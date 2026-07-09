@@ -198,7 +198,13 @@ app.use(express.urlencoded({ extended: false }));
 // directly over the docker network (no such header) and stays open, so the
 // internal grab integration keeps working. Auth is off entirely when no
 // GRABBIT_PASSWORD is set.
+//
+// Header absence proves nothing about the caller, so on a shared docker
+// network every neighbouring container would get the internal bypass. Set
+// GRABBIT_INTERNAL_TOKEN to require internal callers to also present it in an
+// X-Grabbit-Token header; unset keeps the plain header-based split.
 const GRABBIT_PASSWORD = process.env.GRABBIT_PASSWORD || '';
+const INTERNAL_TOKEN = process.env.GRABBIT_INTERNAL_TOKEN || '';
 const AUTH_SECRET = process.env.GRABBIT_SECRET || GRABBIT_PASSWORD || 'grabbit-dev';
 const AUTH_COOKIE = 'grabbit_auth';
 const AUTH_TOKEN = crypto
@@ -216,7 +222,9 @@ function parseCookies(header) {
   return out;
 }
 
-const isExternal = (req) => !!req.headers['x-forwarded-host'];
+const isInternal = (req) =>
+  !req.headers['x-forwarded-host'] &&
+  (!INTERNAL_TOKEN || req.headers['x-grabbit-token'] === INTERNAL_TOKEN);
 const isAuthed = (req) => parseCookies(req.headers.cookie)[AUTH_COOKIE] === AUTH_TOKEN;
 
 function loginPage(error) {
@@ -274,7 +282,7 @@ app.post('/logout', (_req, res) => {
 // Gate everything below for external, unauthenticated requests. API calls get a
 // 401 JSON; page/asset requests are redirected to the login form.
 app.use((req, res, next) => {
-  if (!GRABBIT_PASSWORD || !isExternal(req) || isAuthed(req)) return next();
+  if (!GRABBIT_PASSWORD || isInternal(req) || isAuthed(req)) return next();
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }

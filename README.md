@@ -55,6 +55,17 @@ See `extractors/nuditok.js` for a real example (SPA whose real URL only comes
 from a private API). The registry in `extractors/index.js` auto-loads every file
 except `index.js` and `generic.js`.
 
+## Auth
+
+Set `GRABBIT_PASSWORD` to gate the web UI behind a single shared password
+(HMAC-signed cookie; `GRABBIT_SECRET` optionally signs it separately). Only
+external traffic — requests carrying an `X-Forwarded-Host` header from the
+reverse proxy — is gated, so a co-hosted app can call the API directly over the
+docker network. Because header absence alone doesn't identify the caller, set
+`GRABBIT_INTERNAL_TOKEN` to require internal callers to also send the value in
+an `X-Grabbit-Token` header; when unset, any header-less request counts as
+internal. With no `GRABBIT_PASSWORD` at all, auth is off entirely.
+
 ## Deploy
 
 Compose lives at `/home/thomas/docker2/compose/grabbit/`.
