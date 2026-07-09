@@ -3,8 +3,8 @@
 Plugin-based media grabber. Paste a link in the web UI; the file streams to your
 device while a copy is saved on the server.
 
-- URL: https://grabbit.mecloud.win
-- Saved copies: `/mnt/4tb/grabbit` on the host (`/data` in the container)
+- URL: whatever host you route it to (e.g. `https://grabbit.example.com`)
+- Saved copies: a host folder you bind-mount to `/data` in the container
 - Stack: Node + Express, yt-dlp + ffmpeg for the generic fallback
 
 ## How it works
@@ -68,10 +68,10 @@ internal. With no `GRABBIT_PASSWORD` at all, auth is off entirely.
 
 ## Deploy
 
-Compose lives at `/home/thomas/docker2/compose/grabbit/`.
+Keep a compose directory for the stack (e.g. `compose/grabbit/`).
 
 ```bash
-cd /home/thomas/docker2/compose/grabbit
+cd /path/to/compose/grabbit
 docker compose build && docker compose up -d
 ```
 
