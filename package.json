@@ -1,0 +1,14 @@
+{
+  "name": "grabbit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plugin-based media grabber: paste a link, stream the file to the browser and save a copy on the server",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

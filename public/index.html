@@ -1,0 +1,1454 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#0b0b0e" />
+    <title>grabbit</title>
+    <style>
+      :root {
+        --bg: #0b0b0e;
+        --surface: #16171c;
+        --surface-2: #1f2026;
+        --surface-3: #2a2c34;
+        --surface-hi: #34363f;
+        --text: #e7e8ec;
+        --muted: #9a9ca6;
+        --faint: #6b6d77;
+        --line: #25262d;
+        --primary: #5b7cfa;
+        --primary-dim: #2a3358;
+        --on-primary: #ffffff;
+        --brand: #f43f5e;
+        --good: #58d68d;
+        --good-dim: #1f4a32;
+        --warn: #f5c451;
+        --warn-dim: #4a3d16;
+        --bad: #f87171;
+        --bad-dim: #4a2222;
+        --nav-h: 72px;
+        --radius: 20px;
+        font-synthesis: none;
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+        overflow-x: hidden;
+      }
+      svg { display: block; }
+      .ic { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .ic.fill { fill: currentColor; stroke: none; }
+      button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
+      input, select { font: inherit; }
+
+      /* ---- layout ---- */
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 0 16px calc(var(--nav-h) + 28px);
+        min-height: 100%;
+      }
+      .view { display: none; animation: fade .18s ease; }
+      .view.active { display: block; }
+      @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+      .appbar {
+        position: sticky; top: 0; z-index: 20;
+        display: flex; align-items: center; gap: 8px;
+        padding: 22px 0 12px;
+        background: linear-gradient(var(--bg) 70%, transparent);
+      }
+      .appbar h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: .2px; flex: 1; }
+      .appbar .spacer { flex: 1; }
+      .appbar .iconbtn { color: var(--text); padding: 8px; border-radius: 999px; }
+      .appbar .iconbtn:active { background: var(--surface-2); }
+      .wordmark { font-size: 26px; font-weight: 700; letter-spacing: .3px; flex: 1; }
+      .wordmark b { color: var(--brand); font-weight: 700; }
+
+      /* ---- search bar (Home) ---- */
+      .searchbar {
+        display: flex; align-items: center; gap: 10px;
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 999px; padding: 6px 8px 6px 18px;
+        margin-bottom: 18px;
+      }
+      .searchbar:focus-within { border-color: var(--surface-hi); }
+      .searchbar .ic { color: var(--muted); flex: none; }
+      .searchbar input {
+        flex: 1; min-width: 0; background: none; border: 0; outline: none;
+        color: var(--text); font-size: 15px; padding: 10px 0;
+      }
+      .searchbar input::placeholder { color: var(--faint); }
+      .searchbar .go {
+        flex: none; display: grid; place-items: center;
+        width: 40px; height: 40px; border-radius: 999px;
+        background: var(--primary); color: var(--on-primary);
+      }
+      .searchbar .go:disabled { opacity: .5; }
+      .searchbar .go.spin .ic { animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* ---- result / media cards (Home) ---- */
+      #cards { display: flex; flex-direction: column; gap: 16px; }
+      .mcard {
+        position: relative; border-radius: var(--radius);
+        background: var(--surface); border: 1px solid var(--line);
+        min-height: 116px; overflow: hidden;
+        display: flex; flex-direction: column; justify-content: space-between;
+      }
+      .mcard.has-img { min-height: 200px; border-color: transparent; }
+      .mcard .bg {
+        position: absolute; inset: 0; background-size: cover; background-position: center;
+      }
+      .mcard.has-img::after {
+        content: ""; position: absolute; inset: 0;
+        background: linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,.05) 30%, rgba(0,0,0,.55) 100%);
+      }
+      .mcard .top { position: relative; z-index: 2; padding: 16px 16px 0; }
+      .mcard .mtitle {
+        font-weight: 700; font-size: 17px; line-height: 1.25;
+        text-shadow: 0 1px 8px rgba(0,0,0,.6);
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      }
+      .mcard .msub { margin-top: 4px; font-size: 12.5px; color: var(--muted); text-shadow: 0 1px 6px rgba(0,0,0,.7); }
+      .mcard.has-img .msub { color: #d7d8de; }
+      .mcard .actions {
+        position: relative; z-index: 2;
+        display: flex; gap: 10px; justify-content: flex-end;
+        padding: 12px 14px 14px;
+      }
+      .mcard .act {
+        display: grid; place-items: center; width: 54px; height: 48px;
+        border-radius: 14px; background: rgba(42,44,52,.82); color: var(--text);
+        backdrop-filter: blur(6px); transition: background .12s;
+      }
+      .mcard .act:active { background: var(--primary); color: var(--on-primary); }
+      .pill-status {
+        position: absolute; top: 14px; right: 14px; z-index: 3;
+        font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+        background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.14); color: #fff;
+      }
+
+      /* ---- empty states ---- */
+      .empty {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        text-align: center; color: var(--faint); padding: 64px 20px; gap: 14px;
+      }
+      .empty .face { font-size: 30px; letter-spacing: 2px; color: var(--faint); white-space: nowrap; }
+      .empty .ic { width: 40px; height: 40px; color: var(--surface-hi); }
+      .empty p { margin: 0; font-size: 15px; color: var(--muted); }
+      .empty small { color: var(--faint); max-width: 280px; }
+
+      /* ---- chips (Downloads) ---- */
+      .chips {
+        display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 16px;
+        scrollbar-width: none;
+      }
+      .chips::-webkit-scrollbar { display: none; }
+      .chip {
+        flex: none; display: inline-flex; align-items: center; gap: 6px;
+        padding: 8px 14px; border-radius: 999px; font-size: 13.5px; font-weight: 500;
+        background: var(--surface); border: 1px solid var(--line); color: var(--muted);
+        white-space: nowrap;
+      }
+      .chip.active { background: var(--primary-dim); border-color: transparent; color: #cdd6ff; }
+      .chip .ic { width: 17px; height: 17px; }
+
+      /* ---- history rows (Downloads) ---- */
+      #historyList { display: flex; flex-direction: column; gap: 14px; }
+      .hcard {
+        position: relative; border-radius: var(--radius); overflow: hidden;
+        background: var(--surface); border: 1px solid var(--line);
+        display: grid; grid-template-columns: 1fr auto; align-items: start; gap: 12px;
+        padding: 14px 14px 12px;
+      }
+      .hcard.has-img { min-height: 150px; border-color: transparent; align-items: stretch; }
+      .hcard.has-img .bg { position: absolute; inset: 0; background-size: cover; background-position: center; }
+      .hcard.has-img::after {
+        content: ""; position: absolute; inset: 0;
+        background: linear-gradient(180deg, rgba(0,0,0,.35), rgba(0,0,0,.65));
+      }
+      .hcard .h-main { position: relative; z-index: 2; min-width: 0; display: flex; flex-direction: column; }
+      .hcard .h-title {
+        font-weight: 700; font-size: 15.5px; line-height: 1.25;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      }
+      .hcard.has-img .h-title { text-shadow: 0 1px 8px rgba(0,0,0,.7); }
+      .hcard .h-title a { color: inherit; text-decoration: none; }
+      .hcard .h-row { margin-top: auto; padding-top: 10px; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+      .hcard.has-img .h-row { color: #d2d3da; }
+      .hcard .h-side { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+      .typebox {
+        display: grid; place-items: center; width: 56px; height: 50px; border-radius: 14px;
+        background: rgba(42,44,52,.85); color: var(--text); flex: none;
+      }
+      .hcard.has-img .typebox { background: rgba(20,20,24,.7); }
+      .h-del { color: var(--faint); padding: 6px; border-radius: 999px; }
+      .h-del:active { background: var(--surface-3); color: var(--bad); }
+      .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+      .badge.ch18 { color: #ff9eb5; border-color: #5a2a36; background: rgba(90,42,54,.25); }
+      .badge.chmain { color: #9db8ff; border-color: #2a3c5a; background: rgba(42,60,90,.25); }
+      .badge.chserver { color: #9be7c4; border-color: #2d5a3a; background: rgba(45,90,58,.2); }
+
+      /* ---- queue ---- */
+      .qtabs { display: flex; gap: 22px; overflow-x: auto; padding: 4px 0 14px; scrollbar-width: none; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+      .qtabs::-webkit-scrollbar { display: none; }
+      .qtab { flex: none; padding: 6px 0; font-size: 15px; font-weight: 500; color: var(--muted); position: relative; }
+      .qtab.active { color: var(--primary); }
+      .qtab.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -15px; height: 2px; border-radius: 2px; background: var(--primary); }
+      #queueList { display: flex; flex-direction: column; gap: 10px; }
+      .qrow {
+        display: flex; align-items: center; gap: 12px;
+        background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px;
+      }
+      .qrow .q-thumb { width: 48px; height: 48px; border-radius: 10px; object-fit: cover; background: var(--surface-2); flex: none; }
+      .qrow .q-info { min-width: 0; flex: 1; }
+      .qrow .q-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .qrow .q-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+      .qrow .qbar { height: 5px; border-radius: 5px; background: var(--surface-3); overflow: hidden; margin-top: 8px; }
+      .qrow .qbar i { display: block; height: 100%; background: var(--primary); width: 0; transition: width .25s; }
+      .qstat { flex: none; font-size: 11.5px; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+      .qstat.saved { color: var(--good); border-color: var(--good-dim); background: rgba(31,74,50,.25); }
+      .qstat.skipped { color: var(--warn); border-color: var(--warn-dim); background: rgba(74,61,22,.25); }
+      .qstat.failed { color: var(--bad); border-color: var(--bad-dim); background: rgba(74,34,34,.25); }
+      .qstat.busy { color: var(--primary); border-color: var(--primary-dim); background: rgba(42,51,88,.3); }
+      .qsummary { margin-bottom: 14px; padding: 14px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); display: none; }
+      .qsummary.show { display: block; }
+      .qsummary .bar { height: 6px; border-radius: 6px; background: var(--surface-3); overflow: hidden; margin-top: 10px; }
+      .qsummary .bar i { display: block; height: 100%; background: var(--primary); width: 0; transition: width .2s; }
+      .qsummary .qtxt { font-size: 13.5px; color: var(--muted); }
+
+      /* ---- more / settings ---- */
+      .section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 4px; margin-bottom: 16px; }
+      .section h2 { margin: 12px 16px 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); font-weight: 600; }
+      .setrow { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 14px; }
+      .setrow + .setrow { border-top: 1px solid var(--line); border-radius: 0; }
+      .setrow .ic { color: var(--muted); flex: none; }
+      .setrow .label { flex: 1; min-width: 0; }
+      .setrow .label .t { font-size: 15px; }
+      .setrow .label .d { font-size: 12.5px; color: var(--faint); margin-top: 1px; }
+      .setrow select, .field select, .field input {
+        background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px;
+        color: var(--text); padding: 9px 12px; font-size: 14px; outline: none;
+      }
+      .setrow select:focus, .field select:focus, .field input:focus { border-color: var(--surface-hi); }
+      /* switch */
+      .switch { position: relative; width: 46px; height: 28px; flex: none; }
+      .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+      .switch .track { position: absolute; inset: 0; border-radius: 999px; background: var(--surface-3); transition: background .15s; }
+      .switch .track::after { content: ""; position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; border-radius: 999px; background: var(--faint); transition: transform .15s, background .15s; }
+      .switch input:checked + .track { background: var(--primary-dim); }
+      .switch input:checked + .track::after { transform: translateX(18px); background: var(--primary); }
+      .sites { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; }
+      .site { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
+      .site .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+      .site .dot.limited { background: var(--warn); }
+      .site small { color: var(--faint); font-size: 11px; }
+
+      /* ---- FAB (Download all) ---- */
+      .fab {
+        position: fixed; right: max(16px, calc(50% - 320px + 16px)); bottom: calc(var(--nav-h) + 18px); z-index: 30;
+        display: none; align-items: center; gap: 10px;
+        padding: 0 22px; height: 56px; border-radius: 18px;
+        background: var(--primary); color: var(--on-primary); font-weight: 600; font-size: 15px;
+        box-shadow: 0 10px 30px rgba(0,0,0,.5);
+      }
+      .fab.show { display: inline-flex; }
+      .fab:active { filter: brightness(1.1); }
+
+      /* ---- bottom nav ---- */
+      .bottomnav {
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: var(--nav-h);
+        background: var(--surface); border-top: 1px solid var(--line);
+        display: flex; padding: 8px 6px calc(8px + env(safe-area-inset-bottom));
+      }
+      .navitem {
+        flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px;
+        color: var(--muted); padding-top: 4px;
+      }
+      .navitem .pill {
+        display: grid; place-items: center; width: 64px; height: 32px; border-radius: 999px;
+        transition: background .15s;
+      }
+      .navitem .lab { font-size: 11.5px; font-weight: 500; }
+      .navitem.active { color: var(--text); }
+      .navitem.active .pill { background: var(--primary-dim); color: #cdd6ff; }
+      .navitem.active .lab { font-weight: 700; }
+
+      /* ---- bottom sheet ---- */
+      .sheet-backdrop {
+        position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.5);
+        display: none; align-items: flex-end; justify-content: center;
+        opacity: 0; transition: opacity .18s;
+      }
+      .sheet-backdrop.show { display: flex; opacity: 1; }
+      .sheet {
+        width: 100%; max-width: 640px; background: var(--surface);
+        border-radius: 26px 26px 0 0; border: 1px solid var(--line); border-bottom: 0;
+        padding: 8px 18px calc(22px + env(safe-area-inset-bottom));
+        transform: translateY(100%); transition: transform .22s cubic-bezier(.2,.8,.2,1);
+        max-height: 86vh; overflow-y: auto;
+      }
+      .sheet-backdrop.show .sheet { transform: none; }
+      .sheet .grab { width: 36px; height: 4px; border-radius: 4px; background: var(--surface-hi); margin: 8px auto 14px; }
+      .sheet h3 { margin: 0 0 2px; font-size: 18px; font-weight: 700; line-height: 1.3; }
+      .sheet .sh-sub { margin: 0 0 16px; font-size: 13px; color: var(--muted); }
+      .field { margin-bottom: 14px; }
+      .field > label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+      .field select, .field input { width: 100%; }
+      .seg { display: flex; gap: 8px; }
+      .seg button {
+        flex: 1; padding: 11px; border-radius: 12px; background: var(--surface-2);
+        border: 1px solid var(--line); color: var(--muted); font-weight: 600; font-size: 14px;
+      }
+      .seg button.on { background: var(--primary-dim); border-color: transparent; color: #cdd6ff; }
+      .row2 { display: flex; gap: 12px; }
+      .row2 .field { flex: 1; }
+      .toggle-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+      .toggle-row .label { flex: 1; }
+      .toggle-row .label .t { font-size: 14.5px; }
+      .toggle-row .label .d { font-size: 12px; color: var(--faint); margin-top: 1px; }
+      .sheet .confirm {
+        width: 100%; margin-top: 8px; padding: 15px; border-radius: 16px;
+        background: var(--primary); color: var(--on-primary); font-weight: 700; font-size: 15.5px;
+        display: flex; align-items: center; justify-content: center; gap: 10px;
+      }
+      .sheet .confirm:disabled { opacity: .55; }
+      .sheet .warn {
+        margin: 0 0 14px; padding: 11px 13px; border-radius: 12px; font-size: 13px;
+        background: var(--warn-dim); border: 1px solid #6a571f; color: #f6d98a; display: none;
+      }
+      .sheet .warn.show { display: block; }
+
+      /* ---- toast ---- */
+      #toast {
+        position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px);
+        translate: -50% 0; z-index: 60;
+        background: var(--surface-hi); color: var(--text); border: 1px solid var(--line);
+        padding: 12px 18px; border-radius: 14px; font-size: 14px; max-width: 90%;
+        word-break: break-word; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+        opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+      }
+      #toast.show { opacity: 1; transform: translateY(0); }
+      #toast.good { border-color: var(--good-dim); }
+      #toast.bad { border-color: var(--bad-dim); }
+
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- ===================== HOME ===================== -->
+      <section id="view-home" class="view active">
+        <header class="appbar">
+          <div class="wordmark"><b>la</b>dda</div>
+        </header>
+
+        <form id="form" class="searchbar">
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+          <input id="url" type="url" inputmode="url" placeholder="Search or insert URL" autocomplete="off" autocapitalize="off" spellcheck="false" required />
+          <button id="go" class="go" type="submit" title="Fetch">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M13 5l7 7-7 7" /></svg>
+          </button>
+        </form>
+
+        <div id="homeError" class="empty hidden"></div>
+
+        <div id="homeEmpty" class="empty">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5" /><path d="M5 21h14" /></svg>
+          <p>Paste a link to get started</p>
+          <small>The file streams to this device and a copy is kept on the server. Unknown sites fall back to yt-dlp.</small>
+        </div>
+
+        <div id="cards"></div>
+      </section>
+
+      <!-- ===================== DOWNLOADS ===================== -->
+      <section id="view-downloads" class="view">
+        <header class="appbar">
+          <h1>Downloads</h1>
+          <button class="iconbtn" id="dlRefresh" title="Refresh">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 4v5h-5" /></svg>
+          </button>
+          <button class="iconbtn" id="dlClear" title="Clear all">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M6 6l1 14h10l1-14" /></svg>
+          </button>
+        </header>
+
+        <div class="chips" id="dlChips">
+          <button class="chip active" data-sort="new">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14" /><path d="M19 12l-7 7-7-7" /></svg>
+            Date added
+          </button>
+          <button class="chip" data-filter="all">All</button>
+          <button class="chip" data-filter="video">Video</button>
+          <button class="chip" data-filter="audio">Audio</button>
+          <button class="chip" data-filter="image">Images</button>
+        </div>
+
+        <div id="historyList"></div>
+        <div id="historyEmpty" class="empty hidden">
+          <div class="face">( ´_ゝ`)</div>
+          <p>No downloads yet</p>
+        </div>
+      </section>
+
+      <!-- ===================== QUEUE ===================== -->
+      <section id="view-queue" class="view">
+        <header class="appbar">
+          <h1>Download queue</h1>
+          <button class="iconbtn" id="qClear" title="Clear finished">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M6 6l1 14h10l1-14" /></svg>
+          </button>
+        </header>
+
+        <div class="qtabs" id="qtabs">
+          <button class="qtab active" data-q="running">Running</button>
+          <button class="qtab" data-q="done">Completed</button>
+        </div>
+
+        <div class="qsummary" id="qSummary">
+          <div class="qtxt" id="qSummaryText">Idle</div>
+          <div class="bar"><i id="qSummaryBar"></i></div>
+        </div>
+
+        <div id="queueList"></div>
+        <div id="queueEmpty" class="empty">
+          <div class="face">( ´･_･`)</div>
+          <p>No results</p>
+        </div>
+      </section>
+
+      <!-- ===================== MORE ===================== -->
+      <section id="view-more" class="view">
+        <header class="appbar">
+          <h1>More</h1>
+        </header>
+
+        <div class="section">
+          <h2>Default download options</h2>
+          <div class="setrow">
+            <div class="label"><div class="t">Save to</div><div class="d">Where new downloads go by default</div></div>
+            <select id="setDest">
+              <option value="">Elite-v2 shorts</option>
+              <option value="server">Server library</option>
+            </select>
+          </div>
+          <div class="setrow" id="setChannelRow">
+            <div class="label"><div class="t">Channel</div><div class="d">Shorts channel for new clips</div></div>
+            <select id="setChannel">
+              <option value="main">main</option>
+              <option value="18plus">18+</option>
+            </select>
+          </div>
+          <div class="setrow hidden" id="setFolderRow">
+            <div class="label"><div class="t">Library folder</div><div class="d">Server-library video target</div></div>
+            <select id="setFolder"></select>
+          </div>
+          <div class="setrow">
+            <div class="label"><div class="t">Quality</div><div class="d">Resolution cap (yt-dlp sites)</div></div>
+            <select id="setQuality">
+              <option value="">Best</option>
+              <option value="2160">2160p (4K)</option>
+              <option value="1440">1440p</option>
+              <option value="1080">1080p</option>
+              <option value="720">720p</option>
+              <option value="480">480p</option>
+              <option value="360">360p</option>
+            </select>
+          </div>
+          <div class="setrow" id="setContainerRow">
+            <div class="label"><div class="t">Video container</div><div class="d">Server-library output (mkv/webm need yt-dlp)</div></div>
+            <select id="setContainer">
+              <option value="mp4">mp4</option>
+              <option value="mkv">mkv</option>
+              <option value="webm">webm</option>
+            </select>
+          </div>
+          <div class="setrow">
+            <div class="label"><div class="t">Audio format</div><div class="d">Default for audio downloads</div></div>
+            <select id="setAfmt">
+              <option value="best">Best (source)</option>
+              <option value="m4a">m4a</option>
+              <option value="mp3">mp3</option>
+              <option value="opus">opus</option>
+              <option value="flac">flac</option>
+              <option value="wav">wav</option>
+              <option value="vorbis">vorbis</option>
+              <option value="aac">aac</option>
+              <option value="alac">alac</option>
+            </select>
+          </div>
+          <div class="setrow">
+            <div class="label"><div class="t">Audio bitrate</div><div class="d">Default for lossy audio</div></div>
+            <select id="setAq">
+              <option value="">Best</option>
+              <option value="320">320k</option>
+              <option value="256">256k</option>
+              <option value="192">192k</option>
+              <option value="160">160k</option>
+              <option value="128">128k</option>
+              <option value="96">96k</option>
+            </select>
+          </div>
+          <div class="setrow">
+            <div class="label"><div class="t">Download to this device</div><div class="d">Also stream the file to your device</div></div>
+            <label class="switch"><input type="checkbox" id="setDevice" checked /><span class="track"></span></label>
+          </div>
+          <div class="setrow">
+            <div class="label"><div class="t">Convert to web format</div><div class="d">Save a web-optimized .web.mp4 (skips the transcoder)</div></div>
+            <label class="switch"><input type="checkbox" id="setWeb" /><span class="track"></span></label>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Supported sites</h2>
+          <div class="sites" id="sitesList"></div>
+        </div>
+
+        <div class="section">
+          <form method="post" action="/logout">
+            <button type="submit" class="setrow" style="width:100%;text-align:left">
+              <svg class="ic" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" /></svg>
+              <div class="label"><div class="t">Sign out</div></div>
+            </button>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <!-- Download all FAB (Home, profiles only) -->
+    <button id="fab" class="fab">
+      <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5" /><path d="M5 21h14" /></svg>
+      Download all
+    </button>
+
+    <!-- ===================== BOTTOM NAV ===================== -->
+    <nav class="bottomnav" id="nav">
+      <button class="navitem active" data-tab="home">
+        <span class="pill"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8" /><path d="M5 10v10h5v-6h4v6h5V10" /></svg></span>
+        <span class="lab">Home</span>
+      </button>
+      <button class="navitem" data-tab="downloads">
+        <span class="pill"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5" /><path d="M5 21h14" /></svg></span>
+        <span class="lab">Downloads</span>
+      </button>
+      <button class="navitem" data-tab="more">
+        <span class="pill"><svg class="ic fill" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="19" cy="12" r="2" /></svg></span>
+        <span class="lab">More</span>
+      </button>
+      <button class="navitem" data-tab="queue">
+        <span class="pill"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke-dasharray="3 3.5" /><path d="M12 8v6m0 0l-2.5-2.5M12 14l2.5-2.5" /></svg></span>
+        <span class="lab">Queue</span>
+      </button>
+    </nav>
+
+    <!-- ===================== DOWNLOAD SHEET ===================== -->
+    <div class="sheet-backdrop" id="sheetBack">
+      <div class="sheet" id="sheet">
+        <div class="grab"></div>
+        <h3 id="shTitle">Download</h3>
+        <p class="sh-sub" id="shSub"></p>
+
+        <div class="warn" id="shWarn"></div>
+
+        <div class="field hidden" id="shTitleField">
+          <label>Title</label>
+          <input id="shTitleInput" type="text" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label>Save under profile name</label>
+          <input id="shCreator" type="text" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label>Save to</label>
+          <div class="seg" id="shDest">
+            <button type="button" data-v="" class="on">Elite-v2 shorts</button>
+            <button type="button" data-v="server">Server library</button>
+          </div>
+        </div>
+
+        <div class="field" id="shChannelField">
+          <label>Channel</label>
+          <div class="seg" id="shChannel">
+            <button type="button" data-v="main" class="on">main</button>
+            <button type="button" data-v="18plus">18+</button>
+          </div>
+        </div>
+
+        <div class="field hidden" id="shFolderField">
+          <label>Library folder</label>
+          <select id="shFolder"></select>
+        </div>
+
+        <div class="field hidden" id="shNewFolderField">
+          <label>New folder name</label>
+          <input id="shNewFolder" type="text" autocomplete="off" placeholder="my-folder" />
+        </div>
+
+        <div class="row2" id="shVideoOpts">
+          <div class="field">
+            <label>Quality</label>
+            <select id="shQuality">
+              <option value="">Best</option>
+              <option value="2160">2160p (4K)</option>
+              <option value="1440">1440p</option>
+              <option value="1080">1080p</option>
+              <option value="720">720p</option>
+              <option value="480">480p</option>
+              <option value="360">360p</option>
+            </select>
+          </div>
+          <div class="field hidden" id="shContainerField">
+            <label>Container</label>
+            <select id="shContainer">
+              <option value="mp4">mp4</option>
+              <option value="mkv">mkv</option>
+              <option value="webm">webm</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row2 hidden" id="shAudioField">
+          <div class="field">
+            <label>Audio format</label>
+            <select id="shAfmt">
+              <option value="best">Best (source)</option>
+              <option value="m4a">m4a</option>
+              <option value="mp3">mp3</option>
+              <option value="opus">opus</option>
+              <option value="flac">flac</option>
+              <option value="wav">wav</option>
+              <option value="vorbis">vorbis</option>
+              <option value="aac">aac</option>
+              <option value="alac">alac</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Bitrate</label>
+            <select id="shAq">
+              <option value="">Best</option>
+              <option value="320">320k</option>
+              <option value="256">256k</option>
+              <option value="192">192k</option>
+              <option value="160">160k</option>
+              <option value="128">128k</option>
+              <option value="96">96k</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="toggle-row hidden" id="shThumbRow">
+          <div class="label"><div class="t">Embed thumbnail</div><div class="d">Cover art inside the file</div></div>
+          <label class="switch"><input type="checkbox" id="shThumb" /><span class="track"></span></label>
+        </div>
+        <div class="toggle-row hidden" id="shSubsRow">
+          <div class="label"><div class="t">Embed subtitles</div><div class="d">When the source has them</div></div>
+          <label class="switch"><input type="checkbox" id="shSubs" /><span class="track"></span></label>
+        </div>
+        <div class="toggle-row hidden" id="shSponsorRow">
+          <div class="label"><div class="t">Remove sponsors</div><div class="d">Cut SponsorBlock segments</div></div>
+          <label class="switch"><input type="checkbox" id="shSponsor" /><span class="track"></span></label>
+        </div>
+
+        <div class="toggle-row hidden" id="shWebRow">
+          <div class="label"><div class="t">Convert to web format</div><div class="d">Ready instantly, skips the transcoder</div></div>
+          <label class="switch"><input type="checkbox" id="shWeb" /><span class="track"></span></label>
+        </div>
+
+        <div class="toggle-row" id="shDeviceRow">
+          <div class="label"><div class="t">Download to this device</div><div class="d">Also save the file to your device</div></div>
+          <label class="switch"><input type="checkbox" id="shDevice" checked /><span class="track"></span></label>
+        </div>
+
+        <button class="confirm" id="shConfirm">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5" /><path d="M5 21h14" /></svg>
+          <span id="shConfirmLabel">Download</span>
+        </button>
+      </div>
+    </div>
+
+    <div id="toast"></div>
+
+    <script>
+      // ----------------------------------------------------------------- utils
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      // CSS-safe url() value: quote it and escape backslashes/quotes so a thumbnail
+      // URL containing ")" can't break out of the property (combine with esc() for
+      // the surrounding HTML attribute).
+      const cssUrl = (u) => 'url("' + String(u == null ? '' : u).replace(/[\\"]/g, '\\$&').replace(/[\r\n]/g, '') + '")';
+      // Only http(s) links are safe to render as clickable (blocks javascript:/data:).
+      const safeHref = (u) => /^https?:\/\//i.test(String(u || '')) ? String(u) : '';
+      // Fetch JSON but fail with a readable message when the body isn't JSON — a
+      // long download can exceed the Traefik/Cloudflare gateway timeout, which
+      // then returns an HTML error page (the old code blindly ran r.json() on it
+      // and surfaced a cryptic "Unexpected token" error). The download keeps
+      // running on the server regardless, so we say so.
+      async function fetchJson(url, opts) {
+        const r = await fetch(url, opts);
+        if ((r.headers.get('content-type') || '').includes('application/json')) return r.json();
+        let body = '';
+        try { body = (await r.text()).trim(); } catch {}
+        if ([502, 503, 504, 524].includes(r.status)) {
+          throw new Error('The server took too long to respond (gateway timeout). Large downloads keep running on the server — check Downloads in a few minutes.');
+        }
+        const plain = body && !body.includes('<') ? body.slice(0, 200) : '';
+        throw new Error(plain || ('Unexpected server response (HTTP ' + r.status + ').'));
+      }
+      function relTime(ms) {
+        const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+        if (s < 60) return s + 's ago';
+        const m = Math.round(s / 60); if (m < 60) return m + 'm ago';
+        const h = Math.round(m / 60); if (h < 24) return h + 'h ago';
+        return Math.round(h / 24) + 'd ago';
+      }
+      let toastTimer;
+      function toast(msg, kind) {
+        const t = $('toast');
+        t.textContent = msg;
+        t.className = 'show' + (kind ? ' ' + kind : '');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => (t.className = ''), 3200);
+      }
+
+      // ----------------------------------------------------------------- settings (defaults)
+      const SETTINGS_KEY = 'grabbit.settings.v1';
+      const defaults = { dest: '', channel: 'main', folder: 'videos', quality: '', device: true, web: false, afmt: 'm4a', aq: '', container: 'mp4' };
+      let settings = Object.assign({}, defaults);
+      // Only adopt known keys from storage, and coerce each to an allowed value, so
+      // poisoned/legacy data can neither accumulate junk nor feed an unexpected
+      // value into a request.
+      const SETTING_ENUMS = {
+        dest: ['', 'server'], channel: ['main', '18plus'],
+        quality: ['', '2160', '1440', '1080', '720', '480', '360'],
+        afmt: ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'],
+        aq: ['', '320', '256', '192', '160', '128', '96'],
+        container: ['mp4', 'mkv', 'webm'],
+      };
+      try {
+        const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+        for (const k of Object.keys(defaults)) if (k in stored) settings[k] = stored[k];
+      } catch {}
+      for (const [k, allowed] of Object.entries(SETTING_ENUMS)) if (!allowed.includes(settings[k])) settings[k] = defaults[k];
+      // folder is a free-form name (any server subfolder); keep it a safe string.
+      settings.folder = String(settings.folder || 'videos').replace(/[^a-zA-Z0-9 _-]+/g, '').slice(0, 40) || 'videos';
+      settings.device = !!settings.device;
+      settings.web = !!settings.web;
+      function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} }
+
+      // Server-library subfolders (under the grabbit downloads dir). The sheet's
+      // folder select lists these plus a "new folder" entry; the More tab lists
+      // them as the default-folder choice.
+      let folderList = ['videos', 'adults', 'photos'];
+      function populateFolderSelects() {
+        const sh = $('shFolder');
+        const prevSh = sh.value;
+        sh.innerHTML =
+          folderList.map((f) => '<option value="' + esc(f) + '">' + esc(f) + '</option>').join('') +
+          '<option value="__new__">+ New folder…</option>';
+        sh.value = folderList.includes(prevSh) ? prevSh : (folderList.includes(settings.folder) ? settings.folder : folderList[0]);
+        const set = $('setFolder');
+        set.innerHTML = folderList.map((f) => '<option value="' + esc(f) + '">' + esc(f) + '</option>').join('');
+        set.value = folderList.includes(settings.folder) ? settings.folder : folderList[0];
+      }
+      async function loadFolders() {
+        try {
+          const r = await fetch('/api/folders');
+          const d = await r.json();
+          if (Array.isArray(d.folders) && d.folders.length) folderList = d.folders;
+        } catch { /* keep current list */ }
+        populateFolderSelects();
+      }
+
+      // ----------------------------------------------------------------- tab nav
+      const nav = $('nav');
+      let currentTab = 'home';
+      function showTab(tab) {
+        currentTab = tab;
+        document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + tab));
+        nav.querySelectorAll('.navitem').forEach((n) => n.classList.toggle('active', n.dataset.tab === tab));
+        $('fab').classList.toggle('show', tab === 'home' && profileMode && profileItems.length > 0);
+        window.scrollTo(0, 0);
+        if (tab === 'downloads') loadHistory();
+      }
+      nav.addEventListener('click', (e) => {
+        const b = e.target.closest('.navitem');
+        if (b) showTab(b.dataset.tab);
+      });
+
+      // ----------------------------------------------------------------- icons
+      const ICON = {
+        audio: '<svg class="ic" viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>',
+        video: '<svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2.5" /><path d="M16 10l5-3v10l-5-3" /></svg>',
+        image: '<svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8.5" cy="8.5" r="1.6" /><path d="M21 15l-5-5L5 21" /></svg>',
+      };
+
+      // ----------------------------------------------------------------- HOME: fetch + cards
+      const form = $('form'), urlInput = $('url'), go = $('go');
+      const cardsEl = $('cards'), homeEmpty = $('homeEmpty'), homeError = $('homeError');
+
+      let singleData = null;     // last /api/resolve result
+      let profileMode = false;
+      let profileItems = [];
+      let profileData = null;
+      let currentUrl = '';
+
+      function setBusy(on) {
+        go.disabled = on;
+        go.classList.toggle('spin', on);
+      }
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const url = urlInput.value.trim();
+        if (!url) return;
+        currentUrl = url;
+        homeError.classList.add('hidden');
+        cardsEl.innerHTML = '';
+        homeEmpty.classList.add('hidden');
+        singleData = null; profileMode = false; profileItems = []; profileData = null;
+        $('fab').classList.remove('show');
+        setBusy(true);
+        try {
+          // Profile (multi-clip) first.
+          try {
+            const pr = await fetch('/api/profile?url=' + encodeURIComponent(url));
+            const pd = await pr.json();
+            if (pd.ok && pd.isProfile) { renderProfile(pd); return; }
+          } catch { /* fall through */ }
+
+          const d = await fetchJson('/api/resolve?url=' + encodeURIComponent(url));
+          if (!d.ok) throw new Error(d.error || 'Could not resolve link');
+          singleData = d;
+          renderSingle(d);
+        } catch (err) {
+          homeError.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5v.5"/></svg><p>' + esc(err.message) + '</p>';
+          homeError.classList.remove('hidden');
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      function mediaCard({ title, sub, thumbnail, kind, status, onActions }) {
+        const card = document.createElement('div');
+        card.className = 'mcard' + (thumbnail ? ' has-img' : '');
+        let inner = '';
+        if (thumbnail) inner += '<div class="bg" style="' + esc('background-image:' + cssUrl(thumbnail)) + '"></div>';
+        if (status) inner += '<span class="pill-status">' + esc(status) + '</span>';
+        inner += '<div class="top"><div class="mtitle">' + esc(title) + '</div>' + (sub ? '<div class="msub">' + esc(sub) + '</div>' : '') + '</div>';
+        inner += '<div class="actions"></div>';
+        card.innerHTML = inner;
+        const actions = card.querySelector('.actions');
+        onActions(actions);
+        return card;
+      }
+
+      function renderSingle(d) {
+        const isImg = d.mediaType === 'image';
+        const status = importStatusLabel(d.imported, isImg, settings.channel);
+        const card = mediaCard({
+          title: d.title || d.filename,
+          sub: (d.duration ? fmtClock(d.duration) + ' · ' : '') + d.extractor,
+          thumbnail: d.thumbnail,
+          status,
+          onActions(actions) {
+            if (isImg) {
+              actions.appendChild(actBtn(ICON.image, () => openSheet('image', d)));
+            } else {
+              actions.appendChild(actBtn(ICON.audio, () => openSheet('audio', d)));
+              actions.appendChild(actBtn(ICON.video, () => openSheet('video', d)));
+            }
+          },
+        });
+        cardsEl.appendChild(card);
+      }
+
+      function renderProfile(pd) {
+        profileMode = true;
+        profileData = pd;
+        profileItems = pd.items || [];
+        const head = document.createElement('div');
+        head.style.cssText = 'margin:2px 2px 4px;font-size:13px;color:var(--muted)';
+        head.textContent = '@' + (pd.creator || '?') + ' — ' + pd.count + ' items';
+        cardsEl.appendChild(head);
+        profileItems.forEach((it) => {
+          const isImg = it.mediaType === 'image';
+          const status = importStatusLabel(it.imported, isImg, settings.channel);
+          const card = mediaCard({
+            title: it.title || it.filename,
+            sub: (it.duration ? fmtClock(it.duration) + ' · ' : '') + (isImg ? 'image' : 'video') + (it.tooLongForShorts ? ' · server only' : ''),
+            thumbnail: it.thumbnail,
+            status,
+            onActions(actions) {
+              actions.appendChild(actBtn(isImg ? ICON.image : ICON.video, () => openSheet(isImg ? 'image' : 'video', null, it)));
+            },
+          });
+          cardsEl.appendChild(card);
+        });
+        $('fab').classList.add('show');
+      }
+
+      function actBtn(svg, onClick) {
+        const b = document.createElement('button');
+        b.className = 'act';
+        b.innerHTML = svg;
+        b.addEventListener('click', onClick);
+        return b;
+      }
+
+      function importStatusLabel(imported, isImg, channel) {
+        if (!imported) return '';
+        const st = isImg ? imported.main : imported[channel];
+        if (st === 'imported') return isImg ? 'in library' : 'in elite-v2';
+        if (st === 'pending') return 'queued';
+        return '';
+      }
+
+      // ----------------------------------------------------------------- SHEET
+      const sheetBack = $('sheetBack'), sheet = $('sheet');
+      let sheetMode = 'video';   // video | audio | image
+      let sheetItem = null;      // for "all" or profile-single: the profile item; null for single resolve
+      let sheetSingle = null;    // single resolve data
+      let sheetAll = false;      // batch (download all) mode
+
+      function segValue(seg) { const on = seg.querySelector('.on'); return on ? on.dataset.v : ''; }
+      function segSet(seg, v) { seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); }
+      function bindSeg(seg, onChange) {
+        seg.addEventListener('click', (e) => {
+          const b = e.target.closest('button'); if (!b) return;
+          segSet(seg, b.dataset.v); onChange && onChange(b.dataset.v);
+        });
+      }
+
+      bindSeg($('shDest'), () => syncSheet());
+      bindSeg($('shChannel'), () => syncSheet());
+      $('shFolder').addEventListener('change', syncSheet);
+      $('shContainer').addEventListener('change', syncSheet);
+      $('shCreator').addEventListener('input', syncSheet);
+      $('shDevice').addEventListener('change', syncSheet);
+      $('shWeb').addEventListener('change', syncSheet);
+
+      function openSheetCommon() {
+        // Apply current defaults to the sheet controls.
+        segSet($('shDest'), settings.dest);
+        segSet($('shChannel'), settings.channel);
+        $('shFolder').value = folderList.includes(settings.folder) ? settings.folder : (folderList[0] || 'videos');
+        $('shNewFolder').value = '';
+        $('shQuality').value = settings.quality;
+        $('shAfmt').value = settings.afmt;
+        $('shAq').value = settings.aq;
+        $('shContainer').value = settings.container;
+        $('shWeb').checked = settings.web;
+        $('shDevice').checked = settings.device;
+        // Extras are per-download, off by default.
+        $('shThumb').checked = false;
+        $('shSubs').checked = false;
+        $('shSponsor').checked = false;
+      }
+
+      // Single-resolve sheet (mode = audio|video|image, single = resolve data).
+      function openSheet(mode, single, profileItem) {
+        sheetMode = mode;
+        sheetSingle = single || null;
+        sheetItem = profileItem || null;
+        sheetAll = false;
+        openSheetCommon();
+        const item = single || profileItem;
+        $('shTitle').textContent = mode === 'audio' ? 'Download audio' : mode === 'image' ? 'Download image' : 'Download video';
+        $('shSub').textContent = (item && (item.title || item.filename)) || '';
+        $('shCreator').value = (item && item.creator) || '';
+        // Title is editable for a single resolved URL (it renames the file).
+        $('shTitleInput').value = (single && single.title) || '';
+        openSheetUi();
+      }
+
+      // Batch (download all) sheet.
+      function openSheetAll() {
+        if (!profileItems.length) return;
+        sheetAll = true; sheetMode = 'video'; sheetSingle = null; sheetItem = null;
+        openSheetCommon();
+        $('shTitle').textContent = 'Download all';
+        $('shSub').textContent = '@' + (profileData.creator || '?') + ' — ' + profileItems.length + ' items';
+        $('shCreator').value = profileData.creator || '';
+        $('shTitleInput').value = '';
+        openSheetUi();
+      }
+
+      function openSheetUi() {
+        syncSheet();
+        sheetBack.classList.add('show');
+        if (history.state == null || !history.state.sheet) history.pushState({ sheet: true }, '');
+      }
+      function closeSheet() {
+        sheetBack.classList.remove('show');
+        if (history.state && history.state.sheet) history.back();
+      }
+      sheetBack.addEventListener('click', (e) => { if (e.target === sheetBack) closeSheet(); });
+      window.addEventListener('popstate', () => { if (sheetBack.classList.contains('show')) sheetBack.classList.remove('show'); });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetBack.classList.contains('show')) closeSheet(); });
+
+      // Reflect option dependencies + confirm label inside the sheet.
+      function syncSheet() {
+        const isAudio = sheetMode === 'audio';
+        const isImage = sheetMode === 'image';
+        const isVideo = sheetMode === 'video';
+
+        // A long video can't go into shorts: force the server library and lock the
+        // elite option out.
+        const sheetTarget = sheetSingle || sheetItem;
+        const tooLong = isVideo && !sheetAll && !!(sheetTarget && sheetTarget.tooLongForShorts);
+        const eliteBtn = $('shDest').querySelector('[data-v=""]');
+        if (tooLong) segSet($('shDest'), 'server');
+        eliteBtn.style.pointerEvents = tooLong ? 'none' : '';
+        eliteBtn.style.opacity = tooLong ? '0.4' : '';
+
+        const dest = segValue($('shDest'));
+        const isServer = dest === 'server';
+        const channel = segValue($('shChannel'));
+
+        $('shChannelField').classList.toggle('hidden', isServer || isImage);
+        const folderVisible = isServer && !isImage && !isAudio;
+        $('shFolderField').classList.toggle('hidden', !folderVisible);
+        $('shNewFolderField').classList.toggle('hidden', !(folderVisible && $('shFolder').value === '__new__'));
+        // Title is editable only for a single resolved URL.
+        $('shTitleField').classList.toggle('hidden', !sheetSingle);
+        $('shVideoOpts').classList.toggle('hidden', !isVideo);
+        $('shAudioField').classList.toggle('hidden', !isAudio);
+        // Container + extras (thumbnail/subs/sponsorblock) only apply to a
+        // server-library video save (elite shorts must stay plain mp4).
+        const advancedVideo = isVideo && isServer;
+        $('shContainerField').classList.toggle('hidden', !advancedVideo);
+        $('shThumbRow').classList.toggle('hidden', !advancedVideo);
+        $('shSubsRow').classList.toggle('hidden', !advancedVideo);
+        $('shSponsorRow').classList.toggle('hidden', !advancedVideo);
+        // Web format only applies to an elite-v2 video save.
+        $('shWebRow').classList.toggle('hidden', !(isVideo && !isServer));
+        // No "to this device" toggle for a batch (download all).
+        $('shDeviceRow').classList.toggle('hidden', sheetAll);
+
+        // Warning: too long for shorts, or already present (single only).
+        const warn = $('shWarn');
+        let msg = '';
+        if (tooLong) {
+          const dur = sheetTarget.duration ? ' (' + fmtClock(sheetTarget.duration) + ')' : '';
+          msg = 'Too long for shorts' + dur + ' — saving to the server library instead.';
+        } else if (!sheetAll) {
+          const imp = sheetTarget && sheetTarget.imported;
+          if (imp && !isServer) {
+            const st = isImage ? imp.main : imp[channel];
+            if (st === 'imported') msg = isImage ? 'Already in the photos library.' : 'Already in elite-v2 (' + channel + ') — it will not be re-imported.';
+            else if (st === 'pending') msg = 'Already queued in the ' + channel + ' import folder.';
+          }
+        }
+        warn.textContent = msg;
+        warn.classList.toggle('show', !!msg);
+
+        // confirm label
+        const device = $('shDevice').checked;
+        let label;
+        if (sheetAll) label = 'Download all (' + profileItems.length + ')';
+        else if (isAudio) label = isServer ? 'Save audio' : 'Download audio';
+        else if (isImage) label = device ? 'Download image' : 'Save image';
+        else if (isServer) label = device ? 'Download' : 'Save to library';
+        else label = device ? 'Download & import' : 'Save & import';
+        $('shConfirmLabel').textContent = label;
+      }
+
+      // Build a query string for /api/download or /api/download-all.
+      function buildQuery({ batch }) {
+        const dest = segValue($('shDest'));
+        const channel = segValue($('shChannel'));
+        const creator = $('shCreator').value.trim();
+        const isAudio = sheetMode === 'audio';
+        const p = new URLSearchParams();
+        p.set('channel', channel);
+        if (dest) p.set('dest', dest);
+        if (dest === 'server' && !isAudio) {
+          const f = $('shFolder').value === '__new__' ? $('shNewFolder').value.trim() : $('shFolder').value;
+          if (f) p.set('folder', f);
+        }
+        // Editable title (single resolve only) renames the saved file.
+        if (sheetSingle && $('shTitleInput').value.trim()) p.set('title', $('shTitleInput').value.trim());
+        if ($('shWeb').checked && !$('shWebRow').classList.contains('hidden')) p.set('web', '1');
+        if ($('shQuality').value && sheetMode === 'video') p.set('quality', $('shQuality').value);
+        if (isAudio) {
+          p.set('audio', '1');
+          p.set('afmt', $('shAfmt').value);
+          if ($('shAq').value) p.set('aq', $('shAq').value);
+        }
+        // Container + extras only for a server-library video save.
+        if (sheetMode === 'video' && dest === 'server') {
+          if ($('shContainer').value && $('shContainer').value !== 'mp4') p.set('container', $('shContainer').value);
+          if ($('shThumb').checked) p.set('thumb', '1');
+          if ($('shSubs').checked) p.set('subs', '1');
+          if ($('shSponsor').checked) p.set('sponsor', '1');
+        }
+        if (creator) p.set('creator', creator);
+        if (!batch) p.set('device', $('shDevice').checked ? '1' : '0');
+        return p;
+      }
+
+      $('shConfirm').addEventListener('click', async () => {
+        // Persist sheet choices as the new defaults.
+        settings.dest = segValue($('shDest'));
+        settings.channel = segValue($('shChannel'));
+        // Persist the resolved folder (a new-folder name, or the picked one).
+        settings.folder = $('shFolder').value === '__new__'
+          ? ($('shNewFolder').value.trim() || settings.folder)
+          : $('shFolder').value;
+        settings.quality = $('shQuality').value;
+        settings.afmt = $('shAfmt').value;
+        settings.aq = $('shAq').value;
+        settings.container = $('shContainer').value;
+        settings.web = $('shWeb').checked;
+        settings.device = $('shDevice').checked;
+        saveSettings();
+        reflectSettings();
+
+        if (sheetAll) { startBatch(); return; }
+
+        if (sheetItem && !sheetSingle) {
+          // Single clip inside a profile -> use the batch endpoint with one id.
+          startBatch([sheetItem.id]);
+          return;
+        }
+
+        // Single resolved URL -> start a background job. The download runs on the
+        // server (survives the gateway timeout); progress shows in the Queue, and
+        // a device-bound job auto-downloads its finished file when ready.
+        closeSheet();
+        const p = buildQuery({ batch: false });
+        p.set('url', currentUrl);
+        startJob(p);
+      });
+
+      // ----------------------------------------------------------------- QUEUE
+      // Single downloads run as server-side jobs (so long downloads survive the
+      // gateway timeout); the queue mirrors their progress over a persistent SSE
+      // stream. Batch (download-all) keeps its own per-run SSE; both feed one view.
+      const queueList = $('queueList'), queueEmpty = $('queueEmpty');
+      const qSummary = $('qSummary'), qSummaryText = $('qSummaryText'), qSummaryBar = $('qSummaryBar');
+      let qTab = 'running';
+      let activeSource = null;       // active batch EventSource
+      const jobMap = new Map();      // server job id -> public job
+      const delivered = new Set();   // jobs already auto-downloaded to the device
+      let queueRows = [];            // batch rows {id,title,thumbnail,status,meta,_t}
+
+      $('qtabs').addEventListener('click', (e) => {
+        const b = e.target.closest('.qtab'); if (!b) return;
+        qTab = b.dataset.q;
+        $('qtabs').querySelectorAll('.qtab').forEach((t) => t.classList.toggle('active', t === b));
+        renderQueue();
+      });
+
+      $('qClear').addEventListener('click', async () => {
+        try { await fetch('/api/jobs/clear', { method: 'POST' }); } catch {}
+        for (const [id, j] of jobMap) if (j.status === 'done' || j.status === 'error') jobMap.delete(id);
+        queueRows = queueRows.filter((r) => r.status === 'busy' || r.status === 'queued');
+        if (!activeSource) qSummary.classList.remove('show');
+        renderQueue();
+      });
+
+      const RUNNING = new Set(['queued', 'running', 'busy']);
+      function fmtClock(sec) {
+        const s = Math.max(0, Math.round(Number(sec) || 0));
+        const m = Math.floor(s / 60);
+        return m + ':' + String(s % 60).padStart(2, '0');
+      }
+
+      // Merge server jobs + batch rows into one time-sorted list.
+      function queueEntries() {
+        const jobs = [...jobMap.values()].map((j) => ({
+          id: j.id, title: j.title || j.filename || 'download', thumbnail: j.thumbnail,
+          status: j.status, percent: j.percent, phase: j.phase, speed: j.speed, eta: j.eta,
+          message: j.message, error: j.error, duration: j.duration, _t: j.createdAt || 0,
+        }));
+        const batch = queueRows.map((b) => ({
+          id: 'b:' + b.id, title: b.title, thumbnail: b.thumbnail,
+          status: b.status === 'busy' ? 'running' : b.status, message: b.meta, _t: b._t || 0,
+        }));
+        return [...jobs, ...batch].sort((a, b) => b._t - a._t);
+      }
+
+      function rowMeta(r) {
+        if (r.error) return esc(r.error);
+        if (r.phase === 'resolving') return 'resolving…';
+        if (r.phase === 'processing') return 'processing…';
+        if (r.status === 'running' && typeof r.percent === 'number') {
+          const eta = r.eta && r.eta !== 'NA' ? ' · ETA ' + esc(r.eta) : '';
+          return r.percent + '%' + (r.speed ? ' · ' + esc(r.speed) : '') + eta;
+        }
+        if (r.message) return esc(r.message);
+        if (r.duration) return fmtClock(r.duration);
+        return '';
+      }
+
+      function renderQueue() {
+        const rows = queueEntries().filter((r) => (qTab === 'running' ? RUNNING.has(r.status) : !RUNNING.has(r.status)));
+        if (!rows.length) {
+          queueList.innerHTML = '';
+          queueEmpty.classList.remove('hidden');
+          return;
+        }
+        queueEmpty.classList.add('hidden');
+        queueList.innerHTML = rows.map((r) => {
+          const thumb = r.thumbnail ? '<img class="q-thumb" src="' + esc(r.thumbnail) + '" alt="" loading="lazy" />' : '<div class="q-thumb"></div>';
+          const cls = (r.status === 'done' || r.status === 'saved') ? 'saved'
+            : r.status === 'skipped' ? 'skipped'
+            : (r.status === 'failed' || r.status === 'error') ? 'failed' : 'busy';
+          const label = r.status === 'done' ? 'done' : r.status;
+          const showBar = r.status === 'running' && typeof r.percent === 'number';
+          return '<div class="qrow">' + thumb +
+            '<div class="q-info"><div class="q-title">' + esc(r.title) + '</div>' +
+            '<div class="q-meta">' + rowMeta(r) + '</div>' +
+            (showBar ? '<div class="qbar"><i style="width:' + (r.percent || 0) + '%"></i></div>' : '') +
+            '</div>' +
+            '<span class="qstat ' + cls + '">' + esc(label) + '</span></div>';
+        }).join('');
+      }
+
+      // Persistent stream of server-job updates.
+      let jobStream = null;
+      function connectJobStream() {
+        if (jobStream) return;
+        jobStream = new EventSource('/api/jobs/stream');
+        jobStream.onmessage = (ev) => {
+          let d; try { d = JSON.parse(ev.data); } catch { return; }
+          if (d.type !== 'job' || !d.job) return;
+          const j = d.job;
+          jobMap.set(j.id, j);
+          // Auto-deliver to the device once a device-bound job is ready.
+          if (j.status === 'done' && j.device && j.deliverable && !delivered.has(j.id)) {
+            delivered.add(j.id);
+            const a = document.createElement('a');
+            a.href = '/api/jobs/' + encodeURIComponent(j.id) + '/file';
+            a.download = '';
+            document.body.appendChild(a); a.click(); a.remove();
+          }
+          if (j.status === 'done') { loadHistory(); if (j.dest === 'server') loadFolders(); }
+          if (currentTab === 'queue') renderQueue();
+        };
+        // EventSource reconnects automatically on error.
+      }
+
+      // Start a single download as a background job and watch it in the Queue.
+      async function startJob(query) {
+        connectJobStream();
+        try {
+          const d = await fetchJson('/api/jobs/start?' + query.toString());
+          if (!d.ok) throw new Error(d.error || 'Could not start download');
+          toast('Added to queue', 'good');
+          showTab('queue');
+        } catch (err) { toast(err.message, 'bad'); }
+      }
+
+      function startBatch(ids) {
+        const idList = ids || profileItems.map((it) => it.id);
+        if (!idList.length) return;
+        if (activeSource) { toast('A batch download is already running.', 'bad'); showTab('queue'); return; }
+        closeSheet();
+
+        // Seed batch rows from the chosen items.
+        const wanted = new Set(idList);
+        const now = Date.now();
+        queueRows = profileItems.filter((it) => wanted.has(it.id)).map((it, i) => ({
+          id: it.id, title: it.title || it.filename, thumbnail: it.thumbnail, status: 'queued', meta: '', _t: now - i,
+        }));
+        qTab = 'running';
+        $('qtabs').querySelectorAll('.qtab').forEach((t) => t.classList.toggle('active', t.dataset.q === 'running'));
+        qSummary.classList.add('show');
+        qSummaryText.textContent = 'Starting…';
+        qSummaryBar.style.width = '0%';
+        renderQueue();
+        showTab('queue');
+
+        const p = buildQuery({ batch: true });
+        p.set('ids', idList.join(','));
+        p.set('url', currentUrl);
+        const src = new EventSource('/api/download-all?' + p.toString());
+        activeSource = src;
+
+        src.onmessage = (ev) => {
+          const d = JSON.parse(ev.data);
+          if (d.type === 'start') {
+            qSummaryText.textContent = 'Downloading ' + d.total + ' items to ' + d.channel + '…';
+          } else if (d.type === 'progress') {
+            const row = queueRows.find((r) => r.id === d.id);
+            if (row) { row.status = d.status; row.meta = d.error || ''; }
+            qSummaryBar.style.width = Math.round((d.index / d.total) * 100) + '%';
+            qSummaryText.textContent = d.index + ' / ' + d.total + ' processed…';
+            renderQueue();
+          } else if (d.type === 'done') {
+            qSummaryText.textContent = 'Done — ' + d.saved + ' saved, ' + d.skipped + ' skipped, ' + d.failed + ' failed.';
+            qSummaryBar.style.width = '100%';
+            src.close(); activeSource = null;
+            renderQueue();
+            loadHistory();
+            toast('Batch done: ' + d.saved + ' saved', 'good');
+          } else if (d.type === 'error') {
+            qSummaryText.textContent = d.error;
+            src.close(); activeSource = null;
+            renderQueue();
+            toast(d.error, 'bad');
+          }
+        };
+        src.onerror = () => {
+          qSummaryText.textContent = 'Connection lost.';
+          src.close(); activeSource = null;
+          renderQueue();
+        };
+      }
+
+      $('fab').addEventListener('click', openSheetAll);
+
+      // ----------------------------------------------------------------- DOWNLOADS (history)
+      const historyList = $('historyList'), historyEmpty = $('historyEmpty');
+      let historyItems = [];
+      let hFilter = 'all', hSort = 'new';
+
+      $('dlRefresh').addEventListener('click', loadHistory);
+      $('dlClear').addEventListener('click', async () => {
+        if (!confirm('Clear the entire download list?')) return;
+        await fetch('/api/history/delete', { method: 'POST' });
+        loadHistory();
+      });
+      $('dlChips').addEventListener('click', (e) => {
+        const c = e.target.closest('.chip'); if (!c) return;
+        if (c.dataset.sort) {
+          hSort = hSort === 'new' ? 'old' : 'new';
+          c.querySelector('svg').style.transform = hSort === 'old' ? 'rotate(180deg)' : '';
+        } else {
+          hFilter = c.dataset.filter;
+          $('dlChips').querySelectorAll('[data-filter]').forEach((x) => x.classList.toggle('active', x === c));
+          // keep the sort chip visually active too
+        }
+        $('dlChips').querySelector('[data-sort]').classList.add('active');
+        renderHistory();
+      });
+
+      historyList.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.h-del');
+        if (!btn) return;
+        e.preventDefault();
+        btn.disabled = true;
+        await fetch('/api/history/delete?id=' + encodeURIComponent(btn.dataset.id), { method: 'POST' });
+        loadHistory();
+      });
+
+      function itemKind(it) {
+        const f = (it.filename || '').toLowerCase();
+        if (/\.(mp3|m4a|opus|ogg|aac)$/.test(f) || /^audio\//.test(it.channel || '')) return 'audio';
+        if (/\.(jpg|jpeg|png|webp|gif)$/.test(f) || /photos$/.test(it.channel || '')) return 'image';
+        return 'video';
+      }
+
+      async function loadHistory() {
+        try {
+          const r = await fetch('/api/history');
+          const d = await r.json();
+          historyItems = (d.items || []).filter(Boolean);
+          renderHistory();
+        } catch { /* leave as-is */ }
+      }
+
+      function renderHistory() {
+        let items = historyItems.slice();
+        if (hFilter !== 'all') items = items.filter((it) => itemKind(it) === hFilter);
+        if (hSort === 'old') items = items.reverse();
+        if (!items.length) {
+          historyList.innerHTML = '';
+          historyEmpty.classList.remove('hidden');
+          return;
+        }
+        historyEmpty.classList.add('hidden');
+        historyList.innerHTML = items.map((it) => {
+          const kind = itemKind(it);
+          const chClass = (it.channel || '').includes('18plus') ? 'ch18' : (it.channel || '').startsWith('server') || (it.channel || '').startsWith('audio') ? 'chserver' : 'chmain';
+          const where = it.imported ? 'imported' : it.device ? 'on device' : 'saved';
+          const title = esc(it.title || it.filename || 'download');
+          const sh = safeHref(it.sourceUrl);
+          const link = sh ? '<a href="' + esc(sh) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title;
+          const icon = kind === 'audio' ? ICON.audio : kind === 'image' ? ICON.image : ICON.video;
+          const hasImg = !!it.thumbnail;
+          return '<div class="hcard' + (hasImg ? ' has-img' : '') + '">' +
+            (hasImg ? '<div class="bg" style="' + esc('background-image:' + cssUrl(it.thumbnail)) + '"></div>' : '') +
+            '<div class="h-main">' +
+              '<div class="h-title">' + link + '</div>' +
+              '<div class="h-row">' +
+                '<span class="badge ' + chClass + '">' + esc(it.channel || '') + '</span>' +
+                (it.creator ? esc(it.creator) + ' · ' : '') + where + ' · ' + relTime(it.time) +
+              '</div>' +
+            '</div>' +
+            '<div class="h-side">' +
+              '<button class="h-del" type="button" data-id="' + esc(it.id) + '" title="Remove">' +
+                '<svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>' +
+              '</button>' +
+              '<div class="typebox">' + icon + '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      // ----------------------------------------------------------------- MORE (settings)
+      function reflectSettings() {
+        $('setDest').value = settings.dest;
+        $('setChannel').value = settings.channel;
+        $('setFolder').value = settings.folder;
+        $('setQuality').value = settings.quality;
+        $('setContainer').value = settings.container;
+        $('setAfmt').value = settings.afmt;
+        $('setAq').value = settings.aq;
+        $('setDevice').checked = settings.device;
+        $('setWeb').checked = settings.web;
+        $('setChannelRow').classList.toggle('hidden', settings.dest === 'server');
+        $('setFolderRow').classList.toggle('hidden', settings.dest !== 'server');
+        $('setContainerRow').classList.toggle('hidden', settings.dest !== 'server');
+      }
+      $('setDest').addEventListener('change', () => { settings.dest = $('setDest').value; saveSettings(); reflectSettings(); });
+      $('setChannel').addEventListener('change', () => { settings.channel = $('setChannel').value; saveSettings(); });
+      $('setFolder').addEventListener('change', () => { settings.folder = $('setFolder').value; saveSettings(); });
+      $('setQuality').addEventListener('change', () => { settings.quality = $('setQuality').value; saveSettings(); });
+      $('setContainer').addEventListener('change', () => { settings.container = $('setContainer').value; saveSettings(); });
+      $('setAfmt').addEventListener('change', () => { settings.afmt = $('setAfmt').value; saveSettings(); });
+      $('setAq').addEventListener('change', () => { settings.aq = $('setAq').value; saveSettings(); });
+      $('setDevice').addEventListener('change', () => { settings.device = $('setDevice').checked; saveSettings(); });
+      $('setWeb').addEventListener('change', () => { settings.web = $('setWeb').checked; saveSettings(); });
+      reflectSettings();
+
+      // ----------------------------------------------------------------- supported sites
+      (async function loadSites() {
+        try {
+          const r = await fetch('/api/sites');
+          const d = await r.json();
+          $('sitesList').innerHTML = (d.sites || []).map((s) => {
+            const limited = s.profiles === 'limited';
+            const note = s.profiles === true ? 'single + profiles' : limited ? 'single + profiles (limited)' : 'single videos';
+            return '<span class="site"><span class="dot' + (limited ? ' limited' : '') + '"></span>' + esc(s.domain) + ' <small>' + note + '</small></span>';
+          }).join('') +
+            '<span class="site"><span class="dot"></span>+ yt-dlp <small>' + (d.ytdlp ? '~' + d.ytdlp + ' more · single + playlists' : 'many sites') + '</small></span>';
+        } catch { /* ignore */ }
+      })();
+
+      // Close any live streams when the page is hidden/unloaded (mobile Safari
+      // keeps EventSource connections alive in the background otherwise).
+      window.addEventListener('pagehide', () => {
+        if (activeSource) { activeSource.close(); activeSource = null; }
+        if (jobStream) { jobStream.close(); jobStream = null; }
+      });
+
+      // ----------------------------------------------------------------- init
+      loadHistory();
+      loadFolders();
+      connectJobStream(); // pick up any in-progress jobs (incl. across reloads)
+      renderQueue();
+    </script>
+  </body>
+</html>
