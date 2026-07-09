@@ -19,8 +19,8 @@ const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_BIN || 'ffprobe';
-// Root of the elite-v2 shorts store (host /mnt/4tb/elitev2/shorts). Files land
-// in <root>/<channel>/_import/ where the elite-v2 timer auto-imports them.
+// Root of the elite-v2 shorts store (a host folder bind-mounted here). Files
+// land in <root>/<channel>/_import/ where the elite-v2 timer auto-imports them.
 const ELITE_ROOT = process.env.ELITE_ROOT || '/elitev2-shorts';
 const CHANNELS = { main: 'main', '18plus': '18plus' };
 // Audio extraction targets (yt-dlp --audio-format). 'best' keeps the source codec.
