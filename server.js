@@ -1144,11 +1144,17 @@ function downloadYtdlp(job, dest, opts = {}) {
       ? `bv*[height<=${q}]+ba/b[height<=${q}]/bv*+ba/b`
       : 'bv*+ba/b';
     const wantProgress = typeof opts.onProgress === 'function';
+    // TikTok's hevc (bytevc1) formats claim aac audio in metadata but the
+    // actual streams are silent — prefer h264 there so downloads keep audio.
+    const isTikTok = /(^|\.)tiktok\.com$/.test(
+      (() => { try { return new URL(job.url).hostname; } catch { return ''; } })()
+    );
     const args = [
       '--no-warnings',
       '--no-playlist',
       '-f',
       fmt,
+      ...(isTikTok ? ['-S', 'vcodec:h264'] : []),
       '--merge-output-format',
       opts.container || 'mp4',
       ...(opts.embedThumb ? ['--embed-thumbnail'] : []),
