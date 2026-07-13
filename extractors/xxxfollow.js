@@ -61,7 +61,9 @@ function buildJob(userdir, userid, mediaid, title, creator) {
     sourceUrl: `${BASE}/${creator}`,
     thumbnail: `${dir}/${mediaid}_small.webp`,
     filename: `${creator}-${mediaid}.mp4`,
-    downloadUrl: `${dir}/${mediaid}_fhd.mp4`, // best quality
+    // Not every post has an _fhd variant; the downloader falls back in order.
+    downloadUrl: `${dir}/${mediaid}_fhd.mp4`,
+    fallbackUrls: [`${dir}/${mediaid}.mp4`, `${dir}/${mediaid}_sd.mp4`],
     headers: { 'User-Agent': UA, Referer: BASE + '/' },
   };
 }

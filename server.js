@@ -1096,7 +1096,14 @@ async function saveJobToImport(job, channel, web, quality) {
 // Fetch a direct URL to disk, honouring the extractor's required headers.
 // opts.onProgress({ percent, downloaded, total }) is called as bytes arrive.
 async function downloadDirect(job, dest, opts = {}) {
-  const upstream = await fetch(job.downloadUrl, { headers: job.headers || {} });
+  // Extractors may list lower-quality fallbackUrls for sites where the best
+  // variant doesn't exist for every post (e.g. xxxfollow _fhd -> plain -> _sd).
+  const urls = [job.downloadUrl, ...(job.fallbackUrls || [])];
+  let upstream;
+  for (const url of urls) {
+    upstream = await fetch(url, { headers: job.headers || {} });
+    if (upstream.ok && upstream.body) break;
+  }
   if (!upstream.ok || !upstream.body) throw new Error(`upstream HTTP ${upstream.status}`);
   const total = Number(upstream.headers.get('content-length')) || 0;
   const src = Readable.fromWeb(upstream.body);
