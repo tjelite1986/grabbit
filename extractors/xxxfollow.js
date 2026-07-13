@@ -75,13 +75,14 @@ async function resolve(url) {
   const html = await res.text();
 
   // Main clip's media id from og:image (.../<mediaid>_small.jpg|webp).
-  const og = html.match(/og:image"[^>]*content="[^"]*post_public\/(\d+)\/(\d+)\/(\d+)_/i);
+  // The user-id dir can carry a suffix, e.g. post_public/4179/41791007-1/....
+  const og = html.match(/og:image"[^>]*content="[^"]*post_public\/(\d+)\/([\d-]+)\/(\d+)_/i);
   let userdir;
   let userid;
   let mediaid;
   if (og) [, userdir, userid, mediaid] = og;
   else {
-    const any = html.match(/post_public\/(\d+)\/(\d+)\/(\d+)(?:_fhd|_sd)?\.mp4/);
+    const any = html.match(/post_public\/(\d+)\/([\d-]+)\/(\d+)(?:_fhd|_sd)?\.mp4/);
     if (!any) throw new Error('no video found on page');
     [, userdir, userid, mediaid] = any;
   }
@@ -102,7 +103,7 @@ async function resolveProfile(url) {
     const html = await res.text();
     // Each post: alt="<title> by <creator>" ... src=".../<mediaid>_small.<ext>"
     const re =
-      /alt="([^"]+?)\s+by\s+[^"]*?"[^>]*?post_public\/(\d+)\/(\d+)\/(\d+)_small/g;
+      /alt="([^"]+?)\s+by\s+[^"]*?"[^>]*?post_public\/(\d+)\/([\d-]+)\/(\d+)_small/g;
     let m;
     let added = 0;
     while ((m = re.exec(html))) {
