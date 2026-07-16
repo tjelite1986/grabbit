@@ -687,6 +687,31 @@ app.post('/api/playlists/save', (req, res) => {
   res.json({ ok: true, playlists: list });
 });
 
+// POST /api/downloaded/mark?url=... -> manually mark a source as downloaded:
+// playlist views show it as done and "download new" skips it. Used for tracks
+// that were obtained some other way (e.g. a Premium-only playlist entry
+// grabbed from a different upload of the same song).
+app.post('/api/downloaded/mark', (req, res) => {
+  const url = req.query.url;
+  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  markDownloaded(url, null);
+  res.json({ ok: true });
+});
+
+// POST /api/downloaded/unmark?url=... -> undo a mark (manual or automatic).
+app.post('/api/downloaded/unmark', (req, res) => {
+  const url = req.query.url;
+  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  const map = readDownloaded();
+  delete map[mediaKey(url)];
+  try {
+    fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(map));
+  } catch (e) {
+    console.warn('downloaded registry write failed:', e.message);
+  }
+  res.json({ ok: true });
+});
+
 // POST /api/playlists/delete?id=...
 app.post('/api/playlists/delete', (req, res) => {
   const list = readPlaylists().filter((p) => p.id !== String(req.query.id));

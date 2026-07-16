@@ -869,6 +869,8 @@
         audio: '<svg class="ic" viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>',
         video: '<svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2.5" /><path d="M16 10l5-3v10l-5-3" /></svg>',
         image: '<svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8.5" cy="8.5" r="1.6" /><path d="M21 15l-5-5L5 21" /></svg>',
+        check: '<svg class="ic" viewBox="0 0 24 24"><path d="M4 12l6 6L20 6" /></svg>',
+        uncheck: '<svg class="ic" viewBox="0 0 24 24"><path d="M4 12l6 6L20 6" /><path d="M4 4l16 16" /></svg>',
       };
 
       // ----------------------------------------------------------------- HOME: fetch + cards
@@ -1030,6 +1032,13 @@
                   actions.appendChild(actBtn(ICON.audio, () => openSheet('audio', null, it)));
                   actions.appendChild(actBtn(ICON.video, () => openSheet('video', null, it)));
                 }
+                if (it.sourceUrl) {
+                  actions.appendChild(actBtn(
+                    it.downloaded ? ICON.uncheck : ICON.check,
+                    () => toggleDownloadedMark(it),
+                    it.downloaded ? 'Remove downloaded mark' : 'Mark as downloaded'
+                  ));
+                }
               },
             });
             itemsWrap.appendChild(card);
@@ -1109,12 +1118,29 @@
         showTab('queue');
       }
 
-      function actBtn(svg, onClick) {
+      function actBtn(svg, onClick, title) {
         const b = document.createElement('button');
         b.className = 'act';
         b.innerHTML = svg;
+        if (title) b.title = title;
         b.addEventListener('click', onClick);
         return b;
+      }
+
+      // Manually flip a playlist item's downloaded mark: the registry is the
+      // dedup source of truth, so this hides it from "download new" (mark) or
+      // makes it eligible again (unmark).
+      async function toggleDownloadedMark(it) {
+        const ep = it.downloaded ? 'unmark' : 'mark';
+        try {
+          const d = await fetchJson('/api/downloaded/' + ep + '?url=' + encodeURIComponent(it.sourceUrl || ''), { method: 'POST' });
+          if (!d.ok) throw new Error(d.error || 'failed');
+          it.downloaded = !it.downloaded;
+          toast(it.downloaded ? 'Marked as downloaded' : 'Mark removed', 'good');
+          if (profileMode && profileData) { cardsEl.innerHTML = ''; renderProfile(profileData); }
+        } catch {
+          toast('Could not update the downloaded mark', 'bad');
+        }
       }
 
       function importStatusLabel(imported, isImg, channel) {
