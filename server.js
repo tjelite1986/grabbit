@@ -198,6 +198,80 @@ function deleteHistory(id) {
   return list.length;
 }
 
+// ---------------------------------------------------------------------------
+// Downloaded registry: which source videos have already been saved, so
+// playlist views can mark them and "download new" skips them. Unlike the
+// history log this is unbounded (it's the source of truth for dedup).
+const DOWNLOADED_FILE = path.join(DATA_DIR, 'downloaded.json');
+let downloadedCache = null;
+
+// Stable identity for a media URL: YouTube variants (music./www./youtu.be/
+// shorts) collapse to the video id; other URLs drop query/hash noise.
+function mediaKey(url) {
+  try {
+    const u = new URL(String(url));
+    const host = u.hostname.replace(/^(www|music|m)\./, '');
+    if (host === 'youtube.com' || host === 'youtu.be') {
+      const id = host === 'youtu.be'
+        ? u.pathname.split('/').filter(Boolean)[0]
+        : u.searchParams.get('v') || u.pathname.split('/').filter(Boolean).pop();
+      if (id) return `yt:${id}`;
+    }
+    return `${host}${u.pathname}`;
+  } catch {
+    return String(url || '');
+  }
+}
+
+function readDownloaded() {
+  if (!downloadedCache) {
+    try {
+      downloadedCache = JSON.parse(fs.readFileSync(DOWNLOADED_FILE, 'utf8'));
+    } catch {
+      // First run: seed from the history log so earlier downloads count too.
+      downloadedCache = {};
+      for (const e of readHistory()) {
+        if (e.sourceUrl) downloadedCache[mediaKey(e.sourceUrl)] = { filename: e.filename || null, at: e.time || Date.now() };
+      }
+      try {
+        fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(downloadedCache));
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+  return downloadedCache;
+}
+
+function markDownloaded(sourceUrl, filename) {
+  if (!sourceUrl) return;
+  const map = readDownloaded();
+  map[mediaKey(sourceUrl)] = { filename: filename || null, at: Date.now() };
+  try {
+    fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(map));
+  } catch (e) {
+    console.warn('downloaded registry write failed:', e.message);
+  }
+}
+
+function isDownloaded(sourceUrl) {
+  return !!(sourceUrl && readDownloaded()[mediaKey(sourceUrl)]);
+}
+
+// ---------------------------------------------------------------------------
+// Saved playlists: subscriptions the user re-opens to check for new tracks.
+const PLAYLISTS_FILE = path.join(DATA_DIR, 'playlists.json');
+function readPlaylists() {
+  try {
+    return JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+function writePlaylists(list) {
+  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list));
+}
+
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
@@ -468,9 +542,14 @@ app.get('/api/resolve', async (req, res) => {
       thumbnail: job.thumbnail || null,
       duration: durationKnown(job) ? Number(job.duration) : null,
       mediaType: isImage ? 'image' : 'video',
+      // The full description often carries the real song title/artist for
+      // reposted music — shown collapsed under the result card.
+      description: job.description || null,
       // Site-provided music metadata (artist/track/album/year), when available;
       // pre-fills the Navidrome tag fields in the UI.
       music: job.music || null,
+      // Already saved once (any destination) per the downloaded registry.
+      downloaded: isDownloaded(job.sourceUrl || url),
       // Too long to belong in the shorts library (UI forces the server library).
       tooLongForShorts: !isImage && tooLongForShorts(job),
       filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
@@ -578,6 +657,29 @@ app.get('/api/music-meta', async (req, res) => {
     });
   }
   res.json({ ok: true, candidates: out.slice(0, 10) });
+});
+
+// GET /api/playlists -> saved playlists (subscriptions for new-track checks).
+app.get('/api/playlists', (_req, res) => res.json({ ok: true, playlists: readPlaylists() }));
+
+// POST /api/playlists/save?url=...&name=... -> add (or rename) a saved playlist.
+app.post('/api/playlists/save', (req, res) => {
+  const url = req.query.url;
+  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  const name = String(req.query.name || '').slice(0, 120) || url;
+  const list = readPlaylists();
+  const existing = list.find((p) => p.url === url);
+  if (existing) existing.name = name;
+  else list.push({ id: `${Date.now()}`, url, name, addedAt: Date.now() });
+  writePlaylists(list);
+  res.json({ ok: true, playlists: list });
+});
+
+// POST /api/playlists/delete?id=...
+app.post('/api/playlists/delete', (req, res) => {
+  const list = readPlaylists().filter((p) => p.id !== String(req.query.id));
+  writePlaylists(list);
+  res.json({ ok: true, playlists: list });
 });
 
 // GET /api/history -> recent downloads, newest first.
@@ -749,6 +851,9 @@ app.get('/api/profile', async (req, res) => {
         filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
         thumbnail: job.thumbnail || null,
         duration: durationKnown(job) ? Number(job.duration) : null,
+        sourceUrl: job.sourceUrl || job.url || null,
+        // Marked in playlist views; "download new" skips these.
+        downloaded: isDownloaded(job.sourceUrl || job.url),
         tooLongForShorts: !isImage && tooLongForShorts(job),
         imported: {
           main: isImage ? (photoHas(stem) ? 'imported' : null) : importedStatus('main', job.creator, stem),
@@ -756,7 +861,7 @@ app.get('/api/profile', async (req, res) => {
         },
       };
     });
-    res.json({ ok: true, isProfile: true, extractor: p.extractor, creator: p.creator, count: items.length, items });
+    res.json({ ok: true, isProfile: true, extractor: p.extractor, creator: p.creator, title: p.title || null, count: items.length, items });
   } catch (e) {
     // For the generic probe, "not a playlist" just means it's a single video.
     if (tryGeneric) return res.json({ ok: true, isProfile: false });
@@ -847,6 +952,7 @@ app.get('/api/download-all', async (req, res) => {
         device: false,
       });
       saved++;
+      markDownloaded(job.sourceUrl || job.url, null);
       send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'saved' });
     } catch (e) {
       failed++;
@@ -908,6 +1014,8 @@ function newJob(fields) {
 }
 function finishJob(job, patch) {
   setJob(job, { status: 'done', phase: null, percent: 100, doneAt: Date.now(), ...patch });
+  // Anything saved into a library counts as downloaded (playlist dedup marks).
+  if (job.saved && job.sourceUrl) markDownloaded(job.sourceUrl, job.filename);
   if (job.deliverTemp && job.finalPath) {
     const p = job.finalPath;
     const t = setTimeout(() => fs.rm(p, { force: true }, () => {}), DELIVER_TTL_MS);
@@ -955,6 +1063,7 @@ async function runJob(job, params) {
   setJob(job, {
     title: meta.title || null, creator: meta.creator || null, thumbnail: meta.thumbnail || null,
     mediaType, duration: durationKnown(meta) ? Number(meta.duration) : null,
+    sourceUrl: meta.sourceUrl || params.url,
   });
 
   if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
@@ -1211,8 +1320,29 @@ app.get('/api/jobs/start', (req, res) => {
   };
   const job = newJob({ dest: params.dest, channel: params.channel, device: params.device });
   res.json({ ok: true, jobId: job.id });
-  runJob(job, params).catch((e) => setJob(job, { status: 'error', phase: null, error: String(e.message || e) }));
+  scheduleJob(job, params);
 });
+
+// Cap concurrent job downloads — a playlist "download all" queues dozens of
+// jobs at once, and the Pi can't run that many yt-dlp processes in parallel.
+// Excess jobs wait in FIFO order with their 'queued' status showing in the UI.
+const MAX_ACTIVE_JOBS = Math.max(1, Number(process.env.MAX_ACTIVE_JOBS) || 2);
+let activeJobs = 0;
+const pendingJobs = [];
+function scheduleJob(job, params) {
+  const run = () => {
+    activeJobs++;
+    runJob(job, params)
+      .catch((e) => setJob(job, { status: 'error', phase: null, error: String(e.message || e) }))
+      .finally(() => {
+        activeJobs--;
+        const next = pendingJobs.shift();
+        if (next) next();
+      });
+  };
+  if (activeJobs < MAX_ACTIVE_JOBS) run();
+  else pendingJobs.push(run);
+}
 
 // GET /api/jobs -> snapshot of current jobs (newest first).
 app.get('/api/jobs', (_req, res) => res.json({ ok: true, jobs: snapshotJobs() }));

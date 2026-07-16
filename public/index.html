@@ -339,6 +339,23 @@
       #toast.bad { border-color: var(--bad-dim); }
 
       .hidden { display: none !important; }
+
+      /* Result-card description (collapsed by default) */
+      .desc { margin: 2px 2px 12px; font-size: 13px; color: var(--muted); }
+      .desc summary { cursor: pointer; padding: 4px 0; color: var(--text); font-weight: 500; }
+      .desc pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 6px 0 0; max-height: 40vh; overflow-y: auto; }
+
+      /* Saved playlists (home) */
+      .plsec { margin-top: 18px; }
+      .plsec h2 { font-size: 14px; font-weight: 600; color: var(--muted); margin: 0 2px 8px; }
+      .plrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 8px; color: var(--text); background: var(--surface-2); }
+      .plrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+      .plrow .del { flex: none; color: var(--muted); padding: 4px; }
+
+      /* Profile/playlist header buttons */
+      .profbtns { display: flex; gap: 8px; margin: 0 2px 12px; flex-wrap: wrap; }
+      .profbtns button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; color: var(--text); background: var(--surface-2); }
+      .profbtns button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
     </style>
   </head>
   <body>
@@ -366,6 +383,12 @@
         </div>
 
         <div id="cards"></div>
+
+        <!-- Saved playlists: open one to re-check it for new tracks. -->
+        <div id="plSection" class="plsec hidden">
+          <h2>Saved playlists</h2>
+          <div id="plRows"></div>
+        </div>
       </section>
 
       <!-- ===================== DOWNLOADS ===================== -->
@@ -897,7 +920,7 @@
 
       function renderSingle(d) {
         const isImg = d.mediaType === 'image';
-        const status = importStatusLabel(d.imported, isImg, settings.channel);
+        const status = d.downloaded ? 'downloaded' : importStatusLabel(d.imported, isImg, settings.channel);
         const card = mediaCard({
           title: d.title || d.filename,
           sub: (d.duration ? fmtClock(d.duration) + ' · ' : '') + d.extractor,
@@ -913,6 +936,15 @@
           },
         });
         cardsEl.appendChild(card);
+        // The description often carries the real song title/artist for
+        // reposted music — show it collapsed under the card.
+        if (d.description && d.description.trim()) {
+          const det = document.createElement('details');
+          det.className = 'desc';
+          det.innerHTML = '<summary>Description</summary><pre></pre>';
+          det.querySelector('pre').textContent = d.description.trim();
+          cardsEl.appendChild(det);
+        }
       }
 
       function renderProfile(pd) {
@@ -920,24 +952,118 @@
         profileData = pd;
         profileItems = pd.items || [];
         const head = document.createElement('div');
-        head.style.cssText = 'margin:2px 2px 4px;font-size:13px;color:var(--muted)';
-        head.textContent = '@' + (pd.creator || '?') + ' — ' + pd.count + ' items';
+        head.style.cssText = 'margin:2px 2px 8px;font-size:13px;color:var(--muted)';
+        const plName = pd.title && pd.title !== pd.creator ? pd.title + ' · ' : '';
+        head.textContent = plName + '@' + (pd.creator || '?') + ' — ' + pd.count + ' items';
         cardsEl.appendChild(head);
+
+        // Playlist actions: subscribe (save) + audio-download whatever is new.
+        const btns = document.createElement('div');
+        btns.className = 'profbtns';
+        const savedEntry = savedPlaylists.find((p) => p.url === currentUrl);
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = savedEntry ? 'Remove saved playlist' : 'Save playlist';
+        saveBtn.addEventListener('click', () => (savedEntry ? deletePlaylist(savedEntry.id) : savePlaylist(pd)));
+        btns.appendChild(saveBtn);
+        const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded);
+        const dlNew = document.createElement('button');
+        dlNew.className = 'primary';
+        dlNew.textContent = fresh.length ? 'Download new to Navidrome (' + fresh.length + ')' : 'Nothing new — all downloaded';
+        dlNew.disabled = !fresh.length;
+        dlNew.addEventListener('click', () => startNavidromeBatch(fresh));
+        btns.appendChild(dlNew);
+        cardsEl.appendChild(btns);
+
         profileItems.forEach((it) => {
           const isImg = it.mediaType === 'image';
-          const status = importStatusLabel(it.imported, isImg, settings.channel);
+          const status = it.downloaded ? 'downloaded' : importStatusLabel(it.imported, isImg, settings.channel);
           const card = mediaCard({
             title: it.title || it.filename,
             sub: (it.duration ? fmtClock(it.duration) + ' · ' : '') + (isImg ? 'image' : 'video') + (it.tooLongForShorts ? ' · server only' : ''),
             thumbnail: it.thumbnail,
             status,
             onActions(actions) {
-              actions.appendChild(actBtn(isImg ? ICON.image : ICON.video, () => openSheet(isImg ? 'image' : 'video', null, it)));
+              if (isImg) {
+                actions.appendChild(actBtn(ICON.image, () => openSheet('image', null, it)));
+              } else {
+                actions.appendChild(actBtn(ICON.audio, () => openSheet('audio', null, it)));
+                actions.appendChild(actBtn(ICON.video, () => openSheet('video', null, it)));
+              }
             },
           });
           cardsEl.appendChild(card);
         });
         $('fab').classList.add('show');
+      }
+
+      // ------------------------------------------------------- saved playlists
+      let savedPlaylists = [];
+      async function loadPlaylists() {
+        try {
+          const d = await fetchJson('/api/playlists');
+          savedPlaylists = d.playlists || [];
+        } catch { savedPlaylists = []; }
+        renderPlaylistRows();
+      }
+      function renderPlaylistRows() {
+        const rows = $('plRows');
+        rows.innerHTML = '';
+        $('plSection').classList.toggle('hidden', !savedPlaylists.length);
+        savedPlaylists.forEach((p) => {
+          const row = document.createElement('button');
+          row.className = 'plrow';
+          row.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 6h12"/><path d="M4 12h12"/><path d="M4 18h8"/><circle cx="18" cy="16" r="3"/><path d="M21 16V8"/></svg><span class="nm"></span><span class="del"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></span>';
+          row.querySelector('.nm').textContent = p.name;
+          row.addEventListener('click', (e) => {
+            if (e.target.closest('.del')) { deletePlaylist(p.id); return; }
+            urlInput.value = p.url;
+            form.requestSubmit();
+          });
+          rows.appendChild(row);
+        });
+      }
+      async function savePlaylist(pd) {
+        const name = (pd.title && pd.title !== pd.creator ? pd.title : '@' + (pd.creator || 'playlist'));
+        try {
+          const d = await fetchJson('/api/playlists/save?url=' + encodeURIComponent(currentUrl) + '&name=' + encodeURIComponent(name), { method: 'POST' });
+          savedPlaylists = d.playlists || [];
+          renderPlaylistRows();
+          if (profileMode && profileData) { cardsEl.innerHTML = ''; renderProfile(profileData); }
+          toast('Playlist saved', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
+      }
+      async function deletePlaylist(id) {
+        try {
+          const d = await fetchJson('/api/playlists/delete?id=' + encodeURIComponent(id), { method: 'POST' });
+          savedPlaylists = d.playlists || [];
+          renderPlaylistRows();
+          if (profileMode && profileData) { cardsEl.innerHTML = ''; renderProfile(profileData); }
+        } catch (err) { toast(err.message, 'bad'); }
+      }
+
+      // Queue every given playlist item as an audio job into Navidrome. Each
+      // track resolves and tags itself from its own metadata; the server caps
+      // how many download at once, the rest wait as 'queued'.
+      async function startNavidromeBatch(items, afmt, aq) {
+        if (!items.length) return;
+        connectJobStream();
+        let started = 0;
+        for (const it of items) {
+          const p = new URLSearchParams();
+          p.set('dest', 'navidrome');
+          p.set('audio', '1');
+          p.set('afmt', afmt || settings.afmt || 'opus');
+          if (aq || settings.aq) p.set('aq', aq || settings.aq);
+          p.set('device', '0');
+          p.set('url', it.sourceUrl || it.url || '');
+          try {
+            const d = await fetchJson('/api/jobs/start?' + p.toString());
+            if (d.ok) started++;
+          } catch { /* keep queueing the rest */ }
+        }
+        urlInput.value = '';
+        toast('Queued ' + started + ' tracks for Navidrome', 'good');
+        showTab('queue');
       }
 
       function actBtn(svg, onClick) {
@@ -1047,9 +1173,9 @@
         const isImage = sheetMode === 'image';
         const isVideo = sheetMode === 'video';
 
-        // Navidrome takes audio only, no images and no batches; lock it out there.
+        // Navidrome takes audio only; lock it out for images.
         const navBtn = $('shDest').querySelector('[data-v="navidrome"]');
-        const navBlocked = sheetAll || isImage;
+        const navBlocked = isImage;
         if (navBlocked && segValue($('shDest')) === 'navidrome') segSet($('shDest'), 'server');
         navBtn.style.pointerEvents = navBlocked ? 'none' : '';
         navBtn.style.opacity = navBlocked ? '0.4' : '';
@@ -1075,10 +1201,11 @@
         $('shFolderField').classList.toggle('hidden', !folderVisible);
         $('shNewFolderField').classList.toggle('hidden', !(folderVisible && $('shFolder').value === '__new__'));
         // Navidrome: the tag fields replace the plain title/profile inputs.
+        // Batches skip them — every track tags itself from its own metadata.
         $('shCreatorField').classList.toggle('hidden', isNavidrome);
-        $('shMusicFields').classList.toggle('hidden', !isNavidrome);
+        $('shMusicFields').classList.toggle('hidden', !isNavidrome || sheetAll);
         $('shMusicAlbumField').classList.toggle('hidden', $('shMusicSingle').checked);
-        if (isNavidrome && musicFilledSeq !== sheetSeq) {
+        if (isNavidrome && !sheetAll && musicFilledSeq !== sheetSeq) {
           musicFilledSeq = sheetSeq;
           musicPrefill();
           musicLookup();
@@ -1105,6 +1232,8 @@
         if (tooLong) {
           const dur = sheetTarget.duration ? ' (' + fmtClock(sheetTarget.duration) + ')' : '';
           msg = 'Too long for shorts' + dur + ' — saving to the server library instead.';
+        } else if (isNavidrome && sheetAll) {
+          msg = 'Each track is downloaded as audio and tagged automatically from its own metadata; already-downloaded tracks are skipped.';
         } else if (isNavidrome && isVideo) {
           msg = 'Audio only: the sound track is extracted and saved to the Navidrome music library.';
         } else if (!sheetAll) {
@@ -1121,7 +1250,10 @@
         // confirm label
         const device = $('shDevice').checked;
         let label;
-        if (sheetAll) label = 'Download all (' + profileItems.length + ')';
+        if (sheetAll && isNavidrome) {
+          const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded).length;
+          label = 'Download new to Navidrome (' + fresh + ')';
+        } else if (sheetAll) label = 'Download all (' + profileItems.length + ')';
         else if (isNavidrome) label = 'Save to Navidrome';
         else if (isAudio) label = isServer ? 'Save audio' : 'Download audio';
         else if (isImage) label = device ? 'Download image' : 'Save image';
@@ -1258,9 +1390,28 @@
         saveSettings();
         reflectSettings();
 
-        if (sheetAll) { startBatch(); return; }
+        if (sheetAll) {
+          if (segValue($('shDest')) === 'navidrome') {
+            closeSheet();
+            startNavidromeBatch(
+              profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded),
+              $('shAfmt').value,
+              $('shAq').value
+            );
+          } else startBatch();
+          return;
+        }
 
         if (sheetItem && !sheetSingle) {
+          if (sheetMode === 'audio' || segValue($('shDest')) === 'navidrome') {
+            // Audio (or Navidrome) for one playlist item: run it as a normal
+            // job against the item's own URL — the batch pipeline is video-only.
+            closeSheet();
+            const p = buildQuery({ batch: false });
+            p.set('url', sheetItem.sourceUrl || sheetItem.url || '');
+            startJob(p);
+            return;
+          }
           // Single clip inside a profile -> use the batch endpoint with one id.
           startBatch([sheetItem.id]);
           return;
@@ -1597,6 +1748,7 @@
       // ----------------------------------------------------------------- init
       loadHistory();
       loadFolders();
+      loadPlaylists();
       connectJobStream(); // pick up any in-progress jobs (incl. across reloads)
       renderQueue();
     </script>

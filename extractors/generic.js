@@ -84,7 +84,8 @@ async function resolveProfile(url) {
       sourceUrl: e.webpage_url || vid,
     };
   });
-  return { creator, items };
+  // title: playlist/channel display name (e.g. the playlist's own name).
+  return { creator, title: data.title || null, items };
 }
 
 async function resolve(url) {
