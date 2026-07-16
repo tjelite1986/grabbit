@@ -1,52 +1,47 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs><clipPath id="tile"><rect width="512" height="512" rx="110" /></clipPath></defs>
   <rect width="512" height="512" rx="110" fill="#16171c" />
-  <g transform="translate(6,0) scale(0.976)">
-  <!-- grabbit mascot: chubby frog snagging a note with its tongue (sticker style) -->
+  <g clip-path="url(#tile)">
+  <!-- grabbit mascot: frog face close-up, tongue snagging a note (sticker style) -->
   <g stroke="#163f27" stroke-width="12" stroke-linejoin="round" style="paint-order:stroke">
 
-    <!-- haunches -->
-    <ellipse cx="105" cy="415" rx="78" ry="52" fill="#3da85a" />
-    <ellipse cx="365" cy="415" rx="78" ry="52" fill="#3da85a" />
-
-    <!-- feet -->
-    <ellipse cx="95" cy="470" rx="50" ry="16" fill="#4fbe6b" />
-    <ellipse cx="375" cy="470" rx="50" ry="16" fill="#4fbe6b" />
-
-    <!-- body -->
-    <ellipse cx="235" cy="352" rx="168" ry="130" fill="#4fbe6b" />
-
-    <!-- belly (no outline, soft inset) -->
-    <ellipse cx="235" cy="402" rx="105" ry="72" fill="#d6f2b0" stroke="none" />
+    <!-- head (chin crops below the canvas for the close-up) -->
+    <ellipse cx="256" cy="400" rx="245" ry="195" fill="#4fbe6b" />
 
     <!-- eye domes -->
-    <circle cx="155" cy="235" r="62" fill="#4fbe6b" />
-    <circle cx="315" cy="235" r="62" fill="#4fbe6b" />
+    <circle cx="120" cy="215" r="98" fill="#4fbe6b" />
+    <circle cx="392" cy="215" r="98" fill="#4fbe6b" />
 
     <!-- eyes -->
-    <circle cx="155" cy="235" r="40" fill="#ffffff" stroke-width="9" />
-    <circle cx="315" cy="235" r="40" fill="#ffffff" stroke-width="9" />
-    <circle cx="167" cy="223" r="17" fill="#1c2b22" stroke="none" />
-    <circle cx="327" cy="223" r="17" fill="#1c2b22" stroke="none" />
-    <circle cx="173" cy="217" r="6" fill="#ffffff" stroke="none" />
-    <circle cx="333" cy="217" r="6" fill="#ffffff" stroke="none" />
+    <circle cx="120" cy="215" r="64" fill="#ffffff" stroke-width="10" />
+    <circle cx="392" cy="215" r="64" fill="#ffffff" stroke-width="10" />
+    <!-- pupils peeking inward-up at the note -->
+    <circle cx="146" cy="192" r="27" fill="#1c2b22" stroke="none" />
+    <circle cx="366" cy="192" r="27" fill="#1c2b22" stroke="none" />
+    <circle cx="156" cy="182" r="9" fill="#ffffff" stroke="none" />
+    <circle cx="376" cy="182" r="9" fill="#ffffff" stroke="none" />
+
+    <!-- cheeks -->
+    <ellipse cx="95" cy="430" rx="32" ry="19" fill="#f78fa7" opacity=".85" stroke="none" />
+    <ellipse cx="417" cy="430" rx="32" ry="19" fill="#f78fa7" opacity=".85" stroke="none" />
 
     <!-- nostrils -->
-    <circle cx="215" cy="264" r="5" fill="#163f27" stroke="none" />
-    <circle cx="255" cy="264" r="5" fill="#163f27" stroke="none" />
+    <circle cx="218" cy="330" r="7" fill="#163f27" stroke="none" />
+    <circle cx="294" cy="330" r="7" fill="#163f27" stroke="none" />
 
     <!-- mouth -->
-    <path d="M105 292 Q 235 340 365 292" fill="none" stroke-width="11" stroke-linecap="round" />
+    <path d="M80 400 Q 256 470 432 400" fill="none" stroke-width="12" stroke-linecap="round" />
 
-    <!-- tongue: dark understroke, pink overstroke; exits the right mouth corner -->
-    <ellipse cx="356" cy="297" rx="15" ry="10" fill="#163f27" stroke="none" transform="rotate(-24 356 297)" />
-    <path d="M352 298 C 402 292 424 218 434 148" fill="none" stroke="#163f27" stroke-width="40" stroke-linecap="round" />
-    <path d="M352 298 C 402 292 424 218 434 148" fill="none" stroke="#f76a8e" stroke-width="26" stroke-linecap="round" />
+    <!-- tongue: shoots straight up between the eyes -->
+    <ellipse cx="256" cy="438" rx="20" ry="13" fill="#163f27" stroke="none" />
+    <path d="M256 440 C 246 360 248 250 258 138" fill="none" stroke="#163f27" stroke-width="46" stroke-linecap="round" />
+    <path d="M256 440 C 246 360 248 250 258 138" fill="none" stroke="#f76a8e" stroke-width="30" stroke-linecap="round" />
 
-    <!-- music note, drawn on top so it sits stuck on the tongue tip -->
-    <g fill="#f4f5f7" transform="rotate(-12 445 122)">
-      <rect x="452" y="42" width="13" height="78" rx="6.5" />
-      <path d="M458 40 C 492 50 500 78 492 104 C 488 82 478 68 458 62 Z" />
-      <ellipse cx="445" cy="122" rx="26" ry="19" transform="rotate(-20 445 122)" />
+    <!-- music note, stuck on the tongue tip -->
+    <g fill="#f4f5f7" transform="rotate(-10 266 116) translate(266 116) scale(1.12) translate(-266 -116)">
+      <rect x="274" y="40" width="13" height="76" rx="6.5" />
+      <path d="M280 38 C 314 48 322 76 314 102 C 310 80 300 66 280 60 Z" />
+      <ellipse cx="266" cy="118" rx="26" ry="19" transform="rotate(-20 266 118)" />
     </g>
   </g>
 </g>
