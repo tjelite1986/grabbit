@@ -1390,6 +1390,9 @@
         try {
           const d = await fetchJson('/api/jobs/start?' + query.toString());
           if (!d.ok) throw new Error(d.error || 'Could not start download');
+          // The link is queued — clear the search field for the next paste.
+          // (currentUrl stays, so more downloads from the same card still work.)
+          urlInput.value = '';
           toast('Added to queue', 'good');
           showTab('queue');
         } catch (err) { toast(err.message, 'bad'); }
@@ -1420,6 +1423,8 @@
         p.set('url', currentUrl);
         const src = new EventSource('/api/download-all?' + p.toString());
         activeSource = src;
+        // The batch is running — clear the search field for the next paste.
+        urlInput.value = '';
 
         src.onmessage = (ev) => {
           const d = JSON.parse(ev.data);
