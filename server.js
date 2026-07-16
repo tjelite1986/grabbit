@@ -687,6 +687,112 @@ app.post('/api/playlists/save', (req, res) => {
   res.json({ ok: true, playlists: list });
 });
 
+// ---------------------------------------------------------------------------
+// Playlist watcher: saved playlists with watch=true are re-probed on an
+// interval and any new tracks are queued to Navidrome automatically — the
+// "Download new to Navidrome" button without having to open the playlist.
+const WATCH_INTERVAL_MINUTES = Math.max(15, Number(process.env.WATCH_INTERVAL_MINUTES) || 360);
+let watchCycleRunning = false;
+
+// Queue one track as an audio job into Navidrome, same defaults as the UI's
+// batch button (opus; the cover is embedded as album art by produceAudio).
+function startNavidromeJob(url) {
+  const params = {
+    url,
+    dest: 'navidrome',
+    channel: 'main',
+    device: false,
+    web: false,
+    quality: parseQuality(undefined),
+    audio: true,
+    afmt: 'opus',
+    aq: parseAudioQuality(undefined),
+    container: parseContainer(undefined),
+    embedThumb: false,
+    embedSubs: false,
+    sponsorblock: false,
+    creatorOverride: null,
+    titleOverride: null,
+    artists: null,
+    album: null,
+    single: false,
+    date: null,
+    genres: null,
+  };
+  const job = newJob({ dest: 'navidrome', channel: 'main', device: false });
+  scheduleJob(job, params);
+  return job;
+}
+
+function updatePlaylist(id, patch) {
+  const list = readPlaylists();
+  const pl = list.find((p) => p.id === id);
+  if (pl) {
+    Object.assign(pl, patch);
+    writePlaylists(list);
+  }
+}
+
+async function checkPlaylistForNew(pl) {
+  const profile = await extractors.resolveProfile(pl.url);
+  const fresh = profile.items.filter(
+    (it) => it.mediaType !== 'image' && !isDownloaded(it.sourceUrl || it.url)
+  );
+  for (const it of fresh) startNavidromeJob(it.sourceUrl || it.url);
+  return { total: profile.items.length, queued: fresh.length };
+}
+
+async function runWatchCycle(reason) {
+  if (watchCycleRunning) return;
+  watchCycleRunning = true;
+  try {
+    const watched = readPlaylists().filter((p) => p.watch);
+    if (!watched.length) return;
+    console.log(`playlist watch (${reason}): checking ${watched.length} playlist(s)`);
+    for (const pl of watched) {
+      try {
+        const r = await checkPlaylistForNew(pl);
+        updatePlaylist(pl.id, { lastChecked: Date.now(), lastQueued: r.queued, lastError: null });
+        if (r.queued) console.log(`playlist watch: "${pl.name}" queued ${r.queued} new track(s)`);
+      } catch (e) {
+        updatePlaylist(pl.id, { lastChecked: Date.now(), lastError: String(e.message || e) });
+        console.warn(`playlist watch: "${pl.name}" failed:`, String(e.message || e));
+      }
+    }
+  } finally {
+    watchCycleRunning = false;
+  }
+}
+
+setInterval(() => runWatchCycle('interval'), WATCH_INTERVAL_MINUTES * 60 * 1000).unref();
+// First pass shortly after boot, so a restart doesn't push checks a full
+// interval into the future.
+setTimeout(() => runWatchCycle('startup'), 3 * 60 * 1000).unref();
+
+// POST /api/playlists/watch?id=...&on=1|0 -> toggle auto-download of new tracks.
+app.post('/api/playlists/watch', (req, res) => {
+  const list = readPlaylists();
+  const pl = list.find((p) => p.id === String(req.query.id));
+  if (!pl) return res.status(404).json({ ok: false, error: 'Playlist not found' });
+  pl.watch = req.query.on === '1';
+  writePlaylists(list);
+  res.json({ ok: true, playlists: list });
+});
+
+// POST /api/playlists/check?id=... -> probe one playlist right now and queue
+// whatever is new (manual trigger for the watcher).
+app.post('/api/playlists/check', async (req, res) => {
+  const pl = readPlaylists().find((p) => p.id === String(req.query.id));
+  if (!pl) return res.status(404).json({ ok: false, error: 'Playlist not found' });
+  try {
+    const r = await checkPlaylistForNew(pl);
+    updatePlaylist(pl.id, { lastChecked: Date.now(), lastQueued: r.queued, lastError: null });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    res.status(422).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 // POST /api/downloaded/mark?url=... -> manually mark a source as downloaded:
 // playlist views show it as done and "download new" skips it. Used for tracks
 // that were obtained some other way (e.g. a Premium-only playlist entry
@@ -1249,6 +1355,7 @@ async function produceAudio(job, meta, params, onProgress) {
       outPath = await downloadYtdlpAudio(meta, base, afmt, {
         aq: params.aq,
         embedThumb: params.embedThumb || params.dest === 'navidrome',
+        sponsorblock: params.sponsorblock,
       });
     } else {
       // Direct sources can't be re-extracted to 'best' losslessly; fall back to m4a.
@@ -1594,6 +1701,7 @@ function downloadYtdlpAudio(job, destNoExt, afmt, opts = {}) {
       '-f', 'ba/b', '-x', '--audio-format', afmt,
       ...(opts.aq ? ['--audio-quality', opts.aq] : []),
       ...(opts.embedThumb ? ['--embed-thumbnail'] : []),
+      ...(opts.sponsorblock ? ['--sponsorblock-remove', 'all'] : []),
       '--embed-metadata',
       '-o', `${destNoExt}.%(ext)s`, '--', job.url,
     ];

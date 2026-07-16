@@ -353,6 +353,8 @@
       .plrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 8px; color: var(--text); background: var(--surface-2); }
       .plrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
       .plrow .del { flex: none; color: var(--muted); padding: 4px; }
+      .plrow .watch { flex: none; color: var(--muted); padding: 4px; }
+      .plrow .watch.on { color: var(--good); }
 
       /* Profile/playlist header buttons */
       .profbtns { display: flex; gap: 8px; margin: 0 2px 12px; flex-wrap: wrap; }
@@ -1064,15 +1066,29 @@
         savedPlaylists.forEach((p) => {
           const row = document.createElement('button');
           row.className = 'plrow';
-          row.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 6h12"/><path d="M4 12h12"/><path d="M4 18h8"/><circle cx="18" cy="16" r="3"/><path d="M21 16V8"/></svg><span class="nm"></span><span class="del"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></span>';
+          const bell = p.watch
+            ? '<svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 3a6 6 0 0 0-6 6v3.5L4 16h16l-2-3.5V9a6 6 0 0 0-6-6z"/><path d="M10 19a2 2 0 0 0 4 0z"/></svg>'
+            : '<svg class="ic" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4 16h16l-2-3.5V9a6 6 0 0 0-6-6z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>';
+          row.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 6h12"/><path d="M4 12h12"/><path d="M4 18h8"/><circle cx="18" cy="16" r="3"/><path d="M21 16V8"/></svg><span class="nm"></span>' +
+            '<span class="watch' + (p.watch ? ' on' : '') + '" title="' + (p.watch ? 'Auto-download on — new tracks go to Navidrome' : 'Auto-download new tracks') + '">' + bell + '</span>' +
+            '<span class="del"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></span>';
           row.querySelector('.nm').textContent = p.name;
           row.addEventListener('click', (e) => {
             if (e.target.closest('.del')) { deletePlaylist(p.id); return; }
+            if (e.target.closest('.watch')) { toggleWatch(p); return; }
             urlInput.value = p.url;
             form.requestSubmit();
           });
           rows.appendChild(row);
         });
+      }
+      async function toggleWatch(p) {
+        try {
+          const d = await fetchJson('/api/playlists/watch?id=' + encodeURIComponent(p.id) + '&on=' + (p.watch ? '0' : '1'), { method: 'POST' });
+          savedPlaylists = d.playlists || [];
+          renderPlaylistRows();
+          toast(p.watch ? 'Auto-download off' : 'Auto-download on — new tracks go to Navidrome', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
       }
       async function savePlaylist(pd) {
         const name = (pd.title && pd.title !== pd.creator ? pd.title : '@' + (pd.creator || 'playlist'));
@@ -1289,7 +1305,8 @@
         $('shContainerField').classList.toggle('hidden', !advancedVideo);
         $('shThumbRow').classList.toggle('hidden', !advancedVideo);
         $('shSubsRow').classList.toggle('hidden', !advancedVideo);
-        $('shSponsorRow').classList.toggle('hidden', !advancedVideo);
+        // SponsorBlock also applies to audio extraction (cuts sponsor reads).
+        $('shSponsorRow').classList.toggle('hidden', !(advancedVideo || audioish));
         // Web format only applies to an elite-v2 video save.
         $('shWebRow').classList.toggle('hidden', !(isVideo && dest === ''));
         // No "to this device" toggle for a batch (download all).
@@ -1474,8 +1491,9 @@
           if ($('shContainer').value && $('shContainer').value !== 'mp4') p.set('container', $('shContainer').value);
           if ($('shThumb').checked) p.set('thumb', '1');
           if ($('shSubs').checked) p.set('subs', '1');
-          if ($('shSponsor').checked) p.set('sponsor', '1');
         }
+        // SponsorBlock: server-library videos and any audio extraction.
+        if (!$('shSponsorRow').classList.contains('hidden') && $('shSponsor').checked) p.set('sponsor', '1');
         if (creator) p.set('creator', creator);
         if (!batch) p.set('device', $('shDevice').checked ? '1' : '0');
         return p;
