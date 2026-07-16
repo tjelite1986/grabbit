@@ -819,6 +819,11 @@
       settings.web = !!settings.web;
       function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} }
 
+      // Playlist view: hide entries already in the downloaded registry.
+      const HIDE_DOWNLOADED_KEY = 'grabbit.hideDownloaded';
+      let hideDownloaded = false;
+      try { hideDownloaded = localStorage.getItem(HIDE_DOWNLOADED_KEY) === '1'; } catch {}
+
       // Server-library subfolders (under the grabbit downloads dir). The sheet's
       // folder select lists these plus a "new folder" entry; the More tab lists
       // them as the default-folder choice.
@@ -980,27 +985,57 @@
         dlNew.disabled = !fresh.length;
         dlNew.addEventListener('click', () => startNavidromeBatch(fresh));
         btns.appendChild(dlNew);
+
+        // Hide items already in the downloaded registry (persisted preference).
+        const doneCount = profileItems.filter((it) => it.downloaded).length;
+        if (doneCount) {
+          const hideBtn = document.createElement('button');
+          const hideLabel = () => (hideDownloaded ? 'Show all (' + profileItems.length + ')' : 'Hide downloaded (' + doneCount + ')');
+          hideBtn.textContent = hideLabel();
+          hideBtn.addEventListener('click', () => {
+            hideDownloaded = !hideDownloaded;
+            try { localStorage.setItem(HIDE_DOWNLOADED_KEY, hideDownloaded ? '1' : '0'); } catch {}
+            hideBtn.textContent = hideLabel();
+            renderItems();
+          });
+          btns.appendChild(hideBtn);
+        }
         cardsEl.appendChild(btns);
 
-        profileItems.forEach((it) => {
-          const isImg = it.mediaType === 'image';
-          const status = it.downloaded ? 'downloaded' : importStatusLabel(it.imported, isImg, settings.channel);
-          const card = mediaCard({
-            title: it.title || it.filename,
-            sub: (it.duration ? fmtClock(it.duration) + ' · ' : '') + (isImg ? 'image' : 'video') + (it.tooLongForShorts ? ' · server only' : ''),
-            thumbnail: it.thumbnail,
-            status,
-            onActions(actions) {
-              if (isImg) {
-                actions.appendChild(actBtn(ICON.image, () => openSheet('image', null, it)));
-              } else {
-                actions.appendChild(actBtn(ICON.audio, () => openSheet('audio', null, it)));
-                actions.appendChild(actBtn(ICON.video, () => openSheet('video', null, it)));
-              }
-            },
+        const itemsWrap = document.createElement('div');
+        cardsEl.appendChild(itemsWrap);
+
+        function renderItems() {
+          itemsWrap.innerHTML = '';
+          const shown = hideDownloaded ? profileItems.filter((it) => !it.downloaded) : profileItems;
+          if (!shown.length) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'margin:16px 2px;font-size:13px;color:var(--muted)';
+            empty.textContent = 'Everything here is already downloaded.';
+            itemsWrap.appendChild(empty);
+            return;
+          }
+          shown.forEach((it) => {
+            const isImg = it.mediaType === 'image';
+            const status = it.downloaded ? 'downloaded' : importStatusLabel(it.imported, isImg, settings.channel);
+            const card = mediaCard({
+              title: it.title || it.filename,
+              sub: (it.duration ? fmtClock(it.duration) + ' · ' : '') + (isImg ? 'image' : 'video') + (it.tooLongForShorts ? ' · server only' : ''),
+              thumbnail: it.thumbnail,
+              status,
+              onActions(actions) {
+                if (isImg) {
+                  actions.appendChild(actBtn(ICON.image, () => openSheet('image', null, it)));
+                } else {
+                  actions.appendChild(actBtn(ICON.audio, () => openSheet('audio', null, it)));
+                  actions.appendChild(actBtn(ICON.video, () => openSheet('video', null, it)));
+                }
+              },
+            });
+            itemsWrap.appendChild(card);
           });
-          cardsEl.appendChild(card);
-        });
+        }
+        renderItems();
         $('fab').classList.add('show');
       }
 
