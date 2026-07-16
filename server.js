@@ -1430,17 +1430,24 @@ function downloadYtdlpAudio(job, destNoExt, afmt, opts = {}) {
     p.stderr.on('data', (d) => (err += d));
     p.on('error', reject);
     p.on('close', (code) => {
+      const dir = path.dirname(destNoExt);
+      const base = path.basename(destNoExt);
+      // --embed-thumbnail leaves (converted) image files next to the audio;
+      // they must never be picked as the result, nor left behind in tmp.
+      const isImage = (f) => /\.(webp|png|jpe?g)$/i.test(f);
+      let siblings = [];
+      try {
+        siblings = fs.readdirSync(dir).filter((f) => f.startsWith(`${base}.`));
+      } catch {
+        /* fall through to the reject below */
+      }
+      for (const f of siblings.filter(isImage)) fs.rm(path.join(dir, f), { force: true }, () => {});
       // For a known format the file is <destNoExt>.<afmt>; for 'best' the codec
       // (and extension) is whatever the source was — find it.
       const known = `${destNoExt}.${afmt}`;
       if (afmt !== 'best' && fs.existsSync(known)) return resolve(known);
-      try {
-        const base = path.basename(destNoExt);
-        const match = fs.readdirSync(path.dirname(destNoExt)).find((f) => f.startsWith(`${base}.`));
-        if (match) return resolve(path.join(path.dirname(destNoExt), match));
-      } catch {
-        /* fall through */
-      }
+      const match = siblings.find((f) => !isImage(f) && !/\.(part|src)$/i.test(f));
+      if (match) return resolve(path.join(dir, match));
       reject(new Error(err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
     });
   });
