@@ -6,6 +6,8 @@
     <meta name="robots" content="noindex, nofollow" />
     <meta name="theme-color" content="#0b0b0e" />
     <title>grabbit</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <style>
       :root {
         --bg: #0b0b0e;
@@ -67,8 +69,8 @@
       .appbar .spacer { flex: 1; }
       .appbar .iconbtn { color: var(--text); padding: 8px; border-radius: 999px; }
       .appbar .iconbtn:active { background: var(--surface-2); }
-      .wordmark { font-size: 26px; font-weight: 700; letter-spacing: .3px; flex: 1; }
-      .wordmark b { color: var(--brand); font-weight: 700; }
+      .wordmark { font-size: 26px; font-weight: 700; letter-spacing: .3px; flex: 1; display: flex; align-items: center; gap: 10px; }
+      .wordmark-logo { width: 36px; height: 36px; }
 
       /* ---- search bar (Home) ---- */
       .searchbar {
@@ -363,7 +365,7 @@
       <!-- ===================== HOME ===================== -->
       <section id="view-home" class="view active">
         <header class="appbar">
-          <div class="wordmark"><b>la</b>dda</div>
+          <div class="wordmark"><img src="/logo.svg" alt="" class="wordmark-logo" />grabbit</div>
         </header>
 
         <form id="form" class="searchbar">

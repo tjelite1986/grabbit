@@ -314,6 +314,7 @@ function loginPage(error) {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>grabbit — sign in</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root { color-scheme: dark; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -328,8 +329,9 @@ function loginPage(error) {
   .err { color:#f87171; font-size:13px; margin-bottom:12px; }
 </style></head><body>
 <form method="post" action="/login">
-  <h1>grabbit</h1>
-  <p>Sign in to continue</p>
+  <img src="/logo.svg" alt="" width="72" height="72" style="display:block;margin:0 auto 10px">
+  <h1 style="text-align:center">grabbit</h1>
+  <p style="text-align:center">Sign in to continue</p>
   ${error ? `<div class="err">${error}</div>` : ''}
   <input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password" />
   <button type="submit">Sign in</button>
@@ -362,9 +364,19 @@ app.post('/logout', (_req, res) => {
   res.redirect('/login');
 });
 
+// Icons are needed by the login page and browser tabs before auth.
+const PUBLIC_ASSETS = new Set([
+  '/favicon.svg',
+  '/logo.svg',
+  '/apple-touch-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
+]);
+
 // Gate everything below for external, unauthenticated requests. API calls get a
 // 401 JSON; page/asset requests are redirected to the login form.
 app.use((req, res, next) => {
+  if (PUBLIC_ASSETS.has(req.path)) return next();
   if (!GRABBIT_PASSWORD || isInternal(req) || isAuthed(req)) return next();
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
