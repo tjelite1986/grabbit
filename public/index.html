@@ -622,6 +622,12 @@
              lookup; the values become the file's tags and its library path
              ([Artist]/[Album (Year)]/[Title].ext). -->
         <div class="hidden" id="shMusicFields">
+          <!-- The source description often reveals the real song title when
+               the video title is clickbait — readable while filling the tags. -->
+          <details class="desc hidden" id="shDescBox">
+            <summary>Source description (real title often hides here)</summary>
+            <pre id="shDescText"></pre>
+          </details>
           <div class="field">
             <label>Metadata lookup (iTunes + Deezer)</label>
             <div class="row2">
@@ -1273,6 +1279,12 @@
       function musicPrefill() {
         const src = sheetSingle || sheetItem || {};
         const m = src.music || {};
+        // Source description inside the sheet: the real song title usually
+        // hides there when the video title is clickbait.
+        const desc = ((sheetSingle && sheetSingle.description) || '').trim();
+        $('shDescText').textContent = desc;
+        $('shDescBox').classList.toggle('hidden', !desc);
+        $('shDescBox').open = false;
         $('shMusicTitle').value = m.track || src.title || '';
         $('shMusicArtists').value = m.artist || '';
         $('shMusicAlbum').value = m.album || '';
