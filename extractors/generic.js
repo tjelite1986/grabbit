@@ -115,7 +115,10 @@ async function resolve(url) {
         track: info.track || null,
         album: info.album || null,
         year: info.release_year || (info.release_date ? String(info.release_date).slice(0, 4) : null) || null,
-        genre: info.genre || null,
+        // YouTube's "genre" is the video category ("Music", "Film & Animation"),
+        // not a music genre — worthless as a tag, so only pass it through for
+        // other sites.
+        genre: /youtube/i.test(info.extractor || '') ? null : info.genre || null,
       };
     }
   }

@@ -1145,11 +1145,13 @@ async function produceAudio(job, meta, params, onProgress) {
         } catch (e) {
           console.warn('audio tagging failed, saving untagged:', String(e.message || e));
         }
-        // Library layout: [Artist]/[Album (Year)]/[Title].ext
+        // Library layout: [Artist]/[Album(Year)]/[Artist] - [Album(Year)] - [Title].ext
+        // Artist + album repeat in the file name on purpose: the file stays
+        // traceable even when it ends up outside its folder.
         const artistDir = safeMusicPart(artists[0], 'Unknown Artist');
-        const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? ` (${year})` : '');
+        const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? `(${year})` : '');
         libDir = path.join(NAVIDROME_DIR, artistDir, albumDir);
-        finalName = `${safeMusicPart(songTitle, 'Unknown')}.${realExt}`;
+        finalName = `${artistDir} - ${albumDir} - ${safeMusicPart(songTitle, 'Unknown')}.${realExt}`;
       }
       fs.mkdirSync(libDir, { recursive: true });
       const libPath = path.join(libDir, finalName);
