@@ -1,10 +1,11 @@
 FROM node:18-slim
 
 # yt-dlp (generic video fallback) needs python3 + ffmpeg for merging;
-# gallery-dl powers image-gallery extractors (e.g. imagefap).
+# gallery-dl powers image-gallery extractors (e.g. imagefap); mutagen is
+# yt-dlp's tag writer for embedding cover art into opus/ogg audio.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 python3-pip ffmpeg ca-certificates \
-  && pip3 install --no-cache-dir --break-system-packages yt-dlp curl_cffi gallery-dl \
+  && pip3 install --no-cache-dir --break-system-packages yt-dlp curl_cffi gallery-dl mutagen \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

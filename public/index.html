@@ -437,6 +437,7 @@
             <select id="setDest">
               <option value="">Elite-v2 shorts</option>
               <option value="server">Server library</option>
+              <option value="navidrome">Navidrome (music)</option>
             </select>
           </div>
           <div class="setrow" id="setChannelRow">
@@ -562,7 +563,7 @@
           <input id="shTitleInput" type="text" autocomplete="off" />
         </div>
 
-        <div class="field">
+        <div class="field" id="shCreatorField">
           <label>Save under profile name</label>
           <input id="shCreator" type="text" autocomplete="off" />
         </div>
@@ -572,6 +573,7 @@
           <div class="seg" id="shDest">
             <button type="button" data-v="" class="on">Elite-v2 shorts</button>
             <button type="button" data-v="server">Server library</button>
+            <button type="button" data-v="navidrome">Navidrome</button>
           </div>
         </div>
 
@@ -591,6 +593,48 @@
         <div class="field hidden" id="shNewFolderField">
           <label>New folder name</label>
           <input id="shNewFolder" type="text" autocomplete="off" placeholder="my-folder" />
+        </div>
+
+        <!-- Navidrome tag fields: filled from site metadata + music-database
+             lookup; the values become the file's tags and its library path
+             ([Artist]/[Album (Year)]/[Title].ext). -->
+        <div class="hidden" id="shMusicFields">
+          <div class="field">
+            <label>Metadata lookup (iTunes + Deezer)</label>
+            <div class="row2">
+              <select id="shMusicPick" style="flex:1;min-width:0"><option value="">…</option></select>
+              <button type="button" id="shMusicSearch" title="Search again"
+                style="flex:none;padding:0 14px;border:1px solid var(--line);border-radius:10px;color:var(--text);background:var(--surface-2)">
+                <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
+              </button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Song title</label>
+            <input id="shMusicTitle" type="text" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>Artists / group (comma-separated)</label>
+            <input id="shMusicArtists" type="text" autocomplete="off" placeholder="Artist 1, Artist 2" />
+          </div>
+          <div class="toggle-row">
+            <div class="label"><div class="t">Single</div><div class="d">No album — filed under its own name</div></div>
+            <label class="switch"><input type="checkbox" id="shMusicSingle" /><span class="track"></span></label>
+          </div>
+          <div class="field" id="shMusicAlbumField">
+            <label>Album</label>
+            <input id="shMusicAlbum" type="text" autocomplete="off" />
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Release date</label>
+              <input id="shMusicDate" type="text" autocomplete="off" placeholder="YYYY or YYYY-MM-DD" />
+            </div>
+            <div class="field">
+              <label>Genres (comma-separated)</label>
+              <input id="shMusicGenres" type="text" autocomplete="off" placeholder="Pop, Rock" />
+            </div>
+          </div>
         </div>
 
         <div class="row2" id="shVideoOpts">
@@ -727,7 +771,7 @@
       // poisoned/legacy data can neither accumulate junk nor feed an unexpected
       // value into a request.
       const SETTING_ENUMS = {
-        dest: ['', 'server'], channel: ['main', '18plus'],
+        dest: ['', 'server', 'navidrome'], channel: ['main', '18plus'],
         quality: ['', '2160', '1440', '1080', '720', '480', '360'],
         afmt: ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'],
         aq: ['', '320', '256', '192', '160', '128', '96'],
@@ -918,6 +962,7 @@
       let sheetItem = null;      // for "all" or profile-single: the profile item; null for single resolve
       let sheetSingle = null;    // single resolve data
       let sheetAll = false;      // batch (download all) mode
+      let sheetSeq = 0;          // bumped per sheet open (one-shot triggers key on it)
 
       function segValue(seg) { const on = seg.querySelector('.on'); return on ? on.dataset.v : ''; }
       function segSet(seg, v) { seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); }
@@ -937,6 +982,7 @@
       $('shWeb').addEventListener('change', syncSheet);
 
       function openSheetCommon() {
+        sheetSeq++;
         // Apply current defaults to the sheet controls.
         segSet($('shDest'), settings.dest);
         segSet($('shChannel'), settings.channel);
@@ -1001,10 +1047,18 @@
         const isImage = sheetMode === 'image';
         const isVideo = sheetMode === 'video';
 
+        // Navidrome takes audio only, no images and no batches; lock it out there.
+        const navBtn = $('shDest').querySelector('[data-v="navidrome"]');
+        const navBlocked = sheetAll || isImage;
+        if (navBlocked && segValue($('shDest')) === 'navidrome') segSet($('shDest'), 'server');
+        navBtn.style.pointerEvents = navBlocked ? 'none' : '';
+        navBtn.style.opacity = navBlocked ? '0.4' : '';
+        const isNavidrome = segValue($('shDest')) === 'navidrome';
+
         // A long video can't go into shorts: force the server library and lock the
-        // elite option out.
+        // elite option out. (Navidrome saves the audio track, so the cap doesn't apply.)
         const sheetTarget = sheetSingle || sheetItem;
-        const tooLong = isVideo && !sheetAll && !!(sheetTarget && sheetTarget.tooLongForShorts);
+        const tooLong = isVideo && !isNavidrome && !sheetAll && !!(sheetTarget && sheetTarget.tooLongForShorts);
         const eliteBtn = $('shDest').querySelector('[data-v=""]');
         if (tooLong) segSet($('shDest'), 'server');
         eliteBtn.style.pointerEvents = tooLong ? 'none' : '';
@@ -1013,15 +1067,26 @@
         const dest = segValue($('shDest'));
         const isServer = dest === 'server';
         const channel = segValue($('shChannel'));
+        // Navidrome is audio-only: a video pick saves the extracted audio track.
+        const audioish = isAudio || isNavidrome;
 
-        $('shChannelField').classList.toggle('hidden', isServer || isImage);
+        $('shChannelField').classList.toggle('hidden', isServer || isImage || isNavidrome);
         const folderVisible = isServer && !isImage && !isAudio;
         $('shFolderField').classList.toggle('hidden', !folderVisible);
         $('shNewFolderField').classList.toggle('hidden', !(folderVisible && $('shFolder').value === '__new__'));
+        // Navidrome: the tag fields replace the plain title/profile inputs.
+        $('shCreatorField').classList.toggle('hidden', isNavidrome);
+        $('shMusicFields').classList.toggle('hidden', !isNavidrome);
+        $('shMusicAlbumField').classList.toggle('hidden', $('shMusicSingle').checked);
+        if (isNavidrome && musicFilledSeq !== sheetSeq) {
+          musicFilledSeq = sheetSeq;
+          musicPrefill();
+          musicLookup();
+        }
         // Title is editable only for a single resolved URL.
-        $('shTitleField').classList.toggle('hidden', !sheetSingle);
-        $('shVideoOpts').classList.toggle('hidden', !isVideo);
-        $('shAudioField').classList.toggle('hidden', !isAudio);
+        $('shTitleField').classList.toggle('hidden', !sheetSingle || isNavidrome);
+        $('shVideoOpts').classList.toggle('hidden', !isVideo || isNavidrome);
+        $('shAudioField').classList.toggle('hidden', !audioish);
         // Container + extras (thumbnail/subs/sponsorblock) only apply to a
         // server-library video save (elite shorts must stay plain mp4).
         const advancedVideo = isVideo && isServer;
@@ -1030,7 +1095,7 @@
         $('shSubsRow').classList.toggle('hidden', !advancedVideo);
         $('shSponsorRow').classList.toggle('hidden', !advancedVideo);
         // Web format only applies to an elite-v2 video save.
-        $('shWebRow').classList.toggle('hidden', !(isVideo && !isServer));
+        $('shWebRow').classList.toggle('hidden', !(isVideo && dest === ''));
         // No "to this device" toggle for a batch (download all).
         $('shDeviceRow').classList.toggle('hidden', sheetAll);
 
@@ -1040,6 +1105,8 @@
         if (tooLong) {
           const dur = sheetTarget.duration ? ' (' + fmtClock(sheetTarget.duration) + ')' : '';
           msg = 'Too long for shorts' + dur + ' — saving to the server library instead.';
+        } else if (isNavidrome && isVideo) {
+          msg = 'Audio only: the sound track is extracted and saved to the Navidrome music library.';
         } else if (!sheetAll) {
           const imp = sheetTarget && sheetTarget.imported;
           if (imp && !isServer) {
@@ -1055,6 +1122,7 @@
         const device = $('shDevice').checked;
         let label;
         if (sheetAll) label = 'Download all (' + profileItems.length + ')';
+        else if (isNavidrome) label = 'Save to Navidrome';
         else if (isAudio) label = isServer ? 'Save audio' : 'Download audio';
         else if (isImage) label = device ? 'Download image' : 'Save image';
         else if (isServer) label = device ? 'Download' : 'Save to library';
@@ -1062,12 +1130,76 @@
         $('shConfirmLabel').textContent = label;
       }
 
+      // ------------------------------------------------------------ music tags
+      // Navidrome tag fields: pre-filled from the site's own metadata (yt-dlp
+      // artist/track/album when present), then a music-database lookup
+      // (/api/music-meta: iTunes + Deezer) fills the remaining gaps. Picking a
+      // candidate from the select overwrites all fields.
+      let musicCandidates = [];
+      let musicFilledSeq = -1;   // sheetSeq the fields were last prefilled for
+      let musicLookupToken = 0;
+      function musicPrefill() {
+        const src = sheetSingle || sheetItem || {};
+        const m = src.music || {};
+        $('shMusicTitle').value = m.track || src.title || '';
+        $('shMusicArtists').value = m.artist || '';
+        $('shMusicAlbum').value = m.album || '';
+        $('shMusicDate').value = m.year ? String(m.year) : '';
+        $('shMusicGenres').value = m.genre || '';
+        $('shMusicSingle').checked = false;
+        musicCandidates = [];
+        $('shMusicPick').innerHTML = '<option value="">…</option>';
+      }
+      async function musicLookup() {
+        const src = sheetSingle || sheetItem || {};
+        const q = [$('shMusicArtists').value.trim(), $('shMusicTitle').value.trim()].filter(Boolean).join(' ') || src.title || '';
+        if (!q) return;
+        const token = ++musicLookupToken;
+        const pick = $('shMusicPick');
+        pick.innerHTML = '<option value="">Searching…</option>';
+        try {
+          const r = await fetch('/api/music-meta?q=' + encodeURIComponent(q));
+          const d = await r.json();
+          if (token !== musicLookupToken) return;
+          musicCandidates = d.candidates || [];
+          pick.innerHTML =
+            '<option value="">' + (musicCandidates.length ? 'Pick a match…' : 'No matches') + '</option>' +
+            musicCandidates
+              .map((c, i) => {
+                const y = c.date ? ' (' + c.date.slice(0, 4) + ')' : '';
+                const al = c.album ? ' · ' + c.album : '';
+                return '<option value="' + i + '">' + esc(c.artists.join(', ') + ' — ' + c.title + al + y + ' [' + c.source + ']') + '</option>';
+              })
+              .join('');
+          // Auto-fill: the top match fills whatever is still empty.
+          if (musicCandidates[0]) applyMusicCandidate(musicCandidates[0], false);
+        } catch {
+          if (token === musicLookupToken) pick.innerHTML = '<option value="">Lookup failed</option>';
+        }
+      }
+      // force=false only fills fields the user hasn't typed anything into.
+      function applyMusicCandidate(c, force) {
+        const setv = (id, v) => { if (v && (force || !$(id).value.trim())) $(id).value = v; };
+        setv('shMusicTitle', c.title);
+        setv('shMusicArtists', c.artists.join(', '));
+        setv('shMusicAlbum', c.album);
+        setv('shMusicDate', c.date || '');
+        setv('shMusicGenres', (c.genres || []).join(', '));
+      }
+      $('shMusicPick').addEventListener('change', () => {
+        const c = musicCandidates[Number($('shMusicPick').value)];
+        if (c) applyMusicCandidate(c, true);
+      });
+      $('shMusicSearch').addEventListener('click', () => musicLookup());
+      $('shMusicSingle').addEventListener('change', syncSheet);
+
       // Build a query string for /api/download or /api/download-all.
       function buildQuery({ batch }) {
         const dest = segValue($('shDest'));
         const channel = segValue($('shChannel'));
         const creator = $('shCreator').value.trim();
-        const isAudio = sheetMode === 'audio';
+        // Navidrome is audio-only, whatever the sheet mode.
+        const isAudio = sheetMode === 'audio' || dest === 'navidrome';
         const p = new URLSearchParams();
         p.set('channel', channel);
         if (dest) p.set('dest', dest);
@@ -1075,10 +1207,23 @@
           const f = $('shFolder').value === '__new__' ? $('shNewFolder').value.trim() : $('shFolder').value;
           if (f) p.set('folder', f);
         }
-        // Editable title (single resolve only) renames the saved file.
-        if (sheetSingle && $('shTitleInput').value.trim()) p.set('title', $('shTitleInput').value.trim());
+        // Editable title (single resolve only) renames the saved file. For
+        // navidrome the song-title tag field plays that role instead.
+        if (sheetSingle && dest !== 'navidrome' && $('shTitleInput').value.trim()) p.set('title', $('shTitleInput').value.trim());
+        if (dest === 'navidrome') {
+          const mt = $('shMusicTitle').value.trim();
+          if (mt) p.set('title', mt);
+          const a = $('shMusicArtists').value.trim();
+          if (a) p.set('artists', a);
+          if ($('shMusicSingle').checked) p.set('single', '1');
+          else if ($('shMusicAlbum').value.trim()) p.set('album', $('shMusicAlbum').value.trim());
+          const dt = $('shMusicDate').value.trim();
+          if (dt) p.set('date', dt);
+          const g = $('shMusicGenres').value.trim();
+          if (g) p.set('genres', g);
+        }
         if ($('shWeb').checked && !$('shWebRow').classList.contains('hidden')) p.set('web', '1');
-        if ($('shQuality').value && sheetMode === 'video') p.set('quality', $('shQuality').value);
+        if ($('shQuality').value && sheetMode === 'video' && !isAudio) p.set('quality', $('shQuality').value);
         if (isAudio) {
           p.set('audio', '1');
           p.set('afmt', $('shAfmt').value);
@@ -1345,7 +1490,7 @@
 
       function itemKind(it) {
         const f = (it.filename || '').toLowerCase();
-        if (/\.(mp3|m4a|opus|ogg|aac)$/.test(f) || /^audio\//.test(it.channel || '')) return 'audio';
+        if (/\.(mp3|m4a|opus|ogg|aac)$/.test(f) || /^(audio|navidrome)\//.test(it.channel || '')) return 'audio';
         if (/\.(jpg|jpeg|png|webp|gif)$/.test(f) || /photos$/.test(it.channel || '')) return 'image';
         return 'video';
       }
@@ -1371,7 +1516,7 @@
         historyEmpty.classList.add('hidden');
         historyList.innerHTML = items.map((it) => {
           const kind = itemKind(it);
-          const chClass = (it.channel || '').includes('18plus') ? 'ch18' : (it.channel || '').startsWith('server') || (it.channel || '').startsWith('audio') ? 'chserver' : 'chmain';
+          const chClass = (it.channel || '').includes('18plus') ? 'ch18' : (it.channel || '').startsWith('server') || (it.channel || '').startsWith('audio') || (it.channel || '').startsWith('navidrome') ? 'chserver' : 'chmain';
           const where = it.imported ? 'imported' : it.device ? 'on device' : 'saved';
           const title = esc(it.title || it.filename || 'download');
           const sh = safeHref(it.sourceUrl);
@@ -1408,7 +1553,7 @@
         $('setAq').value = settings.aq;
         $('setDevice').checked = settings.device;
         $('setWeb').checked = settings.web;
-        $('setChannelRow').classList.toggle('hidden', settings.dest === 'server');
+        $('setChannelRow').classList.toggle('hidden', settings.dest !== '');
         $('setFolderRow').classList.toggle('hidden', settings.dest !== 'server');
         $('setContainerRow').classList.toggle('hidden', settings.dest !== 'server');
       }

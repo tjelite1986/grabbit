@@ -36,6 +36,15 @@ const VIDEOS_DIR = process.env.VIDEOS_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'v
 const AUDIO_DIR = process.env.AUDIO_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'mp3');
 const ADULTS_DIR = process.env.ADULTS_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'adults');
 const PHOTOS_DIR = process.env.PHOTOS_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'photos');
+// Navidrome music library (host mount). dest=navidrome saves extracted audio
+// here; Navidrome's scanner picks it up.
+const NAVIDROME_DIR = process.env.NAVIDROME_MUSIC_DIR || path.join(DOWNLOAD_DIR, 'navidrome');
+
+// Download destination: elite (shorts import), server (plain library) or
+// navidrome (music library; audio-only, forces audio extraction).
+function parseDest(v) {
+  return v === 'server' || v === 'navidrome' ? v : 'elite';
+}
 
 // Built-in server-library video folders (audio always goes to mp3). Users can
 // also pick or create any other subfolder of DOWNLOAD_DIR.
@@ -372,6 +381,56 @@ function safeTitle(title) {
   );
 }
 
+// A single path segment of the Navidrome library tree ([Artist]/[Album (Year)]/
+// [Title].ext). Unlike safeTitle, hyphens are kept (band/song names use them);
+// only filesystem-unsafe characters go, and leading/trailing dots (hidden files
+// / Windows quirks) are trimmed.
+function safeMusicPart(name, fallback) {
+  return (
+    String(name || '')
+      .replace(/[<>:"\/\\|?*\u0000-\u001f]+/gu, " ")
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^\.+|\.+$/g, '')
+      .slice(0, 80)
+      .trim() || fallback
+  );
+}
+
+// Rewrite the tags of an audio file in place via mutagen (yt-dlp's tag
+// library, present in the image). Values: string, list (multi-value tag —
+// several artists/genres, which Navidrome reads natively), '' / [] (clears
+// the field) or null (leaves it alone). Mutagen edits tags without remuxing,
+// so embedded cover art survives — ffmpeg's ogg muxer would drop it.
+const TAG_SCRIPT = [
+  'import sys, json',
+  'from mutagen import File',
+  'f = File(sys.argv[1], easy=True)',
+  "if f is None: sys.exit('unsupported audio file')",
+  'for k, v in json.loads(sys.argv[2]).items():',
+  '    if v is None: continue',
+  '    try:',
+  "        if v == '' or v == []:",
+  '            if k in f: del f[k]',
+  '        else:',
+  '            f[k] = v',
+  '    except Exception:',
+  '        pass',
+  'f.save()',
+].join('\n');
+function tagAudio(src, tags) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('python3', ['-c', TAG_SCRIPT, src, JSON.stringify(tags)]);
+    let err = '';
+    p.stderr.on('data', (d) => (err += d));
+    p.on('error', reject);
+    p.on('close', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(err.trim().split('\n').pop() || 'tagging failed'));
+    });
+  });
+}
+
 // Content-Disposition value safe for non-ASCII names (RFC 6266): an ASCII
 // fallback plus a UTF-8 filename* so ÅÄÖ etc. survive the download.
 function contentDisposition(filename) {
@@ -409,6 +468,9 @@ app.get('/api/resolve', async (req, res) => {
       thumbnail: job.thumbnail || null,
       duration: durationKnown(job) ? Number(job.duration) : null,
       mediaType: isImage ? 'image' : 'video',
+      // Site-provided music metadata (artist/track/album/year), when available;
+      // pre-fills the Navidrome tag fields in the UI.
+      music: job.music || null,
       // Too long to belong in the shorts library (UI forces the server library).
       tooLongForShorts: !isImage && tooLongForShorts(job),
       filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
@@ -439,6 +501,85 @@ app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });
 });
 
+// "A & B feat. C" -> ['A', 'B', 'C']: the separators music databases use in
+// their artist strings. Only for database/site strings — user-typed fields go
+// through splitList, where '&' must survive ("Hootie & the Blowfish", "R&B").
+function splitArtists(s) {
+  return String(s || '')
+    .split(/\s*[,&;]\s*|\s+(?:featuring|feat\.?|ft\.?)\s+/i)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+// User-typed comma/semicolon-separated lists (the artists/genres fields).
+function splitList(s) {
+  return String(s || '')
+    .split(/\s*[,;]\s*/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+// GET /api/music-meta?q=... -> song metadata candidates from public music
+// databases (iTunes Search + Deezer, both keyless), for the UI to auto-fill
+// the Navidrome tag fields. Candidates: {source, title, artists[], album,
+// date, genres[], cover}.
+app.get('/api/music-meta', async (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 200);
+  if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
+  const out = [];
+  const seen = new Set();
+  const push = (c) => {
+    const key = (c.artists.join(',') + '|' + c.title).toLowerCase();
+    if (c.title && c.artists.length && !seen.has(key)) {
+      seen.add(key);
+      out.push(c);
+    }
+  };
+  const jfetch = async (u) => {
+    const r = await fetch(u, { headers: { 'user-agent': 'grabbit/1.0' }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error(`upstream ${r.status}`);
+    return r.json();
+  };
+  // Both lookups run in parallel; either one failing alone is fine.
+  const [itunes, deezer] = await Promise.allSettled([
+    jfetch(`https://itunes.apple.com/search?media=music&entity=song&limit=6&term=${encodeURIComponent(q)}`),
+    jfetch(`https://api.deezer.com/search?limit=4&q=${encodeURIComponent(q)}`),
+  ]);
+  if (itunes.status === 'fulfilled') {
+    for (const r of itunes.value.results || []) {
+      push({
+        source: 'itunes',
+        title: r.trackName || null,
+        artists: splitArtists(r.artistName),
+        album: r.collectionName || null,
+        date: r.releaseDate ? String(r.releaseDate).slice(0, 10) : null,
+        genres: r.primaryGenreName ? [r.primaryGenreName] : [],
+        cover: r.artworkUrl100 || null,
+      });
+    }
+  }
+  if (deezer.status === 'fulfilled') {
+    const rows = deezer.value.data || [];
+    // Deezer's search rows lack date/genres; the album lookup has both.
+    const albums = await Promise.allSettled(
+      rows.map((r) => (r.album && r.album.id ? jfetch(`https://api.deezer.com/album/${r.album.id}`) : Promise.reject(new Error('no album'))))
+    );
+    rows.forEach((r, i) => {
+      const alb = albums[i].status === 'fulfilled' ? albums[i].value : null;
+      push({
+        source: 'deezer',
+        title: r.title || null,
+        artists: splitArtists(r.artist && r.artist.name),
+        album: (r.album && r.album.title) || null,
+        date: (alb && alb.release_date) || null,
+        genres: alb && alb.genres && Array.isArray(alb.genres.data) ? alb.genres.data.map((g) => g.name).filter(Boolean) : [],
+        cover: (r.album && r.album.cover_medium) || null,
+      });
+    });
+  }
+  res.json({ ok: true, candidates: out.slice(0, 10) });
+});
+
 // GET /api/history -> recent downloads, newest first.
 app.get('/api/history', (_req, res) => {
   res.json({ ok: true, items: readHistory().slice(0, 100) });
@@ -456,14 +597,18 @@ app.post('/api/history/delete', (req, res) => {
 
 // GET /api/download?url=...&dest=elite|server&channel=main|18plus&device=1|0&web=1|0&quality=N&audio=1&afmt=
 //   dest=elite (default) saves into the elite-v2 shorts _import; dest=server
-//     saves into the plain server library (videos/mp3/adults).
+//     saves into the plain server library (videos/mp3/adults). dest=navidrome
+//     is jobs-API only (tagging + library sorting live there) and is rejected.
 //   device=1 (default) streams the file to the browser; device=0 saves only.
 //   web=1 saves a web-optimized .web.mp4 (lands ready; the transcoder skips it).
 //   quality=720|1080|... caps the download resolution (yt-dlp sites only).
 //   audio=1 extracts audio (afmt=m4a|mp3|opus); streamed (elite) or saved (server).
 app.get('/api/download', async (req, res) => {
   const url = req.query.url;
-  const dest = req.query.dest === 'server' ? 'server' : 'elite';
+  const dest = parseDest(req.query.dest);
+  if (dest === 'navidrome') {
+    return res.status(400).json({ ok: false, error: 'dest=navidrome is only supported via /api/jobs/start (it tags and sorts the file).' });
+  }
   const channel = CHANNELS[req.query.channel] || 'main';
   const folder = req.query.folder; // server-library target folder (videos/adults/photos)
   const device = req.query.device !== '0'; // download to this device too
@@ -489,7 +634,8 @@ app.get('/api/download', async (req, res) => {
   if (job.mediaType === 'image') return downloadImage(res, job, url, device);
 
   // Audio-only: for the elite destination it's streamed (audio doesn't fit the
-  // shorts pipeline); for the server library it's saved into the mp3 folder.
+  // shorts pipeline); for the server library it's saved into the mp3 folder,
+  // for navidrome into the music library.
   if (audio) return downloadAudio(res, job, url, afmt, dest);
 
   // Server library: save the video into the chosen folder (videos/adults/photos).
@@ -950,7 +1096,11 @@ async function produceAudio(job, meta, params, onProgress) {
   setJob(job, { phase: 'downloading' });
   try {
     if (meta.kind === 'ytdlp') {
-      outPath = await downloadYtdlpAudio(meta, base, afmt, { aq: params.aq, embedThumb: params.embedThumb });
+      // Navidrome files always get the cover embedded — it's the album art.
+      outPath = await downloadYtdlpAudio(meta, base, afmt, {
+        aq: params.aq,
+        embedThumb: params.embedThumb || params.dest === 'navidrome',
+      });
     } else {
       // Direct sources can't be re-extracted to 'best' losslessly; fall back to m4a.
       const dfmt = afmt === 'best' ? 'm4a' : afmt;
@@ -962,15 +1112,53 @@ async function produceAudio(job, meta, params, onProgress) {
     const realExt = safeExt(path.extname(outPath).slice(1), 'm4a');
     const mime = audioMime(realExt);
     const outName = `${stem}.${realExt}`;
-    if (params.dest === 'server') {
-      fs.mkdirSync(AUDIO_DIR, { recursive: true });
-      const libPath = path.join(AUDIO_DIR, outName);
+    if (params.dest === 'server' || params.dest === 'navidrome') {
+      const nav = params.dest === 'navidrome';
+      let libDir = nav ? NAVIDROME_DIR : AUDIO_DIR;
+      let finalName = outName;
+      if (nav) {
+        // Tags: UI-provided fields win; site metadata (yt-dlp) fills the gaps.
+        const m = meta.music || {};
+        const artists = params.artists ? splitList(params.artists) : splitArtists(m.artist);
+        if (!artists.length) artists.push(meta.creator || 'Unknown Artist');
+        const songTitle = (params.titleOverride || m.track || meta.title || 'Unknown').trim();
+        // A single is filed as its own album (standard music-library layout).
+        const album = (params.single ? songTitle : params.album || m.album || songTitle).trim();
+        const date = params.date || (m.year ? String(m.year) : null);
+        const year = date ? String(date).slice(0, 4) : null;
+        const genres = params.genres ? splitList(params.genres) : m.genre ? [m.genre] : [];
+        try {
+          await tagAudio(outPath, {
+            title: songTitle,
+            artist: artists,
+            albumartist: artists[0],
+            album,
+            date,
+            genre: genres,
+            // Clear the video-site leftovers (description, watch links) that
+            // yt-dlp's --embed-metadata writes — junk in a music library.
+            synopsis: '',
+            description: '',
+            comment: '',
+            purl: '',
+          });
+        } catch (e) {
+          console.warn('audio tagging failed, saving untagged:', String(e.message || e));
+        }
+        // Library layout: [Artist]/[Album (Year)]/[Title].ext
+        const artistDir = safeMusicPart(artists[0], 'Unknown Artist');
+        const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? ` (${year})` : '');
+        libDir = path.join(NAVIDROME_DIR, artistDir, albumDir);
+        finalName = `${safeMusicPart(songTitle, 'Unknown')}.${realExt}`;
+      }
+      fs.mkdirSync(libDir, { recursive: true });
+      const libPath = path.join(libDir, finalName);
       fs.copyFileSync(outPath, libPath);
-      recordJobHistory(meta, params, 'server/mp3', outName, false);
+      recordJobHistory(meta, params, nav ? 'navidrome/music' : 'server/mp3', finalName, false);
       finishJob(job, {
-        saved: true, dest: 'server', dir: 'mp3', filename: outName, mime,
+        saved: true, dest: params.dest, dir: nav ? 'music' : 'mp3', filename: finalName, mime,
         deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
-        message: 'Saved to library/mp3.',
+        message: nav ? 'Saved to Navidrome.' : 'Saved to library/mp3.',
       });
     } else {
       // Audio doesn't fit the shorts pipeline — it's delivered to the device only.
@@ -984,7 +1172,7 @@ async function produceAudio(job, meta, params, onProgress) {
     fs.rm(srcTmp, { force: true }, () => {});
     // The library copy owns the data now; drop the temp. (For elite audio the
     // temp IS the deliverable, so it's kept until served / TTL.)
-    if (params.dest === 'server') fs.rm(outPath, { force: true }, () => {});
+    if (params.dest !== 'elite') fs.rm(outPath, { force: true }, () => {});
   }
 }
 
@@ -992,16 +1180,17 @@ async function produceAudio(job, meta, params, onProgress) {
 app.get('/api/jobs/start', (req, res) => {
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  const dest = parseDest(req.query.dest);
   const params = {
     url,
-    dest: req.query.dest === 'server' ? 'server' : 'elite',
+    dest,
     channel: CHANNELS[req.query.channel] || 'main',
     folder: req.query.folder,
     device: req.query.device !== '0',
     web: req.query.web === '1',
     quality: parseQuality(req.query.quality),
-    audio: req.query.audio === '1',
-    afmt: AUDIO_FORMATS.includes(req.query.afmt) ? req.query.afmt : 'm4a',
+    audio: req.query.audio === '1' || dest === 'navidrome',
+    afmt: AUDIO_FORMATS.includes(req.query.afmt) ? req.query.afmt : dest === 'navidrome' ? 'opus' : 'm4a',
     aq: parseAudioQuality(req.query.aq),
     container: parseContainer(req.query.container),
     embedThumb: req.query.thumb === '1',
@@ -1009,6 +1198,14 @@ app.get('/api/jobs/start', (req, res) => {
     sponsorblock: req.query.sponsor === '1',
     creatorOverride: req.query.creator ? String(req.query.creator) : null,
     titleOverride: req.query.title ? String(req.query.title) : null,
+    // Navidrome tag fields (all optional): artists/genres are ","- or ";"-
+    // separated lists, date is YYYY or YYYY-MM-DD, single files the song as
+    // its own album.
+    artists: req.query.artists ? String(req.query.artists).slice(0, 300) : null,
+    album: req.query.album ? String(req.query.album).slice(0, 200) : null,
+    single: req.query.single === '1',
+    date: req.query.date ? String(req.query.date).slice(0, 10) : null,
+    genres: req.query.genres ? String(req.query.genres).slice(0, 200) : null,
   };
   const job = newJob({ dest: params.dest, channel: params.channel, device: params.device });
   res.json({ ok: true, jobId: job.id });
@@ -1291,21 +1488,23 @@ async function downloadAudio(res, job, url, afmt, dest) {
     }
 
     if (dest === 'server') {
+      const realExt = safeExt(path.extname(outPath).slice(1), afmt);
+      const outName = `${stem}.${realExt}`;
       fs.mkdirSync(AUDIO_DIR, { recursive: true });
-      const libPath = path.join(AUDIO_DIR, `${stem}.${afmt}`);
+      const libPath = path.join(AUDIO_DIR, outName);
       fs.copyFileSync(outPath, libPath);
       recordHistory({
         creator: job.creator || null,
         title: job.title || null,
-        channel: `server/mp3`,
-        filename: `${stem}.${afmt}`,
+        channel: 'server/mp3',
+        filename: outName,
         sourceUrl: job.sourceUrl || url,
         thumbnail: job.thumbnail || null,
         extractor: job.extractor || null,
         imported: false,
         device: false,
       });
-      return res.json({ ok: true, saved: true, dest: 'server', dir: 'mp3', filename: `${stem}.${afmt}` });
+      return res.json({ ok: true, saved: true, dest: 'server', dir: 'mp3', filename: outName });
     }
 
     const mime = audioMime(afmt);

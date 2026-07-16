@@ -96,6 +96,7 @@ async function resolve(url) {
   let tags = [];
   let thumbnail;
   let duration = null;
+  let music = null;
   if (info) {
     creator = info.uploader || info.channel || info.extractor || 'unknown';
     title = cleanTitle(info.title) || info.id;
@@ -106,8 +107,19 @@ async function resolve(url) {
     const ext = info.ext || 'mp4';
     const base = (info.uploader ? info.uploader + '-' : '') + (info.id || info.title || 'video');
     filename = `${base}.${ext}`;
+    // Music metadata when the site provides it (e.g. YouTube music videos):
+    // used to pre-fill the Navidrome tag fields.
+    if (info.track || info.artist || info.album) {
+      music = {
+        artist: info.artist || info.creator || null,
+        track: info.track || null,
+        album: info.album || null,
+        year: info.release_year || (info.release_date ? String(info.release_date).slice(0, 4) : null) || null,
+        genre: info.genre || null,
+      };
+    }
   }
-  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl: url };
+  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl: url, music };
 }
 
 module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };
