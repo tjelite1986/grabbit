@@ -1280,11 +1280,17 @@
         const src = sheetSingle || sheetItem || {};
         const m = src.music || {};
         // Source description inside the sheet: the real song title usually
-        // hides there when the video title is clickbait.
+        // hides there when the video title is clickbait. Playlist items lack
+        // it in the flat listing, so it's fetched on demand (cached per item).
         const desc = ((sheetSingle && sheetSingle.description) || '').trim();
         $('shDescText').textContent = desc;
         $('shDescBox').classList.toggle('hidden', !desc);
         $('shDescBox').open = false;
+        if (!sheetSingle && sheetItem && (sheetItem.sourceUrl || sheetItem.url)) {
+          $('shDescText').textContent = 'Loading…';
+          $('shDescBox').classList.remove('hidden');
+          loadItemDetails(sheetItem, sheetSeq);
+        }
         $('shMusicTitle').value = m.track || src.title || '';
         $('shMusicArtists').value = m.artist || '';
         $('shMusicAlbum').value = m.album || '';
@@ -1294,6 +1300,33 @@
         musicCandidates = [];
         $('shMusicPick').innerHTML = '<option value="">…</option>';
       }
+      // Fetch a playlist item's full metadata (description + music tags) when
+      // its sheet opens; the flat playlist listing doesn't carry them.
+      async function loadItemDetails(it, seq) {
+        if (it._resolved === undefined) {
+          try {
+            it._resolved = await fetchJson('/api/resolve?url=' + encodeURIComponent(it.sourceUrl || it.url));
+          } catch {
+            it._resolved = null;
+          }
+        }
+        if (seq !== sheetSeq) return; // sheet moved on to something else
+        const d = it._resolved;
+        const desc = ((d && d.description) || '').trim();
+        $('shDescText').textContent = desc;
+        $('shDescBox').classList.toggle('hidden', !desc);
+        if (d && d.music) {
+          const m = d.music;
+          const setv = (id, v) => { if (v && !$(id).value.trim()) $(id).value = v; };
+          setv('shMusicTitle', m.track);
+          setv('shMusicArtists', m.artist);
+          setv('shMusicAlbum', m.album);
+          setv('shMusicDate', m.year ? String(m.year) : '');
+          // Better artist/track just arrived — redo the database lookup with it.
+          if (m.track || m.artist) musicLookup();
+        }
+      }
+
       async function musicLookup() {
         const src = sheetSingle || sheetItem || {};
         const q = [$('shMusicArtists').value.trim(), $('shMusicTitle').value.trim()].filter(Boolean).join(' ') || src.title || '';
