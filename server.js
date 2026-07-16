@@ -1096,6 +1096,9 @@ async function runJob(job, params) {
     else if (params.dest === 'server') await produceServerVideo(job, meta, params, onProgress);
     else await produceEliteVideo(job, meta, params, onProgress);
   } catch (e) {
+    // Full stack to the server log — the job list only shows the message, and
+    // an unexpected TypeError is undebuggable without it.
+    console.error(`job ${job.id} failed:`, e && e.stack ? e.stack : e);
     setJob(job, { status: 'error', phase: null, error: String(e.message || e) });
   }
 }
@@ -1294,8 +1297,10 @@ async function produceAudio(job, meta, params, onProgress) {
   } finally {
     fs.rm(srcTmp, { force: true }, () => {});
     // The library copy owns the data now; drop the temp. (For elite audio the
-    // temp IS the deliverable, so it's kept until served / TTL.)
-    if (params.dest !== 'elite') fs.rm(outPath, { force: true }, () => {});
+    // temp IS the deliverable, so it's kept until served / TTL.) outPath is
+    // still null when afmt=best and the download failed before assignment —
+    // an unguarded rm here would throw and mask the real download error.
+    if (outPath && params.dest !== 'elite') fs.rm(outPath, { force: true }, () => {});
   }
 }
 
