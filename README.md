@@ -7,6 +7,12 @@ device while a copy is saved on the server.
 - Saved copies: a host folder you bind-mount to `/data` in the container
 - Stack: Node + Express, yt-dlp + ffmpeg for the generic fallback
 
+## Screenshots
+
+| Home | Download sheet | Settings |
+|------|----------------|----------|
+| ![Home screen with resolved link and saved playlists](assets/screenshots/home.jpg) | ![Audio download sheet with metadata lookup and destination picker](assets/screenshots/download-dialog.jpg) | ![Default download options and cookie storage](assets/screenshots/settings.jpg) |
+
 ## How it works
 
 1. `GET /api/resolve?url=...` picks the matching extractor and returns metadata
