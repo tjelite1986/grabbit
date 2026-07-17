@@ -950,7 +950,7 @@ function startNavidromeJob(url) {
     titleOverride: null,
     artists: null,
     album: null,
-    single: false,
+    release: 'album',
     date: null,
     genres: null,
   };
@@ -1618,8 +1618,9 @@ async function produceAudio(job, meta, params, onProgress) {
         const artists = params.artists ? splitList(params.artists) : splitArtists(m.artist);
         if (!artists.length) artists.push(meta.creator || 'Unknown Artist');
         const songTitle = (params.titleOverride || m.track || meta.title || 'Unknown').trim();
-        // A single is filed as its own album (standard music-library layout).
-        const album = (params.single ? songTitle : params.album || m.album || songTitle).trim();
+        // A single is filed as its own album (standard music-library layout);
+        // an EP keeps its own album name like a regular album.
+        const album = (params.release === 'single' ? songTitle : params.album || m.album || songTitle).trim();
         const date = params.date || (m.year ? String(m.year) : null);
         const year = date ? String(date).slice(0, 4) : null;
         const genres = params.genres ? splitList(params.genres) : m.genre ? [m.genre] : [];
@@ -1631,6 +1632,10 @@ async function produceAudio(job, meta, params, onProgress) {
             album,
             date,
             genre: genres,
+            // Navidrome reads this as the release type (album/single/ep).
+            // Best effort: formats whose easy-tag map lacks the key (mp3/m4a)
+            // silently skip it in the tag script.
+            releasetype: params.release,
             // Clear the video-site leftovers (description, watch links) that
             // yt-dlp's --embed-metadata writes — junk in a music library.
             synopsis: '',
@@ -1833,11 +1838,13 @@ app.get('/api/jobs/start', (req, res) => {
       creatorOverride: req.query.creator ? String(req.query.creator) : null,
       titleOverride: req.query.title ? String(req.query.title) : null,
       // Navidrome tag fields (all optional): artists/genres are ","- or ";"-
-      // separated lists, date is YYYY or YYYY-MM-DD, single files the song as
-      // its own album.
+      // separated lists, date is YYYY or YYYY-MM-DD. release is album|single|ep
+      // (single files the song as its own album); legacy single=1 still works.
       artists: req.query.artists ? String(req.query.artists).slice(0, 300) : null,
       album: req.query.album ? String(req.query.album).slice(0, 200) : null,
-      single: req.query.single === '1',
+      release: ['album', 'single', 'ep'].includes(req.query.release)
+        ? req.query.release
+        : req.query.single === '1' ? 'single' : 'album',
       date: req.query.date ? String(req.query.date).slice(0, 10) : null,
       genres: req.query.genres ? String(req.query.genres).slice(0, 200) : null,
     };

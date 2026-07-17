@@ -672,12 +672,16 @@
             <label>Artists / group (comma-separated)</label>
             <input id="shMusicArtists" type="text" autocomplete="off" placeholder="Artist 1, Artist 2" />
           </div>
-          <div class="toggle-row">
-            <div class="label"><div class="t">Single</div><div class="d">No album — filed under its own name</div></div>
-            <label class="switch"><input type="checkbox" id="shMusicSingle" /><span class="track"></span></label>
+          <div class="field">
+            <label>Release type (a single has no album — it is filed under its own name)</label>
+            <div class="seg" id="shMusicRelease">
+              <button type="button" data-v="album" class="on">Album</button>
+              <button type="button" data-v="single">Single</button>
+              <button type="button" data-v="ep">EP</button>
+            </div>
           </div>
           <div class="field" id="shMusicAlbumField">
-            <label>Album</label>
+            <label id="shMusicAlbumLabel">Album</label>
             <input id="shMusicAlbum" type="text" autocomplete="off" />
           </div>
           <div class="row2">
@@ -1421,7 +1425,9 @@
         // metadata.
         $('shCreatorField').classList.toggle('hidden', isNavidrome || sheetMulti);
         $('shMusicFields').classList.toggle('hidden', !isNavidrome || sheetAll || sheetMulti);
-        $('shMusicAlbumField').classList.toggle('hidden', $('shMusicSingle').checked);
+        const musicRel = segValue($('shMusicRelease'));
+        $('shMusicAlbumField').classList.toggle('hidden', musicRel === 'single');
+        $('shMusicAlbumLabel').textContent = musicRel === 'ep' ? 'EP name' : 'Album';
         if (isNavidrome && !sheetAll && !sheetMulti && musicFilledSeq !== sheetSeq) {
           musicFilledSeq = sheetSeq;
           musicPrefill();
@@ -1518,7 +1524,7 @@
         $('shMusicAlbum').value = m.album || '';
         $('shMusicDate').value = m.year ? String(m.year) : '';
         $('shMusicGenres').value = m.genre || '';
-        $('shMusicSingle').checked = false;
+        segSet($('shMusicRelease'), 'album');
         musicCandidates = [];
         $('shMusicPick').innerHTML = '<option value="">…</option>';
       }
@@ -1590,7 +1596,7 @@
         if (c) applyMusicCandidate(c, true);
       });
       $('shMusicSearch').addEventListener('click', () => musicLookup());
-      $('shMusicSingle').addEventListener('change', syncSheet);
+      bindSeg($('shMusicRelease'), syncSheet);
 
       // Build a query string for /api/download or /api/download-all.
       function buildQuery({ batch }) {
@@ -1614,8 +1620,9 @@
           if (mt) p.set('title', mt);
           const a = $('shMusicArtists').value.trim();
           if (a) p.set('artists', a);
-          if ($('shMusicSingle').checked) p.set('single', '1');
-          else if ($('shMusicAlbum').value.trim()) p.set('album', $('shMusicAlbum').value.trim());
+          const rel = segValue($('shMusicRelease'));
+          if (rel !== 'album') p.set('release', rel);
+          if (rel !== 'single' && $('shMusicAlbum').value.trim()) p.set('album', $('shMusicAlbum').value.trim());
           const dt = $('shMusicDate').value.trim();
           if (dt) p.set('date', dt);
           const g = $('shMusicGenres').value.trim();
