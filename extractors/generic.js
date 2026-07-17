@@ -6,6 +6,7 @@
 
 const { spawn } = require('child_process');
 const { cleanTitle } = require('./util');
+const { cookieArgs } = require('../cookies');
 
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 
@@ -17,13 +18,15 @@ function match() {
 function probe(url) {
   // `yt-dlp -j` prints a single JSON line with metadata without downloading.
   return new Promise((resolve) => {
-    const args = ['-j', '--no-warnings', '--no-playlist', '--', url];
+    const ck = cookieArgs(url);
+    const args = ['-j', '--no-warnings', '--no-playlist', ...ck.args, '--', url];
     const p = spawn(YTDLP, args);
     let out = '';
     let err = '';
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
     p.on('close', (code) => {
+      ck.cleanup();
       if (code !== 0) return resolve(null);
       try {
         resolve(JSON.parse(out.trim().split('\n')[0]));
@@ -31,7 +34,10 @@ function probe(url) {
         resolve(null);
       }
     });
-    p.on('error', () => resolve(null));
+    p.on('error', () => {
+      ck.cleanup();
+      resolve(null);
+    });
   });
 }
 
@@ -39,11 +45,13 @@ function probe(url) {
 // playlist/channel/profile's entries without resolving each (fast).
 function flatPlaylist(url) {
   return new Promise((resolve) => {
-    const args = ['--flat-playlist', '-J', '--no-warnings', '--', url];
+    const ck = cookieArgs(url);
+    const args = ['--flat-playlist', '-J', '--no-warnings', ...ck.args, '--', url];
     const p = spawn(YTDLP, args);
     let out = '';
     p.stdout.on('data', (d) => (out += d));
     p.on('close', (code) => {
+      ck.cleanup();
       if (code !== 0) return resolve(null);
       try {
         resolve(JSON.parse(out));
@@ -51,7 +59,10 @@ function flatPlaylist(url) {
         resolve(null);
       }
     });
-    p.on('error', () => resolve(null));
+    p.on('error', () => {
+      ck.cleanup();
+      resolve(null);
+    });
   });
 }
 

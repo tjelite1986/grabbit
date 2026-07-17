@@ -14,6 +14,7 @@ const { pipeline } = require('stream/promises');
 
 const extractors = require('./extractors');
 const { cleanDescription } = require('./extractors/util');
+const { cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -99,6 +100,115 @@ function parseAudioQuality(q) {
 // A video output container for the server library (default mp4).
 function parseContainer(c) {
   return VIDEO_CONTAINERS.includes(c) ? c : 'mp4';
+}
+
+// SponsorBlock mode: 'remove' cuts the segments out, 'mark' keeps them but
+// embeds them as chapters. '1' is the legacy checkbox value (= remove).
+function parseSponsor(v) {
+  if (v === '1' || v === 'remove') return 'remove';
+  return v === 'mark' ? 'mark' : null;
+}
+
+// yt-dlp flags for a parsed SponsorBlock mode.
+function sponsorArgs(mode) {
+  if (mode === 'remove') return ['--sponsorblock-remove', 'all'];
+  if (mode === 'mark') return ['--sponsorblock-mark', 'all'];
+  return [];
+}
+
+// "0:30-1:45, 90-120" -> ['*0:30-1:45', '*90-120'] for --download-sections.
+// Each part is a start-end pair in seconds or [hh:]mm:ss. Throws on junk so the
+// user learns the format instead of silently downloading the whole video.
+const SECTION_RE = /^\d+(?::\d{1,2}){0,2}(?:\.\d+)?-\d+(?::\d{1,2}){0,2}(?:\.\d+)?$/;
+function parseSections(s) {
+  const out = [];
+  for (const part of String(s || '').split(',').map((t) => t.trim()).filter(Boolean)) {
+    if (!SECTION_RE.test(part)) throw new Error(`Bad cut section "${part}" — use start-end like 1:30-2:45`);
+    out.push('*' + part);
+    if (out.length > 20) throw new Error('Too many cut sections (max 20)');
+  }
+  return out;
+}
+
+// User-supplied extra yt-dlp flags. Tokenized shell-style, then validated
+// against an ALLOWLIST of known-safe long options (value = does it take an
+// argument). A denylist is not tenable here: optparse accepts bundled short
+// forms (-P/tmp) and flags like --exec/--use-postprocessor/--ppa run programs
+// or write arbitrary paths — so short flags, unknown flags and stray
+// positional tokens (which yt-dlp would treat as extra URLs) are all refused.
+const ALLOWED_ARGS = new Map(Object.entries({
+  // subtitles
+  '--write-subs': false, '--no-write-subs': false,
+  '--write-auto-subs': false, '--no-write-auto-subs': false,
+  '--sub-langs': true, '--sub-format': true, '--convert-subs': true,
+  '--embed-subs': false, '--no-embed-subs': false,
+  // format selection / conversion
+  '--format': true, '--format-sort': true,
+  '--audio-format': true, '--audio-quality': true,
+  '--remux-video': true, '--recode-video': true, '--prefer-free-formats': false,
+  // metadata / embedding
+  '--embed-metadata': false, '--no-embed-metadata': false,
+  '--embed-thumbnail': false, '--no-embed-thumbnail': false,
+  '--embed-chapters': false, '--no-embed-chapters': false,
+  // SponsorBlock category tuning
+  '--sponsorblock-remove': true, '--sponsorblock-mark': true,
+  // network / pacing
+  '--limit-rate': true, '--retries': true, '--fragment-retries': true,
+  '--concurrent-fragments': true, '--socket-timeout': true,
+  '--sleep-requests': true, '--sleep-interval': true, '--max-sleep-interval': true,
+  '--geo-bypass': false, '--geo-bypass-country': true, '--proxy': true,
+  '--force-ipv4': false, '--force-ipv6': false, '--impersonate': true,
+  // site auth / tuning
+  '--username': true, '--password': true, '--video-password': true, '--twofactor': true,
+  '--extractor-args': true, '--referer': true, '--user-agent': true,
+  // live streams
+  '--live-from-start': false, '--no-live-from-start': false,
+}));
+function parseExtraArgs(s) {
+  const str = String(s || '').trim().slice(0, 500);
+  if (!str) return [];
+  const tokens = [];
+  let cur = '';
+  let quote = null;
+  let escaped = false;
+  for (const ch of str) {
+    if (escaped) { cur += ch; escaped = false; continue; }
+    if (ch === '\\' && quote !== "'") { escaped = true; continue; }
+    if (quote) { if (ch === quote) quote = null; else cur += ch; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (/\s/.test(ch)) { if (cur) { tokens.push(cur); cur = ''; } continue; }
+    cur += ch;
+  }
+  if (cur) tokens.push(cur);
+  if (tokens.length > 40) throw new Error('Too many extra arguments');
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const eq = t.indexOf('=');
+    const flag = eq > 0 ? t.slice(0, eq) : t;
+    const takesValue = ALLOWED_ARGS.get(flag);
+    if (takesValue === undefined) {
+      throw new Error(`Extra argument "${flag}" is not allowed — only a safe subset of long yt-dlp flags is supported`);
+    }
+    if (!takesValue && eq > 0) throw new Error(`${flag} does not take a value`);
+    out.push(t);
+    if (takesValue && eq < 0) {
+      const v = tokens[++i];
+      if (v === undefined) throw new Error(`${flag} needs a value`);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+// Scheduled-download start time: epoch ms or an ISO datetime, capped to a year
+// ahead. null when absent/invalid/already past.
+function parseAt(v) {
+  if (!v) return null;
+  const n = /^\d+$/.test(String(v)) ? Number(v) : Date.parse(String(v));
+  if (!Number.isFinite(n)) return null;
+  if (n < Date.now() + 15 * 1000) return null;
+  return Math.min(n, Date.now() + 366 * 24 * 3600 * 1000);
 }
 
 // MIME for a delivered/served audio file.
@@ -592,6 +702,128 @@ app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });
 });
 
+// --- Cookies ----------------------------------------------------------------
+// Netscape cookies.txt files for logged-in/private content. One default file
+// plus optional per-domain files; every yt-dlp invocation picks the matching
+// one automatically (see cookies.js).
+
+// GET /api/cookies -> stored cookie files.
+app.get('/api/cookies', (_req, res) => res.json({ ok: true, cookies: listCookieFiles() }));
+
+// POST /api/cookies/save?name=<domain|default>  (body = raw cookies.txt text)
+app.post('/api/cookies/save', express.text({ type: '*/*', limit: '2mb' }), (req, res) => {
+  const text = typeof req.body === 'string' ? req.body : '';
+  if (!text.trim()) return res.status(400).json({ ok: false, error: 'Empty cookie file' });
+  const name = sanitizeCookieName(req.query.name);
+  try {
+    saveCookieFile(name, text);
+    res.json({ ok: true, name, cookies: listCookieFiles() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// POST /api/cookies/delete?name=...
+app.post('/api/cookies/delete', (req, res) => {
+  try {
+    deleteCookieFile(sanitizeCookieName(req.query.name));
+    res.json({ ok: true, cookies: listCookieFiles() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// --- yt-dlp argument templates ----------------------------------------------
+// Named sets of extra yt-dlp flags the sheet's template picker offers.
+const TEMPLATES_FILE = path.join(DATA_DIR, 'templates.json');
+function readTemplates() {
+  try {
+    return JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+// GET /api/templates -> saved extra-args templates.
+app.get('/api/templates', (_req, res) => res.json({ ok: true, templates: readTemplates() }));
+
+// POST /api/templates/save?name=...&args=...  (same name overwrites)
+app.post('/api/templates/save', (req, res) => {
+  const name = String(req.query.name || '').trim().slice(0, 60);
+  const args = String(req.query.args || '').trim().slice(0, 500);
+  if (!name || !args) return res.status(400).json({ ok: false, error: 'Missing name or args' });
+  try {
+    parseExtraArgs(args); // validate (throws on blocked/broken flags)
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: String(e.message || e) });
+  }
+  const list = readTemplates();
+  const existing = list.find((t) => t.name === name);
+  if (existing) existing.args = args;
+  else list.push({ id: `${Date.now()}`, name, args });
+  fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(list));
+  res.json({ ok: true, templates: list });
+});
+
+// POST /api/templates/delete?id=...
+app.post('/api/templates/delete', (req, res) => {
+  const list = readTemplates().filter((t) => t.id !== String(req.query.id));
+  fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(list));
+  res.json({ ok: true, templates: list });
+});
+
+// --- Search -----------------------------------------------------------------
+// GET /api/search?q=... -> video search results via yt-dlp's ytsearch, so the
+// UI accepts plain words instead of a URL.
+app.get('/api/search', (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 120);
+  if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
+  const n = Math.min(24, Math.max(1, parseInt(req.query.n, 10) || 12));
+  const p = spawn(YTDLP, ['--flat-playlist', '-J', '--no-warnings', '--', `ytsearch${n}:${q}`]);
+  let out = '';
+  let err = '';
+  let sent = false;
+  const fail = (msg) => {
+    if (!sent) {
+      sent = true;
+      res.status(502).json({ ok: false, error: msg });
+    }
+  };
+  const timer = setTimeout(() => {
+    p.kill('SIGKILL');
+    fail('Search timed out');
+  }, 30000);
+  p.stdout.on('data', (d) => (out += d));
+  p.stderr.on('data', (d) => (err += d));
+  p.on('error', (e) => {
+    clearTimeout(timer);
+    fail(String(e.message || e));
+  });
+  p.on('close', () => {
+    clearTimeout(timer);
+    if (sent) return;
+    try {
+      const data = JSON.parse(out);
+      const results = (data.entries || []).filter(Boolean).map((e) => ({
+        id: e.id || null,
+        title: e.title || e.id || 'video',
+        url: e.url || e.webpage_url || null,
+        duration: Number.isFinite(e.duration) ? e.duration : null,
+        channel: e.channel || e.uploader || null,
+        views: Number.isFinite(e.view_count) ? e.view_count : null,
+        thumbnail:
+          (Array.isArray(e.thumbnails) && e.thumbnails.length
+            ? e.thumbnails[e.thumbnails.length - 1].url
+            : null) || (e.id ? `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg` : null),
+      })).filter((r) => r.url);
+      sent = true;
+      res.json({ ok: true, results });
+    } catch {
+      fail(err.trim().split('\n').pop() || 'Search failed');
+    }
+  });
+});
+
 // "A & B feat. C" -> ['A', 'B', 'C']: the separators music databases use in
 // their artist strings. Only for database/site strings — user-typed fields go
 // through splitList, where '&' must survive ("Hootie & the Blowfish", "R&B").
@@ -710,7 +942,10 @@ function startNavidromeJob(url) {
     container: parseContainer(undefined),
     embedThumb: false,
     embedSubs: false,
-    sponsorblock: false,
+    sponsorblock: null,
+    sections: [],
+    splitChapters: false,
+    extraArgs: [],
     creatorOverride: null,
     titleOverride: null,
     artists: null,
@@ -1119,9 +1354,10 @@ let jobSeq = 0;
 const JOB_KEEP_DONE = 60; // cap finished jobs retained in memory
 const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file this long
 
-// The view sent to clients: drops server-only fields (absolute paths).
+// The view sent to clients: drops server-only fields (absolute paths, the raw
+// start params kept for retries).
 function publicJob(j) {
-  const { finalPath, deliverTemp, ...pub } = j;
+  const { finalPath, deliverTemp, params, ...pub } = j;
   return pub;
 }
 function snapshotJobs() {
@@ -1147,7 +1383,7 @@ function newJob(fields) {
     id, status: 'queued', phase: null, percent: null, speed: '', eta: '',
     title: null, creator: null, thumbnail: null, mediaType: null, duration: null,
     filename: null, mime: null, dest: null, dir: null, channel: null,
-    saved: false, deliverable: false, message: null, error: null,
+    saved: false, deliverable: false, message: null, error: null, at: null,
     createdAt: Date.now(), doneAt: null, finalPath: null, deliverTemp: false,
     ...fields,
   };
@@ -1166,9 +1402,10 @@ function finishJob(job, patch) {
   }
   pruneJobs();
 }
+const FINISHED = new Set(['done', 'error', 'cancelled']);
 function pruneJobs() {
   const done = [...jobsMap.values()]
-    .filter((j) => j.status === 'done' || j.status === 'error')
+    .filter((j) => FINISHED.has(j.status))
     .sort((a, b) => a.createdAt - b.createdAt);
   while (done.length > JOB_KEEP_DONE) {
     const j = done.shift();
@@ -1223,6 +1460,7 @@ async function runJob(job, params) {
 
   try {
     if (mediaType === 'image') await produceImage(job, meta, params);
+    else if ((params.sections && params.sections.length) || params.splitChapters) await produceCut(job, meta, params, onProgress);
     else if (params.audio) await produceAudio(job, meta, params, onProgress);
     else if (params.dest === 'server') await produceServerVideo(job, meta, params, onProgress);
     else await produceEliteVideo(job, meta, params, onProgress);
@@ -1255,7 +1493,7 @@ async function produceEliteVideo(job, meta, params, onProgress) {
   try {
     if (!skipImport) fs.mkdirSync(destDir, { recursive: true });
     if (meta.kind === 'direct') await downloadDirect(meta, tmpPath, { onProgress });
-    else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress });
+    else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress, extraArgs: params.extraArgs });
     setJob(job, { phase: 'processing', percent: 100 });
     await embedMetadata(tmpPath, finalPath, meta, params.web);
     if (!skipImport) fs.writeFileSync(path.join(destDir, `${stem}.md`), buildCaption(meta));
@@ -1303,6 +1541,7 @@ async function produceServerVideo(job, meta, params, onProgress) {
         quality: params.quality, onProgress, container,
         embedThumb: params.embedThumb, embedSubs: params.embedSubs,
         sponsorblock: params.sponsorblock, embedMeta: true,
+        extraArgs: params.extraArgs,
       });
       setJob(job, { phase: 'processing', percent: 100 });
       // copy (not rename) — tmp and the library mount may be different devices;
@@ -1310,7 +1549,7 @@ async function produceServerVideo(job, meta, params, onProgress) {
       fs.copyFileSync(tmpPath, libPath);
     } else {
       if (meta.kind === 'direct') await downloadDirect(meta, tmpPath, { onProgress });
-      else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress });
+      else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress, extraArgs: params.extraArgs });
       setJob(job, { phase: 'processing', percent: 100 });
       await embedMetadata(tmpPath, libPath, meta, false);
     }
@@ -1356,6 +1595,7 @@ async function produceAudio(job, meta, params, onProgress) {
         aq: params.aq,
         embedThumb: params.embedThumb || params.dest === 'navidrome',
         sponsorblock: params.sponsorblock,
+        extraArgs: params.extraArgs,
       });
     } else {
       // Direct sources can't be re-extracted to 'best' losslessly; fall back to m4a.
@@ -1436,40 +1676,264 @@ async function produceAudio(job, meta, params, onProgress) {
   }
 }
 
+// Cut downloads: timestamp sections (--download-sections) and/or chapter
+// splitting (--split-chapters) can produce SEVERAL files, so they bypass the
+// single-file pipeline — yt-dlp writes into a temp dir and everything it
+// produced is moved into the server library. Server-library dest only.
+async function produceCut(job, meta, params, onProgress) {
+  if (meta.kind !== 'ytdlp') {
+    throw new Error('Cutting needs a yt-dlp-handled site (this one uses a direct downloader).');
+  }
+  const stem = `${safeCreator(meta.creator)}_-_${safeTitle(meta.title)}`;
+  const audio = !!params.audio;
+  const dir = audio ? AUDIO_DIR : serverVideoDir(params.folder);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-cut-'));
+  try {
+    await ytdlpCut(meta, tmpDir, stem, {
+      audio,
+      afmt: params.afmt,
+      aq: params.aq,
+      quality: params.quality,
+      container: params.container,
+      embedThumb: params.embedThumb,
+      embedSubs: params.embedSubs,
+      sponsorblock: params.sponsorblock,
+      sections: params.sections,
+      splitChapters: params.splitChapters,
+      extraArgs: params.extraArgs,
+      onProgress,
+    });
+    setJob(job, { phase: 'processing', percent: 100 });
+    const isImage = (f) => /\.(webp|png|jpe?g)$/i.test(f);
+    const isJunk = (f) => /\.(part|ytdl|temp|json)$/i.test(f) || isImage(f);
+    let files = fs.readdirSync(tmpDir).filter((f) => !isJunk(f));
+    // Chapter splitting also leaves the full-length source file behind; when
+    // actual chapter files exist, only those are kept.
+    if (params.splitChapters && files.length > 1) {
+      const chapterFiles = files.filter((f) => f.includes(` - ch`));
+      if (chapterFiles.length) files = chapterFiles;
+    }
+    if (!files.length) throw new Error('yt-dlp produced no output (no matching sections/chapters?)');
+    files.sort();
+    fs.mkdirSync(dir, { recursive: true });
+    const savedNames = [];
+    for (const f of files) {
+      const target = path.join(dir, f);
+      fs.copyFileSync(path.join(tmpDir, f), target);
+      savedNames.push(f);
+    }
+    recordJobHistory(meta, params, `server/${path.basename(dir)}`, savedNames[0], false);
+    const single = savedNames.length === 1 ? path.join(dir, savedNames[0]) : null;
+    finishJob(job, {
+      saved: true,
+      dest: 'server',
+      dir: path.basename(dir),
+      filename: savedNames[0],
+      mime: single ? (audio ? audioMime(safeExt(path.extname(single).slice(1), 'm4a')) : videoMime(safeExt(path.extname(single).slice(1), 'mp4'))) : null,
+      deliverable: !!params.device && !!single,
+      finalPath: params.device && single ? single : null,
+      deliverTemp: false,
+      message: `Saved ${savedNames.length} cut file(s) to library/${path.basename(dir)}.`,
+    });
+  } finally {
+    fs.rm(tmpDir, { recursive: true, force: true }, () => {});
+  }
+}
+
+// yt-dlp run for produceCut: downloads into tmpDir using output templates that
+// keep multiple section/chapter files apart. Resolves when yt-dlp exits 0.
+function ytdlpCut(job, tmpDir, stem, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const q = opts.quality;
+    const fmt = q ? `bv*[height<=${q}]+ba/b[height<=${q}]/bv*+ba/b` : 'bv*+ba/b';
+    const ck = cookieArgs(job.url);
+    const wantProgress = typeof opts.onProgress === 'function';
+    const hasSections = opts.sections && opts.sections.length;
+    // Section files: "<stem> [start-end].<ext>". Chapter files: yt-dlp's
+    // chapter template with a "chNN" marker produceCut can filter on.
+    const mainTpl = hasSections
+      ? path.join(tmpDir, `${stem} [%(section_start)d-%(section_end)d].%(ext)s`)
+      : path.join(tmpDir, `${stem}.%(ext)s`);
+    const args = [
+      '--no-warnings', '--no-playlist',
+      ...ck.args,
+      ...(opts.audio
+        ? ['-f', 'ba/b', '-x', '--audio-format', opts.afmt || 'm4a', ...(opts.aq ? ['--audio-quality', opts.aq] : [])]
+        : ['-f', fmt, '--merge-output-format', opts.container || 'mp4']),
+      ...(opts.embedThumb ? ['--embed-thumbnail'] : []),
+      ...(opts.embedSubs && !opts.audio ? ['--embed-subs'] : []),
+      '--embed-metadata',
+      ...sponsorArgs(opts.sponsorblock),
+      ...(hasSections ? opts.sections.flatMap((s) => ['--download-sections', s]) : []),
+      ...(hasSections ? ['--force-keyframes-at-cuts'] : []),
+      ...(opts.splitChapters
+        ? ['--split-chapters', '-o', `chapter:${path.join(tmpDir, `${stem} - ch%(section_number)02d %(section_title)s.%(ext)s`)}`]
+        : []),
+      ...(opts.extraArgs || []),
+      ...(wantProgress
+        ? ['--newline', '--no-color', '--progress-template', 'GRABBIT|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s']
+        : []),
+      '-o', mainTpl,
+      '--', job.url,
+    ];
+    const p = spawn(YTDLP, args);
+    let err = '';
+    const onLine = (line) => {
+      if (line.startsWith('GRABBIT|')) {
+        const [, pct, spd, eta] = line.split('|');
+        const percent = parseFloat(pct);
+        opts.onProgress({ percent: Number.isFinite(percent) ? percent : null, speed: (spd || '').trim(), eta: (eta || '').trim() });
+      } else if (line.trim()) {
+        err += line + '\n';
+      }
+    };
+    const feed = (d) => { if (wantProgress) String(d).split('\n').forEach(onLine); else err += d; };
+    p.stderr.on('data', feed);
+    if (wantProgress) p.stdout.on('data', (d) => String(d).split('\n').forEach(onLine));
+    p.on('error', (e) => {
+      ck.cleanup();
+      reject(e);
+    });
+    p.on('close', (code) => {
+      ck.cleanup();
+      if (code === 0) return resolve();
+      reject(new Error(err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
+    });
+  });
+}
+
 // GET /api/jobs/start?...same params as /api/download... -> { jobId }, instantly.
+// Extras over /api/download: sponsor=remove|mark, sections=<cuts>, split=1
+// (chapter splitting), xargs=<extra yt-dlp flags>, at=<epoch ms | ISO datetime>
+// (scheduled start).
 app.get('/api/jobs/start', (req, res) => {
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
   const dest = parseDest(req.query.dest);
-  const params = {
-    url,
-    dest,
-    channel: CHANNELS[req.query.channel] || 'main',
-    folder: req.query.folder,
-    device: req.query.device !== '0',
-    web: req.query.web === '1',
-    quality: parseQuality(req.query.quality),
-    audio: req.query.audio === '1' || dest === 'navidrome',
-    afmt: AUDIO_FORMATS.includes(req.query.afmt) ? req.query.afmt : dest === 'navidrome' ? 'opus' : 'm4a',
-    aq: parseAudioQuality(req.query.aq),
-    container: parseContainer(req.query.container),
-    embedThumb: req.query.thumb === '1',
-    embedSubs: req.query.subs === '1',
-    sponsorblock: req.query.sponsor === '1',
-    creatorOverride: req.query.creator ? String(req.query.creator) : null,
-    titleOverride: req.query.title ? String(req.query.title) : null,
-    // Navidrome tag fields (all optional): artists/genres are ","- or ";"-
-    // separated lists, date is YYYY or YYYY-MM-DD, single files the song as
-    // its own album.
-    artists: req.query.artists ? String(req.query.artists).slice(0, 300) : null,
-    album: req.query.album ? String(req.query.album).slice(0, 200) : null,
-    single: req.query.single === '1',
-    date: req.query.date ? String(req.query.date).slice(0, 10) : null,
-    genres: req.query.genres ? String(req.query.genres).slice(0, 200) : null,
-  };
+  let params;
+  try {
+    params = {
+      url,
+      dest,
+      channel: CHANNELS[req.query.channel] || 'main',
+      folder: req.query.folder,
+      device: req.query.device !== '0',
+      web: req.query.web === '1',
+      quality: parseQuality(req.query.quality),
+      audio: req.query.audio === '1' || dest === 'navidrome',
+      afmt: AUDIO_FORMATS.includes(req.query.afmt) ? req.query.afmt : dest === 'navidrome' ? 'opus' : 'm4a',
+      aq: parseAudioQuality(req.query.aq),
+      container: parseContainer(req.query.container),
+      embedThumb: req.query.thumb === '1',
+      embedSubs: req.query.subs === '1',
+      sponsorblock: parseSponsor(req.query.sponsor),
+      sections: parseSections(req.query.sections),
+      splitChapters: req.query.split === '1',
+      extraArgs: parseExtraArgs(req.query.xargs),
+      creatorOverride: req.query.creator ? String(req.query.creator) : null,
+      titleOverride: req.query.title ? String(req.query.title) : null,
+      // Navidrome tag fields (all optional): artists/genres are ","- or ";"-
+      // separated lists, date is YYYY or YYYY-MM-DD, single files the song as
+      // its own album.
+      artists: req.query.artists ? String(req.query.artists).slice(0, 300) : null,
+      album: req.query.album ? String(req.query.album).slice(0, 200) : null,
+      single: req.query.single === '1',
+      date: req.query.date ? String(req.query.date).slice(0, 10) : null,
+      genres: req.query.genres ? String(req.query.genres).slice(0, 200) : null,
+    };
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: String(e.message || e) });
+  }
+  // Cut downloads produce loose library files, which only the server library
+  // can hold (elite-v2 shorts import and Navidrome tagging are single-file).
+  if ((params.sections.length || params.splitChapters) && params.dest !== 'server') {
+    return res.status(400).json({ ok: false, error: 'Cutting/splitting is only supported for the server library.' });
+  }
+  const at = parseAt(req.query.at);
   const job = newJob({ dest: params.dest, channel: params.channel, device: params.device });
+  job.params = params;
+  if (at) {
+    setJob(job, { status: 'scheduled', at });
+    addScheduled({ id: job.id, at, params, dest: params.dest, channel: params.channel, device: params.device });
+  }
+  res.json({ ok: true, jobId: job.id, scheduled: !!at });
+  if (!at) scheduleJob(job, params);
+});
+
+// ---------------------------------------------------------------------------
+// Scheduled downloads: jobs with a future start time wait in 'scheduled' until
+// due, survive restarts via a DATA_DIR file, and can be cancelled.
+const SCHEDULED_FILE = path.join(DATA_DIR, 'scheduled.json');
+function readScheduled() {
+  try {
+    return JSON.parse(fs.readFileSync(SCHEDULED_FILE, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+function writeScheduled(list) {
+  try {
+    fs.writeFileSync(SCHEDULED_FILE, JSON.stringify(list));
+  } catch (e) {
+    console.warn('scheduled write failed:', e.message);
+  }
+}
+function addScheduled(entry) {
+  writeScheduled([...readScheduled().filter((s) => s.id !== entry.id), entry]);
+}
+function removeScheduled(id) {
+  writeScheduled(readScheduled().filter((s) => s.id !== id));
+}
+
+// Recreate 'scheduled' jobs from disk after a restart.
+for (const s of readScheduled()) {
+  if (!jobsMap.has(s.id)) {
+    const job = newJob({ id: s.id, status: 'scheduled', at: s.at, dest: s.dest, channel: s.channel, device: s.device });
+    job.params = s.params;
+  }
+}
+
+// Fire due schedules. A coarse poll (not one timer per job) keeps restarts and
+// clock jumps trivially correct.
+setInterval(() => {
+  const due = readScheduled().filter((s) => s.at <= Date.now());
+  for (const s of due) {
+    removeScheduled(s.id);
+    let job = jobsMap.get(s.id);
+    if (job && job.status !== 'scheduled') continue; // cancelled or already run
+    if (!job) {
+      job = newJob({ id: s.id, dest: s.dest, channel: s.channel, device: s.device });
+      job.params = s.params;
+    }
+    setJob(job, { status: 'queued', at: null });
+    scheduleJob(job, s.params || job.params);
+  }
+}, 20 * 1000).unref();
+
+// POST /api/jobs/:id/cancel -> cancel a scheduled or still-queued job.
+app.post('/api/jobs/:id/cancel', (req, res) => {
+  const job = jobsMap.get(req.params.id);
+  if (!job) return res.status(404).json({ ok: false, error: 'Job not found' });
+  if (job.status !== 'scheduled' && job.status !== 'queued') {
+    return res.status(400).json({ ok: false, error: 'Only scheduled or queued jobs can be cancelled' });
+  }
+  removeScheduled(job.id);
+  setJob(job, { status: 'cancelled', at: null, doneAt: Date.now(), message: 'Cancelled' });
+  res.json({ ok: true });
+});
+
+// POST /api/jobs/:id/retry -> re-queue a failed/cancelled job with its params.
+app.post('/api/jobs/:id/retry', (req, res) => {
+  const old = jobsMap.get(req.params.id);
+  if (!old) return res.status(404).json({ ok: false, error: 'Job not found' });
+  if (!old.params) return res.status(400).json({ ok: false, error: 'This job cannot be retried' });
+  if (old.status !== 'error' && old.status !== 'cancelled') {
+    return res.status(400).json({ ok: false, error: 'Only failed or cancelled jobs can be retried' });
+  }
+  const job = newJob({ dest: old.dest, channel: old.channel, device: old.device });
+  job.params = old.params;
   res.json({ ok: true, jobId: job.id });
-  scheduleJob(job, params);
+  scheduleJob(job, old.params);
 });
 
 // Cap concurrent job downloads — a playlist "download all" queues dozens of
@@ -1480,6 +1944,12 @@ let activeJobs = 0;
 const pendingJobs = [];
 function scheduleJob(job, params) {
   const run = () => {
+    // Cancelled while waiting in the FIFO — skip it and let the next one in.
+    if (job.status === 'cancelled') {
+      const next = pendingJobs.shift();
+      if (next) next();
+      return;
+    }
     activeJobs++;
     runJob(job, params)
       .catch((e) => setJob(job, { status: 'error', phase: null, error: String(e.message || e) }))
@@ -1544,7 +2014,7 @@ app.get('/api/jobs/:id/file', (req, res) => {
 // POST /api/jobs/clear -> drop finished/failed jobs (and any throwaway files).
 app.post('/api/jobs/clear', (_req, res) => {
   for (const [id, j] of jobsMap) {
-    if (j.status === 'done' || j.status === 'error') {
+    if (FINISHED.has(j.status)) {
       if (j.deliverTemp && j.finalPath) fs.rm(j.finalPath, { force: true }, () => {});
       jobsMap.delete(id);
     }
@@ -1634,9 +2104,11 @@ function downloadYtdlp(job, dest, opts = {}) {
     const isTikTok = /(^|\.)tiktok\.com$/.test(
       (() => { try { return new URL(job.url).hostname; } catch { return ''; } })()
     );
+    const ck = cookieArgs(job.url);
     const args = [
       '--no-warnings',
       '--no-playlist',
+      ...ck.args,
       '-f',
       fmt,
       ...(isTikTok ? ['-S', 'vcodec:h264'] : []),
@@ -1645,7 +2117,8 @@ function downloadYtdlp(job, dest, opts = {}) {
       ...(opts.embedThumb ? ['--embed-thumbnail'] : []),
       ...(opts.embedSubs ? ['--embed-subs'] : []),
       ...(opts.embedMeta ? ['--embed-metadata'] : []),
-      ...(opts.sponsorblock ? ['--sponsorblock-remove', 'all'] : []),
+      ...sponsorArgs(opts.sponsorblock),
+      ...(opts.extraArgs || []),
       ...(wantProgress
         ? ['--newline', '--no-color', '--progress-template', 'GRABBIT|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s']
         : []),
@@ -1670,8 +2143,12 @@ function downloadYtdlp(job, dest, opts = {}) {
     const feed = (d) => { if (wantProgress) String(d).split('\n').forEach(onLine); else err += d; };
     p.stderr.on('data', feed);
     if (wantProgress) p.stdout.on('data', (d) => String(d).split('\n').forEach(onLine));
-    p.on('error', reject);
+    p.on('error', (e) => {
+      ck.cleanup();
+      reject(e);
+    });
     p.on('close', (code) => {
+      ck.cleanup();
       const out = resolveYtdlpOutput(dest);
       if (out) {
         // Normalize to the path the caller expects to read (embedMetadata etc.).
@@ -1696,20 +2173,27 @@ function downloadYtdlpAudio(job, destNoExt, afmt, opts = {}) {
   return new Promise((resolve, reject) => {
     // 'best' keeps the source codec, whose extension we can't predict — let
     // yt-dlp report it; for a known format the extension equals afmt.
+    const ck = cookieArgs(job.url);
     const args = [
       '--no-warnings', '--no-playlist',
+      ...ck.args,
       '-f', 'ba/b', '-x', '--audio-format', afmt,
       ...(opts.aq ? ['--audio-quality', opts.aq] : []),
       ...(opts.embedThumb ? ['--embed-thumbnail'] : []),
-      ...(opts.sponsorblock ? ['--sponsorblock-remove', 'all'] : []),
+      ...sponsorArgs(opts.sponsorblock),
+      ...(opts.extraArgs || []),
       '--embed-metadata',
       '-o', `${destNoExt}.%(ext)s`, '--', job.url,
     ];
     const p = spawn(YTDLP, args);
     let err = '';
     p.stderr.on('data', (d) => (err += d));
-    p.on('error', reject);
+    p.on('error', (e) => {
+      ck.cleanup();
+      reject(e);
+    });
     p.on('close', (code) => {
+      ck.cleanup();
       const dir = path.dirname(destNoExt);
       const base = path.basename(destNoExt);
       // --embed-thumbnail leaves (converted) image files next to the audio;

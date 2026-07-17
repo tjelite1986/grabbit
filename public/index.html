@@ -192,6 +192,11 @@
       .hcard.has-img .typebox { background: rgba(20,20,24,.7); }
       .h-del { color: var(--faint); padding: 6px; border-radius: 999px; }
       .h-del:active { background: var(--surface-3); color: var(--bad); }
+      .h-redo { color: var(--faint); padding: 6px; border-radius: 999px; }
+      .h-redo:active { background: var(--surface-3); color: var(--primary); }
+      .qact { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: var(--muted); flex: none; }
+      .qact:active { background: var(--surface-3); color: var(--text); }
+      .qact .ic { width: 19px; height: 19px; }
       .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
       .badge.ch18 { color: #ff9eb5; border-color: #5a2a36; background: rgba(90,42,54,.25); }
       .badge.chmain { color: #9db8ff; border-color: #2a3c5a; background: rgba(42,60,90,.25); }
@@ -234,11 +239,12 @@
       .setrow .label { flex: 1; min-width: 0; }
       .setrow .label .t { font-size: 15px; }
       .setrow .label .d { font-size: 12.5px; color: var(--faint); margin-top: 1px; }
-      .setrow select, .field select, .field input {
+      .setrow select, .field select, .field input, .field textarea {
         background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px;
         color: var(--text); padding: 9px 12px; font-size: 14px; outline: none;
       }
-      .setrow select:focus, .field select:focus, .field input:focus { border-color: var(--surface-hi); }
+      .field textarea { font-family: ui-monospace, monospace; font-size: 12.5px; resize: vertical; }
+      .setrow select:focus, .field select:focus, .field input:focus, .field textarea:focus { border-color: var(--surface-hi); }
       /* switch */
       .switch { position: relative; width: 46px; height: 28px; flex: none; }
       .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
@@ -302,7 +308,7 @@
       .sheet .sh-sub { margin: 0 0 16px; font-size: 13px; color: var(--muted); }
       .field { margin-bottom: 14px; }
       .field > label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
-      .field select, .field input { width: 100%; }
+      .field select, .field input, .field textarea { width: 100%; }
       .seg { display: flex; gap: 8px; }
       .seg button {
         flex: 1; padding: 11px; border-radius: 12px; background: var(--surface-2);
@@ -372,7 +378,7 @@
 
         <form id="form" class="searchbar">
           <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
-          <input id="url" type="url" inputmode="url" placeholder="Search or insert URL" autocomplete="off" autocapitalize="off" spellcheck="false" required />
+          <input id="url" type="text" inputmode="search" placeholder="Search or insert URL(s)" autocomplete="off" autocapitalize="off" spellcheck="false" required />
           <button id="go" class="go" type="submit" title="Fetch">
             <svg class="ic" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M13 5l7 7-7 7" /></svg>
           </button>
@@ -531,6 +537,22 @@
           <div class="setrow">
             <div class="label"><div class="t">Convert to web format</div><div class="d">Save a web-optimized .web.mp4 (skips the transcoder)</div></div>
             <label class="switch"><input type="checkbox" id="setWeb" /><span class="track"></span></label>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Cookies for private content</h2>
+          <div class="sites" id="cookiesList"></div>
+          <div style="padding:4px 16px 16px">
+            <div class="field">
+              <label>Site domain (leave empty for a default used on all sites)</label>
+              <input id="ckName" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="youtube.com" />
+            </div>
+            <div class="field">
+              <label>cookies.txt content (Netscape format, from a browser export)</label>
+              <textarea id="ckText" rows="4" spellcheck="false" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;…"></textarea>
+            </div>
+            <button type="button" id="ckSave" style="padding:11px 18px;border-radius:12px;background:var(--primary);color:var(--on-primary);font-weight:600;font-size:14px">Save cookies</button>
           </div>
         </div>
 
@@ -730,9 +752,37 @@
           <div class="label"><div class="t">Embed subtitles</div><div class="d">When the source has them</div></div>
           <label class="switch"><input type="checkbox" id="shSubs" /><span class="track"></span></label>
         </div>
-        <div class="toggle-row hidden" id="shSponsorRow">
-          <div class="label"><div class="t">Remove sponsors</div><div class="d">Cut SponsorBlock segments</div></div>
-          <label class="switch"><input type="checkbox" id="shSponsor" /><span class="track"></span></label>
+        <div class="field hidden" id="shSponsorRow">
+          <label>SponsorBlock</label>
+          <select id="shSponsor">
+            <option value="">Off</option>
+            <option value="remove">Remove segments</option>
+            <option value="mark">Keep, mark as chapters</option>
+          </select>
+        </div>
+
+        <div class="field hidden" id="shCutsField">
+          <label>Cut sections (start-end, comma-separated)</label>
+          <input id="shCuts" type="text" autocomplete="off" placeholder="0:30-1:45, 3:10-4:00" />
+        </div>
+        <div class="toggle-row hidden" id="shSplitRow">
+          <div class="label"><div class="t">Split by chapters</div><div class="d">One file per chapter</div></div>
+          <label class="switch"><input type="checkbox" id="shSplit" /><span class="track"></span></label>
+        </div>
+
+        <div class="field hidden" id="shXargsField">
+          <label>Extra yt-dlp arguments</label>
+          <input id="shXargs" type="text" autocomplete="off" spellcheck="false" placeholder="--write-subs --sub-langs en" />
+          <div class="row2" style="margin-top:6px">
+            <select id="shTemplate" style="flex:1;min-width:0"><option value="">Templates…</option></select>
+            <button type="button" id="shTplSave" style="flex:none;padding:0 14px;border:1px solid var(--line);border-radius:10px;color:var(--text);background:var(--surface-2);font-size:13px">Save</button>
+            <button type="button" id="shTplDel" style="flex:none;padding:0 14px;border:1px solid var(--line);border-radius:10px;color:var(--muted);background:var(--surface-2);font-size:13px">Delete</button>
+          </div>
+        </div>
+
+        <div class="field" id="shAtField">
+          <label>Schedule start (optional)</label>
+          <input id="shAt" type="datetime-local" />
         </div>
 
         <div class="toggle-row hidden" id="shWebRow">
@@ -890,16 +940,27 @@
         go.classList.toggle('spin', on);
       }
 
+      function showHomeError(msg) {
+        homeError.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5v.5"/></svg><p>' + esc(msg) + '</p>';
+        homeError.classList.remove('hidden');
+      }
+
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
-        const url = urlInput.value.trim();
-        if (!url) return;
-        currentUrl = url;
+        const raw = urlInput.value.trim();
+        if (!raw) return;
         homeError.classList.add('hidden');
         cardsEl.innerHTML = '';
         homeEmpty.classList.add('hidden');
         singleData = null; profileMode = false; profileItems = []; profileData = null;
         $('fab').classList.remove('show');
+        // The box takes one URL (resolve), several URLs (batch with shared
+        // settings) or plain words (video search).
+        const urls = raw.match(/https?:\/\/[^\s"'<>]+/g) || [];
+        if (urls.length > 1) { renderMulti(urls); return; }
+        if (urls.length === 0) { await runSearch(raw); return; }
+        const url = urls[0];
+        currentUrl = url;
         setBusy(true);
         try {
           // Profile (multi-clip) first.
@@ -914,12 +975,63 @@
           singleData = d;
           renderSingle(d);
         } catch (err) {
-          homeError.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5v.5"/></svg><p>' + esc(err.message) + '</p>';
-          homeError.classList.remove('hidden');
+          showHomeError(err.message);
         } finally {
           setBusy(false);
         }
       });
+
+      // Plain-words input -> yt-dlp video search; a result click fetches it.
+      function fmtViews(n) {
+        return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
+      }
+      async function runSearch(q) {
+        setBusy(true);
+        try {
+          const d = await fetchJson('/api/search?q=' + encodeURIComponent(q));
+          if (!d.ok) throw new Error(d.error || 'Search failed');
+          if (!(d.results || []).length) throw new Error('No results for "' + q + '"');
+          const head = document.createElement('div');
+          head.style.cssText = 'margin:2px 2px 8px;font-size:13px;color:var(--muted)';
+          head.textContent = 'Search results for "' + q + '"';
+          cardsEl.appendChild(head);
+          d.results.forEach((r) => {
+            const card = mediaCard({
+              title: r.title,
+              sub: [r.duration ? fmtClock(r.duration) : null, r.channel, r.views != null ? fmtViews(r.views) + ' views' : null].filter(Boolean).join(' · '),
+              thumbnail: r.thumbnail,
+              onActions(actions) {
+                actions.appendChild(actBtn(ICON.video, () => { urlInput.value = r.url; form.requestSubmit(); }, 'Fetch this video'));
+              },
+            });
+            cardsEl.appendChild(card);
+          });
+        } catch (err) {
+          showHomeError(err.message);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      // Several URLs pasted at once -> one card that queues them all with the
+      // same settings (each file still names/tags itself from its own metadata).
+      let multiUrls = [];
+      function renderMulti(urls) {
+        multiUrls = urls;
+        const card = mediaCard({
+          title: urls.length + ' links pasted',
+          sub: 'Download all with the same settings',
+          onActions(actions) {
+            actions.appendChild(actBtn(ICON.audio, () => openSheetMulti('audio'), 'Download all as audio'));
+            actions.appendChild(actBtn(ICON.video, () => openSheetMulti('video'), 'Download all as video'));
+          },
+        });
+        cardsEl.appendChild(card);
+        const list = document.createElement('div');
+        list.style.cssText = 'margin:8px 2px;font-size:12.5px;color:var(--faint);word-break:break-all';
+        list.innerHTML = urls.map((u) => esc(u)).join('<br>');
+        cardsEl.appendChild(list);
+      }
 
       function mediaCard({ title, sub, thumbnail, kind, status, onActions }) {
         const card = document.createElement('div');
@@ -1173,6 +1285,7 @@
       let sheetItem = null;      // for "all" or profile-single: the profile item; null for single resolve
       let sheetSingle = null;    // single resolve data
       let sheetAll = false;      // batch (download all) mode
+      let sheetMulti = false;    // multi-link paste mode (multiUrls)
       let sheetSeq = 0;          // bumped per sheet open (one-shot triggers key on it)
 
       function segValue(seg) { const on = seg.querySelector('.on'); return on ? on.dataset.v : ''; }
@@ -1208,7 +1321,12 @@
         // Extras are per-download, off by default.
         $('shThumb').checked = false;
         $('shSubs').checked = false;
-        $('shSponsor').checked = false;
+        $('shSponsor').value = '';
+        $('shCuts').value = '';
+        $('shSplit').checked = false;
+        $('shXargs').value = '';
+        $('shTemplate').value = '';
+        $('shAt').value = '';
       }
 
       // Single-resolve sheet (mode = audio|video|image, single = resolve data).
@@ -1217,6 +1335,7 @@
         sheetSingle = single || null;
         sheetItem = profileItem || null;
         sheetAll = false;
+        sheetMulti = false;
         openSheetCommon();
         const item = single || profileItem;
         $('shTitle').textContent = mode === 'audio' ? 'Download audio' : mode === 'image' ? 'Download image' : 'Download video';
@@ -1230,11 +1349,23 @@
       // Batch (download all) sheet.
       function openSheetAll() {
         if (!profileItems.length) return;
-        sheetAll = true; sheetMode = 'video'; sheetSingle = null; sheetItem = null;
+        sheetAll = true; sheetMode = 'video'; sheetSingle = null; sheetItem = null; sheetMulti = false;
         openSheetCommon();
         $('shTitle').textContent = 'Download all';
         $('shSub').textContent = '@' + (profileData.creator || '?') + ' — ' + profileItems.length + ' items';
         $('shCreator').value = profileData.creator || '';
+        $('shTitleInput').value = '';
+        openSheetUi();
+      }
+
+      // Multi-link paste sheet: same settings for every pasted URL.
+      function openSheetMulti(mode) {
+        if (!multiUrls.length) return;
+        sheetMode = mode; sheetSingle = null; sheetItem = null; sheetAll = false; sheetMulti = true;
+        openSheetCommon();
+        $('shTitle').textContent = 'Download ' + multiUrls.length + ' links';
+        $('shSub').textContent = 'Each file is named and tagged from its own metadata.';
+        $('shCreator').value = '';
         $('shTitleInput').value = '';
         openSheetUi();
       }
@@ -1286,11 +1417,12 @@
         $('shFolderField').classList.toggle('hidden', !folderVisible);
         $('shNewFolderField').classList.toggle('hidden', !(folderVisible && $('shFolder').value === '__new__'));
         // Navidrome: the tag fields replace the plain title/profile inputs.
-        // Batches skip them — every track tags itself from its own metadata.
-        $('shCreatorField').classList.toggle('hidden', isNavidrome);
-        $('shMusicFields').classList.toggle('hidden', !isNavidrome || sheetAll);
+        // Batches/multi-link skip them — every track tags itself from its own
+        // metadata.
+        $('shCreatorField').classList.toggle('hidden', isNavidrome || sheetMulti);
+        $('shMusicFields').classList.toggle('hidden', !isNavidrome || sheetAll || sheetMulti);
         $('shMusicAlbumField').classList.toggle('hidden', $('shMusicSingle').checked);
-        if (isNavidrome && !sheetAll && musicFilledSeq !== sheetSeq) {
+        if (isNavidrome && !sheetAll && !sheetMulti && musicFilledSeq !== sheetSeq) {
           musicFilledSeq = sheetSeq;
           musicPrefill();
           musicLookup();
@@ -1307,6 +1439,15 @@
         $('shSubsRow').classList.toggle('hidden', !advancedVideo);
         // SponsorBlock also applies to audio extraction (cuts sponsor reads).
         $('shSponsorRow').classList.toggle('hidden', !(advancedVideo || audioish));
+        // Cutting/splitting produce loose library files -> server library only,
+        // and per-clip timestamps make no sense for a batch/multi run.
+        const cutsOk = isServer && !isImage && !sheetAll && !sheetMulti;
+        $('shCutsField').classList.toggle('hidden', !cutsOk);
+        $('shSplitRow').classList.toggle('hidden', !(cutsOk && isVideo));
+        // Extra yt-dlp args apply anywhere yt-dlp runs (ignored by direct sites).
+        $('shXargsField').classList.toggle('hidden', isImage);
+        // Scheduling works for job-based downloads (not the download-all batch).
+        $('shAtField').classList.toggle('hidden', sheetAll);
         // Web format only applies to an elite-v2 video save.
         $('shWebRow').classList.toggle('hidden', !(isVideo && dest === ''));
         // No "to this device" toggle for a batch (download all).
@@ -1336,7 +1477,8 @@
         // confirm label
         const device = $('shDevice').checked;
         let label;
-        if (sheetAll && isNavidrome) {
+        if (sheetMulti) label = 'Download ' + multiUrls.length + ' links';
+        else if (sheetAll && isNavidrome) {
           const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded).length;
           label = 'Download new to Navidrome (' + fresh + ')';
         } else if (sheetAll) label = 'Download all (' + profileItems.length + ')';
@@ -1493,7 +1635,17 @@
           if ($('shSubs').checked) p.set('subs', '1');
         }
         // SponsorBlock: server-library videos and any audio extraction.
-        if (!$('shSponsorRow').classList.contains('hidden') && $('shSponsor').checked) p.set('sponsor', '1');
+        if (!$('shSponsorRow').classList.contains('hidden') && $('shSponsor').value) p.set('sponsor', $('shSponsor').value);
+        // Job-only extras (the download-all batch endpoint ignores them).
+        if (!batch) {
+          if (!$('shCutsField').classList.contains('hidden') && $('shCuts').value.trim()) p.set('sections', $('shCuts').value.trim());
+          if (!$('shSplitRow').classList.contains('hidden') && $('shSplit').checked) p.set('split', '1');
+          if (!$('shXargsField').classList.contains('hidden') && $('shXargs').value.trim()) p.set('xargs', $('shXargs').value.trim());
+          if (!$('shAtField').classList.contains('hidden') && $('shAt').value) {
+            const t = new Date($('shAt').value).getTime();
+            if (Number.isFinite(t) && t > Date.now()) p.set('at', String(t));
+          }
+        }
         if (creator) p.set('creator', creator);
         if (!batch) p.set('device', $('shDevice').checked ? '1' : '0');
         return p;
@@ -1515,6 +1667,13 @@
         settings.device = $('shDevice').checked;
         saveSettings();
         reflectSettings();
+
+        if (sheetMulti) {
+          const q = buildQuery({ batch: false });
+          closeSheet();
+          startJobs(multiUrls, q);
+          return;
+        }
 
         if (sheetAll) {
           if (segValue($('shDest')) === 'navidrome') {
@@ -1579,7 +1738,7 @@
         renderQueue();
       });
 
-      const RUNNING = new Set(['queued', 'running', 'busy']);
+      const RUNNING = new Set(['queued', 'running', 'busy', 'scheduled']);
       function fmtClock(sec) {
         const s = Math.max(0, Math.round(Number(sec) || 0));
         const m = Math.floor(s / 60);
@@ -1591,7 +1750,9 @@
         const jobs = [...jobMap.values()].map((j) => ({
           id: j.id, title: j.title || j.filename || 'download', thumbnail: j.thumbnail,
           status: j.status, percent: j.percent, phase: j.phase, speed: j.speed, eta: j.eta,
-          message: j.message, error: j.error, duration: j.duration, _t: j.createdAt || 0,
+          message: j.message, error: j.error, duration: j.duration, at: j.at, _t: j.createdAt || 0,
+          canCancel: j.status === 'scheduled' || j.status === 'queued',
+          canRetry: j.status === 'error' || j.status === 'cancelled',
         }));
         const batch = queueRows.map((b) => ({
           id: 'b:' + b.id, title: b.title, thumbnail: b.thumbnail,
@@ -1602,6 +1763,7 @@
 
       function rowMeta(r) {
         if (r.error) return esc(r.error);
+        if (r.status === 'scheduled' && r.at) return 'starts ' + esc(new Date(r.at).toLocaleString());
         if (r.phase === 'resolving') return 'resolving…';
         if (r.phase === 'processing') return 'processing…';
         if (r.status === 'running' && typeof r.percent === 'number') {
@@ -1624,18 +1786,36 @@
         queueList.innerHTML = rows.map((r) => {
           const thumb = r.thumbnail ? '<img class="q-thumb" src="' + esc(r.thumbnail) + '" alt="" loading="lazy" />' : '<div class="q-thumb"></div>';
           const cls = (r.status === 'done' || r.status === 'saved') ? 'saved'
-            : r.status === 'skipped' ? 'skipped'
+            : (r.status === 'skipped' || r.status === 'scheduled' || r.status === 'cancelled') ? 'skipped'
             : (r.status === 'failed' || r.status === 'error') ? 'failed' : 'busy';
           const label = r.status === 'done' ? 'done' : r.status;
           const showBar = r.status === 'running' && typeof r.percent === 'number';
+          const acts =
+            (r.canCancel ? '<button class="qact" type="button" data-act="cancel" data-id="' + esc(r.id) + '" title="Cancel"><svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' : '') +
+            (r.canRetry ? '<button class="qact" type="button" data-act="retry" data-id="' + esc(r.id) + '" title="Retry"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg></button>' : '');
           return '<div class="qrow">' + thumb +
             '<div class="q-info"><div class="q-title">' + esc(r.title) + '</div>' +
             '<div class="q-meta">' + rowMeta(r) + '</div>' +
             (showBar ? '<div class="qbar"><i style="width:' + (r.percent || 0) + '%"></i></div>' : '') +
-            '</div>' +
+            '</div>' + acts +
             '<span class="qstat ' + cls + '">' + esc(label) + '</span></div>';
         }).join('');
       }
+
+      // Cancel a scheduled/queued job, or retry a failed/cancelled one.
+      queueList.addEventListener('click', async (e) => {
+        const b = e.target.closest('.qact');
+        if (!b) return;
+        b.disabled = true;
+        try {
+          const d = await fetchJson('/api/jobs/' + encodeURIComponent(b.dataset.id) + '/' + b.dataset.act, { method: 'POST' });
+          if (!d.ok) throw new Error(d.error || 'failed');
+          toast(b.dataset.act === 'retry' ? 'Retrying' : 'Cancelled', 'good');
+        } catch (err) {
+          toast(err.message, 'bad');
+          b.disabled = false;
+        }
+      });
 
       // Persistent stream of server-job updates.
       let jobStream = null;
@@ -1670,9 +1850,30 @@
           // The link is queued — clear the search field for the next paste.
           // (currentUrl stays, so more downloads from the same card still work.)
           urlInput.value = '';
-          toast('Added to queue', 'good');
+          toast(d.scheduled ? 'Scheduled' : 'Added to queue', 'good');
           showTab('queue');
         } catch (err) { toast(err.message, 'bad'); }
+      }
+
+      // Start one job per pasted URL, all sharing the sheet's settings.
+      async function startJobs(urls, baseQuery) {
+        connectJobStream();
+        let started = 0;
+        let scheduled = false;
+        let lastError = null;
+        for (const u of urls) {
+          const p = new URLSearchParams(baseQuery);
+          p.set('url', u);
+          try {
+            const d = await fetchJson('/api/jobs/start?' + p.toString());
+            if (d.ok) { started++; scheduled = scheduled || !!d.scheduled; }
+            else lastError = d.error || null;
+          } catch (err) { lastError = err.message; }
+        }
+        urlInput.value = '';
+        if (started) toast((scheduled ? 'Scheduled ' : 'Queued ') + started + ' of ' + urls.length + ' links', 'good');
+        else toast(lastError || 'Could not start any download', 'bad');
+        showTab('queue');
       }
 
       function startBatch(ids) {
@@ -1762,6 +1963,15 @@
       });
 
       historyList.addEventListener('click', async (e) => {
+        // Re-download: refill the home form with the source URL and fetch it.
+        const redo = e.target.closest('.h-redo');
+        if (redo) {
+          e.preventDefault();
+          urlInput.value = redo.dataset.url;
+          showTab('home');
+          form.requestSubmit();
+          return;
+        }
         const btn = e.target.closest('.h-del');
         if (!btn) return;
         e.preventDefault();
@@ -1818,6 +2028,11 @@
               '<button class="h-del" type="button" data-id="' + esc(it.id) + '" title="Remove">' +
                 '<svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>' +
               '</button>' +
+              (sh
+                ? '<button class="h-redo" type="button" data-url="' + esc(sh) + '" title="Download again">' +
+                  '<svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>' +
+                  '</button>'
+                : '') +
               '<div class="typebox">' + icon + '</div>' +
             '</div>' +
           '</div>';
@@ -1850,6 +2065,96 @@
       $('setWeb').addEventListener('change', () => { settings.web = $('setWeb').checked; saveSettings(); });
       reflectSettings();
 
+      // ----------------------------------------------------------------- cookies
+      // Netscape cookies.txt files for private/member-only content: one default
+      // file plus optional per-domain files, picked automatically per download.
+      async function loadCookies() {
+        try {
+          const d = await fetchJson('/api/cookies');
+          renderCookies(d.cookies || []);
+        } catch { renderCookies([]); }
+      }
+      function renderCookies(list) {
+        const el = $('cookiesList');
+        if (!list.length) {
+          el.innerHTML = '<span style="font-size:12.5px;color:var(--faint)">No cookie files yet. Export cookies.txt from a browser extension and paste it below — downloads then use it automatically.</span>';
+          return;
+        }
+        el.innerHTML = list.map((c) =>
+          '<span class="site"><span class="dot"></span>' + esc(c.name) +
+          ' <small>' + Math.max(1, Math.round(c.size / 1024)) + ' kB</small>' +
+          '<button type="button" class="ck-del" data-name="' + esc(c.name) + '" title="Delete" style="padding:0 0 0 6px;color:var(--muted)">✕</button></span>'
+        ).join('');
+      }
+      $('cookiesList').addEventListener('click', async (e) => {
+        const b = e.target.closest('.ck-del');
+        if (!b) return;
+        if (!confirm('Delete the "' + b.dataset.name + '" cookie file?')) return;
+        try {
+          const d = await fetchJson('/api/cookies/delete?name=' + encodeURIComponent(b.dataset.name), { method: 'POST' });
+          renderCookies(d.cookies || []);
+        } catch (err) { toast(err.message, 'bad'); }
+      });
+      $('ckSave').addEventListener('click', async () => {
+        const text = $('ckText').value;
+        if (!text.trim()) { toast('Paste the cookies.txt content first', 'bad'); return; }
+        try {
+          const d = await fetchJson('/api/cookies/save?name=' + encodeURIComponent($('ckName').value.trim()), {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: text,
+          });
+          if (!d.ok) throw new Error(d.error || 'failed');
+          renderCookies(d.cookies || []);
+          $('ckText').value = '';
+          $('ckName').value = '';
+          toast('Cookies saved — matching sites use them automatically', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
+      });
+
+      // ----------------------------------------------------------------- arg templates
+      // Named sets of extra yt-dlp flags, offered by the sheet's template picker.
+      let argTemplates = [];
+      function renderTemplateSelect() {
+        $('shTemplate').innerHTML = '<option value="">Templates…</option>' +
+          argTemplates.map((t) => '<option value="' + esc(t.id) + '">' + esc(t.name) + '</option>').join('');
+      }
+      async function loadTemplates() {
+        try {
+          const d = await fetchJson('/api/templates');
+          argTemplates = d.templates || [];
+        } catch { argTemplates = []; }
+        renderTemplateSelect();
+      }
+      $('shTemplate').addEventListener('change', () => {
+        const t = argTemplates.find((x) => x.id === $('shTemplate').value);
+        if (t) $('shXargs').value = t.args;
+      });
+      $('shTplSave').addEventListener('click', async () => {
+        const args = $('shXargs').value.trim();
+        if (!args) { toast('Type the arguments first', 'bad'); return; }
+        const name = prompt('Template name:');
+        if (!name || !name.trim()) return;
+        try {
+          const d = await fetchJson('/api/templates/save?name=' + encodeURIComponent(name.trim()) + '&args=' + encodeURIComponent(args), { method: 'POST' });
+          if (!d.ok) throw new Error(d.error || 'failed');
+          argTemplates = d.templates || [];
+          renderTemplateSelect();
+          toast('Template saved', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
+      });
+      $('shTplDel').addEventListener('click', async () => {
+        const id = $('shTemplate').value;
+        if (!id) { toast('Pick a template to delete', 'bad'); return; }
+        try {
+          const d = await fetchJson('/api/templates/delete?id=' + encodeURIComponent(id), { method: 'POST' });
+          argTemplates = d.templates || [];
+          renderTemplateSelect();
+          $('shTemplate').value = '';
+          toast('Template deleted', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
+      });
+
       // ----------------------------------------------------------------- supported sites
       (async function loadSites() {
         try {
@@ -1875,6 +2180,8 @@
       loadHistory();
       loadFolders();
       loadPlaylists();
+      loadCookies();
+      loadTemplates();
       connectJobStream(); // pick up any in-progress jobs (incl. across reloads)
       renderQueue();
     </script>

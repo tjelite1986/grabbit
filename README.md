@@ -22,6 +22,35 @@ device while a copy is saved on the server.
 
 Any URL no dedicated extractor claims falls back to yt-dlp automatically.
 
+## Features beyond plain downloading
+
+- **Search**: type plain words instead of a URL and the box becomes a video
+  search (`yt-dlp ytsearch`); click a result to fetch it.
+- **Multi-link paste**: paste several URLs at once — one card queues them all
+  as separate jobs sharing the same settings.
+- **Cookies for private content**: store Netscape `cookies.txt` files under
+  More → Cookies (one default file plus optional per-domain files). Every
+  yt-dlp call — resolve, download, playlists — automatically uses the matching
+  file, unlocking member/private/premium content. Each invocation gets its own
+  throwaway temp copy so concurrent jobs can't corrupt the stored file.
+- **Cutting**: give timestamp sections (`0:30-1:45, 3:10-4:00`) to download
+  only those parts (`--download-sections` + `--force-keyframes-at-cuts`), or
+  toggle *Split by chapters* for one file per chapter (`--split-chapters`).
+  Server-library destination only, since a cut can produce several files.
+- **SponsorBlock**: per download, either remove the sponsored segments or keep
+  them but embed them as chapters.
+- **Scheduling**: pick a start time in the sheet; the job waits as `scheduled`,
+  survives restarts (persisted in `DATA_DIR/scheduled.json`) and can be
+  cancelled from the queue.
+- **Extra yt-dlp arguments**: a flags field in the sheet, with named templates
+  you can save/re-use. Only an allowlisted safe subset of long yt-dlp options
+  passes through (subtitles, format selection, network pacing, site auth,
+  SponsorBlock categories, …) — short flags, unknown flags and stray
+  positional tokens are refused, so nothing can execute programs, touch
+  arbitrary paths or smuggle extra URLs.
+- **Retry & re-download**: failed/cancelled jobs get a retry button in the
+  queue; history rows get a re-download button.
+
 ### Long videos
 
 Shorts are short clips, so a video longer than `SHORTS_MAX_DURATION` seconds
