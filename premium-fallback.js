@@ -12,6 +12,12 @@ const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 // A browser UA is required for music.youtube.com to serve the real watch page.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0';
 
+// Deterministic lock — a plain retry can never clear it (unlike YouTube's
+// intermittent "Video unavailable" flakes, which often succeed on retry).
+function isMusicPremiumLock(msg) {
+  return /only available to Music Premium members/i.test(String(msg || ''));
+}
+
 // Errors worth attempting the free-counterpart lookup for. "Video
 // unavailable" also covers genuinely deleted videos — the lookup then finds
 // nothing and the original error stands. findFreeAlternate() only acts on
@@ -134,4 +140,4 @@ async function findFreeAlternate(url) {
   return found ? { url: `https://www.youtube.com/watch?v=${found}`, via: 'search' } : null;
 }
 
-module.exports = { isRecoverableYoutubeError, findFreeAlternate, youtubeVideoId };
+module.exports = { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate, youtubeVideoId };

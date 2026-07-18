@@ -15,7 +15,7 @@ const { pipeline } = require('stream/promises');
 const extractors = require('./extractors');
 const { cleanDescription } = require('./extractors/util');
 const { cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
-const { isRecoverableYoutubeError, findFreeAlternate } = require('./premium-fallback');
+const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -2233,6 +2233,17 @@ async function withYoutubeFallback(job, run) {
     return await run(job);
   } catch (e) {
     if (!isRecoverableYoutubeError(e && e.message)) throw e;
+    // YouTube intermittently reports playable videos as unavailable — a plain
+    // retry often clears it. Premium locks are deterministic, skip straight
+    // to the counterpart lookup for those.
+    if (!isMusicPremiumLock(e && e.message)) {
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        return await run(job);
+      } catch {
+        /* fall through to the counterpart lookup */
+      }
+    }
     const alt = await findFreeAlternate(job.url).catch(() => null);
     if (!alt) throw e;
     console.warn(`unavailable-video fallback (${alt.via}): ${job.url} -> ${alt.url}`);

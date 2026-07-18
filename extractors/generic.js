@@ -7,7 +7,7 @@
 const { spawn } = require('child_process');
 const { cleanTitle } = require('./util');
 const { cookieArgs } = require('../cookies');
-const { isRecoverableYoutubeError, findFreeAlternate } = require('../premium-fallback');
+const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('../premium-fallback');
 
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 
@@ -105,6 +105,12 @@ async function resolveProfile(url) {
 async function resolve(url) {
   const sourceUrl = url;
   let { info, error } = await probe(url);
+  // YouTube intermittently reports playable videos as unavailable — re-probe
+  // once before hunting for a counterpart ID (premium locks are deterministic).
+  if (!info && isRecoverableYoutubeError(error) && !isMusicPremiumLock(error)) {
+    await new Promise((r) => setTimeout(r, 2000));
+    ({ info, error } = await probe(url));
+  }
   // Premium/region-locked YouTube ID: swap in the free counterpart (when one
   // exists) so the rest of the pipeline downloads a playable video.
   if (!info && isRecoverableYoutubeError(error)) {
