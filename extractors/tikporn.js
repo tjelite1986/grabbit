@@ -74,12 +74,16 @@ function jobFromApiVideo(v, creator, creatorName) {
   const id = String(v.video_id);
   const keywords = Array.isArray(v.keywords) ? v.keywords : [];
   const tags = keywords.map((k) => '#' + String(k).toLowerCase().replace(/[^a-z0-9]+/g, ''));
+  const metaDesc =
+    v.video_text && v.video_text.meta_description && v.video_text.meta_description.default
+      ? String(v.video_text.meta_description.default.text || '')
+      : '';
   return {
     kind: 'direct',
     id,
     creator,
     title: metaTitle(v, creatorName || creator),
-    description: '',
+    description: metaDesc,
     tags,
     sourceUrl: `https://tik.porn/video/${id}`,
     thumbnail: v.poster_url || v.medium_thumb || null,
@@ -159,7 +163,7 @@ function jobFromNextVideo(fv) {
     id,
     creator,
     title,
-    description: '',
+    description: (fv.metadata && fv.metadata.description) || '',
     tags: tagNames.map((k) => '#' + String(k).toLowerCase().replace(/[^a-z0-9]+/g, '')),
     sourceUrl: `https://tik.porn/video/${id}`,
     thumbnail: fv.poster || null,
