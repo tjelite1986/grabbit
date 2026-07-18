@@ -1006,6 +1006,7 @@ function startNavidromeJob(url) {
     extraArgs: [],
     creatorOverride: null,
     titleOverride: null,
+    tagsOverride: null,
     artists: null,
     album: null,
     release: 'album',
@@ -1283,6 +1284,12 @@ app.get('/api/profile', async (req, res) => {
       return {
         id: job.id || stem,
         title: job.title || null,
+        creator: job.creator || null,
+        // Extractors that resolve full items up front (e.g. tikporn's apiv2
+        // listing) carry these; flat listings leave them null and the item
+        // sheet fetches them on open instead.
+        description: job.description || null,
+        tags: Array.isArray(job.tags) && job.tags.length ? job.tags : undefined,
         mediaType: isImage ? 'image' : 'video',
         filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
         thumbnail: job.thumbnail || null,
@@ -1497,6 +1504,15 @@ async function runJob(job, params) {
   }
   if (params.creatorOverride) meta.creator = params.creatorOverride;
   if (params.titleOverride) meta.title = params.titleOverride;
+  if (params.tagsOverride != null) {
+    meta.tags = [...new Set(
+      params.tagsOverride
+        .split(/[\s,;]+/)
+        .map((t) => t.replace(/^#+/, '').trim())
+        .filter(Boolean)
+        .map((t) => '#' + t.toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ''))
+    )];
+  }
   const mediaType = meta.mediaType === 'image' ? 'image' : 'video';
   setJob(job, {
     title: meta.title || null, creator: meta.creator || null, thumbnail: meta.thumbnail || null,
@@ -1898,6 +1914,8 @@ app.get('/api/jobs/start', (req, res) => {
       extraArgs: parseExtraArgs(req.query.xargs),
       creatorOverride: req.query.creator ? String(req.query.creator) : null,
       titleOverride: req.query.title ? String(req.query.title) : null,
+      // Edited hashtag list; '' clears the clip's tags entirely.
+      tagsOverride: typeof req.query.tags === 'string' ? String(req.query.tags).slice(0, 500) : null,
       // Navidrome tag fields (all optional): artists/genres are ","- or ";"-
       // separated lists, date is YYYY or YYYY-MM-DD. release is album|single|ep
       // (single files the song as its own album); legacy single=1 still works.

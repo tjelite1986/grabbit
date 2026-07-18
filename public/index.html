@@ -127,6 +127,14 @@
       }
       .mcard .msub { margin-top: 4px; font-size: 12.5px; color: var(--muted); text-shadow: 0 1px 6px rgba(0,0,0,.7); }
       .mcard.has-img .msub { color: #d7d8de; }
+      /* Full caption/description shown in the card; tap to un-clamp. */
+      .mcard .mdesc {
+        margin-top: 6px; font-size: 12.5px; line-height: 1.45; color: var(--muted);
+        text-shadow: 0 1px 6px rgba(0,0,0,.7); white-space: pre-wrap; word-break: break-word;
+        display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+      }
+      .mcard.has-img .mdesc { color: #d7d8de; }
+      .mcard .mdesc.expanded { display: block; -webkit-line-clamp: unset; max-height: 45vh; overflow-y: auto; }
       .mcard .actions {
         position: relative; z-index: 2;
         display: flex; gap: 10px; justify-content: flex-end;
@@ -625,6 +633,11 @@
           <input id="shCreator" type="text" autocomplete="off" />
         </div>
 
+        <div class="field" id="shTagsField">
+          <label>Hashtags (space or comma separated)</label>
+          <input id="shTags" type="text" autocomplete="off" placeholder="#tag1 #tag2" />
+        </div>
+
         <div class="field">
           <label>Save to</label>
           <div class="seg" id="shDest">
@@ -1045,15 +1058,19 @@
         cardsEl.appendChild(list);
       }
 
-      function mediaCard({ title, sub, thumbnail, kind, status, onActions }) {
+      function mediaCard({ title, sub, thumbnail, kind, status, caption, onActions }) {
         const card = document.createElement('div');
         card.className = 'mcard' + (thumbnail ? ' has-img' : '');
         let inner = '';
         if (thumbnail) inner += '<div class="bg" style="' + esc('background-image:' + cssUrl(thumbnail)) + '"></div>';
         if (status) inner += '<span class="pill-status">' + esc(status) + '</span>';
-        inner += '<div class="top"><div class="mtitle">' + esc(title) + '</div>' + (sub ? '<div class="msub">' + esc(sub) + '</div>' : '') + '</div>';
+        inner += '<div class="top"><div class="mtitle">' + esc(title) + '</div>' + (sub ? '<div class="msub">' + esc(sub) + '</div>' : '');
+        if (caption && caption.trim()) inner += '<div class="mdesc">' + esc(caption.trim()) + '</div>';
+        inner += '</div>';
         inner += '<div class="actions"></div>';
         card.innerHTML = inner;
+        const mdesc = card.querySelector('.mdesc');
+        if (mdesc) mdesc.addEventListener('click', () => mdesc.classList.toggle('expanded'));
         const actions = card.querySelector('.actions');
         onActions(actions);
         // Portrait posters get the tall letterboxed treatment — detectable
@@ -1081,6 +1098,7 @@
           title: d.title || d.filename,
           sub: (d.duration ? fmtClock(d.duration) + ' · ' : '') + d.extractor,
           thumbnail: d.thumbnail,
+          caption: d.description,
           status,
           onActions(actions) {
             if (isImg) {
@@ -1092,15 +1110,6 @@
           },
         });
         cardsEl.appendChild(card);
-        // The description often carries the real song title/artist for
-        // reposted music — show it collapsed under the card.
-        if (d.description && d.description.trim()) {
-          const det = document.createElement('details');
-          det.className = 'desc';
-          det.innerHTML = '<summary>Description</summary><pre></pre>';
-          det.querySelector('pre').textContent = d.description.trim();
-          cardsEl.appendChild(det);
-        }
       }
 
       function renderProfile(pd) {
@@ -1165,6 +1174,7 @@
               title: it.title || it.filename,
               sub: (it.duration ? fmtClock(it.duration) + ' · ' : '') + (isImg ? 'image' : 'video') + (it.tooLongForShorts ? ' · server only' : ''),
               thumbnail: it.thumbnail,
+              caption: it.description,
               status,
               onActions(actions) {
                 if (isImg) {
@@ -1368,8 +1378,9 @@
         $('shTitle').textContent = mode === 'audio' ? 'Download audio' : mode === 'image' ? 'Download image' : 'Download video';
         $('shSub').textContent = (item && (item.title || item.filename)) || '';
         $('shCreator').value = (item && item.creator) || '';
-        // Title is editable for a single resolved URL (it renames the file).
-        $('shTitleInput').value = (single && single.title) || '';
+        // Title is editable per clip (it renames the saved file).
+        $('shTitleInput').value = (item && item.title) || '';
+        $('shTags').value = ((item && item.tags) || []).join(' ');
         openSheetUi();
       }
 
@@ -1456,8 +1467,11 @@
           musicPrefill();
           musicLookup();
         }
-        // Title is editable only for a single resolved URL.
-        $('shTitleField').classList.toggle('hidden', !sheetSingle || isNavidrome);
+        // Title is editable per clip (single resolve or one profile item).
+        $('shTitleField').classList.toggle('hidden', (!sheetSingle && !sheetItem) || isNavidrome);
+        // Hashtags feed the caption/keywords; navidrome uses genres instead
+        // and the batch endpoints have no per-clip tags.
+        $('shTagsField').classList.toggle('hidden', isNavidrome || sheetAll || sheetMulti);
         $('shVideoOpts').classList.toggle('hidden', !isVideo || isNavidrome);
         $('shAudioField').classList.toggle('hidden', !audioish);
         // Container + extras (thumbnail/subs/sponsorblock) only apply to a
@@ -1566,6 +1580,9 @@
         const desc = ((d && d.description) || '').trim();
         $('shDescText').textContent = desc;
         $('shDescBox').classList.toggle('hidden', !desc);
+        if (d && Array.isArray(d.tags) && d.tags.length && !$('shTags').value.trim()) {
+          $('shTags').value = d.tags.join(' ');
+        }
         if (d && d.music) {
           const m = d.music;
           const setv = (id, v) => { if (v && !$(id).value.trim()) $(id).value = v; };
@@ -1635,9 +1652,13 @@
           const f = $('shFolder').value === '__new__' ? $('shNewFolder').value.trim() : $('shFolder').value;
           if (f) p.set('folder', f);
         }
-        // Editable title (single resolve only) renames the saved file. For
-        // navidrome the song-title tag field plays that role instead.
-        if (sheetSingle && dest !== 'navidrome' && $('shTitleInput').value.trim()) p.set('title', $('shTitleInput').value.trim());
+        // Editable title (per clip) renames the saved file. For navidrome
+        // the song-title tag field plays that role instead.
+        if ((sheetSingle || sheetItem) && dest !== 'navidrome' && $('shTitleInput').value.trim()) p.set('title', $('shTitleInput').value.trim());
+        // Edited hashtag list replaces the clip's tags (caption + keywords).
+        if ((sheetSingle || sheetItem) && dest !== 'navidrome' && !$('shTagsField').classList.contains('hidden')) {
+          p.set('tags', $('shTags').value.trim());
+        }
         if (dest === 'navidrome') {
           const mt = $('shMusicTitle').value.trim();
           if (mt) p.set('title', mt);
