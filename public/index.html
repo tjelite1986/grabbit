@@ -107,6 +107,14 @@
       .mcard .bg {
         position: absolute; inset: 0; background-size: cover; background-position: center;
       }
+      /* Portrait thumbnails (shorts/TikTok-style): tall card showing the whole
+         frame, letterboxed over a blurred cover copy instead of hard-cropping. */
+      .mcard.portrait { aspect-ratio: 3 / 4; max-height: 480px; }
+      .mcard.portrait .bg { background-size: contain; background-repeat: no-repeat; }
+      .mcard .bg-blur {
+        position: absolute; inset: 0; background-size: cover; background-position: center;
+        filter: blur(18px) brightness(.55); transform: scale(1.12);
+      }
       .mcard.has-img::after {
         content: ""; position: absolute; inset: 0;
         background: linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,.05) 30%, rgba(0,0,0,.55) 100%);
@@ -1048,6 +1056,21 @@
         card.innerHTML = inner;
         const actions = card.querySelector('.actions');
         onActions(actions);
+        // Portrait posters get the tall letterboxed treatment — detectable
+        // only from the loaded image's natural dimensions.
+        if (thumbnail) {
+          const probe = new Image();
+          probe.onload = () => {
+            if (probe.naturalHeight > probe.naturalWidth) {
+              card.classList.add('portrait');
+              const blur = document.createElement('div');
+              blur.className = 'bg-blur';
+              blur.style.backgroundImage = cssUrl(thumbnail);
+              card.insertBefore(blur, card.firstChild);
+            }
+          };
+          probe.src = thumbnail;
+        }
         return card;
       }
 
