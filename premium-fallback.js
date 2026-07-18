@@ -84,7 +84,17 @@ function norm(s) {
 
 // Words that mark a different rendition; penalized only when the original
 // title does not carry them itself.
-const VARIANT = /\b(remix|nightcore|live|cover|acoustic|karaoke|instrumental|sped.?up|slowed|8d|reverb|lyrics?|edit)\b/i;
+const VARIANT = /\b(remix|nightcore|live|cover|acoustic|akustisk|karaoke|instrumental|sped.?up|slowed|8d|reverb|lyrics?|edit)\b/i;
+
+// Cheap playability probe — a premium/region-locked counterpart must never be
+// returned as the "free" alternate (the redirect target can itself be locked).
+function isPlayable(id) {
+  return new Promise((resolve) => {
+    const p = spawn(YTDLP, ['--simulate', '--no-warnings', '--no-playlist', '-O', '%(id)s', '--', `https://www.youtube.com/watch?v=${id}`]);
+    p.on('close', (code) => resolve(code === 0));
+    p.on('error', () => resolve(false));
+  });
+}
 
 function flatSearch(query, n = 8) {
   return new Promise((resolve) => {
@@ -103,15 +113,15 @@ function flatSearch(query, n = 8) {
   });
 }
 
-// Search for a free upload of the same track and pick the closest match: the
-// artist's auto-generated "Topic" upload first, then the artist's own channel.
-// The track title must actually appear in the result title.
-async function searchFreeCopy(id, title, author) {
+// Search for free uploads of the same track, ranked closest-match first: the
+// artist's auto-generated "Topic" upload, then the artist's own channel. The
+// track title must actually appear in the result title.
+async function searchFreeCandidates(id, title, author) {
   const artist = author.replace(/\s*-\s*Topic$/i, '').trim();
   const entries = await flatSearch(`${artist} ${title}`);
   const nTitle = norm(title);
   const nArtist = norm(artist);
-  let best = null;
+  const scored = [];
   for (const e of entries) {
     if (!e.id || e.id === id) continue;
     const eTitle = norm(e.title);
@@ -122,22 +132,37 @@ async function searchFreeCopy(id, title, author) {
     if (eChannel === `${nArtist} topic`) score += 3;
     else if (nArtist && eChannel.includes(nArtist)) score += 2;
     if (eTitle === nTitle) score += 1;
-    if (!best || score > best.score) best = { id: e.id, score };
+    if (score > 0) scored.push({ id: e.id, score });
   }
-  return best && best.score > 0 ? best.id : null;
+  // Stable sort keeps search-ranking order within equal scores.
+  return scored.sort((a, b) => b.score - a.score).map((c) => c.id);
 }
 
 // null when no free counterpart could be found; otherwise
-// { url, via: 'ytmusic-redirect' | 'search' }.
+// { url, via: 'ytmusic-redirect' | 'search', origin }. Every candidate is
+// verified playable before being returned — the redirect target (and even
+// search hits) can themselves be premium-locked. origin carries the locked
+// original's clean track/artist (from oEmbed, which still serves locked
+// videos) — the counterpart is often a regular video upload whose title and
+// channel name make poor music tags.
 async function findFreeAlternate(url) {
   const id = youtubeVideoId(url);
   if (!id) return null;
-  const redirect = await ytmRedirectId(id).catch(() => null);
-  if (redirect) return { url: `https://www.youtube.com/watch?v=${redirect}`, via: 'ytmusic-redirect' };
   const meta = await oembed(id).catch(() => null);
+  const origin = meta && meta.title
+    ? { title: meta.title, artist: meta.author.replace(/\s*-\s*Topic$/i, '').trim() }
+    : null;
+  const redirect = await ytmRedirectId(id).catch(() => null);
+  if (redirect && (await isPlayable(redirect))) {
+    return { url: `https://www.youtube.com/watch?v=${redirect}`, via: 'ytmusic-redirect', origin };
+  }
   if (!meta || !meta.title) return null;
-  const found = await searchFreeCopy(id, meta.title, meta.author).catch(() => null);
-  return found ? { url: `https://www.youtube.com/watch?v=${found}`, via: 'search' } : null;
+  const candidates = await searchFreeCandidates(id, meta.title, meta.author).catch(() => []);
+  for (const cand of candidates.slice(0, 3)) {
+    if (cand === redirect) continue;
+    if (await isPlayable(cand)) return { url: `https://www.youtube.com/watch?v=${cand}`, via: 'search', origin };
+  }
+  return null;
 }
 
 module.exports = { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate, youtubeVideoId };

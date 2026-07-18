@@ -121,6 +121,14 @@ async function resolve(url) {
         console.warn(`unavailable-video fallback (${alt.via}): ${url} -> ${alt.url}`);
         info = retry.info;
         url = alt.url;
+        // The counterpart is often a regular video upload with no music
+        // metadata — carry over the locked original's clean artist/track so
+        // tagging (and the genre lookup) get proper values instead of the
+        // channel name and raw video title.
+        if (alt.origin && !info.track && !info.artist) {
+          info.track = alt.origin.title;
+          info.artist = alt.origin.artist;
+        }
       }
     }
   }

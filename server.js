@@ -843,13 +843,11 @@ function splitList(s) {
     .filter(Boolean);
 }
 
-// GET /api/music-meta?q=... -> song metadata candidates from public music
-// databases (iTunes Search + Deezer, both keyless), for the UI to auto-fill
-// the Navidrome tag fields. Candidates: {source, title, artists[], album,
-// date, genres[], cover}.
-app.get('/api/music-meta', async (req, res) => {
-  const q = String(req.query.q || '').trim().slice(0, 200);
-  if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
+// Song metadata candidates from public music databases (iTunes Search +
+// Deezer, both keyless). Candidates: {source, title, artists[], album, date,
+// genres[], cover}. Used by the /api/music-meta endpoint (UI auto-fill) and
+// by the download-time genre auto-fill.
+async function musicMetaCandidates(q) {
   const out = [];
   const seen = new Set();
   const push = (c) => {
@@ -901,8 +899,34 @@ app.get('/api/music-meta', async (req, res) => {
       });
     });
   }
-  res.json({ ok: true, candidates: out.slice(0, 10) });
+  return out.slice(0, 10);
+}
+
+app.get('/api/music-meta', async (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 200);
+  if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
+  res.json({ ok: true, candidates: await musicMetaCandidates(q) });
 });
+
+// Best-effort genre lookup for a track (used when neither the UI nor the
+// source site provided one — which is the norm for YouTube, whose "genre" is
+// a video category and deliberately dropped). Picks the first candidate that
+// plausibly matches artist + title.
+async function lookupGenres(artist, title) {
+  const fold = (s) => String(s || '').toLowerCase().trim();
+  const nArtist = fold(artist);
+  const nTitle = fold(title);
+  const candidates = await musicMetaCandidates(`${artist} ${title}`.trim().slice(0, 200));
+  for (const c of candidates) {
+    if (!c.genres || !c.genres.length) continue;
+    const cArtists = fold((c.artists || []).join(' '));
+    const cTitle = fold(c.title);
+    const artistOk = !nArtist || cArtists.includes(nArtist) || nArtist.includes(fold((c.artists || [])[0]));
+    const titleOk = !nTitle || cTitle.includes(nTitle) || nTitle.includes(cTitle);
+    if (artistOk && titleOk) return c.genres.slice(0, 3);
+  }
+  return [];
+}
 
 // GET /api/playlists -> saved playlists (subscriptions for new-track checks).
 app.get('/api/playlists', (_req, res) => res.json({ ok: true, playlists: readPlaylists() }));
@@ -1624,7 +1648,10 @@ async function produceAudio(job, meta, params, onProgress) {
         const album = (params.release === 'single' ? songTitle : params.album || m.album || songTitle).trim();
         const date = params.date || (m.year ? String(m.year) : null);
         const year = date ? String(date).slice(0, 4) : null;
-        const genres = params.genres ? splitList(params.genres) : m.genre ? [m.genre] : [];
+        let genres = params.genres ? splitList(params.genres) : m.genre ? [m.genre] : [];
+        // No genre from the UI or the site: look one up (iTunes/Deezer) so
+        // the library doesn't end up genre-less — the norm for YouTube rips.
+        if (!genres.length) genres = await lookupGenres(artists[0], songTitle).catch(() => []);
         try {
           await tagAudio(outPath, {
             title: songTitle,
