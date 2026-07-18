@@ -68,22 +68,69 @@ function metaTitle(v, creatorName) {
   return t || v.action_name || String(v.video_id);
 }
 
+// The site's real (displayed) description is a template with dynamic tokens —
+// "Video sent by @{{creator:123}} & #{{tag:63}} ... | Tik.Porn" — resolved
+// against the video's creator/action/tag collections. Token names are
+// space-stripped so multi-word tags render as site-style hashtags
+// (#SmallTits). Unresolvable tokens vanish along with their @/# prefix.
+function renderDescription(text, lookups) {
+  if (!text) return '';
+  return String(text)
+    .replace(/\{\{(\w+):(\d+)\}\}/g, (_, type, id) => {
+      const name = (lookups[type] && lookups[type][String(id)]) || '';
+      return String(name).replace(/[^\p{L}\p{N}]+/gu, '');
+    })
+    .replace(/\s*\|\s*Tik\.?\s*Porn\s*$/i, '')
+    .replace(/[@#](?=\s|$)/g, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+// {creator: {id: name}, action: {...}, tag: {...}, pornstar: {...}} from the
+// video's own collections (works for both the page shape and apiv2 objects).
+function tokenLookups({ creators = [], user = null, action = null, tags = [], pornstars = [] }) {
+  const byId = (list) => {
+    const out = {};
+    for (const e of list || []) if (e && e.id != null && e.name) out[String(e.id)] = e.name;
+    return out;
+  };
+  const creator = byId(creators);
+  if (user && user.id != null && user.name) creator[String(user.id)] = user.name;
+  const act = {};
+  if (action && action.id != null && action.name) act[String(action.id)] = action.name;
+  return { creator, action: act, tag: byId(tags), pornstar: byId(pornstars) };
+}
+
 // Build a job from an apiv2 video object. creatorName is the original profile
 // name (used only to strip it out of the meta title).
 function jobFromApiVideo(v, creator, creatorName) {
   const id = String(v.video_id);
   const keywords = Array.isArray(v.keywords) ? v.keywords : [];
   const tags = keywords.map((k) => '#' + String(k).toLowerCase().replace(/[^a-z0-9]+/g, ''));
-  const metaDesc =
-    v.video_text && v.video_text.meta_description && v.video_text.meta_description.default
-      ? String(v.video_text.meta_description.default.text || '')
+  const vt = v.video_text || {};
+  const template =
+    vt.display_video_title && vt.display_video_title.default
+      ? vt.display_video_title.default.text
       : '';
+  const rendered = renderDescription(
+    template,
+    tokenLookups({
+      creators: Array.isArray(v.creator) ? v.creator : [],
+      user: v.user_account_id != null && v.user_name ? { id: v.user_account_id, name: v.user_name } : null,
+      action: v.action_id != null && v.action_name ? { id: v.action_id, name: v.action_name } : null,
+      tags: v.tags,
+      pornstars: v.pornstars,
+    })
+  );
+  const metaDesc =
+    vt.meta_description && vt.meta_description.default ? String(vt.meta_description.default.text || '') : '';
   return {
     kind: 'direct',
     id,
     creator,
     title: metaTitle(v, creatorName || creator),
-    description: metaDesc,
+    description: rendered || metaDesc,
     tags,
     sourceUrl: `https://tik.porn/video/${id}`,
     thumbnail: v.poster_url || v.medium_thumb || null,
@@ -163,7 +210,17 @@ function jobFromNextVideo(fv) {
     id,
     creator,
     title,
-    description: (fv.metadata && fv.metadata.description) || '',
+    description:
+      renderDescription(
+        fv.texts && fv.texts.video && fv.texts.video.text,
+        tokenLookups({
+          creators: Array.isArray(fv.creator) ? fv.creator : [],
+          user: fv.user,
+          action: fv.action,
+          tags: fv.tags,
+          pornstars: fv.pornstars,
+        })
+      ) || (fv.metadata && fv.metadata.description) || '',
     tags: tagNames.map((k) => '#' + String(k).toLowerCase().replace(/[^a-z0-9]+/g, '')),
     sourceUrl: `https://tik.porn/video/${id}`,
     thumbnail: fv.poster || null,
