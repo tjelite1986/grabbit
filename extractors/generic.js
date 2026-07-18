@@ -7,7 +7,7 @@
 const { spawn } = require('child_process');
 const { cleanTitle } = require('./util');
 const { cookieArgs } = require('../cookies');
-const { isMusicPremiumError, findFreeAlternate } = require('../premium-fallback');
+const { isRecoverableYoutubeError, findFreeAlternate } = require('../premium-fallback');
 
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 
@@ -105,14 +105,14 @@ async function resolveProfile(url) {
 async function resolve(url) {
   const sourceUrl = url;
   let { info, error } = await probe(url);
-  // Premium-locked YouTube Music ID: swap in the free counterpart (when one
+  // Premium/region-locked YouTube ID: swap in the free counterpart (when one
   // exists) so the rest of the pipeline downloads a playable video.
-  if (!info && isMusicPremiumError(error)) {
+  if (!info && isRecoverableYoutubeError(error)) {
     const alt = await findFreeAlternate(url).catch(() => null);
     if (alt) {
       const retry = await probe(alt.url);
       if (retry.info) {
-        console.warn(`music premium fallback (${alt.via}): ${url} -> ${alt.url}`);
+        console.warn(`unavailable-video fallback (${alt.via}): ${url} -> ${alt.url}`);
         info = retry.info;
         url = alt.url;
       }

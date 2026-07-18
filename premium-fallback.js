@@ -12,8 +12,17 @@ const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 // A browser UA is required for music.youtube.com to serve the real watch page.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0';
 
-function isMusicPremiumError(msg) {
-  return /only available to Music Premium members/i.test(String(msg || ''));
+// Errors worth attempting the free-counterpart lookup for. "Video
+// unavailable" also covers genuinely deleted videos — the lookup then finds
+// nothing and the original error stands. findFreeAlternate() only acts on
+// YouTube URLs, so the broad match cannot misfire on other sites.
+function isRecoverableYoutubeError(msg) {
+  const s = String(msg || '');
+  return (
+    /only available to Music Premium members/i.test(s) ||
+    /Video unavailable/i.test(s) ||
+    /not available in your country/i.test(s)
+  );
 }
 
 function youtubeVideoId(url) {
@@ -125,4 +134,4 @@ async function findFreeAlternate(url) {
   return found ? { url: `https://www.youtube.com/watch?v=${found}`, via: 'search' } : null;
 }
 
-module.exports = { isMusicPremiumError, findFreeAlternate, youtubeVideoId };
+module.exports = { isRecoverableYoutubeError, findFreeAlternate, youtubeVideoId };

@@ -15,7 +15,7 @@ const { pipeline } = require('stream/promises');
 const extractors = require('./extractors');
 const { cleanDescription } = require('./extractors/util');
 const { cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
-const { isMusicPremiumError, findFreeAlternate } = require('./premium-fallback');
+const { isRecoverableYoutubeError, findFreeAlternate } = require('./premium-fallback');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -2225,27 +2225,27 @@ function downloadYtdlpAudioRaw(job, destNoExt, afmt, opts = {}) {
   });
 }
 
-// A YouTube Music premium-locked ID sometimes has a free counterpart (same
+// A premium/region-locked YouTube ID sometimes has a free counterpart (same
 // recording, different video ID) — retry the download once against it before
 // surfacing the error. See premium-fallback.js.
-async function withMusicPremiumFallback(job, run) {
+async function withYoutubeFallback(job, run) {
   try {
     return await run(job);
   } catch (e) {
-    if (!isMusicPremiumError(e && e.message)) throw e;
+    if (!isRecoverableYoutubeError(e && e.message)) throw e;
     const alt = await findFreeAlternate(job.url).catch(() => null);
     if (!alt) throw e;
-    console.warn(`music premium fallback (${alt.via}): ${job.url} -> ${alt.url}`);
+    console.warn(`unavailable-video fallback (${alt.via}): ${job.url} -> ${alt.url}`);
     return run({ ...job, url: alt.url });
   }
 }
 
 function downloadYtdlp(job, dest, opts = {}) {
-  return withMusicPremiumFallback(job, (j) => downloadYtdlpRaw(j, dest, opts));
+  return withYoutubeFallback(job, (j) => downloadYtdlpRaw(j, dest, opts));
 }
 
 function downloadYtdlpAudio(job, destNoExt, afmt, opts = {}) {
-  return withMusicPremiumFallback(job, (j) => downloadYtdlpAudioRaw(j, destNoExt, afmt, opts));
+  return withYoutubeFallback(job, (j) => downloadYtdlpAudioRaw(j, destNoExt, afmt, opts));
 }
 
 // Strip the audio track out of an already-downloaded file (for 'direct' jobs
