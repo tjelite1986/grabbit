@@ -7,6 +7,7 @@
 const { spawn } = require('child_process');
 const { cleanTitle } = require('./util');
 const { cookieArgs } = require('../cookies');
+const { isMusicPremiumError, findFreeAlternate } = require('../premium-fallback');
 
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 
@@ -17,6 +18,8 @@ function match() {
 
 function probe(url) {
   // `yt-dlp -j` prints a single JSON line with metadata without downloading.
+  // Resolves { info, error } — error holds yt-dlp's last stderr line so the
+  // caller can react to specific failures (e.g. premium-locked videos).
   return new Promise((resolve) => {
     const ck = cookieArgs(url);
     const args = ['-j', '--no-warnings', '--no-playlist', ...ck.args, '--', url];
@@ -27,16 +30,16 @@ function probe(url) {
     p.stderr.on('data', (d) => (err += d));
     p.on('close', (code) => {
       ck.cleanup();
-      if (code !== 0) return resolve(null);
+      if (code !== 0) return resolve({ info: null, error: err.trim().split('\n').pop() || `yt-dlp exited ${code}` });
       try {
-        resolve(JSON.parse(out.trim().split('\n')[0]));
+        resolve({ info: JSON.parse(out.trim().split('\n')[0]), error: null });
       } catch {
-        resolve(null);
+        resolve({ info: null, error: 'metadata parse failed' });
       }
     });
-    p.on('error', () => {
+    p.on('error', (e) => {
       ck.cleanup();
-      resolve(null);
+      resolve({ info: null, error: e.message });
     });
   });
 }
@@ -100,7 +103,21 @@ async function resolveProfile(url) {
 }
 
 async function resolve(url) {
-  const info = await probe(url);
+  const sourceUrl = url;
+  let { info, error } = await probe(url);
+  // Premium-locked YouTube Music ID: swap in the free counterpart (when one
+  // exists) so the rest of the pipeline downloads a playable video.
+  if (!info && isMusicPremiumError(error)) {
+    const alt = await findFreeAlternate(url).catch(() => null);
+    if (alt) {
+      const retry = await probe(alt.url);
+      if (retry.info) {
+        console.warn(`music premium fallback (${alt.via}): ${url} -> ${alt.url}`);
+        info = retry.info;
+        url = alt.url;
+      }
+    }
+  }
   let filename = 'download.mp4';
   let creator = 'unknown';
   let title;
@@ -134,7 +151,9 @@ async function resolve(url) {
       };
     }
   }
-  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl: url, music };
+  // sourceUrl stays the pasted URL so the downloaded-registry dedupe keys off
+  // what the user actually entered, even when a premium fallback swapped url.
+  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music };
 }
 
 module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };

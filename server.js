@@ -15,6 +15,7 @@ const { pipeline } = require('stream/promises');
 const extractors = require('./extractors');
 const { cleanDescription } = require('./extractors/util');
 const { cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
+const { isMusicPremiumError, findFreeAlternate } = require('./premium-fallback');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -2099,7 +2100,7 @@ function resolveYtdlpOutput(dest) {
 // (server-library only): opts.container (mp4|mkv|webm), opts.embedThumb,
 // opts.embedSubs, opts.sponsorblock, opts.embedMeta let yt-dlp mux/embed the
 // final file itself (the caller then skips the ffmpeg remux).
-function downloadYtdlp(job, dest, opts = {}) {
+function downloadYtdlpRaw(job, dest, opts = {}) {
   return new Promise((resolve, reject) => {
     const q = opts.quality;
     const fmt = q
@@ -2176,7 +2177,7 @@ function downloadYtdlp(job, dest, opts = {}) {
 // Extract audio-only from a yt-dlp site directly (bestaudio -> afmt). Writes to
 // <destNoExt>.<afmt>; resolves with that path. opts.aq = yt-dlp --audio-quality
 // ('0' best, or '<n>K'); opts.embedThumb embeds cover art.
-function downloadYtdlpAudio(job, destNoExt, afmt, opts = {}) {
+function downloadYtdlpAudioRaw(job, destNoExt, afmt, opts = {}) {
   return new Promise((resolve, reject) => {
     // 'best' keeps the source codec, whose extension we can't predict — let
     // yt-dlp report it; for a known format the extension equals afmt.
@@ -2222,6 +2223,29 @@ function downloadYtdlpAudio(job, destNoExt, afmt, opts = {}) {
       reject(new Error(err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
     });
   });
+}
+
+// A YouTube Music premium-locked ID sometimes has a free counterpart (same
+// recording, different video ID) — retry the download once against it before
+// surfacing the error. See premium-fallback.js.
+async function withMusicPremiumFallback(job, run) {
+  try {
+    return await run(job);
+  } catch (e) {
+    if (!isMusicPremiumError(e && e.message)) throw e;
+    const alt = await findFreeAlternate(job.url).catch(() => null);
+    if (!alt) throw e;
+    console.warn(`music premium fallback (${alt.via}): ${job.url} -> ${alt.url}`);
+    return run({ ...job, url: alt.url });
+  }
+}
+
+function downloadYtdlp(job, dest, opts = {}) {
+  return withMusicPremiumFallback(job, (j) => downloadYtdlpRaw(j, dest, opts));
+}
+
+function downloadYtdlpAudio(job, destNoExt, afmt, opts = {}) {
+  return withMusicPremiumFallback(job, (j) => downloadYtdlpAudioRaw(j, destNoExt, afmt, opts));
 }
 
 // Strip the audio track out of an already-downloaded file (for 'direct' jobs
