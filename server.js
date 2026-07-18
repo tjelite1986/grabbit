@@ -858,7 +858,8 @@ async function musicMetaCandidates(q) {
     }
   };
   const jfetch = async (u) => {
-    const r = await fetch(u, { headers: { 'user-agent': 'grabbit/1.0' }, signal: AbortSignal.timeout(8000) });
+    // accept-language pins Deezer's localized genre names to English.
+    const r = await fetch(u, { headers: { 'user-agent': 'grabbit/1.0', 'accept-language': 'en' }, signal: AbortSignal.timeout(8000) });
     if (!r.ok) throw new Error(`upstream ${r.status}`);
     return r.json();
   };
@@ -908,6 +909,38 @@ app.get('/api/music-meta', async (req, res) => {
   res.json({ ok: true, candidates: await musicMetaCandidates(q) });
 });
 
+// The music library keeps every genre in English with one spelling: iTunes
+// and Deezer disagree on names ("Hip-Hop/Rap" vs "Rap/Hip Hop") and Deezer
+// sometimes localizes them (Swedish seen in the wild).
+const GENRE_NORMALIZE = {
+  'hårdrock': 'Hard Rock',
+  'alternativmusik': 'Alternative',
+  'internationell pop': 'Pop',
+  'latinomusik': 'Latin',
+  'klassisk': 'Classical',
+  'filmmusik': 'Soundtrack',
+  'film/videospel': 'Soundtrack',
+  'rock och roll/rockabilly': 'Rockabilly',
+  'dancehall/ragga': 'Dancehall',
+  'modern dancehall': 'Dancehall',
+  'hip-hop/rap': 'Hip-Hop',
+  'rap/hip hop': 'Hip-Hop',
+  'hiphop': 'Hip-Hop',
+  'rap': 'Hip-Hop',
+  'indie rock': 'Indie Rock',
+  'indie rock/rock pop': 'Indie Rock',
+  'electronica': 'Electronic',
+};
+
+function normalizeGenres(genres) {
+  const out = [];
+  for (const g of genres || []) {
+    const n = GENRE_NORMALIZE[String(g).trim().toLowerCase()] || String(g).trim();
+    if (n && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
 // Best-effort genre lookup for a track (used when neither the UI nor the
 // source site provided one — which is the norm for YouTube, whose "genre" is
 // a video category and deliberately dropped). Picks the first candidate that
@@ -923,7 +956,7 @@ async function lookupGenres(artist, title) {
     const cTitle = fold(c.title);
     const artistOk = !nArtist || cArtists.includes(nArtist) || nArtist.includes(fold((c.artists || [])[0]));
     const titleOk = !nTitle || cTitle.includes(nTitle) || nTitle.includes(cTitle);
-    if (artistOk && titleOk) return c.genres.slice(0, 3);
+    if (artistOk && titleOk) return normalizeGenres(c.genres).slice(0, 3);
   }
   return [];
 }
