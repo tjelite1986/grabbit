@@ -26,12 +26,20 @@ function match(url) {
   }
 }
 
-// Model pages look like /<slug>.<entropy> (e.g. /lillie-lucas.xuy); videos are
-// /video/<id>. Treat the dotted-slug form as a profile.
+// Model pages used to look like /<slug>.<entropy> (e.g. /lillie-lucas.xuy);
+// a site update made user profiles plain slugs (/lisacollinssw). Videos are
+// /video/<id>. Treat any other single-segment path as a potential profile —
+// resolveProfile fails cleanly when the page carries no profile.
+const NON_PROFILE = new Set([
+  'video', 'action', 'tag', 'category', 'categories', 'search', 'live',
+  'login', 'signup', 'register', 'terms', 'privacy', 'dmca', 'contact', 'faq',
+]);
+
 function isProfile(url) {
   try {
     const p = new URL(url).pathname;
-    return /^\/[A-Za-z0-9-]+\.[A-Za-z0-9]+\/?$/.test(p) && !p.startsWith('/video/');
+    const m = p.match(/^\/([A-Za-z0-9_-]+)(\.[A-Za-z0-9]+)?\/?$/);
+    return !!m && !NON_PROFILE.has(m[1].toLowerCase());
   } catch {
     return false;
   }
@@ -120,12 +128,62 @@ async function resolveProfile(url) {
   return { creator, items };
 }
 
+// Build a job from the post-2026-07 __NEXT_DATA__ video shape
+// (pageProps.firstVideo): plain `id`, signed `downloadLink` (full quality,
+// `source.src` is the lower-res player stream), tag objects, and SEO titles
+// under texts.profile.<user|pornstar|producer>.default.text.
+function jobFromNextVideo(fv) {
+  const id = String(fv.id);
+  const creator =
+    (fv.user && fv.user.name) ||
+    (Array.isArray(fv.creator) && fv.creator[0] && fv.creator[0].name) ||
+    (Array.isArray(fv.pornstars) && fv.pornstars[0] && fv.pornstars[0].name) ||
+    'tikporn';
+  const tp = (fv.texts && fv.texts.profile) || {};
+  let title = '';
+  for (const k of ['pornstar', 'user', 'producer']) {
+    if (tp[k] && tp[k].default && tp[k].default.text) {
+      title = tp[k].default.text;
+      break;
+    }
+  }
+  title = String(title).replace(/\s*\|\s*Tik\.?\s*Porn\s*$/i, '').replace(/\s+/g, ' ').trim()
+    || (fv.action && fv.action.name) || id;
+  const tagNames = Array.isArray(fv.tags) ? fv.tags.map((t) => t && t.name).filter(Boolean) : [];
+  const mp4Source =
+    fv.downloadLink ||
+    (fv.source && fv.source.src) ||
+    (Array.isArray(fv.sources) && (fv.sources.find((s) => s && s.type === 'video/mp4') || {}).src);
+  return {
+    kind: 'direct',
+    id,
+    creator,
+    title,
+    description: '',
+    tags: tagNames.map((k) => '#' + String(k).toLowerCase().replace(/[^a-z0-9]+/g, '')),
+    sourceUrl: `https://tik.porn/video/${id}`,
+    thumbnail: fv.poster || null,
+    duration: Number.isFinite(fv.duration) ? fv.duration : null,
+    filename: `${creator}-${id}.mp4`,
+    downloadUrl: mp4Source,
+    headers: { 'User-Agent': UA, Referer: REFERER },
+  };
+}
+
 // Single video page /video/<id>: find the clip in the page's __NEXT_DATA__.
 async function resolve(url) {
   const res = await fetchT(url, { headers: { 'User-Agent': UA } });
   if (!res.ok) throw new Error(`page fetch failed: HTTP ${res.status}`);
   const html = await res.text();
   const wantId = (new URL(url).pathname.match(/\/video\/(\d+)/) || [])[1];
+
+  // Current site: the clip sits in pageProps.firstVideo with the new field
+  // names (id/downloadLink instead of video_id/download_url).
+  const data = nextData(html);
+  const fv = data && data.props && data.props.pageProps && data.props.pageProps.firstVideo;
+  if (fv && fv.id != null && (!wantId || String(fv.id) === wantId) && (fv.downloadLink || fv.source || fv.sources)) {
+    return jobFromNextVideo(fv);
+  }
 
   // Walk __NEXT_DATA__ for a video object carrying a downloadable URL.
   let found = null;
@@ -138,7 +196,7 @@ async function resolve(url) {
       return;
     }
     for (const k of Object.keys(o)) walk(o[k]);
-  })(nextData(html));
+  })(data);
 
   if (!found) throw new Error('could not find video on page');
   // Normalise to the apiv2 shape jobFromApiVideo expects.
