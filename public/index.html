@@ -44,6 +44,12 @@
         overflow-x: hidden;
       }
       svg { display: block; }
+      .installbar { display: flex; align-items: center; gap: 12px; margin: 12px 0; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+      .installbar img { width: 40px; height: 40px; border-radius: 10px; }
+      .installbar .t { flex: 1; font-weight: 600; min-width: 0; }
+      .installbar .t small { display: block; color: var(--muted); font-weight: 400; }
+      .installbar .go { padding: 8px 16px; border-radius: 10px; background: var(--primary); color: var(--on-primary); font-weight: 600; flex: none; }
+      .installbar .dismiss { color: var(--muted); flex: none; padding: 4px; }
       .ic { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
       .ic.fill { fill: currentColor; stroke: none; }
       button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
@@ -400,6 +406,16 @@
             <svg class="ic" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M13 5l7 7-7 7" /></svg>
           </button>
         </form>
+
+        <!-- Shown when the browser reports the app is installable. -->
+        <div class="installbar hidden" id="installBar">
+          <img src="/icon-192.png" alt="" />
+          <div class="t">Install grabbit<small>Get the app on your home screen</small></div>
+          <button type="button" class="go" id="installGo">Install</button>
+          <button type="button" class="dismiss" id="installDismiss" title="Dismiss">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
 
         <div id="homeError" class="empty hidden"></div>
 
@@ -2280,6 +2296,35 @@
             .catch(() => urlInput.focus());
         }
       })();
+
+      // Install banner: Chrome only shows its own install prompt after opaque
+      // engagement heuristics; capturing beforeinstallprompt lets us offer the
+      // install immediately instead. Hidden once installed or dismissed.
+      const installBar = $('installBar');
+      let installEvt = null;
+      let installDismissed = false;
+      try { installDismissed = localStorage.getItem('grabbit.installDismissed') === '1'; } catch {}
+      const isStandalone = matchMedia('(display-mode: standalone)').matches || !!navigator.standalone;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        installEvt = e;
+        if (!installDismissed && !isStandalone) installBar.classList.remove('hidden');
+      });
+      $('installGo').addEventListener('click', async () => {
+        if (!installEvt) return;
+        installEvt.prompt();
+        await installEvt.userChoice.catch(() => {});
+        installEvt = null;
+        installBar.classList.add('hidden');
+      });
+      $('installDismiss').addEventListener('click', () => {
+        installBar.classList.add('hidden');
+        try { localStorage.setItem('grabbit.installDismissed', '1'); } catch {}
+      });
+      window.addEventListener('appinstalled', () => {
+        installBar.classList.add('hidden');
+        toast('App installed', 'good');
+      });
 
       // Service worker + push-notification toggle (More tab). The toggle only
       // shows when the server has VAPID keys and the browser supports push.
