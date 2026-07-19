@@ -4,6 +4,7 @@
 // folder (with a .md caption sidecar) and stream the result to the browser.
 
 const express = require('express');
+const webpush = require('web-push');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -385,6 +386,7 @@ function writePlaylists(list) {
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 
 // --- Auth -----------------------------------------------------------------
 // A single shared password gates the public web UI. Only EXTERNAL traffic (via
@@ -475,13 +477,17 @@ app.post('/logout', (_req, res) => {
   res.redirect('/login');
 });
 
-// Icons are needed by the login page and browser tabs before auth.
+// Icons are needed by the login page and browser tabs before auth. The PWA
+// manifest and service worker must also stay reachable without a session,
+// otherwise install and SW updates break when the auth cookie expires.
 const PUBLIC_ASSETS = new Set([
   '/favicon.svg',
   '/logo.svg',
   '/apple-touch-icon.png',
   '/icon-192.png',
   '/icon-512.png',
+  '/manifest.webmanifest',
+  '/sw.js',
 ]);
 
 // Gate everything below for external, unauthenticated requests. API calls get a
@@ -496,6 +502,79 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+// PWA share-target entry: Android's share sheet opens /share?url=…&text=…; the
+// SPA reads the query client-side and prefills the grab box.
+app.get('/share', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+// --- Web Push ---------------------------------------------------------------
+// Job-finished notifications to installed PWAs. Enabled only when VAPID keys
+// are set (generate once with `npx web-push generate-vapid-keys`). Routes sit
+// below the auth gate, so only signed-in clients can (un)subscribe.
+const VAPID_PUBLIC = process.env.GRABBIT_VAPID_PUBLIC || '';
+const VAPID_PRIVATE = process.env.GRABBIT_VAPID_PRIVATE || '';
+const VAPID_SUBJECT = process.env.GRABBIT_VAPID_SUBJECT || 'mailto:admin@mecloud.win';
+const pushEnabled = !!(VAPID_PUBLIC && VAPID_PRIVATE);
+if (pushEnabled) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE);
+
+const PUSH_SUBS_FILE = path.join(DATA_DIR, 'push-subscriptions.json');
+function loadPushSubs() {
+  try {
+    const list = JSON.parse(fs.readFileSync(PUSH_SUBS_FILE, 'utf8'));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+function savePushSubs() {
+  try {
+    fs.writeFileSync(PUSH_SUBS_FILE, JSON.stringify(pushSubs));
+  } catch { /* non-fatal; resubscribe survives restarts anyway */ }
+}
+let pushSubs = loadPushSubs();
+
+app.get('/api/push/key', (_req, res) => res.json({ ok: pushEnabled, key: VAPID_PUBLIC || null }));
+
+app.post('/api/push/subscribe', (req, res) => {
+  if (!pushEnabled) return res.status(400).json({ ok: false, error: 'Push is not configured' });
+  const sub = req.body && req.body.subscription;
+  if (!sub || typeof sub.endpoint !== 'string' || !sub.keys) {
+    return res.status(400).json({ ok: false, error: 'Invalid subscription' });
+  }
+  pushSubs = pushSubs.filter((s) => s.endpoint !== sub.endpoint).concat([sub]);
+  savePushSubs();
+  res.json({ ok: true });
+});
+
+app.post('/api/push/unsubscribe', (req, res) => {
+  const endpoint = req.body && req.body.endpoint;
+  pushSubs = pushSubs.filter((s) => s.endpoint !== endpoint);
+  savePushSubs();
+  res.json({ ok: true });
+});
+
+function sendPush(payload) {
+  if (!pushEnabled || !pushSubs.length) return;
+  const body = JSON.stringify(payload);
+  for (const sub of [...pushSubs]) {
+    webpush.sendNotification(sub, body, { TTL: 3600 }).catch((e) => {
+      // Drop expired/revoked subscriptions.
+      if (e.statusCode === 404 || e.statusCode === 410) {
+        pushSubs = pushSubs.filter((s) => s.endpoint !== sub.endpoint);
+        savePushSubs();
+      }
+    });
+  }
+}
+
+function notifyJobFinished(j) {
+  const name = j.title || j.filename || j.sourceUrl || 'download';
+  sendPush(
+    j.status === 'done'
+      ? { title: 'Download complete', body: name, tag: 'job-' + j.id, url: '/?tab=queue' }
+      : { title: 'Download failed', body: name + (j.error ? ' — ' + j.error : ''), tag: 'job-' + j.id, url: '/?tab=queue' }
+  );
+}
 
 function validUrl(u) {
   try {
@@ -1439,8 +1518,10 @@ function emitJob(j) {
   }
 }
 function setJob(j, patch) {
+  const prev = j.status;
   Object.assign(j, patch);
   emitJob(j);
+  if (j.status !== prev && (j.status === 'done' || j.status === 'error')) notifyJobFinished(j);
 }
 function newJob(fields) {
   const id = `${Date.now()}-${jobSeq++}`;

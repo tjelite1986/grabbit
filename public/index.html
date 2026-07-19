@@ -8,6 +8,7 @@
     <title>grabbit</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <style>
       :root {
         --bg: #0b0b0e;
@@ -553,6 +554,10 @@
           <div class="setrow">
             <div class="label"><div class="t">Convert to web format</div><div class="d">Save a web-optimized .web.mp4 (skips the transcoder)</div></div>
             <label class="switch"><input type="checkbox" id="setWeb" /><span class="track"></span></label>
+          </div>
+          <div class="setrow hidden" id="setPushRow">
+            <div class="label"><div class="t">Notify when done</div><div class="d">Push notification when a download finishes</div></div>
+            <label class="switch"><input type="checkbox" id="setPush" /><span class="track"></span></label>
           </div>
         </div>
 
@@ -1888,6 +1893,7 @@
           }
           if (j.status === 'done') { loadHistory(); if (j.dest === 'server') loadFolders(); }
           if (currentTab === 'queue') renderQueue();
+          updateBadge();
         };
         // EventSource reconnects automatically on error.
       }
@@ -2235,6 +2241,113 @@
       loadTemplates();
       connectJobStream(); // pick up any in-progress jobs (incl. across reloads)
       renderQueue();
+
+      // ----------------------------------------------------------------- PWA
+      // App-icon badge mirrors the number of running/queued jobs.
+      function updateBadge() {
+        if (!('setAppBadge' in navigator)) return;
+        const n = [...jobMap.values()].filter((j) => RUNNING.has(j.status)).length;
+        (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+      }
+
+      // Entry points: share-target (/share?url=…&text=…) and app-shortcut deep
+      // links (?tab=…, ?action=paste). Handled once, then the URL is cleaned.
+      (function handleEntryParams() {
+        const q = new URLSearchParams(location.search);
+        const isShare = location.pathname === '/share';
+        const tab = q.get('tab');
+        const action = q.get('action');
+        if (!isShare && !tab && !action) return;
+        history.replaceState(null, '', '/');
+        const firstUrl = (s) => (String(s || '').match(/https?:\/\/[^\s"'<>]+/) || [])[0] || '';
+        if (isShare) {
+          const u = firstUrl([q.get('url'), q.get('text'), q.get('title')].filter(Boolean).join(' '));
+          urlInput.value = u || String(q.get('text') || q.get('title') || '').trim();
+          if (urlInput.value) form.requestSubmit();
+          else urlInput.focus();
+          return;
+        }
+        if (['home', 'downloads', 'queue', 'more'].includes(tab)) showTab(tab);
+        if (action === 'paste') {
+          (navigator.clipboard && navigator.clipboard.readText
+            ? navigator.clipboard.readText()
+            : Promise.reject(new Error('unavailable')))
+            .then((t) => {
+              const u = firstUrl(t);
+              if (u) { urlInput.value = u; form.requestSubmit(); }
+              else urlInput.focus();
+            })
+            .catch(() => urlInput.focus());
+        }
+      })();
+
+      // Service worker + push-notification toggle (More tab). The toggle only
+      // shows when the server has VAPID keys and the browser supports push.
+      let swReg = null;
+      let pushKey = '';
+      const pushToggle = $('setPush');
+
+      function vapidKeyBytes(s) {
+        const pad = '='.repeat((4 - (s.length % 4)) % 4);
+        const b = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+        return Uint8Array.from(b, (c) => c.charCodeAt(0));
+      }
+
+      async function initPushToggle() {
+        if (!swReg || !('PushManager' in window) || !('Notification' in window)) return;
+        try {
+          const d = await fetchJson('/api/push/key');
+          if (!d.ok || !d.key) return;
+          pushKey = d.key;
+        } catch { return; }
+        $('setPushRow').classList.remove('hidden');
+        const sub = await swReg.pushManager.getSubscription().catch(() => null);
+        pushToggle.checked = !!sub && Notification.permission === 'granted';
+      }
+
+      pushToggle.addEventListener('change', async () => {
+        pushToggle.disabled = true;
+        try {
+          if (pushToggle.checked) {
+            const perm = await Notification.requestPermission();
+            if (perm !== 'granted') throw new Error('Notifications are blocked in the browser');
+            const sub = await swReg.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: vapidKeyBytes(pushKey),
+            });
+            const d = await fetchJson('/api/push/subscribe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ subscription: sub.toJSON() }),
+            });
+            if (!d.ok) throw new Error(d.error || 'Could not enable notifications');
+            toast('Notifications on', 'good');
+          } else {
+            const sub = await swReg.pushManager.getSubscription();
+            if (sub) {
+              await fetchJson('/api/push/unsubscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: sub.endpoint }),
+              }).catch(() => {});
+              await sub.unsubscribe();
+            }
+            toast('Notifications off', 'good');
+          }
+        } catch (err) {
+          pushToggle.checked = !pushToggle.checked;
+          toast(err.message, 'bad');
+        } finally {
+          pushToggle.disabled = false;
+        }
+      });
+
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker
+          .register('/sw.js')
+          .then((reg) => { swReg = reg; return initPushToggle(); })
+          .catch(() => {});
+      }
     </script>
   </body>
 </html>
