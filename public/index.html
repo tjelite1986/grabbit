@@ -50,6 +50,18 @@
       .installbar .t small { display: block; color: var(--muted); font-weight: 400; }
       .installbar .go { padding: 8px 16px; border-radius: 10px; background: var(--primary); color: var(--on-primary); font-weight: 600; flex: none; }
       .installbar .dismiss { color: var(--muted); flex: none; padding: 4px; }
+      .rulerow { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); cursor: pointer; }
+      .rulerow:first-child { border-top: 0; }
+      .r-info { flex: 1; min-width: 0; }
+      .r-name { font-weight: 600; font-size: 14px; }
+      .r-auto { font-size: 11px; color: var(--good); border: 1px solid var(--good-dim); border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px; }
+      .r-sum { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .r-move { color: var(--muted); padding: 4px 8px; font-size: 16px; flex: none; }
+      .rule-edit { padding: 4px 16px 14px; border-top: 1px solid var(--line); background: var(--surface-2); }
+      .rule-edit h4 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; color: var(--faint); }
+      .rule-edit .rgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+      .rule-edit .rbtns { display: flex; gap: 10px; margin-top: 14px; }
+      .rule-edit .rbtns button { padding: 10px 16px; border-radius: 11px; font-weight: 600; font-size: 14px; }
       .ic { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
       .ic.fill { fill: currentColor; stroke: none; }
       button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
@@ -578,6 +590,19 @@
         </div>
 
         <div class="section">
+          <h2>Rules</h2>
+          <p style="margin:0;padding:0 16px 10px;color:var(--muted);font-size:13px">
+            Auto-apply settings when a link matches. The top rule wins. Matching is
+            case-insensitive; wrap a pattern in /slashes/ for regex. An automatic rule
+            starts shared links without opening the options sheet.
+          </p>
+          <div id="rulesList"></div>
+          <div style="padding:4px 16px 16px">
+            <button type="button" id="ruleAdd" style="padding:11px 18px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);color:var(--text);font-weight:600;font-size:14px">+ New rule</button>
+          </div>
+        </div>
+
+        <div class="section">
           <h2>Cookies for private content</h2>
           <div class="sites" id="cookiesList"></div>
           <div style="padding:4px 16px 16px">
@@ -1027,8 +1052,14 @@
         homeError.classList.remove('hidden');
       }
 
+      // Set by handleEntryParams when a share-target / paste-shortcut entry
+      // auto-submits: lets an auto rule start the job without the sheet.
+      let entryAuto = false;
+
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
+        const wasAuto = entryAuto;
+        entryAuto = false;
         const raw = urlInput.value.trim();
         if (!raw) return;
         homeError.classList.add('hidden');
@@ -1056,6 +1087,15 @@
           if (!d.ok) throw new Error(d.error || 'Could not resolve link');
           singleData = d;
           renderSingle(d);
+          // A fully-automatic rule on a shared link: fill the sheet from the
+          // rule and confirm it programmatically — zero-decision download.
+          if (wasAuto && d.rule && d.rule.auto) {
+            const mode = d.rule.apply && (d.rule.apply.audio || d.rule.apply.dest === 'navidrome')
+              ? 'audio' : d.mediaType === 'image' ? 'image' : 'video';
+            openSheet(mode, d);
+            $('shConfirm').click();
+            toast('Rule "' + d.rule.name + '" started this download', 'good');
+          }
         } catch (err) {
           showHomeError(err.message);
         } finally {
@@ -1423,6 +1463,42 @@
         $('shAt').value = '';
       }
 
+      // The rule that applies to what the sheet is about to download, if any.
+      function activeSheetRule() {
+        if (sheetMulti) return null;
+        if (sheetSingle) return sheetSingle.rule || null;
+        return (profileData && profileData.rule) || null;
+      }
+
+      // Overlay a matched rule's settings on the sheet defaults. Only fields the
+      // rule explicitly sets are touched; syncSheet's constraints still win.
+      function applyRuleToSheet(rule) {
+        if (!rule || !rule.apply) return;
+        const a = rule.apply;
+        if ('dest' in a) segSet($('shDest'), a.dest);
+        if ('channel' in a) segSet($('shChannel'), a.channel);
+        if (a.folder) {
+          if (folderList.includes(a.folder)) { $('shFolder').value = a.folder; }
+          else { $('shFolder').value = '__new__'; $('shNewFolder').value = a.folder; }
+        }
+        if ('quality' in a) $('shQuality').value = a.quality === 'best' ? '' : a.quality;
+        if ('afmt' in a) $('shAfmt').value = a.afmt;
+        if ('aq' in a) $('shAq').value = a.aq === 'best' ? '' : a.aq;
+        if ('container' in a) $('shContainer').value = a.container;
+        if (a.web) $('shWeb').checked = true;
+        if ('sponsor' in a) $('shSponsor').value = a.sponsor;
+        if ('device' in a) $('shDevice').checked = a.device === '1';
+        if (a.creatorOverride) $('shCreator').value = a.creatorOverride;
+      }
+
+      function applySheetRuleUi() {
+        const rl = activeSheetRule();
+        if (!rl) return;
+        applyRuleToSheet(rl);
+        const sub = $('shSub');
+        sub.textContent = (sub.textContent ? sub.textContent + ' · ' : '') + 'Rule: ' + rl.name;
+      }
+
       // Single-resolve sheet (mode = audio|video|image, single = resolve data).
       function openSheet(mode, single, profileItem) {
         sheetMode = mode;
@@ -1438,6 +1514,7 @@
         // Title is editable per clip (it renames the saved file).
         $('shTitleInput').value = (item && item.title) || '';
         $('shTags').value = ((item && item.tags) || []).join(' ');
+        applySheetRuleUi();
         openSheetUi();
       }
 
@@ -1450,6 +1527,7 @@
         $('shSub').textContent = '@' + (profileData.creator || '?') + ' — ' + profileItems.length + ' items';
         $('shCreator').value = profileData.creator || '';
         $('shTitleInput').value = '';
+        applySheetRuleUi();
         openSheetUi();
       }
 
@@ -2265,6 +2343,229 @@
         } catch (err) { toast(err.message, 'bad'); }
       });
 
+      // ----------------------------------------------------------------- rules
+      // Deterministic if-this-then-that download rules, managed in More. The
+      // whole ordered list is saved at once; the server enum-validates it.
+      let rules = [];
+      let ruleEditIdx = -1; // rules.length while composing a brand-new rule
+
+      async function loadRules() {
+        try {
+          const d = await fetchJson('/api/rules');
+          if (d.ok) { rules = d.rules || []; renderRules(); }
+        } catch { /* the section just stays empty */ }
+      }
+
+      async function persistRules() {
+        try {
+          const d = await fetchJson('/api/rules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rules }),
+          });
+          if (!d.ok) throw new Error(d.error || 'Could not save rules');
+          rules = d.rules;
+          return true;
+        } catch (err) {
+          toast(err.message, 'bad');
+          return false;
+        }
+      }
+
+      const RULE_DEST_NAMES = { '': 'Elite shorts', server: 'Server library', navidrome: 'Navidrome' };
+      function ruleSummary(r) {
+        const m = r.match || {}, a = r.apply || {};
+        const when = [
+          m.site && 'site ' + m.site,
+          m.creator && 'creator ' + m.creator,
+          m.title && 'title ' + m.title,
+          m.mediaType,
+          m.minDuration && '≥' + m.minDuration + 's',
+          m.maxDuration && '≤' + m.maxDuration + 's',
+        ].filter(Boolean).join(', ') || 'everything';
+        const then = [
+          'dest' in a && RULE_DEST_NAMES[a.dest],
+          a.channel,
+          a.folder && '/' + a.folder,
+          a.audio && 'audio',
+          a.afmt,
+          a.quality,
+          a.web && 'web format',
+          a.sponsor && 'sponsor ' + a.sponsor,
+          'device' in a && (a.device === '1' ? 'to device' : 'no device'),
+          a.creatorOverride && '→ ' + a.creatorOverride,
+        ].filter(Boolean).join(', ') || 'defaults';
+        return when + ' → ' + then;
+      }
+
+      function ruleOpt(value, label, current) {
+        return '<option value="' + esc(value) + '"' + (String(current) === String(value) ? ' selected' : '') + '>' + esc(label) + '</option>';
+      }
+
+      function ruleEditorHtml(r) {
+        const m = r.match || {}, a = r.apply || {};
+        const dest = 'dest' in a ? a.dest : '-';
+        const channel = 'channel' in a ? a.channel : '-';
+        const device = 'device' in a ? a.device : '';
+        return '<div class="rule-edit">' +
+          '<div class="field"><label>Rule name</label><input id="ruName" type="text" autocomplete="off" value="' + esc(r.name || '') + '" /></div>' +
+          '<h4>When</h4>' +
+          '<div class="rgrid">' +
+          '<div class="field"><label>Site</label><input id="ruSite" type="text" autocomplete="off" placeholder="youtube" value="' + esc(m.site || '') + '" /></div>' +
+          '<div class="field"><label>Creator</label><input id="ruCreator" type="text" autocomplete="off" value="' + esc(m.creator || '') + '" /></div>' +
+          '</div>' +
+          '<div class="field"><label>Title contains</label><input id="ruTitle" type="text" autocomplete="off" placeholder="text or /regex/" value="' + esc(m.title || '') + '" /></div>' +
+          '<div class="rgrid">' +
+          '<div class="field"><label>Type</label><select id="ruType">' +
+            ruleOpt('', 'Any', m.mediaType || '') + ruleOpt('video', 'Video', m.mediaType || '') + ruleOpt('image', 'Image', m.mediaType || '') +
+          '</select></div>' +
+          '<div class="field"><label>Duration (s, min–max)</label><div style="display:flex;gap:8px">' +
+            '<input id="ruMin" type="number" min="1" placeholder="min" value="' + (m.minDuration || '') + '" style="width:50%" />' +
+            '<input id="ruMax" type="number" min="1" placeholder="max" value="' + (m.maxDuration || '') + '" style="width:50%" />' +
+          '</div></div>' +
+          '</div>' +
+          '<h4>Then</h4>' +
+          '<div class="rgrid">' +
+          '<div class="field"><label>Save to</label><select id="ruDest">' +
+            ruleOpt('-', "Don't change", dest) + ruleOpt('', 'Elite-v2 shorts', dest) + ruleOpt('server', 'Server library', dest) + ruleOpt('navidrome', 'Navidrome (music)', dest) +
+          '</select></div>' +
+          '<div class="field"><label>Channel</label><select id="ruChannel">' +
+            ruleOpt('-', "Don't change", channel) + ruleOpt('main', 'main', channel) + ruleOpt('18plus', '18+', channel) +
+          '</select></div>' +
+          '<div class="field"><label>Library folder</label><input id="ruFolder" type="text" autocomplete="off" placeholder="videos" value="' + esc(a.folder || '') + '" /></div>' +
+          '<div class="field"><label>Quality</label><select id="ruQuality">' +
+            ruleOpt('', "Don't change", a.quality || '') + ruleOpt('best', 'Best', a.quality || '') +
+            ['2160', '1440', '1080', '720', '480', '360'].map((q) => ruleOpt(q, q + 'p', a.quality || '')).join('') +
+          '</select></div>' +
+          '<div class="field"><label>Audio format</label><select id="ruAfmt">' +
+            ruleOpt('', "Don't change", a.afmt || '') +
+            ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'].map((f) => ruleOpt(f, f, a.afmt || '')).join('') +
+          '</select></div>' +
+          '<div class="field"><label>Audio bitrate</label><select id="ruAq">' +
+            ruleOpt('', "Don't change", a.aq || '') + ruleOpt('best', 'Best', a.aq || '') +
+            ['320', '256', '192', '160', '128', '96'].map((b) => ruleOpt(b, b + 'k', a.aq || '')).join('') +
+          '</select></div>' +
+          '<div class="field"><label>Video container</label><select id="ruContainer">' +
+            ruleOpt('', "Don't change", a.container || '') +
+            ['mp4', 'mkv', 'webm'].map((c) => ruleOpt(c, c, a.container || '')).join('') +
+          '</select></div>' +
+          '<div class="field"><label>SponsorBlock</label><select id="ruSponsor">' +
+            ruleOpt('', "Don't change", a.sponsor || '') + ruleOpt('remove', 'Remove segments', a.sponsor || '') + ruleOpt('mark', 'Mark segments', a.sponsor || '') +
+          '</select></div>' +
+          '<div class="field"><label>Save to this device</label><select id="ruDevice">' +
+            ruleOpt('', "Don't change", device) + ruleOpt('1', 'On', device) + ruleOpt('0', 'Off', device) +
+          '</select></div>' +
+          '<div class="field"><label>Save under profile name</label><input id="ruCreatorO" type="text" autocomplete="off" value="' + esc(a.creatorOverride || '') + '" /></div>' +
+          '</div>' +
+          '<div class="toggle-row"><div class="label"><div class="t">Extract audio only</div><div class="d">Save the audio track instead of the video</div></div>' +
+            '<label class="switch"><input type="checkbox" id="ruAudio"' + (a.audio ? ' checked' : '') + ' /><span class="track"></span></label></div>' +
+          '<div class="toggle-row"><div class="label"><div class="t">Fully automatic</div><div class="d">Shared links start downloading without the sheet</div></div>' +
+            '<label class="switch"><input type="checkbox" id="ruAuto"' + (r.auto ? ' checked' : '') + ' /><span class="track"></span></label></div>' +
+          '<div class="rbtns">' +
+          '<button type="button" id="ruSave" style="background:var(--primary);color:var(--on-primary)">Save rule</button>' +
+          '<button type="button" id="ruCancel" style="background:var(--surface-3);color:var(--text)">Cancel</button>' +
+          (ruleEditIdx < rules.length ? '<button type="button" id="ruDelete" style="background:var(--bad-dim);color:var(--bad);margin-left:auto">Delete</button>' : '') +
+          '</div>' +
+          '</div>';
+      }
+
+      function collectRule(base) {
+        const r = { id: base.id || '', name: $('ruName').value.trim() || 'Rule', enabled: base.enabled !== false, auto: $('ruAuto').checked, match: {}, apply: {} };
+        const m = r.match;
+        if ($('ruSite').value.trim()) m.site = $('ruSite').value.trim();
+        if ($('ruCreator').value.trim()) m.creator = $('ruCreator').value.trim();
+        if ($('ruTitle').value.trim()) m.title = $('ruTitle').value.trim();
+        if ($('ruType').value) m.mediaType = $('ruType').value;
+        if (Number($('ruMin').value) > 0) m.minDuration = Number($('ruMin').value);
+        if (Number($('ruMax').value) > 0) m.maxDuration = Number($('ruMax').value);
+        const a = r.apply;
+        if ($('ruDest').value !== '-') a.dest = $('ruDest').value;
+        if ($('ruChannel').value !== '-') a.channel = $('ruChannel').value;
+        if ($('ruFolder').value.trim()) a.folder = $('ruFolder').value.trim();
+        if ($('ruQuality').value) a.quality = $('ruQuality').value;
+        if ($('ruAudio').checked) a.audio = true;
+        if ($('ruAfmt').value) a.afmt = $('ruAfmt').value;
+        if ($('ruAq').value) a.aq = $('ruAq').value;
+        if ($('ruContainer').value) a.container = $('ruContainer').value;
+        if ($('ruSponsor').value) a.sponsor = $('ruSponsor').value;
+        if ($('ruDevice').value) a.device = $('ruDevice').value;
+        if ($('ruCreatorO').value.trim()) a.creatorOverride = $('ruCreatorO').value.trim();
+        return r;
+      }
+
+      function renderRules() {
+        const list = $('rulesList');
+        const rows = rules.map((r, i) => {
+          if (i === ruleEditIdx) return ruleEditorHtml(r);
+          return '<div class="rulerow" data-i="' + i + '">' +
+            '<div class="r-info"><div class="r-name">' + esc(r.name) + (r.auto ? '<span class="r-auto">auto</span>' : '') + (r.enabled === false ? ' <small style="color:var(--faint)">(off)</small>' : '') + '</div>' +
+            '<div class="r-sum">' + esc(ruleSummary(r)) + '</div></div>' +
+            '<button type="button" class="r-move" data-act="up" title="Move up">↑</button>' +
+            '<button type="button" class="r-move" data-act="down" title="Move down">↓</button>' +
+            '<label class="switch"><input type="checkbox" data-act="toggle"' + (r.enabled !== false ? ' checked' : '') + ' /><span class="track"></span></label>' +
+            '</div>';
+        });
+        if (ruleEditIdx === rules.length) {
+          rows.push(ruleEditorHtml({ name: '', enabled: true, auto: false, match: {}, apply: {} }));
+        }
+        if (!rows.length) {
+          rows.push('<p style="margin:0;padding:0 16px 8px;color:var(--faint);font-size:13px">No rules yet.</p>');
+        }
+        list.innerHTML = rows.join('');
+        bindRuleEditor();
+      }
+
+      function bindRuleEditor() {
+        const save = $('ruSave');
+        if (!save) return;
+        const isNew = ruleEditIdx === rules.length;
+        const base = isNew ? { enabled: true } : rules[ruleEditIdx];
+        save.addEventListener('click', async () => {
+          const r = collectRule(base);
+          const prev = rules.slice();
+          if (isNew) rules.push(r); else rules[ruleEditIdx] = r;
+          if (await persistRules()) { ruleEditIdx = -1; toast('Rule saved', 'good'); }
+          else rules = prev;
+          renderRules();
+        });
+        $('ruCancel').addEventListener('click', () => { ruleEditIdx = -1; renderRules(); });
+        const del = $('ruDelete');
+        if (del) del.addEventListener('click', async () => {
+          const prev = rules.slice();
+          rules.splice(ruleEditIdx, 1);
+          if (await persistRules()) { ruleEditIdx = -1; toast('Rule deleted', 'good'); }
+          else rules = prev;
+          renderRules();
+        });
+      }
+
+      $('rulesList').addEventListener('click', async (e) => {
+        const act = e.target.closest('[data-act]');
+        const row = e.target.closest('.rulerow');
+        if (act && row) {
+          const i = Number(row.dataset.i);
+          if (act.dataset.act === 'toggle') {
+            rules[i].enabled = act.checked;
+            if (!(await persistRules())) rules[i].enabled = !act.checked;
+            renderRules();
+          } else if (act.dataset.act === 'up' && i > 0) {
+            [rules[i - 1], rules[i]] = [rules[i], rules[i - 1]];
+            if (await persistRules()) renderRules();
+          } else if (act.dataset.act === 'down' && i < rules.length - 1) {
+            [rules[i + 1], rules[i]] = [rules[i], rules[i + 1]];
+            if (await persistRules()) renderRules();
+          }
+          return;
+        }
+        if (row && ruleEditIdx === -1) { ruleEditIdx = Number(row.dataset.i); renderRules(); }
+      });
+
+      $('ruleAdd').addEventListener('click', () => {
+        if (ruleEditIdx !== -1) return;
+        ruleEditIdx = rules.length;
+        renderRules();
+      });
+
       // ----------------------------------------------------------------- supported sites
       (async function loadSites() {
         try {
@@ -2292,6 +2593,7 @@
       loadPlaylists();
       loadCookies();
       loadTemplates();
+      loadRules();
       connectJobStream(); // pick up any in-progress jobs (incl. across reloads)
       renderQueue();
 
@@ -2316,7 +2618,7 @@
         if (isShare) {
           const u = firstUrl([q.get('url'), q.get('text'), q.get('title')].filter(Boolean).join(' '));
           urlInput.value = u || String(q.get('text') || q.get('title') || '').trim();
-          if (urlInput.value) form.requestSubmit();
+          if (urlInput.value) { entryAuto = true; form.requestSubmit(); }
           else urlInput.focus();
           return;
         }
@@ -2327,7 +2629,7 @@
             : Promise.reject(new Error('unavailable')))
             .then((t) => {
               const u = firstUrl(t);
-              if (u) { urlInput.value = u; form.requestSubmit(); }
+              if (u) { urlInput.value = u; entryAuto = true; form.requestSubmit(); }
               else urlInput.focus();
             })
             .catch(() => urlInput.focus());

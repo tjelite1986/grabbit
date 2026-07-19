@@ -576,6 +576,140 @@ function notifyJobFinished(j) {
   );
 }
 
+// --- Rules engine -----------------------------------------------------------
+// Deterministic if-this-then-that rules: when a resolved link matches a rule's
+// conditions, the rule's settings pre-fill the download sheet (and, with
+// auto=true, a share-target/shortcut entry starts the job without the sheet).
+// Plain substring/regex matching, no external services — evaluation is free.
+// First enabled matching rule wins, top to bottom; an empty match section
+// matches everything (documented catch-all).
+const RULES_FILE = path.join(DATA_DIR, 'rules.json');
+const RULE_QUALITIES = ['best', '2160', '1440', '1080', '720', '480', '360'];
+const RULE_BITRATES = ['best', '320', '256', '192', '160', '128', '96'];
+
+function readRules() {
+  try {
+    const list = JSON.parse(fs.readFileSync(RULES_FILE, 'utf8'));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function cleanRuleStr(v, max) {
+  return typeof v === 'string' ? v.trim().slice(0, max) : '';
+}
+
+// A pattern is a case-insensitive substring, or /…/ for a regex.
+function validRulePattern(p) {
+  if (p.length > 2 && p.startsWith('/') && p.endsWith('/')) {
+    try {
+      new RegExp(p.slice(1, -1), 'i');
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function ruleTextMatch(pattern, value) {
+  const v = String(value || '');
+  const p = String(pattern);
+  if (p.length > 2 && p.startsWith('/') && p.endsWith('/')) {
+    try {
+      return new RegExp(p.slice(1, -1), 'i').test(v);
+    } catch {
+      return false;
+    }
+  }
+  return v.toLowerCase().includes(p.toLowerCase());
+}
+
+// Whitelist every field: rules come from the (authed) UI but are stored and
+// replayed into download params, so enum-validate like any other request input.
+function sanitizeRules(input) {
+  if (!Array.isArray(input)) return null;
+  const out = [];
+  for (const r of input.slice(0, 100)) {
+    if (!r || typeof r !== 'object') continue;
+    const match = r.match && typeof r.match === 'object' ? r.match : {};
+    const apply = r.apply && typeof r.apply === 'object' ? r.apply : {};
+    const m = {};
+    for (const k of ['site', 'creator', 'title']) {
+      const v = cleanRuleStr(match[k], 200);
+      if (v && validRulePattern(v)) m[k] = v;
+    }
+    if (match.mediaType === 'video' || match.mediaType === 'image') m.mediaType = match.mediaType;
+    for (const k of ['minDuration', 'maxDuration']) {
+      const n = Number(match[k]);
+      if (Number.isFinite(n) && n > 0) m[k] = Math.round(n);
+    }
+    const a = {};
+    if ('dest' in apply && ['', 'server', 'navidrome'].includes(apply.dest)) a.dest = apply.dest;
+    if ('channel' in apply && CHANNELS[apply.channel]) a.channel = apply.channel;
+    const folder = cleanRuleStr(apply.folder, 40);
+    if (folder) a.folder = sanitizeFolder(folder);
+    if ('quality' in apply && RULE_QUALITIES.includes(apply.quality)) a.quality = apply.quality;
+    if (apply.audio === true) a.audio = true;
+    if ('afmt' in apply && AUDIO_FORMATS.includes(apply.afmt)) a.afmt = apply.afmt;
+    if ('aq' in apply && RULE_BITRATES.includes(apply.aq)) a.aq = apply.aq;
+    if ('container' in apply && VIDEO_CONTAINERS.includes(apply.container)) a.container = apply.container;
+    if (apply.web === true) a.web = true;
+    if ('sponsor' in apply && ['remove', 'mark'].includes(apply.sponsor)) a.sponsor = apply.sponsor;
+    if ('device' in apply && ['1', '0'].includes(String(apply.device))) a.device = String(apply.device);
+    const creator = cleanRuleStr(apply.creatorOverride, 80);
+    if (creator) a.creatorOverride = creator;
+    out.push({
+      id: cleanRuleStr(r.id, 40) || `r${Date.now()}-${out.length}`,
+      name: cleanRuleStr(r.name, 60) || 'Rule',
+      enabled: r.enabled !== false,
+      auto: r.auto === true,
+      match: m,
+      apply: a,
+    });
+  }
+  return out;
+}
+
+function matchRule(ctx) {
+  let host = '';
+  try {
+    host = new URL(ctx.url).hostname;
+  } catch { /* leave empty */ }
+  for (const r of readRules()) {
+    if (r.enabled === false) continue;
+    const m = r.match || {};
+    if (m.site && !(ruleTextMatch(m.site, host) || ruleTextMatch(m.site, ctx.extractor))) continue;
+    if (m.creator && !ruleTextMatch(m.creator, ctx.creator)) continue;
+    if (m.title && !ruleTextMatch(m.title, ctx.title)) continue;
+    if (m.mediaType && ctx.mediaType !== m.mediaType) continue;
+    // Duration bounds require a known duration; unknown never satisfies them.
+    if (m.minDuration && !(Number(ctx.duration) >= m.minDuration)) continue;
+    if (m.maxDuration && !(Number(ctx.duration) <= m.maxDuration)) continue;
+    return r;
+  }
+  return null;
+}
+
+// The slice of a matched rule the UI needs.
+function publicRule(r) {
+  return r ? { id: r.id, name: r.name, auto: r.auto === true, apply: r.apply || {} } : null;
+}
+
+app.get('/api/rules', (_req, res) => res.json({ ok: true, rules: readRules() }));
+
+// Whole-list save: the UI owns ordering, so it always posts the full array.
+app.post('/api/rules', (req, res) => {
+  const rules = sanitizeRules(req.body && req.body.rules);
+  if (!rules) return res.status(400).json({ ok: false, error: 'Invalid rules payload' });
+  try {
+    fs.writeFileSync(RULES_FILE, JSON.stringify(rules));
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+  res.json({ ok: true, rules });
+});
+
 function validUrl(u) {
   try {
     const p = new URL(u);
@@ -761,6 +895,16 @@ app.get('/api/resolve', async (req, res) => {
         main: isImage ? (photoHas(stem) ? 'imported' : null) : importedStatus('main', job.creator, stem),
         '18plus': isImage ? null : importedStatus('18plus', job.creator, stem),
       },
+      // First matching rule (if any): pre-fills the sheet; auto rules start
+      // share-target entries without the sheet.
+      rule: publicRule(matchRule({
+        url,
+        extractor: job.extractor,
+        creator: job.creator,
+        title: job.title,
+        mediaType: isImage ? 'image' : 'video',
+        duration: durationKnown(job) ? Number(job.duration) : null,
+      })),
     });
   } catch (e) {
     // 422 (not 5xx) so Cloudflare passes the JSON body through unchanged.
@@ -1383,7 +1527,17 @@ app.get('/api/profile', async (req, res) => {
         },
       };
     });
-    res.json({ ok: true, isProfile: true, extractor: p.extractor, creator: p.creator, title: p.title || null, count: items.length, items });
+    res.json({
+      ok: true,
+      isProfile: true,
+      extractor: p.extractor,
+      creator: p.creator,
+      title: p.title || null,
+      count: items.length,
+      items,
+      // Rule matched on the profile itself (no per-item duration/type checks).
+      rule: publicRule(matchRule({ url, extractor: p.extractor, creator: p.creator, title: p.title })),
+    });
   } catch (e) {
     // For the generic probe, "not a playlist" just means it's a single video.
     if (tryGeneric) return res.json({ ok: true, isProfile: false });
