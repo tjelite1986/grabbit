@@ -949,7 +949,7 @@
       // ----------------------------------------------------------------- tab nav
       const nav = $('nav');
       let currentTab = 'home';
-      function showTab(tab) {
+      function renderTab(tab) {
         currentTab = tab;
         document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + tab));
         nav.querySelectorAll('.navitem').forEach((n) => n.classList.toggle('active', n.dataset.tab === tab));
@@ -957,6 +957,42 @@
         window.scrollTo(0, 0);
         if (tab === 'downloads') loadHistory();
       }
+
+      // Device Back support: a non-home tab holds exactly ONE extra history
+      // entry (replaced on tab-to-tab switches), so Back always returns to Home
+      // first and only a second Back leaves the app — instead of every tab
+      // switch exiting the installed PWA outright. The options sheet pushes its
+      // own entry on top (see openSheetUi), so Back closes the sheet first.
+      let pendingTab = null; // tab chosen while the sheet entry was still popping
+      function applyTabHistory(tab) {
+        if (tab === 'home') {
+          // Leaving a pushed tab entry: pop it so Back-from-Home exits.
+          if (history.state && history.state.tab) history.back();
+        } else if (history.state && history.state.tab) {
+          history.replaceState({ tab }, '');
+        } else {
+          history.pushState({ tab }, '');
+        }
+      }
+      function showTab(tab) {
+        renderTab(tab);
+        // closeSheet()'s history.back() is async — if its entry is still on
+        // top, defer the tab bookkeeping until that pop lands (popstate below).
+        if (history.state && history.state.sheet) { pendingTab = tab; return; }
+        applyTabHistory(tab);
+      }
+      window.addEventListener('popstate', (e) => {
+        const sheetEl = $('sheetBack');
+        if (sheetEl.classList.contains('show')) sheetEl.classList.remove('show');
+        if (pendingTab !== null) {
+          const t = pendingTab;
+          pendingTab = null;
+          applyTabHistory(t);
+          return;
+        }
+        const tab = (e.state && e.state.tab) || 'home';
+        if (tab !== currentTab) renderTab(tab);
+      });
       nav.addEventListener('click', (e) => {
         const b = e.target.closest('.navitem');
         if (b) showTab(b.dataset.tab);
@@ -1439,7 +1475,8 @@
         if (history.state && history.state.sheet) history.back();
       }
       sheetBack.addEventListener('click', (e) => { if (e.target === sheetBack) closeSheet(); });
-      window.addEventListener('popstate', () => { if (sheetBack.classList.contains('show')) sheetBack.classList.remove('show'); });
+      // Back-button dismissal is handled by the shared popstate listener in the
+      // tab-nav section (it also owns tab history entries).
       document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetBack.classList.contains('show')) closeSheet(); });
 
       // Reflect option dependencies + confirm label inside the sheet.
