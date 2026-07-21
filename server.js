@@ -800,6 +800,24 @@ function importedStatus(channel, creator, stem) {
 
 // elite-v2's importer treats the part before `_-_` as the profile name and only
 // accepts [A-Za-z0-9 ._-()] there, so sanitize the creator to that set.
+// Filesystem name limits are counted in BYTES per path segment (255 on ext4),
+// not characters — a 100-character Arabic or emoji title is well past that and
+// the save dies with ENAMETOOLONG. Cut on a code-point boundary so no character
+// is split in half.
+function clampBytes(text, maxBytes) {
+  const str = String(text || '');
+  if (Buffer.byteLength(str) <= maxBytes) return str;
+  let out = '';
+  let used = 0;
+  for (const ch of str) {
+    const size = Buffer.byteLength(ch);
+    if (used + size > maxBytes) break;
+    out += ch;
+    used += size;
+  }
+  return out.trim();
+}
+
 function safeCreator(name) {
   return (
     String(name || 'unknown')
@@ -816,14 +834,16 @@ function safeCreator(name) {
 // (elite-v2's importer only sanitizes the on-disk name; the real title still
 // shows via the .md caption sidecar, and the profile part stays ASCII.)
 function safeTitle(title) {
-  return (
+  const cut = (
     String(title || 'video')
       .replace(/[^\p{L}\p{N} ._()-]+/gu, ' ')
       .replace(/_-_| - /g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-      .slice(0, 100) || 'video'
+      .slice(0, 100)
   );
+  // Non-latin titles fit far fewer characters into the byte budget.
+  return clampBytes(cut, 120) || 'video';
 }
 
 // A single path segment of the Navidrome library tree ([Artist]/[Album (Year)]/
@@ -831,15 +851,16 @@ function safeTitle(title) {
 // only filesystem-unsafe characters go, and leading/trailing dots (hidden files
 // / Windows quirks) are trimmed.
 function safeMusicPart(name, fallback) {
-  return (
+  const cut = (
     String(name || '')
       .replace(/[<>:"\/\\|?*\u0000-\u001f]+/gu, " ")
       .replace(/\s+/g, ' ')
       .trim()
       .replace(/^\.+|\.+$/g, '')
       .slice(0, 80)
-      .trim() || fallback
+      .trim()
   );
+  return clampBytes(cut, 100) || fallback;
 }
 
 // Rewrite the tags of an audio file in place via mutagen (yt-dlp's tag
@@ -1807,6 +1828,18 @@ function failJob(job, message) {
   });
 }
 
+// Some failures are the server saying "not right now" rather than "no":
+// YouTube's signed media URLs are short-lived and its rate limiter answers 403
+// (and 429) when several jobs run at once. Those deserve another attempt; a
+// deleted video or an unsupported site does not.
+function isTransientDownloadError(e) {
+  return /HTTP Error (403|408|429|5\d\d)|Forbidden|Too Many Requests|timed? ?out|Connection reset|Temporary failure|EAI_AGAIN|ECONNRESET|ETIMEDOUT/i.test(
+    String((e && e.message) || e || '')
+  );
+}
+const DOWNLOAD_ATTEMPTS = 3;
+const RETRY_BASE_MS = 5000;
+
 // Resolve, enforce the shorts length cap, then dispatch to the right producer.
 async function runJob(job, params) {
   setJob(job, { status: 'running', phase: 'resolving' });
@@ -1846,17 +1879,29 @@ async function runJob(job, params) {
       eta: p.eta || job.eta,
     });
 
-  try {
-    if (mediaType === 'image') await produceImage(job, meta, params);
-    else if ((params.sections && params.sections.length) || params.splitChapters) await produceCut(job, meta, params, onProgress);
-    else if (params.audio) await produceAudio(job, meta, params, onProgress);
-    else if (params.dest === 'server') await produceServerVideo(job, meta, params, onProgress);
-    else await produceEliteVideo(job, meta, params, onProgress);
-  } catch (e) {
-    // Full stack to the server log — the job list only shows the message, and
-    // an unexpected TypeError is undebuggable without it.
-    console.error(`job ${job.id} failed:`, e && e.stack ? e.stack : e);
-    failJob(job, String(e.message || e));
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt++) {
+    try {
+      if (mediaType === 'image') await produceImage(job, meta, params);
+      else if ((params.sections && params.sections.length) || params.splitChapters) await produceCut(job, meta, params, onProgress);
+      else if (params.audio) await produceAudio(job, meta, params, onProgress);
+      else if (params.dest === 'server') await produceServerVideo(job, meta, params, onProgress);
+      else await produceEliteVideo(job, meta, params, onProgress);
+      return;
+    } catch (e) {
+      // Full stack to the server log — the job list only shows the message, and
+      // an unexpected TypeError is undebuggable without it.
+      console.error(`job ${job.id} attempt ${attempt}/${DOWNLOAD_ATTEMPTS} failed:`, e && e.stack ? e.stack : e);
+      if (attempt === DOWNLOAD_ATTEMPTS || !isTransientDownloadError(e)) {
+        return failJob(job, String(e.message || e));
+      }
+      // Back off a little further each time — the rate limiter that answered
+      // 403 is usually busy with the other jobs in the batch.
+      setJob(job, {
+        phase: 'retrying', percent: null, speed: '', eta: '',
+        message: `Retrying (${attempt}/${DOWNLOAD_ATTEMPTS - 1}) after: ${String(e.message || e)}`,
+      });
+      await new Promise((r) => setTimeout(r, RETRY_BASE_MS * attempt));
+    }
   }
 }
 
@@ -2049,7 +2094,10 @@ async function produceAudio(job, meta, params, onProgress) {
         const artistDir = safeMusicPart(artists[0], 'Unknown Artist');
         const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? `(${year})` : '');
         libDir = path.join(navRoot, artistDir, albumDir);
-        finalName = `${artistDir} - ${albumDir} - ${safeMusicPart(songTitle, 'Unknown')}.${realExt}`;
+        // Three parts of up to 100 bytes each would still overflow the 255-byte
+        // limit on their own, so the assembled stem gets its own budget.
+        const stemName = `${artistDir} - ${albumDir} - ${safeMusicPart(songTitle, 'Unknown')}`;
+        finalName = `${clampBytes(stemName, 200) || 'track'}.${realExt}`;
       }
       fs.mkdirSync(libDir, { recursive: true });
       const libPath = path.join(libDir, finalName);
