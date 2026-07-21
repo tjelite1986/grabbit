@@ -1084,6 +1084,22 @@
       // auto-submits: lets an auto rule start the job without the sheet.
       let entryAuto = false;
 
+      // Pull every link out of pasted text: one per line, several separated by
+      // spaces, and links copied without the scheme ("facebook.com/share/..."),
+      // which apps hand out all the time. A bare domain only counts when it has
+      // a real TLD and a path, so a search phrase like "3.5/5 stars" is not
+      // mistaken for a link. Trailing prose punctuation is trimmed.
+      const URL_IN_TEXT = /https?:\/\/[^\s"'<>]+|(?:[a-z0-9-]+\.)+[a-z]{2,24}\/[^\s"'<>]*/gi;
+      function extractUrls(text) {
+        const found = String(text || '').match(URL_IN_TEXT) || [];
+        const seen = new Set();
+        for (const raw of found) {
+          const trimmed = raw.replace(/[.,;:!?)\]}]+$/, '');
+          if (trimmed) seen.add(/^https?:\/\//i.test(trimmed) ? trimmed : 'https://' + trimmed);
+        }
+        return [...seen];
+      }
+
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const wasAuto = entryAuto;
@@ -1097,7 +1113,7 @@
         $('fab').classList.remove('show');
         // The box takes one URL (resolve), several URLs (batch with shared
         // settings) or plain words (video search).
-        const urls = raw.match(/https?:\/\/[^\s"'<>]+/g) || [];
+        const urls = extractUrls(raw);
         if (urls.length > 1) { renderMulti(urls); return; }
         if (urls.length === 0) { await runSearch(raw); return; }
         const url = urls[0];
@@ -2684,7 +2700,7 @@
         const action = q.get('action');
         if (!isShare && !tab && !action) return;
         history.replaceState(null, '', '/');
-        const firstUrl = (s) => (String(s || '').match(/https?:\/\/[^\s"'<>]+/) || [])[0] || '';
+        const firstUrl = (s) => extractUrls(s)[0] || '';
         if (isShare) {
           const u = firstUrl([q.get('url'), q.get('text'), q.get('title')].filter(Boolean).join(' '));
           urlInput.value = u || String(q.get('text') || q.get('title') || '').trim();
