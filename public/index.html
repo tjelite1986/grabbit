@@ -1278,7 +1278,9 @@
         const mdesc = card.querySelector('.mdesc');
         if (mdesc) mdesc.addEventListener('click', () => mdesc.classList.toggle('expanded'));
         const actions = card.querySelector('.actions');
-        onActions(actions);
+        // Optional: a placeholder card (one still waiting for its lookup) has
+        // nothing to act on yet.
+        if (onActions) onActions(actions);
         // Portrait posters get the tall letterboxed treatment — detectable
         // only from the loaded image's natural dimensions.
         if (thumbnail) {
