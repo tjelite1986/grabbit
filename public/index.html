@@ -396,6 +396,7 @@
       .plrow .del { flex: none; color: var(--muted); padding: 4px; }
       .plrow .watch { flex: none; color: var(--muted); padding: 4px; }
       .plrow .watch.on { color: var(--good); }
+      .plrow .pllib { flex: none; font-size: 11px; font-weight: 600; letter-spacing: .3px; color: var(--muted); background: var(--surface-3); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; }
 
       /* Profile/playlist header buttons */
       .profbtns { display: flex; gap: 8px; margin: 0 2px 12px; flex-wrap: wrap; }
@@ -516,6 +517,13 @@
               <option value="">Elite-v2 shorts</option>
               <option value="server">Server library</option>
               <option value="navidrome">Navidrome (music)</option>
+            </select>
+          </div>
+          <div class="setrow hidden" id="setNavLibRow">
+            <div class="label"><div class="t">Music library</div><div class="d">Which Navidrome new music goes to</div></div>
+            <select id="setNavLib">
+              <option value="main">My music</option>
+              <option value="kids">Kids</option>
             </select>
           </div>
           <div class="setrow" id="setChannelRow">
@@ -690,6 +698,17 @@
             <button type="button" data-v="" class="on">Elite-v2 shorts</button>
             <button type="button" data-v="server">Server library</button>
             <button type="button" data-v="navidrome">Navidrome</button>
+          </div>
+        </div>
+
+        <!-- Which Navidrome instance/library the track lands in. The kids
+             library is served by a separate Navidrome (barnmusik) and never
+             mixes with the main one. -->
+        <div class="field hidden" id="shNavLibField">
+          <label>Music library</label>
+          <div class="seg" id="shNavLib">
+            <button type="button" data-v="main" class="on">My music</button>
+            <button type="button" data-v="kids">Kids</button>
           </div>
         </div>
 
@@ -919,13 +938,13 @@
 
       // ----------------------------------------------------------------- settings (defaults)
       const SETTINGS_KEY = 'grabbit.settings.v1';
-      const defaults = { dest: '', channel: 'main', folder: 'videos', quality: '', device: true, web: false, afmt: 'm4a', aq: '', container: 'mp4' };
+      const defaults = { dest: '', channel: 'main', navLib: 'main', folder: 'videos', quality: '', device: true, web: false, afmt: 'm4a', aq: '', container: 'mp4' };
       let settings = Object.assign({}, defaults);
       // Only adopt known keys from storage, and coerce each to an allowed value, so
       // poisoned/legacy data can neither accumulate junk nor feed an unexpected
       // value into a request.
       const SETTING_ENUMS = {
-        dest: ['', 'server', 'navidrome'], channel: ['main', '18plus'],
+        dest: ['', 'server', 'navidrome'], channel: ['main', '18plus'], navLib: ['main', 'kids'],
         quality: ['', '2160', '1440', '1080', '720', '480', '360'],
         afmt: ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'],
         aq: ['', '320', '256', '192', '160', '128', '96'],
@@ -1232,7 +1251,9 @@
         dlNew.className = 'primary';
         dlNew.textContent = fresh.length ? 'Download new to Navidrome (' + fresh.length + ')' : 'Nothing new — all downloaded';
         dlNew.disabled = !fresh.length;
-        dlNew.addEventListener('click', () => startNavidromeBatch(fresh));
+        // A saved playlist carries its own target library; otherwise the default.
+        dlNew.addEventListener('click', () =>
+          startNavidromeBatch(fresh, null, null, (savedEntry && savedEntry.lib) || settings.navLib));
         btns.appendChild(dlNew);
 
         // Hide items already in the downloaded registry (persisted preference).
@@ -1316,17 +1337,29 @@
             ? '<svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 3a6 6 0 0 0-6 6v3.5L4 16h16l-2-3.5V9a6 6 0 0 0-6-6z"/><path d="M10 19a2 2 0 0 0 4 0z"/></svg>'
             : '<svg class="ic" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4 16h16l-2-3.5V9a6 6 0 0 0-6-6z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>';
           row.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 6h12"/><path d="M4 12h12"/><path d="M4 18h8"/><circle cx="18" cy="16" r="3"/><path d="M21 16V8"/></svg><span class="nm"></span>' +
+            '<span class="pllib" title="Target music library — tap to switch">' + (p.lib === 'kids' ? 'Kids' : 'Mine') + '</span>' +
             '<span class="watch' + (p.watch ? ' on' : '') + '" title="' + (p.watch ? 'Auto-download on — new tracks go to Navidrome' : 'Auto-download new tracks') + '">' + bell + '</span>' +
             '<span class="del"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></span>';
           row.querySelector('.nm').textContent = p.name;
           row.addEventListener('click', (e) => {
             if (e.target.closest('.del')) { deletePlaylist(p.id); return; }
+            if (e.target.closest('.pllib')) { togglePlaylistLib(p); return; }
             if (e.target.closest('.watch')) { toggleWatch(p); return; }
             urlInput.value = p.url;
             form.requestSubmit();
           });
           rows.appendChild(row);
         });
+      }
+      // Switch which Navidrome library this playlist's new tracks go into.
+      async function togglePlaylistLib(p) {
+        const next = p.lib === 'kids' ? 'main' : 'kids';
+        try {
+          const d = await fetchJson('/api/playlists/lib?id=' + encodeURIComponent(p.id) + '&lib=' + next, { method: 'POST' });
+          savedPlaylists = d.playlists || [];
+          renderPlaylistRows();
+          toast(next === 'kids' ? 'New tracks go to the kids library' : 'New tracks go to your library', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
       }
       async function toggleWatch(p) {
         try {
@@ -1358,13 +1391,15 @@
       // Queue every given playlist item as an audio job into Navidrome. Each
       // track resolves and tags itself from its own metadata; the server caps
       // how many download at once, the rest wait as 'queued'.
-      async function startNavidromeBatch(items, afmt, aq) {
+      async function startNavidromeBatch(items, afmt, aq, lib) {
         if (!items.length) return;
         connectJobStream();
+        const navLib = lib === 'kids' ? 'kids' : 'main';
         let started = 0;
         for (const it of items) {
           const p = new URLSearchParams();
           p.set('dest', 'navidrome');
+          p.set('lib', navLib);
           p.set('audio', '1');
           p.set('afmt', afmt || settings.afmt || 'opus');
           if (aq || settings.aq) p.set('aq', aq || settings.aq);
@@ -1376,7 +1411,7 @@
           } catch { /* keep queueing the rest */ }
         }
         urlInput.value = '';
-        toast('Queued ' + started + ' tracks for Navidrome', 'good');
+        toast('Queued ' + started + ' tracks for Navidrome' + (navLib === 'kids' ? ' (kids)' : ''), 'good');
         showTab('queue');
       }
 
@@ -1444,6 +1479,7 @@
         // Apply current defaults to the sheet controls.
         segSet($('shDest'), settings.dest);
         segSet($('shChannel'), settings.channel);
+        segSet($('shNavLib'), settings.navLib);
         $('shFolder').value = folderList.includes(settings.folder) ? settings.folder : (folderList[0] || 'videos');
         $('shNewFolder').value = '';
         $('shQuality').value = settings.quality;
@@ -1477,6 +1513,7 @@
         const a = rule.apply;
         if ('dest' in a) segSet($('shDest'), a.dest);
         if ('channel' in a) segSet($('shChannel'), a.channel);
+        if ('lib' in a) segSet($('shNavLib'), a.lib);
         if (a.folder) {
           if (folderList.includes(a.folder)) { $('shFolder').value = a.folder; }
           else { $('shFolder').value = '__new__'; $('shNewFolder').value = a.folder; }
@@ -1587,6 +1624,7 @@
         const audioish = isAudio || isNavidrome;
 
         $('shChannelField').classList.toggle('hidden', isServer || isImage || isNavidrome);
+        $('shNavLibField').classList.toggle('hidden', !isNavidrome);
         const folderVisible = isServer && !isImage && !isAudio;
         $('shFolderField').classList.toggle('hidden', !folderVisible);
         $('shNewFolderField').classList.toggle('hidden', !(folderVisible && $('shFolder').value === '__new__'));
@@ -1796,6 +1834,7 @@
           p.set('tags', $('shTags').value.trim());
         }
         if (dest === 'navidrome') {
+          p.set('lib', segValue($('shNavLib')));
           const mt = $('shMusicTitle').value.trim();
           if (mt) p.set('title', mt);
           const a = $('shMusicArtists').value.trim();
@@ -1868,7 +1907,8 @@
             startNavidromeBatch(
               profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded),
               $('shAfmt').value,
-              $('shAq').value
+              $('shAq').value,
+              segValue($('shNavLib'))
             );
           } else startBatch();
           return;
@@ -2238,12 +2278,15 @@
         $('setAq').value = settings.aq;
         $('setDevice').checked = settings.device;
         $('setWeb').checked = settings.web;
+        $('setNavLib').value = settings.navLib;
         $('setChannelRow').classList.toggle('hidden', settings.dest !== '');
+        $('setNavLibRow').classList.toggle('hidden', settings.dest !== 'navidrome');
         $('setFolderRow').classList.toggle('hidden', settings.dest !== 'server');
         $('setContainerRow').classList.toggle('hidden', settings.dest !== 'server');
       }
       $('setDest').addEventListener('change', () => { settings.dest = $('setDest').value; saveSettings(); reflectSettings(); });
       $('setChannel').addEventListener('change', () => { settings.channel = $('setChannel').value; saveSettings(); });
+      $('setNavLib').addEventListener('change', () => { settings.navLib = $('setNavLib').value; saveSettings(); });
       $('setFolder').addEventListener('change', () => { settings.folder = $('setFolder').value; saveSettings(); });
       $('setQuality').addEventListener('change', () => { settings.quality = $('setQuality').value; saveSettings(); });
       $('setContainer').addEventListener('change', () => { settings.container = $('setContainer').value; saveSettings(); });
@@ -2385,6 +2428,7 @@
         ].filter(Boolean).join(', ') || 'everything';
         const then = [
           'dest' in a && RULE_DEST_NAMES[a.dest],
+          a.lib === 'kids' && 'kids library',
           a.channel,
           a.folder && '/' + a.folder,
           a.audio && 'audio',
@@ -2431,6 +2475,9 @@
           '</select></div>' +
           '<div class="field"><label>Channel</label><select id="ruChannel">' +
             ruleOpt('-', "Don't change", channel) + ruleOpt('main', 'main', channel) + ruleOpt('18plus', '18+', channel) +
+          '</select></div>' +
+          '<div class="field"><label>Music library</label><select id="ruLib">' +
+            ruleOpt('-', "Don't change", 'lib' in a ? a.lib : '-') + ruleOpt('main', 'My music', 'lib' in a ? a.lib : '-') + ruleOpt('kids', 'Kids', 'lib' in a ? a.lib : '-') +
           '</select></div>' +
           '<div class="field"><label>Library folder</label><input id="ruFolder" type="text" autocomplete="off" placeholder="videos" value="' + esc(a.folder || '') + '" /></div>' +
           '<div class="field"><label>Quality</label><select id="ruQuality">' +
@@ -2481,6 +2528,7 @@
         const a = r.apply;
         if ($('ruDest').value !== '-') a.dest = $('ruDest').value;
         if ($('ruChannel').value !== '-') a.channel = $('ruChannel').value;
+        if ($('ruLib').value !== '-') a.lib = $('ruLib').value;
         if ($('ruFolder').value.trim()) a.folder = $('ruFolder').value.trim();
         if ($('ruQuality').value) a.quality = $('ruQuality').value;
         if ($('ruAudio').checked) a.audio = true;

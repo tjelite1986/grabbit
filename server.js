@@ -42,11 +42,21 @@ const PHOTOS_DIR = process.env.PHOTOS_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'p
 // Navidrome music library (host mount). dest=navidrome saves extracted audio
 // here; Navidrome's scanner picks it up.
 const NAVIDROME_DIR = process.env.NAVIDROME_MUSIC_DIR || path.join(DOWNLOAD_DIR, 'navidrome');
+// Second, fully separate music library served by its own Navidrome instance
+// (kids). Same tagging/layout, different root — nothing saved here ever shows
+// up in the main library.
+const NAVIDROME_KIDS_DIR = process.env.NAVIDROME_KIDS_DIR || path.join(DOWNLOAD_DIR, 'navidrome-kids');
 
 // Download destination: elite (shorts import), server (plain library) or
 // navidrome (music library; audio-only, forces audio extraction).
 function parseDest(v) {
   return v === 'server' || v === 'navidrome' ? v : 'elite';
+}
+
+// Which Navidrome library a dest=navidrome save lands in.
+const NAV_LIBS = { main: NAVIDROME_DIR, kids: NAVIDROME_KIDS_DIR };
+function parseNavLib(v) {
+  return v === 'kids' ? 'kids' : 'main';
 }
 
 // Built-in server-library video folders (audio always goes to mp3). Users can
@@ -646,6 +656,7 @@ function sanitizeRules(input) {
     }
     const a = {};
     if ('dest' in apply && ['', 'server', 'navidrome'].includes(apply.dest)) a.dest = apply.dest;
+    if ('lib' in apply && ['main', 'kids'].includes(apply.lib)) a.lib = apply.lib;
     if ('channel' in apply && CHANNELS[apply.channel]) a.channel = apply.channel;
     const folder = cleanRuleStr(apply.folder, 40);
     if (folder) a.folder = sanitizeFolder(folder);
@@ -1192,10 +1203,14 @@ app.post('/api/playlists/save', (req, res) => {
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
   const name = String(req.query.name || '').slice(0, 120) || url;
+  // Which Navidrome library the watcher downloads this playlist into.
+  const lib = parseNavLib(req.query.lib);
   const list = readPlaylists();
   const existing = list.find((p) => p.url === url);
-  if (existing) existing.name = name;
-  else list.push({ id: `${Date.now()}`, url, name, addedAt: Date.now() });
+  if (existing) {
+    existing.name = name;
+    if ('lib' in req.query) existing.lib = lib;
+  } else list.push({ id: `${Date.now()}`, url, name, lib, addedAt: Date.now() });
   writePlaylists(list);
   res.json({ ok: true, playlists: list });
 });
@@ -1209,10 +1224,11 @@ let watchCycleRunning = false;
 
 // Queue one track as an audio job into Navidrome, same defaults as the UI's
 // batch button (opus; the cover is embedded as album art by produceAudio).
-function startNavidromeJob(url) {
+function startNavidromeJob(url, navLib) {
   const params = {
     url,
     dest: 'navidrome',
+    navLib: parseNavLib(navLib),
     channel: 'main',
     device: false,
     web: false,
@@ -1255,7 +1271,7 @@ async function checkPlaylistForNew(pl) {
   const fresh = profile.items.filter(
     (it) => it.mediaType !== 'image' && !isDownloaded(it.sourceUrl || it.url)
   );
-  for (const it of fresh) startNavidromeJob(it.sourceUrl || it.url);
+  for (const it of fresh) startNavidromeJob(it.sourceUrl || it.url, pl.lib);
   return { total: profile.items.length, queued: fresh.length };
 }
 
@@ -1292,6 +1308,17 @@ app.post('/api/playlists/watch', (req, res) => {
   const pl = list.find((p) => p.id === String(req.query.id));
   if (!pl) return res.status(404).json({ ok: false, error: 'Playlist not found' });
   pl.watch = req.query.on === '1';
+  writePlaylists(list);
+  res.json({ ok: true, playlists: list });
+});
+
+// POST /api/playlists/lib?id=...&lib=main|kids -> switch which Navidrome
+// library this playlist's tracks are downloaded into.
+app.post('/api/playlists/lib', (req, res) => {
+  const list = readPlaylists();
+  const pl = list.find((p) => p.id === String(req.query.id));
+  if (!pl) return res.status(404).json({ ok: false, error: 'Playlist not found' });
+  pl.lib = parseNavLib(req.query.lib);
   writePlaylists(list);
   res.json({ ok: true, playlists: list });
 });
@@ -1919,7 +1946,9 @@ async function produceAudio(job, meta, params, onProgress) {
     const outName = `${stem}.${realExt}`;
     if (params.dest === 'server' || params.dest === 'navidrome') {
       const nav = params.dest === 'navidrome';
-      let libDir = nav ? NAVIDROME_DIR : AUDIO_DIR;
+      // Main library or the separate kids one — different Navidrome instances.
+      const navRoot = NAV_LIBS[parseNavLib(params.navLib)];
+      let libDir = nav ? navRoot : AUDIO_DIR;
       let finalName = outName;
       if (nav) {
         // Tags: UI-provided fields win; site metadata (yt-dlp) fills the gaps.
@@ -1963,17 +1992,18 @@ async function produceAudio(job, meta, params, onProgress) {
         // traceable even when it ends up outside its folder.
         const artistDir = safeMusicPart(artists[0], 'Unknown Artist');
         const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? `(${year})` : '');
-        libDir = path.join(NAVIDROME_DIR, artistDir, albumDir);
+        libDir = path.join(navRoot, artistDir, albumDir);
         finalName = `${artistDir} - ${albumDir} - ${safeMusicPart(songTitle, 'Unknown')}.${realExt}`;
       }
       fs.mkdirSync(libDir, { recursive: true });
       const libPath = path.join(libDir, finalName);
       fs.copyFileSync(outPath, libPath);
-      recordJobHistory(meta, params, nav ? 'navidrome/music' : 'server/mp3', finalName, false);
+      const kids = nav && parseNavLib(params.navLib) === 'kids';
+      recordJobHistory(meta, params, nav ? (kids ? 'navidrome/kids' : 'navidrome/music') : 'server/mp3', finalName, false);
       finishJob(job, {
-        saved: true, dest: params.dest, dir: nav ? 'music' : 'mp3', filename: finalName, mime,
+        saved: true, dest: params.dest, dir: nav ? (kids ? 'kids' : 'music') : 'mp3', filename: finalName, mime,
         deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
-        message: nav ? 'Saved to Navidrome.' : 'Saved to library/mp3.',
+        message: nav ? (kids ? 'Saved to Navidrome (kids).' : 'Saved to Navidrome.') : 'Saved to library/mp3.',
       });
     } else {
       // Audio doesn't fit the shorts pipeline — it's delivered to the device only.
@@ -2138,6 +2168,8 @@ app.get('/api/jobs/start', (req, res) => {
       web: req.query.web === '1',
       quality: parseQuality(req.query.quality),
       audio: req.query.audio === '1' || dest === 'navidrome',
+      // Target Navidrome library (main | kids); ignored for other dests.
+      navLib: parseNavLib(req.query.lib),
       afmt: AUDIO_FORMATS.includes(req.query.afmt) ? req.query.afmt : dest === 'navidrome' ? 'opus' : 'm4a',
       aq: parseAudioQuality(req.query.aq),
       container: parseContainer(req.query.container),
