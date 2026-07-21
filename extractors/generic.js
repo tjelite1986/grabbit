@@ -5,7 +5,7 @@
 // (see runYtdlp in server.js); here we only probe metadata for a nice filename.
 
 const { spawn } = require('child_process');
-const { cleanTitle } = require('./util');
+const { cleanTitle, titleFrom } = require('./util');
 const { cookieArgs } = require('../cookies');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('../premium-fallback');
 
@@ -124,6 +124,11 @@ function hashtagsFrom(...texts) {
   return [...seen];
 }
 
+// Some sites hand out a placeholder where the title should be — a logged-in
+// Facebook reel is literally titled "Video", with the real caption in the
+// description. Treat those as no title at all.
+const PLACEHOLDER_TITLE = /^(video|reel|reels|watch|photo|post|facebook|untitled)$/i;
+
 // Facebook titles arrive as "<n> reactions · <n> comments | <caption> | <page>".
 // Keep the caption; the engagement counts and the page name are noise (the page
 // is already the creator).
@@ -178,9 +183,11 @@ async function resolve(url) {
   let music = null;
   if (info) {
     creator = info.uploader || info.channel || info.extractor || 'unknown';
-    title = cleanTitle(stripSocialTitleNoise(info.title, info.uploader)) || info.id;
     description = info.description || '';
     tags = Array.isArray(info.tags) && info.tags.length ? info.tags : hashtagsFrom(info.description, info.title);
+    title = cleanTitle(stripSocialTitleNoise(info.title, info.uploader));
+    // A placeholder title (or none) means the caption is the real title.
+    if (!title || PLACEHOLDER_TITLE.test(title)) title = titleFrom(description, tags, info.id);
     thumbnail = info.thumbnail;
     duration = Number.isFinite(info.duration) ? info.duration : null;
     const ext = info.ext || 'mp4';
