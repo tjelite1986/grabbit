@@ -1179,24 +1179,89 @@
         }
       }
 
-      // Several URLs pasted at once -> one card that queues them all with the
-      // same settings (each file still names/tags itself from its own metadata).
+      // Several URLs pasted at once -> the playlist layout: batch buttons on top
+      // and one card per link. Cards start as placeholders and fill in with the
+      // real thumbnail/title/creator as each link resolves, so the list is
+      // usable immediately instead of after every lookup has finished.
       let multiUrls = [];
+      const MULTI_LOOKUPS = 3; // parallel lookups; more just queues behind the site
+
       function renderMulti(urls) {
         multiUrls = urls;
-        const card = mediaCard({
-          title: urls.length + ' links pasted',
-          sub: 'Download all with the same settings',
-          onActions(actions) {
-            actions.appendChild(actBtn(ICON.audio, () => openSheetMulti('audio'), 'Download all as audio'));
-            actions.appendChild(actBtn(ICON.video, () => openSheetMulti('video'), 'Download all as video'));
-          },
+
+        const head = document.createElement('div');
+        head.style.cssText = 'margin:2px 2px 8px;font-size:13px;color:var(--muted)';
+        head.textContent = urls.length + ' links pasted';
+        cardsEl.appendChild(head);
+
+        const btns = document.createElement('div');
+        btns.className = 'profbtns';
+        const allAudio = document.createElement('button');
+        allAudio.className = 'primary';
+        allAudio.textContent = 'Download all as audio (' + urls.length + ')';
+        allAudio.addEventListener('click', () => openSheetMulti('audio'));
+        const allVideo = document.createElement('button');
+        allVideo.textContent = 'Download all as video';
+        allVideo.addEventListener('click', () => openSheetMulti('video'));
+        btns.appendChild(allAudio);
+        btns.appendChild(allVideo);
+        cardsEl.appendChild(btns);
+
+        const itemsWrap = document.createElement('div');
+        cardsEl.appendChild(itemsWrap);
+
+        // One placeholder per link, replaced in place once its lookup lands.
+        const slots = urls.map((u) => {
+          const slot = document.createElement('div');
+          slot.appendChild(mediaCard({ title: u, sub: 'Reading metadata…' }));
+          itemsWrap.appendChild(slot);
+          return slot;
         });
-        cardsEl.appendChild(card);
-        const list = document.createElement('div');
-        list.style.cssText = 'margin:8px 2px;font-size:12.5px;color:var(--faint);word-break:break-all';
-        list.innerHTML = urls.map((u) => esc(u)).join('<br>');
-        cardsEl.appendChild(list);
+
+        // Build the same item shape a playlist entry has. standalone marks it as
+        // "not part of a profile", so a download runs as its own job instead of
+        // going through the profile batch endpoint.
+        function multiCard(url, d) {
+          const it = d
+            ? { ...d, sourceUrl: url, url, standalone: true }
+            : { sourceUrl: url, url, standalone: true, title: null, mediaType: 'video' };
+          const isImg = it.mediaType === 'image';
+          const status = d ? (d.downloaded ? 'downloaded' : importStatusLabel(d.imported, isImg, settings.channel)) : null;
+          return mediaCard({
+            title: it.title || url,
+            sub: d
+              ? (d.duration ? fmtClock(d.duration) + ' · ' : '') + (d.creator || d.extractor || '') +
+                (d.tooLongForShorts ? ' · server only' : '')
+              : 'No metadata — download may still work',
+            thumbnail: it.thumbnail,
+            caption: it.description,
+            status,
+            onActions(actions) {
+              if (isImg) {
+                actions.appendChild(actBtn(ICON.image, () => openSheet('image', null, it)));
+              } else {
+                actions.appendChild(actBtn(ICON.audio, () => openSheet('audio', null, it)));
+                actions.appendChild(actBtn(ICON.video, () => openSheet('video', null, it)));
+              }
+            },
+          });
+        }
+
+        let next = 0;
+        async function worker() {
+          while (next < urls.length) {
+            const i = next++;
+            const url = urls[i];
+            let d = null;
+            try {
+              const r = await fetchJson('/api/resolve?url=' + encodeURIComponent(url));
+              if (r.ok) d = r;
+            } catch { /* keep the placeholder's fallback card */ }
+            slots[i].innerHTML = '';
+            slots[i].appendChild(multiCard(url, d));
+          }
+        }
+        for (let i = 0; i < Math.min(MULTI_LOOKUPS, urls.length); i++) worker();
       }
 
       function mediaCard({ title, sub, thumbnail, kind, status, caption, onActions }) {
@@ -1950,7 +2015,9 @@
         }
 
         if (sheetItem && !sheetSingle) {
-          if (sheetMode === 'audio' || segValue($('shDest')) === 'navidrome') {
+          // A pasted link has no profile behind it, so it always runs as its own
+          // job — the batch endpoint needs a profile URL to enumerate.
+          if (sheetItem.standalone || sheetMode === 'audio' || segValue($('shDest')) === 'navidrome') {
             // Audio (or Navidrome) for one playlist item: run it as a normal
             // job against the item's own URL — the batch pipeline is video-only.
             closeSheet();
