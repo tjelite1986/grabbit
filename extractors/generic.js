@@ -206,7 +206,12 @@ async function resolve(url) {
   }
   // sourceUrl stays the pasted URL so the downloaded-registry dedupe keys off
   // what the user actually entered, even when a premium fallback swapped url.
-  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music };
+  // Probing can fail while the download itself still works, so a failure is not
+  // fatal here — but it leaves every field at its "unknown" default, which on
+  // its own looks like a broken link rather than a broken extractor. Pass the
+  // reason along so the UI can say what actually went wrong.
+  const probeError = info ? null : error || 'Could not read metadata for this link.';
+  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError };
 }
 
 module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };

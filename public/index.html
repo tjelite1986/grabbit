@@ -237,6 +237,11 @@
       .badge.chmain { color: #9db8ff; border-color: #2a3c5a; background: rgba(42,60,90,.25); }
       .badge.chserver { color: #9be7c4; border-color: #2d5a3a; background: rgba(45,90,58,.2); }
       .badge.chfail { color: #ffb0b0; border-color: #6a2d2d; background: rgba(106,45,45,.25); }
+      .probewarn {
+        position: relative; z-index: 2; margin: 10px 12px 12px; padding: 9px 11px; border-radius: 11px;
+        border: 1px solid #6a5a2d; background: rgba(106,90,45,.22); color: #f0d79b;
+        font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere;
+      }
       .hcard.failed { border-color: #5a2d2d; }
       .hcard .h-err { position: relative; z-index: 2; margin-top: 6px; font-size: 12px; color: var(--bad); overflow-wrap: anywhere; }
 
@@ -1229,6 +1234,15 @@
             }
           },
         });
+        // Metadata could not be read: say so instead of leaving an "unknown"
+        // card that looks like a bad link. The download may still work.
+        if (d.probeError) {
+          const warn = document.createElement('div');
+          warn.className = 'probewarn';
+          warn.textContent = 'No metadata: ' + d.probeError +
+            ' — the download may still work, but title and creator are unknown. Private or login-only content usually needs cookies (More → Cookies).';
+          card.appendChild(warn);
+        }
         cardsEl.appendChild(card);
       }
 

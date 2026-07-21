@@ -940,6 +940,11 @@ app.get('/api/resolve', async (req, res) => {
       // Site-provided music metadata (artist/track/album/year), when available;
       // pre-fills the Navidrome tag fields in the UI.
       music: job.music || null,
+      // The site's metadata could not be read (a broken extractor, or content
+      // that needs a login). The download may still work, so this is a warning
+      // on the card rather than an error — without it the result just reads
+      // "unknown" with no explanation.
+      probeError: job.probeError || null,
       // Already saved once (any destination) per the downloaded registry.
       downloaded: isDownloaded(job.sourceUrl || url),
       // Too long to belong in the shorts library (UI forces the server library).
