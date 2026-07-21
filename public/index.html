@@ -242,6 +242,7 @@
         border: 1px solid #6a5a2d; background: rgba(106,90,45,.22); color: #f0d79b;
         font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere;
       }
+      .probewarn.fatal { border-color: #6a2d2d; background: rgba(106,45,45,.22); color: #ffb0b0; }
       .hcard.failed { border-color: #5a2d2d; }
       .hcard .h-err { position: relative; z-index: 2; margin-top: 6px; font-size: 12px; color: var(--bad); overflow-wrap: anywhere; }
 
@@ -1321,9 +1322,14 @@
         // card that looks like a bad link. The download may still work.
         if (d.probeError) {
           const warn = document.createElement('div');
-          warn.className = 'probewarn';
-          warn.textContent = 'No metadata: ' + d.probeError +
-            ' — the download may still work, but title and creator are unknown. Private or login-only content usually needs cookies (More → Cookies).';
+          // A refused extraction dooms the download too — it is the same
+          // extraction. Only a transient failure leaves the download a chance.
+          warn.className = 'probewarn' + (d.probeFatal ? ' fatal' : '');
+          warn.textContent = d.probeFatal
+            ? 'The site refused this video: ' + d.probeError +
+              ' — downloading will fail too. Login-only content needs cookies (More → Cookies); otherwise try again later or find another upload.'
+            : 'No metadata: ' + d.probeError +
+              ' — the download may still work, but title and creator are unknown.';
           card.appendChild(warn);
         }
         cardsEl.appendChild(card);

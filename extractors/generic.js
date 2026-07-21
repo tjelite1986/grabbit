@@ -102,6 +102,18 @@ async function resolveProfile(url) {
   return { creator, title: data.title || null, items };
 }
 
+// Does this probe failure also doom the download? The site refusing to hand
+// over the video data (Facebook's "Cannot parse data" after its payload
+// endpoint answers with an error, a deleted or private clip, a login wall)
+// leaves nothing for the downloader either — it runs the same extraction.
+// Anything else (a timeout, a dropped connection, an unreadable field) is not
+// evidence about the download.
+function isFatalProbeError(message) {
+  return /Cannot parse data|Unsupported URL|Video unavailable|not available|no longer available|has been removed|been deleted|private|members[- ]only|requires? (?:a )?(?:login|sign[- ]?in|authentication)|Sign in to confirm|log in|No video formats|Requested format is not available|geo[- ]?restricted|blocked in your country/i.test(
+    String(message || '')
+  );
+}
+
 // A release year only counts when it looks like one: leading 4 digits inside a
 // sane range. Accepts both "2019" and a "20190826" date string.
 function plausibleYear(v) {
@@ -218,13 +230,18 @@ async function resolve(url) {
   // its own looks like a broken link rather than a broken extractor. Pass the
   // reason along so the UI can say what actually went wrong.
   const probeError = info ? null : error || 'Could not read metadata for this link.';
+  // A probe can fail two ways. A transient one (timeout, dropped connection)
+  // says nothing about the download, which runs separately. But when the site
+  // refuses the extraction itself, the download uses that same extraction and
+  // cannot succeed either — the UI should say so instead of raising hope.
+  const probeFatal = info ? false : isFatalProbeError(probeError);
   // The site's own id for this video, plus which site it came from. Stable
   // across the different share URLs one clip can have (a Facebook reel is
   // reachable as /share/r/<code>, /share/v/<code> and /reel/<id>), so the
   // downloaded-registry can recognise a repeat even from a brand new link.
   const mediaId = info && info.id ? String(info.id) : null;
   const site = info ? String(info.extractor_key || info.extractor || '').toLowerCase() || null : null;
-  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, mediaId, site };
+  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, probeFatal, mediaId, site };
 }
 
 module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };

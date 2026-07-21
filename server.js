@@ -962,6 +962,9 @@ app.get('/api/resolve', async (req, res) => {
       // on the card rather than an error — without it the result just reads
       // "unknown" with no explanation.
       probeError: job.probeError || null,
+      // True when the failure also blocks the download (same extraction), so
+      // the UI can warn instead of suggesting it might work anyway.
+      probeFatal: !!job.probeFatal,
       // Already saved once (any destination) per the downloaded registry.
       downloaded: isDownloaded(job.sourceUrl || url, job.site, job.mediaId),
       // Too long to belong in the shorts library (UI forces the server library).
