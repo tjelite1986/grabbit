@@ -218,7 +218,13 @@ async function resolve(url) {
   // its own looks like a broken link rather than a broken extractor. Pass the
   // reason along so the UI can say what actually went wrong.
   const probeError = info ? null : error || 'Could not read metadata for this link.';
-  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError };
+  // The site's own id for this video, plus which site it came from. Stable
+  // across the different share URLs one clip can have (a Facebook reel is
+  // reachable as /share/r/<code>, /share/v/<code> and /reel/<id>), so the
+  // downloaded-registry can recognise a repeat even from a brand new link.
+  const mediaId = info && info.id ? String(info.id) : null;
+  const site = info ? String(info.extractor_key || info.extractor || '').toLowerCase() || null : null;
+  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, mediaId, site };
 }
 
 module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };

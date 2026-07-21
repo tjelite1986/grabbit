@@ -389,10 +389,20 @@ function readDownloaded() {
   return downloadedCache;
 }
 
-function markDownloaded(sourceUrl, filename) {
+// A clip is registered under its URL AND, when the site gave us one, under its
+// site-native id — the same video shared as a new link has a different URL but
+// the same id, and only the id-key recognises it.
+function idKey(site, mediaId) {
+  return site && mediaId ? `id:${site}:${mediaId}` : null;
+}
+
+function markDownloaded(sourceUrl, filename, site, mediaId, channel) {
   if (!sourceUrl) return;
   const map = readDownloaded();
-  map[mediaKey(sourceUrl)] = { filename: filename || null, at: Date.now() };
+  const entry = { filename: filename || null, at: Date.now(), channel: channel || null };
+  map[mediaKey(sourceUrl)] = entry;
+  const key = idKey(site, mediaId);
+  if (key) map[key] = entry;
   try {
     fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(map));
   } catch (e) {
@@ -400,8 +410,15 @@ function markDownloaded(sourceUrl, filename) {
   }
 }
 
-function isDownloaded(sourceUrl) {
-  return !!(sourceUrl && readDownloaded()[mediaKey(sourceUrl)]);
+function downloadedEntry(sourceUrl, site, mediaId) {
+  const map = readDownloaded();
+  const key = idKey(site, mediaId);
+  if (key && map[key]) return map[key];
+  return (sourceUrl && map[mediaKey(sourceUrl)]) || null;
+}
+
+function isDownloaded(sourceUrl, site, mediaId) {
+  return !!downloadedEntry(sourceUrl, site, mediaId);
 }
 
 // ---------------------------------------------------------------------------
@@ -946,7 +963,7 @@ app.get('/api/resolve', async (req, res) => {
       // "unknown" with no explanation.
       probeError: job.probeError || null,
       // Already saved once (any destination) per the downloaded registry.
-      downloaded: isDownloaded(job.sourceUrl || url),
+      downloaded: isDownloaded(job.sourceUrl || url, job.site, job.mediaId),
       // Too long to belong in the shorts library (UI forces the server library).
       tooLongForShorts: !isImage && tooLongForShorts(job),
       filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
@@ -1705,7 +1722,7 @@ app.get('/api/download-all', async (req, res) => {
         device: false,
       });
       saved++;
-      markDownloaded(job.sourceUrl || job.url, null);
+      markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, channel);
       send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'saved' });
     } catch (e) {
       failed++;
@@ -1779,7 +1796,11 @@ function newJob(fields) {
 function finishJob(job, patch) {
   setJob(job, { status: 'done', phase: null, percent: 100, doneAt: Date.now(), ...patch });
   // Anything saved into a library counts as downloaded (playlist dedup marks).
-  if (job.saved && job.sourceUrl) markDownloaded(job.sourceUrl, job.filename);
+  // The channel only means something for a shorts save; recording it for a
+  // server/Navidrome save would make a later shorts download look like a repeat.
+  if (job.saved && job.sourceUrl) {
+    markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null);
+  }
   if (job.deliverTemp && job.finalPath) {
     const p = job.finalPath;
     const t = setTimeout(() => fs.rm(p, { force: true }, () => {}), DELIVER_TTL_MS);
@@ -1870,6 +1891,9 @@ async function runJob(job, params) {
     title: meta.title || null, creator: meta.creator || null, thumbnail: meta.thumbnail || null,
     mediaType, duration: durationKnown(meta) ? Number(meta.duration) : null,
     sourceUrl: meta.sourceUrl || params.url,
+    // Site-native id, so finishJob can register the clip under a key that
+    // survives being shared as a different URL.
+    site: meta.site || null, mediaId: meta.mediaId || null,
   });
 
   if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
@@ -1913,7 +1937,14 @@ async function runJob(job, params) {
 async function produceEliteVideo(job, meta, params, onProgress) {
   const stem = `${safeCreator(meta.creator)}_-_${safeTitle(meta.title)}`;
   const outName = `${stem}${params.web ? '.web.mp4' : '.mp4'}`;
-  const status = importedStatus(params.channel, meta.creator, stem);
+  let status = importedStatus(params.channel, meta.creator, stem);
+  // The filename check only matches an identical creator+title. The same clip
+  // shared as a different link, or one whose caption now reads differently,
+  // slips past it — the site-native id does not.
+  if (status === null) {
+    const prev = downloadedEntry(meta.sourceUrl || params.url, meta.site, meta.mediaId);
+    if (prev && prev.channel === params.channel) status = 'imported';
+  }
   const skipImport = status !== null;
   if (skipImport && !params.device) {
     return finishJob(job, {
