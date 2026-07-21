@@ -102,6 +102,34 @@ async function resolveProfile(url) {
   return { creator, title: data.title || null, items };
 }
 
+// Sites that keep hashtags in the caption instead of a tags array (Facebook,
+// Instagram, ...) — pull them out so clips still get keywords.
+function hashtagsFrom(...texts) {
+  const seen = new Set();
+  for (const t of texts) {
+    for (const m of String(t || '').matchAll(/#([\p{L}\p{N}_]{2,50})/gu)) {
+      const tag = m[1].toLowerCase();
+      if (!seen.has(tag)) seen.add(tag);
+      if (seen.size >= 30) break;
+    }
+  }
+  return [...seen];
+}
+
+// Facebook titles arrive as "<n> reactions · <n> comments | <caption> | <page>".
+// Keep the caption; the engagement counts and the page name are noise (the page
+// is already the creator).
+function stripSocialTitleNoise(title, uploader) {
+  const parts = String(title || '').split('|').map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2) return title;
+  const kept = parts.filter(
+    (p, i) =>
+      !/^[\d.,km]+\s*(reactions?|comments?|shares?|views?|likes?)\b/i.test(p) &&
+      !(i === parts.length - 1 && uploader && p.toLowerCase() === String(uploader).toLowerCase())
+  );
+  return kept.length ? kept.join(' ') : title;
+}
+
 async function resolve(url) {
   const sourceUrl = url;
   let { info, error } = await probe(url);
@@ -142,9 +170,9 @@ async function resolve(url) {
   let music = null;
   if (info) {
     creator = info.uploader || info.channel || info.extractor || 'unknown';
-    title = cleanTitle(info.title) || info.id;
+    title = cleanTitle(stripSocialTitleNoise(info.title, info.uploader)) || info.id;
     description = info.description || '';
-    tags = Array.isArray(info.tags) ? info.tags : [];
+    tags = Array.isArray(info.tags) && info.tags.length ? info.tags : hashtagsFrom(info.description, info.title);
     thumbnail = info.thumbnail;
     duration = Number.isFinite(info.duration) ? info.duration : null;
     const ext = info.ext || 'mp4';
