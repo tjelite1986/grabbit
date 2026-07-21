@@ -236,6 +236,9 @@
       .badge.ch18 { color: #ff9eb5; border-color: #5a2a36; background: rgba(90,42,54,.25); }
       .badge.chmain { color: #9db8ff; border-color: #2a3c5a; background: rgba(42,60,90,.25); }
       .badge.chserver { color: #9be7c4; border-color: #2d5a3a; background: rgba(45,90,58,.2); }
+      .badge.chfail { color: #ffb0b0; border-color: #6a2d2d; background: rgba(106,45,45,.25); }
+      .hcard.failed { border-color: #5a2d2d; }
+      .hcard .h-err { position: relative; z-index: 2; margin-top: 6px; font-size: 12px; color: var(--bad); overflow-wrap: anywhere; }
 
       /* ---- queue ---- */
       .qtabs { display: flex; gap: 22px; overflow-x: auto; padding: 4px 0 14px; scrollbar-width: none; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
@@ -468,6 +471,7 @@
           <button class="chip" data-filter="video">Video</button>
           <button class="chip" data-filter="audio">Audio</button>
           <button class="chip" data-filter="image">Images</button>
+          <button class="chip" data-filter="failed">Failed</button>
         </div>
 
         <div id="historyList"></div>
@@ -2227,7 +2231,9 @@
 
       function renderHistory() {
         let items = historyItems.slice();
-        if (hFilter !== 'all') items = items.filter((it) => itemKind(it) === hFilter);
+        // Failures are their own filter; the type filters only list real saves.
+        if (hFilter === 'failed') items = items.filter((it) => it.error);
+        else if (hFilter !== 'all') items = items.filter((it) => !it.error && itemKind(it) === hFilter);
         if (hSort === 'old') items = items.reverse();
         if (!items.length) {
           historyList.innerHTML = '';
@@ -2238,20 +2244,21 @@
         historyList.innerHTML = items.map((it) => {
           const kind = itemKind(it);
           const chClass = (it.channel || '').includes('18plus') ? 'ch18' : (it.channel || '').startsWith('server') || (it.channel || '').startsWith('audio') || (it.channel || '').startsWith('navidrome') ? 'chserver' : 'chmain';
-          const where = it.imported ? 'imported' : it.device ? 'on device' : 'saved';
+          const where = it.error ? 'failed' : it.imported ? 'imported' : it.device ? 'on device' : 'saved';
           const title = esc(it.title || it.filename || 'download');
           const sh = safeHref(it.sourceUrl);
           const link = sh ? '<a href="' + esc(sh) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title;
           const icon = kind === 'audio' ? ICON.audio : kind === 'image' ? ICON.image : ICON.video;
           const hasImg = !!it.thumbnail;
-          return '<div class="hcard' + (hasImg ? ' has-img' : '') + '">' +
+          return '<div class="hcard' + (hasImg ? ' has-img' : '') + (it.error ? ' failed' : '') + '">' +
             (hasImg ? '<div class="bg" style="' + esc('background-image:' + cssUrl(it.thumbnail)) + '"></div>' : '') +
             '<div class="h-main">' +
               '<div class="h-title">' + link + '</div>' +
               '<div class="h-row">' +
-                '<span class="badge ' + chClass + '">' + esc(it.channel || '') + '</span>' +
+                '<span class="badge ' + (it.error ? 'chfail' : chClass) + '">' + esc(it.error ? 'failed' : it.channel || '') + '</span>' +
                 (it.creator ? esc(it.creator) + ' · ' : '') + where + ' · ' + relTime(it.time) +
               '</div>' +
+              (it.error ? '<div class="h-err">' + esc(it.error) + '</div>' : '') +
             '</div>' +
             '<div class="h-side">' +
               '<button class="h-del" type="button" data-id="' + esc(it.id) + '" title="Remove">' +

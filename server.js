@@ -274,6 +274,30 @@ try {
   /* ignore */
 }
 
+// Mirror the console to a file on the data volume. Docker's own log is wiped
+// whenever the container is recreated (an image rebuild), which loses exactly
+// the failure output worth reading; this one lives with the rest of the data.
+// One rotation at LOG_MAX keeps it bounded.
+const LOG_FILE = path.join(DATA_DIR, 'server.log');
+const LOG_MAX = 5 * 1024 * 1024;
+for (const level of ['log', 'warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    original(...args);
+    try {
+      const line = `${new Date().toISOString()} [${level}] ${args
+        .map((a) => (typeof a === 'string' ? a : a && a.stack ? a.stack : JSON.stringify(a)))
+        .join(' ')}\n`;
+      if ((fs.existsSync(LOG_FILE) ? fs.statSync(LOG_FILE).size : 0) > LOG_MAX) {
+        fs.renameSync(LOG_FILE, `${LOG_FILE}.1`);
+      }
+      fs.appendFileSync(LOG_FILE, line);
+    } catch {
+      /* logging must never break a download */
+    }
+  };
+}
+
 let historySeq = 0;
 
 // Number of sites yt-dlp can handle (its --list-extractors count). Filled once
@@ -1252,7 +1276,7 @@ function startNavidromeJob(url, navLib) {
     date: null,
     genres: null,
   };
-  const job = newJob({ dest: 'navidrome', channel: 'main', device: false });
+  const job = newJob({ dest: 'navidrome', channel: 'main', lib: params.navLib, device: false });
   scheduleJob(job, params);
   return job;
 }
@@ -1659,7 +1683,15 @@ app.get('/api/download-all', async (req, res) => {
       send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'saved' });
     } catch (e) {
       failed++;
-      send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'failed', error: String(e.message || e) });
+      const error = String(e.message || e);
+      // Persist the failure too — a batch scrolls past on screen, and nothing
+      // was marked as downloaded, so the item stays retryable.
+      recordHistory({
+        creator: job.creator || null, title, channel: null, filename: null,
+        sourceUrl: job.sourceUrl || job.url || null, thumbnail: job.thumbnail || null,
+        extractor: job.extractor || null, imported: false, device: false, error,
+      });
+      send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'failed', error });
     }
   }
   send({ type: 'done', saved, skipped, failed });
@@ -1755,6 +1787,26 @@ function recordJobHistory(meta, params, channelLabel, filename, imported) {
   });
 }
 
+// Mark a job as failed AND write the failure to the persistent history, so the
+// reason survives a restart — the job list itself is in-memory only. Failures
+// are never marked as downloaded, so a playlist still offers them next time.
+function failJob(job, message) {
+  const error = String(message || 'Download failed');
+  setJob(job, { status: 'error', phase: null, error });
+  recordHistory({
+    creator: job.creator || null,
+    title: job.title || null,
+    channel: job.dest === 'navidrome' ? `navidrome/${job.lib === 'kids' ? 'kids' : 'music'}` : job.dest || null,
+    filename: null,
+    sourceUrl: job.sourceUrl || job.url || null,
+    thumbnail: job.thumbnail || null,
+    extractor: job.extractor || null,
+    imported: false,
+    device: false,
+    error,
+  });
+}
+
 // Resolve, enforce the shorts length cap, then dispatch to the right producer.
 async function runJob(job, params) {
   setJob(job, { status: 'running', phase: 'resolving' });
@@ -1762,7 +1814,7 @@ async function runJob(job, params) {
   try {
     meta = await extractors.resolve(params.url);
   } catch (e) {
-    return setJob(job, { status: 'error', phase: null, error: 'Resolve failed: ' + String(e.message || e) });
+    return failJob(job, 'Resolve failed: ' + String(e.message || e));
   }
   if (params.creatorOverride) meta.creator = params.creatorOverride;
   if (params.titleOverride) meta.title = params.titleOverride;
@@ -1783,7 +1835,7 @@ async function runJob(job, params) {
   });
 
   if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
-    return setJob(job, { status: 'error', phase: null, error: shortsTooLongError(meta) });
+    return failJob(job, shortsTooLongError(meta));
   }
 
   const onProgress = (p) =>
@@ -1804,7 +1856,7 @@ async function runJob(job, params) {
     // Full stack to the server log — the job list only shows the message, and
     // an unexpected TypeError is undebuggable without it.
     console.error(`job ${job.id} failed:`, e && e.stack ? e.stack : e);
-    setJob(job, { status: 'error', phase: null, error: String(e.message || e) });
+    failJob(job, String(e.message || e));
   }
 }
 
@@ -1960,7 +2012,10 @@ async function produceAudio(job, meta, params, onProgress) {
         // an EP keeps its own album name like a regular album.
         const album = (params.release === 'single' ? songTitle : params.album || m.album || songTitle).trim();
         const date = params.date || (m.year ? String(m.year) : null);
-        const year = date ? String(date).slice(0, 4) : null;
+        // Only a plausible year is written into the tag and the album folder —
+        // sites hand out nonsense release years ("1674") often enough.
+        const yearNum = Number(String(date || '').slice(0, 4));
+        const year = yearNum >= 1900 && yearNum <= new Date().getFullYear() + 1 ? String(yearNum) : null;
         let genres = params.genres ? splitList(params.genres) : m.genre ? [m.genre] : [];
         // No genre from the UI or the site: look one up (iTunes/Deezer) so
         // the library doesn't end up genre-less — the norm for YouTube rips.
@@ -1971,7 +2026,8 @@ async function produceAudio(job, meta, params, onProgress) {
             artist: artists,
             albumartist: artists[0],
             album,
-            date,
+            // Implausible dates are dropped entirely, not written half-wrong.
+            date: year ? date : null,
             genre: genres,
             // Navidrome reads this as the release type (album/single/ep).
             // Best effort: formats whose easy-tag map lacks the key (mp3/m4a)
@@ -2203,7 +2259,7 @@ app.get('/api/jobs/start', (req, res) => {
     return res.status(400).json({ ok: false, error: 'Cutting/splitting is only supported for the server library.' });
   }
   const at = parseAt(req.query.at);
-  const job = newJob({ dest: params.dest, channel: params.channel, device: params.device });
+  const job = newJob({ dest: params.dest, channel: params.channel, lib: params.navLib, device: params.device });
   job.params = params;
   if (at) {
     setJob(job, { status: 'scheduled', at });
@@ -2283,7 +2339,7 @@ app.post('/api/jobs/:id/retry', (req, res) => {
   if (old.status !== 'error' && old.status !== 'cancelled') {
     return res.status(400).json({ ok: false, error: 'Only failed or cancelled jobs can be retried' });
   }
-  const job = newJob({ dest: old.dest, channel: old.channel, device: old.device });
+  const job = newJob({ dest: old.dest, channel: old.channel, lib: old.lib, device: old.device });
   job.params = old.params;
   res.json({ ok: true, jobId: job.id });
   scheduleJob(job, old.params);
@@ -2305,7 +2361,7 @@ function scheduleJob(job, params) {
     }
     activeJobs++;
     runJob(job, params)
-      .catch((e) => setJob(job, { status: 'error', phase: null, error: String(e.message || e) }))
+      .catch((e) => failJob(job, String(e.message || e)))
       .finally(() => {
         activeJobs--;
         const next = pendingJobs.shift();

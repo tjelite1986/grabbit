@@ -102,6 +102,14 @@ async function resolveProfile(url) {
   return { creator, title: data.title || null, items };
 }
 
+// A release year only counts when it looks like one: leading 4 digits inside a
+// sane range. Accepts both "2019" and a "20190826" date string.
+function plausibleYear(v) {
+  const y = Number(String(v == null ? '' : v).trim().slice(0, 4));
+  const max = new Date().getFullYear() + 1;
+  return y >= 1900 && y <= max ? String(y) : null;
+}
+
 // Sites that keep hashtags in the caption instead of a tags array (Facebook,
 // Instagram, ...) — pull them out so clips still get keywords.
 function hashtagsFrom(...texts) {
@@ -185,7 +193,10 @@ async function resolve(url) {
         artist: info.artist || info.creator || null,
         track: info.track || null,
         album: info.album || null,
-        year: info.release_year || (info.release_date ? String(info.release_date).slice(0, 4) : null) || null,
+        // release_date first: YouTube Music's release_year is sometimes junk
+        // (a "1674" next to a 2019-08-26 release date). Anything outside a
+        // plausible range is dropped rather than written into a tag.
+        year: plausibleYear(info.release_date) || plausibleYear(info.release_year) || plausibleYear(info.upload_date) || null,
         // YouTube's "genre" is the video category ("Music", "Film & Animation"),
         // not a music genre — worthless as a tag, so only pass it through for
         // other sites.
