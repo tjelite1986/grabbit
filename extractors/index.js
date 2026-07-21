@@ -45,10 +45,30 @@ function pick(url) {
   return generic;
 }
 
+// The site a clip came from, as a stable slug. The yt-dlp path names itself
+// (`facebook`, `tiktok`); a site extractor is identified by its hostname.
+function siteOf(job, url) {
+  if (job && job.site) return job.site;
+  try {
+    return new URL(String(job && job.sourceUrl) || String(url)).hostname.replace(/^(www|m)\./i, '').toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+// Every extractor already carries the site's own id for a clip — as `id` in the
+// site extractors, as `mediaId` from yt-dlp. Normalising both into `site` +
+// `mediaId` here is what lets the downloaded-registry recognise a repeat that
+// arrives under a different URL, without touching each extractor.
+function withMediaId(job, url) {
+  if (!job || typeof job !== 'object') return job;
+  return { ...job, site: siteOf(job, url), mediaId: job.mediaId || (job.id != null ? String(job.id) : null) };
+}
+
 async function resolve(url) {
   const extractor = pick(url);
   const job = await extractor.resolve(url);
-  return { extractor: extractor.name, ...job };
+  return { extractor: extractor.name, ...withMediaId(job, url) };
 }
 
 // Does the matching extractor recognise this URL as a multi-video profile?
@@ -64,7 +84,8 @@ async function resolveProfile(url) {
     throw new Error('This site does not support whole-profile downloads');
   }
   const result = await extractor.resolveProfile(url);
-  return { extractor: extractor.name, ...result };
+  const items = Array.isArray(result.items) ? result.items.map((it) => withMediaId(it, it.sourceUrl || url)) : result.items;
+  return { extractor: extractor.name, ...result, items };
 }
 
 module.exports = { resolve, isProfile, resolveProfile, pick, siteExtractors, generic };
