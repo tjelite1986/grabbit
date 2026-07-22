@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Plugin-based media grabber: paste a link, stream the file to the browser and save a copy on the server",
+  "license": "MIT",
   "type": "commonjs",
   "main": "server.js",
   "scripts": {

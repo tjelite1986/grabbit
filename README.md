@@ -4,6 +4,7 @@
 ![Express](https://img.shields.io/badge/Express-4-000000?logo=express)
 ![yt-dlp](https://img.shields.io/badge/powered%20by-yt--dlp-red)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 Plugin-based media grabber. Paste a link in the web UI; the file streams to your
 device while a copy is saved on the server.
@@ -54,7 +55,7 @@ hour-long files.
 - [Adding a new site](#adding-a-new-site)
 - [Configuration](#configuration) · [Auth](#auth)
 - [Deploy with Docker](#deploy-with-docker)
-- [Disclaimer](#disclaimer)
+- [Disclaimer](#disclaimer) · [License](#license)
 
 ## Features
 
@@ -961,3 +962,9 @@ URLs that **you** provide.
 
 By downloading, installing or running grabbit you acknowledge that you do so at
 your own risk and take full responsibility for your own actions.
+
+## License
+
+Released under the [MIT License](LICENSE) — free to use, modify and redistribute,
+with attribution and no warranty. The [Disclaimer](#disclaimer) above still
+applies to how you use it.
