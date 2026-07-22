@@ -161,6 +161,11 @@ right match from a metadata lookup list — set the genre, mark it as part of an
 Album, Single or EP, and check the source description, where the real title is
 often hiding.
 
+**A site that won't download?** Most links already work through the built-in
+yt-dlp fallback, but a stubborn site can be taught with a small custom extractor
+— see [Adding a new site](#adding-a-new-site), which also covers the easiest
+route: letting an AI agent write it for you.
+
 ### Playlists, subscriptions and bulk downloads
 
 Paste a **playlist** or a **creator/profile** link and grabbit doesn't resolve a
