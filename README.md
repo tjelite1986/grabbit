@@ -25,6 +25,10 @@ hour-long files.
 | Home | Download sheet | Settings |
 |------|----------------|----------|
 | ![Home screen with resolved link and saved playlists](assets/screenshots/home.jpg) | ![Audio download sheet with metadata lookup and destination picker](assets/screenshots/download-dialog.jpg) | ![Default download options and cookie storage](assets/screenshots/settings.jpg) |
+| Multi-link paste | Playlist & batch | Rules |
+| ![Several links pasted at once, laid out as a batch with download-all buttons](assets/screenshots/multi-paste.jpg) | ![A playlist view with item cards and batch actions](assets/screenshots/playlist.jpg) | ![The rule editor with when/then conditions and the automatic toggle](assets/screenshots/rules.jpg) |
+| Cookies | Queue & retries | |
+| ![The cookies panel for private and login-only content](assets/screenshots/cookies.jpg) | ![The download queue showing progress and an automatic retry](assets/screenshots/queue.jpg) | |
 
 > **The easiest way to install it:** copy this repo's link and ask an AI coding
 > agent like [Claude Code](https://claude.com/claude-code) to set it up for you —
@@ -151,6 +155,8 @@ https://www.example.com/share/r/19EBzS35RK/https://www.example.com/share/r/19EBz
 The second form takes no spacing to get right, which makes it much easier to
 build up a list on a phone or tablet.
 
+![Several links pasted at once, laid out as a batch with download-all buttons](assets/screenshots/multi-paste.jpg)
+
 **Download straight into a music server.** If you run your own music server such
 as [Navidrome](https://www.navidrome.org/), point the music destination at its
 library folder and grabbit files each track into a clean, scannable tree:
@@ -178,6 +184,8 @@ route: letting an AI agent write it for you.
 Paste a **playlist** or a **creator/profile** link and grabbit doesn't resolve a
 single file — it lists *every* item in it as a card, with batch actions on top.
 This is how you grab a whole channel, playlist or profile at once.
+
+![A playlist view with item cards and batch actions](assets/screenshots/playlist.jpg)
 
 **The item list.** The header shows the playlist/profile name, the handle and how
 many items it holds. Each card has:
@@ -393,6 +401,8 @@ Under **More → Rules** you can teach grabbit to fill in the download options f
 you whenever a link matches. Each rule is a simple *when this → then that*: a set
 of match conditions and the settings to apply when they're met.
 
+![The rule editor with when/then conditions and the automatic toggle](assets/screenshots/rules.jpg)
+
 **How matching works:**
 
 - A rule has a **When** block (the conditions) and a **Then** block (the settings
@@ -438,6 +448,8 @@ playlists, age-gated pages, premium audio. grabbit can borrow your browser's
 login by using an exported `cookies.txt` file. Every yt-dlp call — resolve,
 download and playlist polling — then reuses it automatically, so login-gated
 content just works.
+
+![The cookies panel for private and login-only content](assets/screenshots/cookies.jpg)
 
 **Getting a `cookies.txt` file.** It has to be in the classic *Netscape* format,
 which a small browser extension produces in one click:
@@ -492,6 +504,8 @@ grabbit's guiding rule: **recover from anything temporary on its own, and be
 blunt about anything permanent** so you're not left staring at a stalled job.
 A resolve problem shows up right on the card; a download problem shows in the
 **Queue** with the job's message.
+
+![The download queue showing progress and an automatic retry](assets/screenshots/queue.jpg)
 
 ### Common messages
 
