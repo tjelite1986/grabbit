@@ -28,6 +28,7 @@ hour-long files.
 
 - [Features](#features)
 - [Getting started](#getting-started)
+- [Everyday use](#everyday-use)
 - [How it works](#how-it-works--under-the-hood)
 - [Adding a new site](#adding-a-new-site)
 - [Configuration](#configuration) · [Auth](#auth)
@@ -38,7 +39,10 @@ hour-long files.
 - **Search**: type plain words instead of a URL and the box becomes a video
   search (`yt-dlp ytsearch`); click a result to fetch it.
 - **Multi-link paste**: paste several URLs at once — one card queues them all
-  as separate jobs sharing the same settings.
+  as separate jobs sharing the same settings. Links may be separated by spaces
+  or newlines, or run straight together with no separator at all
+  (`https://a/x/https://b/y`), which is far easier to assemble on a phone or
+  tablet.
 - **Destinations**: download to your device, the server library, a music
   library (with metadata tagging via iTunes/Deezer lookup), or hand the file to
   a co-hosted app such as [elite-v2](https://github.com/tjelite1986/elite-v2).
@@ -113,6 +117,49 @@ state lives in `DATA_DIR`.
 
 To stop the server, press `Ctrl + C`. For running it permanently on a server,
 see [Deploy](#deploy).
+
+## Everyday use
+
+A few things the web UI does that aren't obvious at first glance.
+
+**Paste one link — or many.** One link resolves to a single card. Paste several
+and grabbit lays them out as a batch, queuing every one with the same settings.
+The links can be on separate lines, spaced out, or run straight together with no
+separator:
+
+```
+https://www.example.com/share/r/19EBzS35RK/
+https://www.example.com/share/r/19EBzS35RK/
+https://www.example.com/share/r/19EBzS35RK/
+```
+
+```
+https://www.example.com/share/r/19EBzS35RK/https://www.example.com/share/r/19EBzS35RK/https://www.example.com/share/r/19EBzS35RK/
+```
+
+The second form takes no spacing to get right, which makes it much easier to
+build up a list on a phone or tablet.
+
+**Subscribe to a playlist.** Paste a playlist link and choose **Save Playlist**.
+The playlist now lives in grabbit, which polls it on an interval and fetches new
+entries automatically as they're added — no need to come back and re-paste.
+
+**Download straight into a music server.** If you run your own music server such
+as [Navidrome](https://www.navidrome.org/), point the music destination at its
+library folder and grabbit files each track into a clean, scannable tree:
+
+```
+[Artist]/[Album (Year)]/[Artist] - [Album (Year)] - [Title].ext
+```
+
+(Artist and album repeat in the file name on purpose, so a track stays
+identifiable even if it ends up outside its folder.)
+
+**Auto or hand-picked metadata.** Leave tagging on **auto** and grabbit names
+and tags the track for you. Prefer to curate it? Do it manually and pick the
+right match from a metadata lookup list — set the genre, mark it as part of an
+Album, Single or EP, and check the source description, where the real title is
+often hiding.
 
 ## How it works — under the hood
 
