@@ -1090,7 +1090,12 @@
       // which apps hand out all the time. A bare domain only counts when it has
       // a real TLD and a path, so a search phrase like "3.5/5 stars" is not
       // mistaken for a link. Trailing prose punctuation is trimmed.
-      const URL_IN_TEXT = /https?:\/\/[^\s"'<>]+|(?:[a-z0-9-]+\.)+[a-z]{2,24}\/[^\s"'<>]*/gi;
+      //
+      // The (?!https?:\/\/) lookahead stops a link's body before an embedded
+      // scheme, so several URLs pasted back-to-back with no separator
+      // ("https://a.com/x/https://b.com/y") split into one match each instead
+      // of being slurped up as a single giant URL.
+      const URL_IN_TEXT = /https?:\/\/(?:(?!https?:\/\/)[^\s"'<>])+|(?:[a-z0-9-]+\.)+[a-z]{2,24}\/(?:(?!https?:\/\/)[^\s"'<>])*/gi;
       function extractUrls(text) {
         const found = String(text || '').match(URL_IN_TEXT) || [];
         const seen = new Set();
