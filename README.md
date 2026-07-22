@@ -36,7 +36,7 @@ hour-long files.
 - [How it works](#how-it-works--under-the-hood)
 - [Adding a new site](#adding-a-new-site)
 - [Configuration](#configuration) · [Auth](#auth)
-- [Deploy](#deploy)
+- [Deploy with Docker](#deploy-with-docker)
 
 ## Features
 
@@ -120,7 +120,7 @@ folder (see [Configuration](#configuration) to choose where), and jobs/cookies
 state lives in `DATA_DIR`.
 
 To stop the server, press `Ctrl + C`. For running it permanently on a server,
-see [Deploy](#deploy).
+see [Deploy with Docker](#deploy-with-docker).
 
 ## Everyday use
 
@@ -645,8 +645,16 @@ environment variables:
 | `DOWNLOAD_DIR` | Server-library root for saved copies. |
 | `VIDEOS_DOWNLOAD_DIR` / `AUDIO_DOWNLOAD_DIR` / `PHOTOS_DOWNLOAD_DIR` / `ADULTS_DOWNLOAD_DIR` | Per-type overrides inside the library. |
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
+| `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
 | `ELITE_ROOT` | elite-v2 shorts storage root — enables the elite destination. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
+
+### Notifications (optional)
+
+| Variable | Description |
+| -------- | ----------- |
+| `GRABBIT_VAPID_PUBLIC` / `GRABBIT_VAPID_PRIVATE` | Web-push key pair — enables "notify when a download finishes". Generate with `npx web-push generate-vapid-keys`. |
+| `GRABBIT_VAPID_SUBJECT` | Contact URI for the push keys, e.g. `mailto:you@example.com`. |
 
 ### External tools
 
@@ -673,15 +681,226 @@ docker network. Because header absence alone doesn't identify the caller, set
 an `X-Grabbit-Token` header; when unset, any header-less request counts as
 internal. With no `GRABBIT_PASSWORD` at all, auth is off entirely.
 
-## Deploy
+## Deploy with Docker
 
-Keep a compose directory for the stack (e.g. `compose/grabbit/`).
+The container is self-contained: the image bundles Node, yt-dlp, ffmpeg,
+gallery-dl and mutagen, so you don't install any of those on the host. This is a
+step-by-step, copy-paste-safe walkthrough. Follow it top to bottom.
+
+### 1. Prerequisites
+
+- **Docker Engine** with the **Compose plugin**. Check both:
+  ```bash
+  docker --version
+  docker compose version
+  ```
+  If `docker compose version` errors, install the plugin (Docker's
+  [official docs](https://docs.docker.com/compose/install/)).
+
+### 2. Get the code
 
 ```bash
-cd /path/to/compose/grabbit
-docker compose build && docker compose up -d
+git clone https://github.com/tjelite1986/grabbit.git
+cd grabbit
 ```
 
-Rebuild is only needed when `package.json` or the Dockerfile changes; for plain
-code edits the same applies because the source is copied into the image (no bind
-mount), so always `docker compose build && up -d` after editing extractors.
+The compose file below is built from this checked-out source, so the folder you
+clone into is also where you run `docker compose`.
+
+### 3. Create the host folders (do this **before** the first start)
+
+grabbit stores three separate kinds of data on the host. Create the folders up
+front — if you let Docker auto-create bind-mount targets they're made as `root`
+with restrictive permissions, which causes confusing write errors later.
+
+```bash
+# state (must persist) + the plain server library, split by type
+mkdir -p data downloads/{videos,mp3,adults,photos}
+# only if you'll use the music-server destination — point this at the same
+# folder your music server scans (create it wherever that library lives)
+mkdir -p music
+```
+
+- **`data/`** — grabbit's own state: download history, scheduled jobs, saved
+  playlists, saved cookies, rules and flag templates, push subscriptions. **Back
+  this up.** Deleting it loses all of that (but not your downloaded files).
+- **`downloads/`** — the plain server library. New files are auto-sorted into
+  `videos/`, `mp3/`, `adults/` (18+) and `photos/`.
+- **`music/`** — only for the *Navidrome (music)* destination; make it the exact
+  directory your music server already scans, so tracks appear there.
+
+**Permissions.** By default the container runs as **root**, so it can always
+write these folders, and the files it creates are owned by `root`. That's fine
+when another app only needs to **read** them (a music server scanning `music/`).
+If you instead want the files owned by a normal user — e.g. so your music server
+can also move or delete them — pin the container to that user and pre-own the
+folders (use your own values from `id -u` and `id -g`):
+
+```bash
+sudo chown -R 1000:1000 data downloads music
+```
+
+…and add `user: "1000:1000"` to the service in the next step.
+
+### 4. Create the secrets file (`.env`)
+
+In the same folder, create a file named `.env`. Every value is optional — set
+only what you use. Leave it out entirely to run with **no password and no
+notifications**.
+
+```dotenv
+# Password gate for the web UI. Leave blank/absent to run with NO auth at all.
+GRABBIT_PASSWORD=change-me-to-something-strong
+# Optional extra secret that signs the login cookie (any random string).
+GRABBIT_SECRET=another-random-string
+# Only needed if another app on the same docker network calls grabbit's API.
+GRABBIT_INTERNAL_TOKEN=
+
+# Web-push, for "notify when a download finishes". Generate a key pair with:
+#   npx web-push generate-vapid-keys
+GRABBIT_VAPID_PUBLIC=
+GRABBIT_VAPID_PRIVATE=
+GRABBIT_VAPID_SUBJECT=mailto:you@example.com
+```
+
+Generate strong random values with `openssl rand -hex 32`.
+
+### 5. The compose file — every line explained
+
+Save this as `docker-compose.yml` in the same folder. Each line is annotated
+inline; a fuller explanation follows below.
+
+```yaml
+services:
+  grabbit:                       # the service name (also the DNS name on the network)
+    build:
+      context: .                 # build the image from the cloned source in this folder
+    container_name: grabbit      # fixed container name, so `docker logs grabbit` works
+    restart: unless-stopped      # auto-start on boot / after a crash; stays down if you stop it
+    ports:
+      - "3000:3000"              # HOST:CONTAINER — reach the UI at http://<host>:3000.
+                                 # Remove this if you put grabbit behind a reverse proxy.
+    # user: "1000:1000"          # uncomment to run as a normal user (see step 3 permissions)
+    environment:
+      # --- auth (see .env) ---
+      - GRABBIT_PASSWORD=${GRABBIT_PASSWORD}
+      - GRABBIT_SECRET=${GRABBIT_SECRET}
+      - GRABBIT_INTERNAL_TOKEN=${GRABBIT_INTERNAL_TOKEN}
+      # --- notifications (see .env) ---
+      - GRABBIT_VAPID_PUBLIC=${GRABBIT_VAPID_PUBLIC}
+      - GRABBIT_VAPID_PRIVATE=${GRABBIT_VAPID_PRIVATE}
+      - GRABBIT_VAPID_SUBJECT=${GRABBIT_VAPID_SUBJECT}
+      # --- plain server library, auto-split by type (paths are INSIDE the container) ---
+      - DOWNLOAD_DIR=/downloads
+      - VIDEOS_DOWNLOAD_DIR=/downloads/videos
+      - AUDIO_DOWNLOAD_DIR=/downloads/mp3
+      - ADULTS_DOWNLOAD_DIR=/downloads/adults
+      - PHOTOS_DOWNLOAD_DIR=/downloads/photos
+      # --- music-server destination (point the volume below at your library) ---
+      - NAVIDROME_MUSIC_DIR=/music
+      # --- behaviour ---
+      - MAX_ACTIVE_JOBS=2        # how many downloads run at once (rest queue)
+      - WATCH_INTERVAL_MINUTES=60 # how often watched playlists are polled
+      - TZ=Europe/Stockholm      # your timezone, so scheduled-start times are local
+    volumes:
+      - ./data:/data            # grabbit state — the container writes to /data (DATA_DIR)
+      - ./downloads:/downloads  # the plain server library (matches DOWNLOAD_DIR above)
+      - ./music:/music          # your music library (matches NAVIDROME_MUSIC_DIR above)
+```
+
+Then start it:
+
+```bash
+docker compose up -d --build
+```
+
+Open **http://your-host:3000**. To watch logs: `docker logs -f grabbit`.
+
+**What each block does**
+
+- **`services:` / `grabbit:`** — defines one service. The name doubles as its
+  hostname on the docker network, which is how a co-hosted app would reach it at
+  `http://grabbit:3000`.
+- **`build: context: .`** — builds the image from the cloned repo (the
+  `Dockerfile` bundles every runtime dependency). Rebuild with `--build` after
+  you pull new code or edit an extractor.
+- **`restart: unless-stopped`** — brings grabbit back after a reboot or crash,
+  but respects a manual `docker compose stop`.
+- **`ports: "3000:3000"`** — publishes the UI on host port 3000. Left of the
+  colon is the host port (change it to e.g. `"8080:3000"` if 3000 is taken);
+  right of the colon is the container port and must stay `3000`. **Delete this
+  line** if a reverse proxy fronts grabbit (below).
+- **`environment:`** — the settings from the [Configuration](#configuration)
+  tables. The `${...}` values are filled from `.env`; the plain ones are literal.
+  Container-internal paths (`/downloads`, `/music`) must match the right side of
+  the volume mounts.
+- **`volumes:`** — `HOST:CONTAINER` bind mounts. The **`./data`** mount is the
+  one you must never lose. `./downloads` and `./music` only matter for those
+  destinations — drop a mount and its env vars if you don't use that destination.
+
+Rebuilds are needed after **any** code change, because the source is copied into
+the image (there's no live bind mount of the app), so make a habit of
+`docker compose up -d --build` after `git pull`.
+
+### More you can add
+
+**Put it behind a reverse proxy (HTTPS + a clean hostname).** Instead of
+publishing a port, join grabbit to your proxy's network and let the proxy
+terminate TLS. Only *external* traffic is password-gated, so this is the
+recommended way to expose it. A [Traefik](https://traefik.io/) example:
+
+```yaml
+    # (remove the top-level `ports:` block when using a proxy)
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grabbit.rule=Host(`grabbit.example.com`)"
+      - "traefik.http.routers.grabbit.entrypoints=https"
+      - "traefik.http.routers.grabbit.tls=true"
+      - "traefik.http.services.grabbit.loadbalancer.server.port=3000"
+
+networks:
+  proxy:
+    external: true               # the network your proxy already runs on
+```
+
+The same idea works with Caddy, nginx-proxy-manager or any other proxy — point
+it at the container's port 3000.
+
+**Let another app drive grabbit.** If you run a co-hosted app that should call
+grabbit's API directly over the docker network (not through the proxy), set
+`GRABBIT_INTERNAL_TOKEN` here and have that app send the same value in an
+`X-Grabbit-Token` header. Internal calls then skip the password gate while
+external ones stay protected. See [Auth](#auth) for the full logic.
+
+**A second (e.g. kids) music library.** Add a `NAVIDROME_KIDS_DIR=/music-kids`
+env var and a `./music-kids:/music-kids` volume, pointed at a second music
+library. It becomes the *Kids* option in the destination picker and on saved
+playlists.
+
+**Auto-update.** Add [Watchtower](https://containrrr.dev/watchtower/) to the
+stack to pull and restart updated images automatically — though since grabbit
+builds from source, `git pull && docker compose up -d --build` on a schedule is
+the more direct route.
+
+### Companion: AudioMuse-AI (smart playlists from what you grab)
+
+If you use the **Navidrome (music)** destination, everything grabbit downloads
+lands in a real music library — which means you can point
+[AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) at that same library.
+AudioMuse-AI runs a local **sonic analysis** of your tracks (via Librosa/ONNX,
+no external APIs required) and generates mood/"instant" playlists for Navidrome,
+Jellyfin, Plex, Emby, LMS and Lyrion. There's also a
+[Navidrome plugin](https://github.com/NeptuneHub/AudioMuse-AI-NV-plugin) that
+queues sonically similar songs in real time.
+
+It connects to your **music server**, not to grabbit directly, so the pipeline is
+simply: *grabbit downloads & tags → your music server scans them → AudioMuse-AI
+analyses and builds playlists*. Follow AudioMuse-AI's own
+[compose guide](https://github.com/NeptuneHub/AudioMuse-AI/blob/main/deployment/docker-compose-navidrome.yaml)
+to add it alongside this stack. One caveat if you automate around it: leave its
+auto-generated playlists alone (renaming them can break its own housekeeping).
+
+Sources: [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) ·
+[AudioMuse-AI Navidrome plugin](https://github.com/NeptuneHub/AudioMuse-AI-NV-plugin)
