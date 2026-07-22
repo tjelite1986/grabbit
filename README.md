@@ -189,12 +189,19 @@ which a small browser extension produces in one click:
 site, tap the extension's **Copy** button, and paste — no cookies file to save,
 no desktop needed.
 
-**Adding them to grabbit.** Go to **More → Cookies** and paste the content in:
+**Adding them to grabbit.** Go to **More → Cookies** (the *Cookies for private
+content* panel) and fill in the two fields:
 
-- Leave the **domain** field empty for a *default* file used on every site, or
-  set it (e.g. `youtube.com`) for a per-domain file that only that site uses.
-- You can keep one default plus any number of per-domain files side by side;
-  grabbit picks the matching one for each download on its own.
+1. **Site domain** — type the site the cookies are for, e.g. `example.com`.
+   Leave it empty instead to save a *default* file that's used on every site.
+2. **cookies.txt content (Netscape format, from a browser export)** — paste the
+   text you copied with the extension's **Copy** button.
+3. Click **Save cookies**.
+
+That's it — the file appears in the list above the form, and matching downloads
+start using it right away. You can keep one default plus any number of per-domain
+files side by side; grabbit picks the matching one for each download on its own,
+and each saved file has a delete button when you want to remove it.
 
 A couple of things worth knowing:
 
