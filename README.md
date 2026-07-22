@@ -1,4 +1,4 @@
-# grabbit
+# Grabbit
 
 ![Node.js](https://img.shields.io/badge/Node.js-20-339933?logo=nodedotjs&logoColor=white)
 ![Express](https://img.shields.io/badge/Express-4-000000?logo=express)
@@ -33,12 +33,12 @@ hour-long files.
 
 > **The easiest way to install it:** copy this repo's link and ask an AI coding
 > agent like [Claude Code](https://claude.com/claude-code) to set it up for you —
-> "Install and run grabbit from `https://github.com/tjelite1986/grabbit` on this
+> "Install and run Grabbit from `https://github.com/tjelite1986/grabbit` on this
 > machine." It can clone the repo, create the folders, write your compose/`.env`
 > and start the container, following the [deploy guide](#deploy-with-docker)
 > below. Prefer to do it by hand? Everything is spelled out step by step.
 
-> **A tool, not an invitation.** grabbit is a general-purpose downloader I built
+> **A tool, not an invitation.** Grabbit is a general-purpose downloader I built
 > as a personal project. It hosts no content and points to nothing, and I do not
 > encourage downloading copyrighted or pirated material. What you download — and
 > whether you have the right to — is entirely up to you. See the
@@ -50,7 +50,7 @@ hour-long files.
 - [Features](#features)
 - [Getting started](#getting-started)
 - [Everyday use](#everyday-use)
-- [Errors and how grabbit handles them](#errors-and-how-grabbit-handles-them)
+- [Errors and how Grabbit handles them](#errors-and-how-grabbit-handles-them)
 - [How it works](#how-it-works--under-the-hood)
 - [Adding a new site](#adding-a-new-site)
 - [Configuration](#configuration) · [Auth](#auth)
@@ -69,7 +69,7 @@ hour-long files.
 - **Destinations**: download to your device, the server library, a music
   library (with metadata tagging via iTunes/Deezer lookup), or hand the file to
   a co-hosted app such as [elite-v2](https://github.com/tjelite1986/elite-v2).
-- **Playlist watching**: save a playlist and grabbit polls it on an interval,
+- **Playlist watching**: save a playlist and Grabbit polls it on an interval,
   fetching new entries automatically.
 - **Cookies for private content**: store Netscape `cookies.txt` files under
   More → Cookies (one default file plus optional per-domain files). Every
@@ -146,7 +146,7 @@ see [Deploy with Docker](#deploy-with-docker).
 A few things the web UI does that aren't obvious at first glance.
 
 **Paste one link — or many.** One link resolves to a single card. Paste several
-and grabbit lays them out as a batch, queuing every one with the same settings.
+and Grabbit lays them out as a batch, queuing every one with the same settings.
 The links can be on separate lines, spaced out, or run straight together with no
 separator:
 
@@ -167,7 +167,7 @@ build up a list on a phone or tablet.
 
 **Download straight into a music server.** If you run your own music server such
 as [Navidrome](https://www.navidrome.org/), point the music destination at its
-library folder and grabbit files each track into a clean, scannable tree:
+library folder and Grabbit files each track into a clean, scannable tree:
 
 ```
 [Artist]/[Album (Year)]/[Artist] - [Album (Year)] - [Title].ext
@@ -176,7 +176,7 @@ library folder and grabbit files each track into a clean, scannable tree:
 (Artist and album repeat in the file name on purpose, so a track stays
 identifiable even if it ends up outside its folder.)
 
-**Auto or hand-picked metadata.** Leave tagging on **auto** and grabbit names
+**Auto or hand-picked metadata.** Leave tagging on **auto** and Grabbit names
 and tags the track for you. Prefer to curate it? Do it manually and pick the
 right match from a metadata lookup list — set the genre, mark it as part of an
 Album, Single or EP, and check the source description, where the real title is
@@ -189,7 +189,7 @@ route: letting an AI agent write it for you.
 
 ### Playlists, subscriptions and bulk downloads
 
-Paste a **playlist** or a **creator/profile** link and grabbit doesn't resolve a
+Paste a **playlist** or a **creator/profile** link and Grabbit doesn't resolve a
 single file — it lists *every* item in it as a card, with batch actions on top.
 This is how you grab a whole channel, playlist or profile at once.
 
@@ -200,7 +200,7 @@ many items it holds. Each card has:
 
 - an **audio** button and a **video** button (image items get an **image**
   button instead) — tap either to open the download sheet for just that one item;
-- a **✓ mark-as-downloaded** toggle. grabbit remembers what you've already
+- a **✓ mark-as-downloaded** toggle. Grabbit remembers what you've already
   grabbed so you can tell new from old at a glance; tap again to clear the mark.
 
 **Batch actions across the whole list:**
@@ -238,7 +238,7 @@ becomes **Remove saved playlist** once saved). Saved playlists live under
   items by hand.
 - **The library pill (`Mine` / `Kids`)** — tap to switch which Navidrome library
   this playlist's new tracks go into (your own or the separate kids library).
-- **The bell (watch) toggle** — turn on **auto-download**: grabbit then polls the
+- **The bell (watch) toggle** — turn on **auto-download**: Grabbit then polls the
   playlist on an interval (`WATCH_INTERVAL_MINUTES`) and downloads any newly
   added track to Navidrome on its own, as tagged audio — no need to come back.
   Off means the playlist is just saved for easy re-opening, nothing downloads by
@@ -409,7 +409,7 @@ already been downloaded/imported.
 
 ### Rules — automate the settings you'd otherwise pick every time
 
-Under **More → Rules** you can teach grabbit to fill in the download options for
+Under **More → Rules** you can teach Grabbit to fill in the download options for
 you whenever a link matches. Each rule is a simple *when this → then that*: a set
 of match conditions and the settings to apply when they're met.
 
@@ -456,7 +456,7 @@ a chance to review before hitting download.
 ### Unlocking private or login-only content with cookies
 
 Some links only resolve when you're signed in — members-only videos, private
-playlists, age-gated pages, premium audio. grabbit can borrow your browser's
+playlists, age-gated pages, premium audio. Grabbit can borrow your browser's
 login by using an exported `cookies.txt` file. Every yt-dlp call — resolve,
 download and playlist polling — then reuses it automatically, so login-gated
 content just works.
@@ -472,7 +472,7 @@ which a small browser extension produces in one click:
    **Netscape** format and keeps the data on your machine.
 3. Open the site and click the extension. You don't have to download a file —
    *Get cookies.txt LOCALLY* has a **Copy** button that puts the cookies on your
-   clipboard, ready to paste straight into grabbit.
+   clipboard, ready to paste straight into Grabbit.
 
 **On a phone or tablet.** Most mobile browsers can't run extensions, but
 [Ultimatum](https://github.com/gonzazoid/Ultimatum) (Android) can. Download the
@@ -480,7 +480,7 @@ which a small browser extension produces in one click:
 site, tap the extension's **Copy** button, and paste — no cookies file to save,
 no desktop needed.
 
-**Adding them to grabbit.** Go to **More → Cookies** (the *Cookies for private
+**Adding them to Grabbit.** Go to **More → Cookies** (the *Cookies for private
 content* panel) and fill in the two fields:
 
 1. **Site domain** — type the site the cookies are for, e.g. `example.com`.
@@ -491,7 +491,7 @@ content* panel) and fill in the two fields:
 
 That's it — the file appears in the list above the form, and matching downloads
 start using it right away. You can keep one default plus any number of per-domain
-files side by side; grabbit picks the matching one for each download on its own,
+files side by side; Grabbit picks the matching one for each download on its own,
 and each saved file has a delete button when you want to remove it.
 
 A couple of things worth knowing:
@@ -504,15 +504,15 @@ A couple of things worth knowing:
 - Stored files are never touched in place — each download gets its own temp
   copy, so running several jobs at once can't corrupt the saved cookies.
 
-## Errors and how grabbit handles them
+## Errors and how Grabbit handles them
 
 A download happens in two stages, and it helps to know which one failed:
 
-1. **Resolve** — grabbit reads the link's metadata (title, creator, duration).
+1. **Resolve** — Grabbit reads the link's metadata (title, creator, duration).
    This is also where it learns whether the content is even reachable.
 2. **Download** — the file is actually fetched and saved.
 
-grabbit's guiding rule: **recover from anything temporary on its own, and be
+Grabbit's guiding rule: **recover from anything temporary on its own, and be
 blunt about anything permanent** so you're not left staring at a stalled job.
 A resolve problem shows up right on the card; a download problem shows in the
 **Queue** with the job's message.
@@ -521,27 +521,27 @@ A resolve problem shows up right on the card; a download problem shows in the
 
 ### Common messages
 
-| What you see | What it means | What grabbit does — and what you can do |
+| What you see | What it means | What Grabbit does — and what you can do |
 | ------------ | ------------- | --------------------------------------- |
 | `Invalid URL` | The box didn't contain a usable link. | Nothing runs. (Plain words instead of a link trigger a video *search*, not this error.) |
-| **"The site refused this video: … — downloading will fail too"** (red card notice) | The site won't hand the video over at all — it's deleted, private, members-only, behind a login, or geo-blocked. The download uses the same extraction, so it can't succeed either. | grabbit warns you **before** you start, instead of failing halfway. If it's login-only, add cookies (**More → Cookies**); otherwise try again later or find another upload. |
-| **"No metadata: … — the download may still work"** (amber card notice) | Only the metadata probe hiccupped (a timeout, an unreadable field). This says nothing about the download itself. | grabbit still lets you download; just the title and creator show as unknown until it finishes. |
-| `only available to Music Premium members` (YouTube Music) | An auto-generated track ID is premium- or region-locked, even though the same recording usually exists under a free ID. | grabbit **automatically** looks up a free counterpart (via music.youtube's redirect, then a track search), checks it actually plays, and copies the original's clean artist/title onto it for tagging. Only if no free copy exists does the error stand. |
-| `Video unavailable` (YouTube) | Often just an intermittent YouTube flake; sometimes a genuine removal. | grabbit **re-probes once** after a short pause before giving up. A real removal still fails after the retry. |
+| **"The site refused this video: … — downloading will fail too"** (red card notice) | The site won't hand the video over at all — it's deleted, private, members-only, behind a login, or geo-blocked. The download uses the same extraction, so it can't succeed either. | Grabbit warns you **before** you start, instead of failing halfway. If it's login-only, add cookies (**More → Cookies**); otherwise try again later or find another upload. |
+| **"No metadata: … — the download may still work"** (amber card notice) | Only the metadata probe hiccupped (a timeout, an unreadable field). This says nothing about the download itself. | Grabbit still lets you download; just the title and creator show as unknown until it finishes. |
+| `only available to Music Premium members` (YouTube Music) | An auto-generated track ID is premium- or region-locked, even though the same recording usually exists under a free ID. | Grabbit **automatically** looks up a free counterpart (via music.youtube's redirect, then a track search), checks it actually plays, and copies the original's clean artist/title onto it for tagging. Only if no free copy exists does the error stand. |
+| `Video unavailable` (YouTube) | Often just an intermittent YouTube flake; sometimes a genuine removal. | Grabbit **re-probes once** after a short pause before giving up. A real removal still fails after the retry. |
 | `not available in your country` / `blocked in your country` | Geo-restriction. | Can't be bypassed from here — it needs cookies or a network from an allowed region. |
-| `HTTP Error 403` / `429 Too Many Requests` / `timed out` / `Connection reset` / `ETIMEDOUT` … | A temporary network or rate-limit failure — common when a big batch hammers one site at once. | grabbit **retries automatically**, up to 3 attempts, waiting longer each time (the queue shows `Retrying (1/2)…`). The queue also caps how many downloads run at once to ease the pressure. |
-| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the Elite-v2 *shorts* destination. | grabbit routes it to the **server library** instead (a notice tells you). In a batch, clips already known to be too long are skipped. |
-| `Cutting needs a yt-dlp-handled site (this one uses a direct downloader)` | You asked to cut or split a site that grabbit downloads directly, not through yt-dlp. | Cutting/splitting only works on yt-dlp sites — download the file whole instead. |
+| `HTTP Error 403` / `429 Too Many Requests` / `timed out` / `Connection reset` / `ETIMEDOUT` … | A temporary network or rate-limit failure — common when a big batch hammers one site at once. | Grabbit **retries automatically**, up to 3 attempts, waiting longer each time (the queue shows `Retrying (1/2)…`). The queue also caps how many downloads run at once to ease the pressure. |
+| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the Elite-v2 *shorts* destination. | Grabbit routes it to the **server library** instead (a notice tells you). In a batch, clips already known to be too long are skipped. |
+| `Cutting needs a yt-dlp-handled site (this one uses a direct downloader)` | You asked to cut or split a site that Grabbit downloads directly, not through yt-dlp. | Cutting/splitting only works on yt-dlp sites — download the file whole instead. |
 | `yt-dlp produced no output (no matching sections/chapters?)` | Your cut ranges matched nothing, or the video has no chapters to split. | Double-check the timestamps, or that the video actually has chapters. |
 | `Bad cut section "…" — use start-end like 1:30-2:45` / `Too many cut sections (max 20)` | The **Cut sections** field is malformed. | Give `start-end` ranges, comma-separated, up to 20. |
 | `Extra argument "…" is not allowed` / `… needs a value` / `… does not take a value` / `Too many extra arguments` | An **Extra yt-dlp arguments** entry was rejected by the safety allowlist. | Only a safe subset of long flags is accepted (no short flags, unknown options or stray URLs). Remove the flagged one. |
 | `Empty cookie file` | You pressed **Save cookies** with nothing pasted. | Paste the `cookies.txt` content first. |
 | `No results for "…"` | A plain-words search came back empty. | Refine the search terms, or paste a direct link. |
-| `Unauthorized` | Wrong or expired web-UI password. | Re-enter the grabbit password. |
+| `Unauthorized` | Wrong or expired web-UI password. | Re-enter the Grabbit password. |
 
 ### What runs on its own
 
-Three of the rows above are worth calling out, because grabbit handles them with
+Three of the rows above are worth calling out, because Grabbit handles them with
 no action from you:
 
 - **Automatic retries with back-off.** Transient download failures (403, 429,
@@ -551,7 +551,7 @@ no action from you:
   third strike, marks the job failed. Failed and cancelled jobs also keep a manual
   **retry** button in the queue.
 - **YouTube re-probe.** Because YouTube intermittently reports playable videos as
-  "unavailable", grabbit quietly probes a second time before trusting the error.
+  "unavailable", Grabbit quietly probes a second time before trusting the error.
 - **Free-counterpart swap for premium locks.** Premium/region-locked YouTube
   Music IDs are transparently replaced with a verified free upload of the same
   track, tagged from the original — you just get the song.
@@ -579,7 +579,7 @@ flowchart LR
    `GET /api/jobs/:id/file` (the file is already on disk, so bytes flow at once).
 3. `GET /api/download?url=...` (synchronous, returns JSON or streams the file) and
    `GET /api/download-all` (SSE batch) are kept for elite-v2's internal grab
-   integration, which calls grabbit over the docker network (no gateway timeout).
+   integration, which calls Grabbit over the docker network (no gateway timeout).
 
 Any URL no dedicated extractor claims falls back to yt-dlp automatically.
 
@@ -624,7 +624,7 @@ contract is small and the folder already has working examples to copy, which is
 exactly the kind of self-contained task these agents do well. A prompt like this
 is usually enough:
 
-> Add a grabbit extractor for `example.com`. Look at the existing files in
+> Add a Grabbit extractor for `example.com`. Look at the existing files in
 > `extractors/` (e.g. `nuditok.js`) and `extractors/index.js` for the contract,
 > figure out how `example.com` serves its media, and write a new
 > `extractors/example.js` that follows the same pattern.
@@ -659,7 +659,7 @@ except `index.js` and `generic.js`.
 
 ## Configuration
 
-Everything is optional — grabbit starts with sensible defaults. Set via
+Everything is optional — Grabbit starts with sensible defaults. Set via
 environment variables:
 
 ### Server
@@ -742,7 +742,7 @@ clone into is also where you run `docker compose`.
 
 ### 3. Create the host folders (do this **before** the first start)
 
-grabbit stores three separate kinds of data on the host. Create the folders up
+Grabbit stores three separate kinds of data on the host. Create the folders up
 front — if you let Docker auto-create bind-mount targets they're made as `root`
 with restrictive permissions, which causes confusing write errors later.
 
@@ -754,7 +754,7 @@ mkdir -p data downloads/{videos,mp3,adults,photos}
 mkdir -p music
 ```
 
-- **`data/`** — grabbit's own state: download history, scheduled jobs, saved
+- **`data/`** — Grabbit's own state: download history, scheduled jobs, saved
   playlists, saved cookies, rules and flag templates, push subscriptions. **Back
   this up.** Deleting it loses all of that (but not your downloaded files).
 - **`downloads/`** — the plain server library. New files are auto-sorted into
@@ -857,12 +857,12 @@ Open **http://your-host:3000**. To watch logs: `docker logs -f grabbit`.
 - **`build: context: .`** — builds the image from the cloned repo (the
   `Dockerfile` bundles every runtime dependency). Rebuild with `--build` after
   you pull new code or edit an extractor.
-- **`restart: unless-stopped`** — brings grabbit back after a reboot or crash,
+- **`restart: unless-stopped`** — brings Grabbit back after a reboot or crash,
   but respects a manual `docker compose stop`.
 - **`ports: "3000:3000"`** — publishes the UI on host port 3000. Left of the
   colon is the host port (change it to e.g. `"8080:3000"` if 3000 is taken);
   right of the colon is the container port and must stay `3000`. **Delete this
-  line** if a reverse proxy fronts grabbit (below).
+  line** if a reverse proxy fronts Grabbit (below).
 - **`environment:`** — the settings from the [Configuration](#configuration)
   tables. The `${...}` values are filled from `.env`; the plain ones are literal.
   Container-internal paths (`/downloads`, `/music`) must match the right side of
@@ -878,7 +878,7 @@ the image (there's no live bind mount of the app), so make a habit of
 ### More you can add
 
 **Put it behind a reverse proxy (HTTPS + a clean hostname).** Instead of
-publishing a port, join grabbit to your proxy's network and let the proxy
+publishing a port, join Grabbit to your proxy's network and let the proxy
 terminate TLS. Only *external* traffic is password-gated, so this is the
 recommended way to expose it. A [Traefik](https://traefik.io/) example:
 
@@ -901,8 +901,8 @@ networks:
 The same idea works with Caddy, nginx-proxy-manager or any other proxy — point
 it at the container's port 3000.
 
-**Let another app drive grabbit.** If you run a co-hosted app that should call
-grabbit's API directly over the docker network (not through the proxy), set
+**Let another app drive Grabbit.** If you run a co-hosted app that should call
+Grabbit's API directly over the docker network (not through the proxy), set
 `GRABBIT_INTERNAL_TOKEN` here and have that app send the same value in an
 `X-Grabbit-Token` header. Internal calls then skip the password gate while
 external ones stay protected. See [Auth](#auth) for the full logic.
@@ -913,13 +913,13 @@ library. It becomes the *Kids* option in the destination picker and on saved
 playlists.
 
 **Auto-update.** Add [Watchtower](https://containrrr.dev/watchtower/) to the
-stack to pull and restart updated images automatically — though since grabbit
+stack to pull and restart updated images automatically — though since Grabbit
 builds from source, `git pull && docker compose up -d --build` on a schedule is
 the more direct route.
 
 ### Companion: AudioMuse-AI (smart playlists from what you grab)
 
-If you use the **Navidrome (music)** destination, everything grabbit downloads
+If you use the **Navidrome (music)** destination, everything Grabbit downloads
 lands in a real music library — which means you can point
 [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) at that same library.
 AudioMuse-AI runs a local **sonic analysis** of your tracks (via Librosa/ONNX,
@@ -928,8 +928,8 @@ Jellyfin, Plex, Emby, LMS and Lyrion. There's also a
 [Navidrome plugin](https://github.com/NeptuneHub/AudioMuse-AI-NV-plugin) that
 queues sonically similar songs in real time.
 
-It connects to your **music server**, not to grabbit directly, so the pipeline is
-simply: *grabbit downloads & tags → your music server scans them → AudioMuse-AI
+It connects to your **music server**, not to Grabbit directly, so the pipeline is
+simply: *Grabbit downloads & tags → your music server scans them → AudioMuse-AI
 analyses and builds playlists*. Follow AudioMuse-AI's own
 [compose guide](https://github.com/NeptuneHub/AudioMuse-AI/blob/main/deployment/docker-compose-navidrome.yaml)
 to add it alongside this stack. One caveat if you automate around it: leave its
@@ -940,13 +940,13 @@ Sources: [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) ·
 
 ## Disclaimer
 
-grabbit is a free, open-source, general-purpose download tool, built and shared
+Grabbit is a free, open-source, general-purpose download tool, built and shared
 as a personal project. It ships no content, hosts nothing, and contains no links
 to any specific material — it simply automates yt-dlp and similar tools against
 URLs that **you** provide.
 
 - **No encouragement of infringement.** I do not endorse, encourage or condone
-  using grabbit to download, copy or distribute copyrighted, pirated or otherwise
+  using Grabbit to download, copy or distribute copyrighted, pirated or otherwise
   unlawful material. Only download content you own, have created yourself, or
   otherwise have the explicit right to save.
 - **You are responsible for how you use it.** Complying with copyright law, with
@@ -960,7 +960,7 @@ URLs that **you** provide.
 - **Not legal advice.** If you're unsure whether a particular download is
   permitted, get qualified advice before proceeding.
 
-By downloading, installing or running grabbit you acknowledge that you do so at
+By downloading, installing or running Grabbit you acknowledge that you do so at
 your own risk and take full responsibility for your own actions.
 
 ## License

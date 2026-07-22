@@ -477,7 +477,7 @@ const isAuthed = (req) => parseCookies(req.headers.cookie)[AUTH_COOKIE] === AUTH
 function loginPage(error) {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>grabbit — sign in</title>
+<title>Grabbit — sign in</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root { color-scheme: dark; }
@@ -494,7 +494,7 @@ function loginPage(error) {
 </style></head><body>
 <form method="post" action="/login">
   <img src="/logo.svg" alt="" width="72" height="72" style="display:block;margin:0 auto 10px">
-  <h1 style="text-align:center">grabbit</h1>
+  <h1 style="text-align:center">Grabbit</h1>
   <p style="text-align:center">Sign in to continue</p>
   ${error ? `<div class="err">${error}</div>` : ''}
   <input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password" />
