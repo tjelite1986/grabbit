@@ -184,9 +184,10 @@ which a small browser extension produces in one click:
    clipboard, ready to paste straight into grabbit.
 
 **On a phone or tablet.** Most mobile browsers can't run extensions, but
-[Ultimatum](https://github.com/gonzazoid/Ultimatum) (Android) can. Install *Get
-cookies.txt LOCALLY* in it, sign in to the site, tap the extension's **Copy**
-button, and paste — no file download, no desktop needed.
+[Ultimatum](https://github.com/gonzazoid/Ultimatum) (Android) can. Download the
+*Get cookies.txt LOCALLY* plugin and load it into Ultimatum, then sign in to the
+site, tap the extension's **Copy** button, and paste — no cookies file to save,
+no desktop needed.
 
 **Adding them to grabbit.** Go to **More → Cookies** and paste the content in:
 
