@@ -164,6 +164,63 @@ right match from a metadata lookup list — set the genre, mark it as part of an
 Album, Single or EP, and check the source description, where the real title is
 often hiding.
 
+### Default download options — every setting explained
+
+These live under **More → Default download options**. They set the *starting
+point* for every new download: the options sheet opens pre-filled with them, you
+can still change anything per download, and a matching [rule](#rules--automate-the-settings-youd-otherwise-pick-every-time)
+can override them. Each change saves the instant you make it — there's no separate
+save button.
+
+Some rows only appear when they're relevant (e.g. the music-library picker shows
+up only once the destination is Navidrome); that's noted per setting.
+
+- **Save to** — the destination new downloads go to. This choice also decides
+  which of the rows below are shown.
+  - *Elite-v2 shorts* — the short-clip library of the co-hosted elite-v2 app.
+  - *Server library* — a plain folder library on the server.
+  - *Navidrome (music)* — a tagged music library: audio only, filed by
+    artist/album (see the naming scheme above).
+
+- **Music library** — *shown only when Save to = Navidrome.* Which music library
+  the audio lands in: *My music* or *Kids* (a separate library/instance).
+
+- **Channel** — *shown only when Save to = Elite-v2 shorts.* Which shorts channel
+  new clips post to: *main* or *18+*.
+
+- **Library folder** — *shown only when Save to = Server library.* The subfolder
+  inside the server library that video downloads are filed under.
+
+- **Quality** — the resolution **cap** for downloads from yt-dlp sites. *Best*
+  takes the highest available; pick a number (2160p/4K down to 360p) to cap it
+  there — handy to save space or bandwidth. Sites with a dedicated extractor
+  hand over their own single quality, so this only affects yt-dlp links.
+
+- **Video container** — *shown only when Save to = Server library.* The file
+  format video is saved as: *mp4* (most compatible), *mkv* or *webm*. mkv and
+  webm need a yt-dlp remux, so they apply to yt-dlp downloads.
+
+- **Audio format** — the format for audio-only downloads. *Best (source)* keeps
+  the original track without re-encoding (fastest, no quality loss); the others
+  force a format — lossy (*mp3*, *opus*, *aac*, *vorbis*, *m4a*) or lossless
+  (*flac*, *wav*, *alac*).
+
+- **Audio bitrate** — the target bitrate for **lossy** audio only; it has no
+  effect on lossless formats or on *Best (source)*. *Best* lets yt-dlp decide;
+  otherwise pick from 320k (highest quality, biggest file) down to 96k
+  (smallest).
+
+- **Download to this device** — *on by default.* When on, the finished file is
+  also streamed to the device you're using, on top of the server copy. Turn it
+  off to keep the file only on the server and skip pulling it to your phone/PC.
+
+- **Convert to web format** — save the download already as a web-optimized
+  `.web.mp4`, ready to play in a browser without a later transcode pass (it skips
+  the separate transcoder step).
+
+- **Notify when done** — *shown only after you've enabled push notifications.*
+  Sends a push notification when a download finishes.
+
 ### Rules — automate the settings you'd otherwise pick every time
 
 Under **More → Rules** you can teach grabbit to fill in the download options for
