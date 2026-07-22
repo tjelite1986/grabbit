@@ -164,6 +164,50 @@ right match from a metadata lookup list — set the genre, mark it as part of an
 Album, Single or EP, and check the source description, where the real title is
 often hiding.
 
+### Rules — automate the settings you'd otherwise pick every time
+
+Under **More → Rules** you can teach grabbit to fill in the download options for
+you whenever a link matches. Each rule is a simple *when this → then that*: a set
+of match conditions and the settings to apply when they're met.
+
+**How matching works:**
+
+- A rule has a **When** block (the conditions) and a **Then** block (the settings
+  to apply). Leave every When field empty and the rule matches *everything*.
+- All the conditions you do fill in must match (they're AND-ed together).
+- Matching is **case-insensitive substring** by default — `youtube` matches
+  `www.youtube.com`. Wrap a pattern in `/slashes/` to use a **regex** instead,
+  e.g. `/(mp3|flac)$/` on the title.
+- Rules are checked **top to bottom, and the first enabled match wins**, so put
+  your most specific rules above the broad catch-all ones. Drag to reorder.
+
+**What you can match on (When):** site, creator, title contains (text or
+`/regex/`), media type (video/image), and a duration range in seconds (only
+applies to links whose length is known).
+
+**What you can set (Then):** destination (Elite-v2 shorts / server library /
+Navidrome music), channel (main / 18+), music library (mine / kids), a library
+subfolder, quality, audio format + bitrate, video container, SponsorBlock
+(remove or mark), save-to-this-device, a profile name to file it under, and an
+*extract audio only* toggle. Anything left on **Don't change** keeps the normal
+default. A rule only touches the fields you actually set.
+
+**Automatic rules.** Flip **Fully automatic** on and a matching *shared* link
+starts downloading immediately with the rule's settings — the options sheet
+never opens. Leave it off and the rule just pre-fills the sheet, so you still get
+a chance to review before hitting download.
+
+**Examples:**
+
+- *Send music straight to Navidrome.* When **Site** = `youtube` → Then
+  **Extract audio only** on, **Audio format** = `opus`, **Save to** =
+  `Navidrome (music)`, and **Fully automatic** on. Now sharing a YouTube link
+  files a tagged track into your music library with zero taps.
+- *Keep long videos out of shorts.* When **Type** = `Video`, **Duration min** =
+  `1200` → Then **Save to** = `Server library`, **Quality** = `1080p`.
+- *Route one creator to the 18+ channel.* When **Creator** = `somename` → Then
+  **Channel** = `18+`. Put this above any broader site rule so it wins.
+
 ### Unlocking private or login-only content with cookies
 
 Some links only resolve when you're signed in — members-only videos, private
