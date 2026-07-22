@@ -179,11 +179,14 @@ which a small browser extension produces in one click:
 2. Install a "cookies.txt" exporter extension — for example *Get cookies.txt
    LOCALLY* (Chrome/Edge) or *cookies.txt* (Firefox). Pick one that exports the
    **Netscape** format and keeps the data on your machine.
-3. Open the site, click the extension, and export/copy the `cookies.txt` for
-   that domain.
+3. Open the site and click the extension. You don't have to download a file —
+   *Get cookies.txt LOCALLY* has a **Copy** button that puts the cookies on your
+   clipboard, ready to paste straight into grabbit.
 
-On a phone or tablet a desktop-style browser that supports extensions (or a
-browser with a built-in cookie export) does the same job.
+**On a phone or tablet.** Most mobile browsers can't run extensions, but
+[Ultimatum](https://github.com/gonzazoid/Ultimatum) (Android) can. Install *Get
+cookies.txt LOCALLY* in it, sign in to the site, tap the extension's **Copy**
+button, and paste — no file download, no desktop needed.
 
 **Adding them to grabbit.** Go to **More → Cookies** and paste the content in:
 
