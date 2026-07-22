@@ -32,6 +32,7 @@ hour-long files.
 - [Features](#features)
 - [Getting started](#getting-started)
 - [Everyday use](#everyday-use)
+- [Errors and how grabbit handles them](#errors-and-how-grabbit-handles-them)
 - [How it works](#how-it-works--under-the-hood)
 - [Adding a new site](#adding-a-new-site)
 - [Configuration](#configuration) · [Auth](#auth)
@@ -466,6 +467,56 @@ A couple of things worth knowing:
   re-export and paste a fresh file.
 - Stored files are never touched in place — each download gets its own temp
   copy, so running several jobs at once can't corrupt the saved cookies.
+
+## Errors and how grabbit handles them
+
+A download happens in two stages, and it helps to know which one failed:
+
+1. **Resolve** — grabbit reads the link's metadata (title, creator, duration).
+   This is also where it learns whether the content is even reachable.
+2. **Download** — the file is actually fetched and saved.
+
+grabbit's guiding rule: **recover from anything temporary on its own, and be
+blunt about anything permanent** so you're not left staring at a stalled job.
+A resolve problem shows up right on the card; a download problem shows in the
+**Queue** with the job's message.
+
+### Common messages
+
+| What you see | What it means | What grabbit does — and what you can do |
+| ------------ | ------------- | --------------------------------------- |
+| `Invalid URL` | The box didn't contain a usable link. | Nothing runs. (Plain words instead of a link trigger a video *search*, not this error.) |
+| **"The site refused this video: … — downloading will fail too"** (red card notice) | The site won't hand the video over at all — it's deleted, private, members-only, behind a login, or geo-blocked. The download uses the same extraction, so it can't succeed either. | grabbit warns you **before** you start, instead of failing halfway. If it's login-only, add cookies (**More → Cookies**); otherwise try again later or find another upload. |
+| **"No metadata: … — the download may still work"** (amber card notice) | Only the metadata probe hiccupped (a timeout, an unreadable field). This says nothing about the download itself. | grabbit still lets you download; just the title and creator show as unknown until it finishes. |
+| `only available to Music Premium members` (YouTube Music) | An auto-generated track ID is premium- or region-locked, even though the same recording usually exists under a free ID. | grabbit **automatically** looks up a free counterpart (via music.youtube's redirect, then a track search), checks it actually plays, and copies the original's clean artist/title onto it for tagging. Only if no free copy exists does the error stand. |
+| `Video unavailable` (YouTube) | Often just an intermittent YouTube flake; sometimes a genuine removal. | grabbit **re-probes once** after a short pause before giving up. A real removal still fails after the retry. |
+| `not available in your country` / `blocked in your country` | Geo-restriction. | Can't be bypassed from here — it needs cookies or a network from an allowed region. |
+| `HTTP Error 403` / `429 Too Many Requests` / `timed out` / `Connection reset` / `ETIMEDOUT` … | A temporary network or rate-limit failure — common when a big batch hammers one site at once. | grabbit **retries automatically**, up to 3 attempts, waiting longer each time (the queue shows `Retrying (1/2)…`). The queue also caps how many downloads run at once to ease the pressure. |
+| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the Elite-v2 *shorts* destination. | grabbit routes it to the **server library** instead (a notice tells you). In a batch, clips already known to be too long are skipped. |
+| `Cutting needs a yt-dlp-handled site (this one uses a direct downloader)` | You asked to cut or split a site that grabbit downloads directly, not through yt-dlp. | Cutting/splitting only works on yt-dlp sites — download the file whole instead. |
+| `yt-dlp produced no output (no matching sections/chapters?)` | Your cut ranges matched nothing, or the video has no chapters to split. | Double-check the timestamps, or that the video actually has chapters. |
+| `Bad cut section "…" — use start-end like 1:30-2:45` / `Too many cut sections (max 20)` | The **Cut sections** field is malformed. | Give `start-end` ranges, comma-separated, up to 20. |
+| `Extra argument "…" is not allowed` / `… needs a value` / `… does not take a value` / `Too many extra arguments` | An **Extra yt-dlp arguments** entry was rejected by the safety allowlist. | Only a safe subset of long flags is accepted (no short flags, unknown options or stray URLs). Remove the flagged one. |
+| `Empty cookie file` | You pressed **Save cookies** with nothing pasted. | Paste the `cookies.txt` content first. |
+| `No results for "…"` | A plain-words search came back empty. | Refine the search terms, or paste a direct link. |
+| `Unauthorized` | Wrong or expired web-UI password. | Re-enter the grabbit password. |
+
+### What runs on its own
+
+Three of the rows above are worth calling out, because grabbit handles them with
+no action from you:
+
+- **Automatic retries with back-off.** Transient download failures (403, 429,
+  timeouts, dropped connections, 5xx) are retried up to three times, each after a
+  longer pause — so a rate limiter that's momentarily busy with the rest of your
+  batch usually clears by the next attempt. Only a non-transient error, or the
+  third strike, marks the job failed. Failed and cancelled jobs also keep a manual
+  **retry** button in the queue.
+- **YouTube re-probe.** Because YouTube intermittently reports playable videos as
+  "unavailable", grabbit quietly probes a second time before trusting the error.
+- **Free-counterpart swap for premium locks.** Premium/region-locked YouTube
+  Music IDs are transparently replaced with a verified free upload of the same
+  track, tagged from the original — you just get the song.
 
 ## How it works — under the hood
 
