@@ -143,10 +143,6 @@ https://www.example.com/share/r/19EBzS35RK/https://www.example.com/share/r/19EBz
 The second form takes no spacing to get right, which makes it much easier to
 build up a list on a phone or tablet.
 
-**Subscribe to a playlist.** Paste a playlist link and choose **Save Playlist**.
-The playlist now lives in grabbit, which polls it on an interval and fetches new
-entries automatically as they're added — no need to come back and re-paste.
-
 **Download straight into a music server.** If you run your own music server such
 as [Navidrome](https://www.navidrome.org/), point the music destination at its
 library folder and grabbit files each track into a clean, scannable tree:
@@ -163,6 +159,63 @@ and tags the track for you. Prefer to curate it? Do it manually and pick the
 right match from a metadata lookup list — set the genre, mark it as part of an
 Album, Single or EP, and check the source description, where the real title is
 often hiding.
+
+### Playlists, subscriptions and bulk downloads
+
+Paste a **playlist** or a **creator/profile** link and grabbit doesn't resolve a
+single file — it lists *every* item in it as a card, with batch actions on top.
+This is how you grab a whole channel, playlist or profile at once.
+
+**The item list.** The header shows the playlist/profile name, the handle and how
+many items it holds. Each card has:
+
+- an **audio** button and a **video** button (image items get an **image**
+  button instead) — tap either to open the download sheet for just that one item;
+- a **✓ mark-as-downloaded** toggle. grabbit remembers what you've already
+  grabbed so you can tell new from old at a glance; tap again to clear the mark.
+
+**Batch actions across the whole list:**
+
+- **Download all** (the floating button, bottom-right) — opens the download sheet
+  once for *every* item in the list. Whatever you set there is shared by all of
+  them, and each file still names and tags itself from its own metadata (so the
+  per-item title/tag fields are hidden in a batch).
+- **Download new to Navidrome (N)** — queues every item you *haven't* downloaded
+  yet as tagged audio into your music library, skipping the ones already done.
+  Disabled when there's nothing new. `(N)` is how many are fresh.
+- **Hide downloaded (N) / Show all** — collapse the items you've already grabbed
+  so only new ones show. The choice is remembered between visits.
+
+**"Download all as audio" vs "Download all as video".** When you paste several
+links at once you get both buttons, and the difference is exactly what it says:
+
+- **Download all as audio** — extracts *only the sound track* of each link. Use
+  this for music, podcasts or anything you only want to listen to: the files are
+  much smaller, and the sheet gives you the audio-specific options (audio format
+  + bitrate). Each track is named and tagged from its own metadata.
+- **Download all as video** — downloads the *full video* (picture + sound) of
+  each link, at the quality and container you choose in the sheet.
+
+Both open the same shared-settings sheet; the only difference is whether you end
+up with audio files or video files. (Sending a batch to the **Navidrome** music
+destination always extracts audio, whichever button you started from — a music
+library holds songs, not video.)
+
+**Subscribing to a playlist.** In a playlist view, tap **Save playlist** (it
+becomes **Remove saved playlist** once saved). Saved playlists live under
+**More → Saved playlists**, where each row gives you:
+
+- **Tap the row** — re-open the playlist to look through it and check for new
+  items by hand.
+- **The library pill (`Mine` / `Kids`)** — tap to switch which Navidrome library
+  this playlist's new tracks go into (your own or the separate kids library).
+- **The bell (watch) toggle** — turn on **auto-download**: grabbit then polls the
+  playlist on an interval (`WATCH_INTERVAL_MINUTES`) and downloads any newly
+  added track to Navidrome on its own, as tagged audio — no need to come back.
+  Off means the playlist is just saved for easy re-opening, nothing downloads by
+  itself.
+- **The trash icon** — remove the saved playlist (this only unsubscribes; it
+  never touches files you've already downloaded).
 
 ### Default download options — every setting explained
 
