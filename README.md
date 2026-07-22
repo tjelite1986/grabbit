@@ -572,6 +572,30 @@ skip known-long clips.
 
 ## Adding a new site
 
+Most links already work through the built-in yt-dlp fallback, so you only need a
+custom extractor when a site yt-dlp *can't* handle — usually a single-page app
+that hides the real media URL behind its own API. This is an advanced,
+code-level task; if you're just here to download things, you can skip this
+section entirely.
+
+### The easy way: let an AI agent write it
+
+Realistically the fastest way to add a site is to hand the job to an AI coding
+agent such as [Claude Code](https://claude.com/claude-code). The extractor
+contract is small and the folder already has working examples to copy, which is
+exactly the kind of self-contained task these agents do well. A prompt like this
+is usually enough:
+
+> Add a grabbit extractor for `example.com`. Look at the existing files in
+> `extractors/` (e.g. `nuditok.js`) and `extractors/index.js` for the contract,
+> figure out how `example.com` serves its media, and write a new
+> `extractors/example.js` that follows the same pattern.
+
+Point it at the repo, let it inspect a real page, and review the file it
+produces. The manual contract below is what it (or you) needs to follow.
+
+### The extractor contract
+
 Drop a file in `extractors/` that exports:
 
 ```js
