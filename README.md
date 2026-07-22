@@ -161,6 +161,44 @@ right match from a metadata lookup list — set the genre, mark it as part of an
 Album, Single or EP, and check the source description, where the real title is
 often hiding.
 
+### Unlocking private or login-only content with cookies
+
+Some links only resolve when you're signed in — members-only videos, private
+playlists, age-gated pages, premium audio. grabbit can borrow your browser's
+login by using an exported `cookies.txt` file. Every yt-dlp call — resolve,
+download and playlist polling — then reuses it automatically, so login-gated
+content just works.
+
+**Getting a `cookies.txt` file.** It has to be in the classic *Netscape* format,
+which a small browser extension produces in one click:
+
+1. Sign in to the site in your browser as usual.
+2. Install a "cookies.txt" exporter extension — for example *Get cookies.txt
+   LOCALLY* (Chrome/Edge) or *cookies.txt* (Firefox). Pick one that exports the
+   **Netscape** format and keeps the data on your machine.
+3. Open the site, click the extension, and export/copy the `cookies.txt` for
+   that domain.
+
+On a phone or tablet a desktop-style browser that supports extensions (or a
+browser with a built-in cookie export) does the same job.
+
+**Adding them to grabbit.** Go to **More → Cookies** and paste the content in:
+
+- Leave the **domain** field empty for a *default* file used on every site, or
+  set it (e.g. `youtube.com`) for a per-domain file that only that site uses.
+- You can keep one default plus any number of per-domain files side by side;
+  grabbit picks the matching one for each download on its own.
+
+A couple of things worth knowing:
+
+- **Use a throwaway account** where you can. Cookies are live login sessions —
+  treat the file like a password, and don't hand a site your main account if a
+  spare will do.
+- Cookies expire. If a previously working link starts failing on login again,
+  re-export and paste a fresh file.
+- Stored files are never touched in place — each download gets its own temp
+  copy, so running several jobs at once can't corrupt the saved cookies.
+
 ## How it works — under the hood
 
 ```mermaid
