@@ -37,6 +37,12 @@ hour-long files.
 > and start the container, following the [deploy guide](#deploy-with-docker)
 > below. Prefer to do it by hand? Everything is spelled out step by step.
 
+> **A tool, not an invitation.** grabbit is a general-purpose downloader I built
+> as a personal project. It hosts no content and points to nothing, and I do not
+> encourage downloading copyrighted or pirated material. What you download — and
+> whether you have the right to — is entirely up to you. See the
+> [Disclaimer](#disclaimer).
+
 **Just want to run it?** Jump to [Getting started](#getting-started).
 **Curious how it's built?** See [How it works](#how-it-works--under-the-hood).
 
@@ -48,6 +54,7 @@ hour-long files.
 - [Adding a new site](#adding-a-new-site)
 - [Configuration](#configuration) · [Auth](#auth)
 - [Deploy with Docker](#deploy-with-docker)
+- [Disclaimer](#disclaimer)
 
 ## Features
 
@@ -929,3 +936,28 @@ auto-generated playlists alone (renaming them can break its own housekeeping).
 
 Sources: [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) ·
 [AudioMuse-AI Navidrome plugin](https://github.com/NeptuneHub/AudioMuse-AI-NV-plugin)
+
+## Disclaimer
+
+grabbit is a free, open-source, general-purpose download tool, built and shared
+as a personal project. It ships no content, hosts nothing, and contains no links
+to any specific material — it simply automates yt-dlp and similar tools against
+URLs that **you** provide.
+
+- **No encouragement of infringement.** I do not endorse, encourage or condone
+  using grabbit to download, copy or distribute copyrighted, pirated or otherwise
+  unlawful material. Only download content you own, have created yourself, or
+  otherwise have the explicit right to save.
+- **You are responsible for how you use it.** Complying with copyright law, with
+  each site's Terms of Service, and with any laws and regulations that apply where
+  you live is entirely your responsibility as the user.
+- **No warranty, no liability.** The software is provided "as is", without
+  warranty of any kind. To the maximum extent permitted by law, the author accepts
+  no responsibility or liability for how the app is used, for what is downloaded
+  with it, or for any damages, data loss or legal consequences arising from its
+  use.
+- **Not legal advice.** If you're unsure whether a particular download is
+  permitted, get qualified advice before proceeding.
+
+By downloading, installing or running grabbit you acknowledge that you do so at
+your own risk and take full responsibility for your own actions.
