@@ -16,6 +16,9 @@ hour-long files.
 - URL: whatever host you route it to (e.g. `https://grabbit.example.com`)
 - Saved copies: a host folder you bind-mount to `/data` in the container
 - Stack: Node + Express, yt-dlp + ffmpeg for the generic fallback
+- Supported sites: everything yt-dlp handles (~1750 sites), plus a handful of
+  dedicated extractors for sites yt-dlp doesn't cover well — so the reach is the
+  same as metube/yt-dlp and then some
 
 ## Screenshots
 
