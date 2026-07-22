@@ -303,6 +303,8 @@ pre-filled from your [default download options](#default-download-options--every
 anything you change here applies to **this download only**. The button at the
 bottom starts it.
 
+![The download sheet for a server-library video, showing cutting, SponsorBlock and extra-args fields](assets/screenshots/download-dialog-video.jpg)
+
 The sheet is context-aware: it only shows the fields that make sense for what
 you're downloading and where it's going, so you'll never see all of these at
 once. Each entry below says when it appears.
@@ -331,6 +333,8 @@ once. Each entry below says when it appears.
 
 **Music tagging** *(the whole block shows only for a single Navidrome save — not
 batches, which tag each track automatically from its own metadata)*
+
+![The download sheet in Navidrome mode with the iTunes/Deezer metadata lookup and tag fields](assets/screenshots/download-dialog.jpg)
 
 - **Source description** — a collapsible panel showing the original post's
   description, where the real song title often hides when the video title is
