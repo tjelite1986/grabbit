@@ -26,6 +26,13 @@ hour-long files.
 |------|----------------|----------|
 | ![Home screen with resolved link and saved playlists](assets/screenshots/home.jpg) | ![Audio download sheet with metadata lookup and destination picker](assets/screenshots/download-dialog.jpg) | ![Default download options and cookie storage](assets/screenshots/settings.jpg) |
 
+> **The easiest way to install it:** copy this repo's link and ask an AI coding
+> agent like [Claude Code](https://claude.com/claude-code) to set it up for you —
+> "Install and run grabbit from `https://github.com/tjelite1986/grabbit` on this
+> machine." It can clone the repo, create the folders, write your compose/`.env`
+> and start the container, following the [deploy guide](#deploy-with-docker)
+> below. Prefer to do it by hand? Everything is spelled out step by step.
+
 **Just want to run it?** Jump to [Getting started](#getting-started).
 **Curious how it's built?** See [How it works](#how-it-works--under-the-hood).
 
