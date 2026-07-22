@@ -221,6 +221,106 @@ up only once the destination is Navidrome); that's noted per setting.
 - **Notify when done** — *shown only after you've enabled push notifications.*
   Sends a push notification when a download finishes.
 
+### The download sheet — every field explained
+
+When you tap a download action on a resolved link (audio / video / image), or a
+batch button on a playlist/multi-paste, the **options sheet** slides up. It's
+pre-filled from your [default download options](#default-download-options--every-setting-explained);
+anything you change here applies to **this download only**. The button at the
+bottom starts it.
+
+The sheet is context-aware: it only shows the fields that make sense for what
+you're downloading and where it's going, so you'll never see all of these at
+once. Each entry below says when it appears.
+
+**Naming and tagging**
+
+- **Title** — the file/clip title. *Shown for a single link or one item picked
+  from a profile; hidden for Navidrome and for batch/multi runs* (there each item
+  keeps its own title).
+- **Save under profile name** — files the download under a creator/profile name.
+  *Hidden for Navidrome and multi-link runs.*
+- **Hashtags (space or comma separated)** — tags that feed the clip's
+  caption/keywords. *Hidden for Navidrome (which uses genres instead) and for
+  batch runs.*
+
+**Where it goes**
+
+- **Save to** — the destination for this download: *Elite-v2 shorts*, *Server
+  library* or *Navidrome*. This choice drives which fields below appear.
+- **Music library** — *Navidrome only.* *My music* or *Kids*.
+- **Channel** — *Elite-v2 shorts only.* *main* or *18+*.
+- **Library folder** — *server-library video only.* Pick an existing subfolder,
+  or choose *New folder* to reveal…
+- **New folder name** — *shown when Library folder = New folder.* Names the
+  subfolder to create.
+
+**Music tagging** *(the whole block shows only for a single Navidrome save — not
+batches, which tag each track automatically from its own metadata)*
+
+- **Source description** — a collapsible panel showing the original post's
+  description, where the real song title often hides when the video title is
+  clickbait.
+- **Metadata lookup (iTunes + Deezer)** — a dropdown of matches from a music
+  database; picking one fills every tag field below at once. The button beside it
+  re-runs the search.
+- **Song title** — the track title tag.
+- **Artists / group (comma-separated)** — one or more artists.
+- **Release type** — *Album*, *Single* or *EP*. A *Single* has no album and is
+  filed under its own name (the album field disappears); *EP* relabels the field
+  to *EP name*.
+- **Album / EP name** — *hidden for Single.* The album/EP the track belongs to.
+- **Release date** — `YYYY` or `YYYY-MM-DD`; the year becomes the `(Year)` in the
+  folder path.
+- **Genres (comma-separated)** — one or more genre tags.
+
+**Quality and format**
+
+- **Quality** — resolution cap for yt-dlp sites (*Best* or 2160p…360p). *Shown
+  for video, non-Navidrome.*
+- **Container** — output format *mp4 / mkv / webm*. *Server-library video only*
+  (Elite shorts stay plain mp4; mkv/webm need yt-dlp).
+- **Audio format** + **Bitrate** — same choices as the defaults; bitrate applies
+  to lossy formats only. *Shown for audio downloads* (including a Navidrome save,
+  which always extracts audio).
+
+**Video extras** *(server-library video only)*
+
+- **Embed thumbnail** — write the cover art inside the file.
+- **Embed subtitles** — include subtitles when the source has them.
+
+**SponsorBlock** — *shown for server-library video or any audio extraction.*
+*Off*, *Remove segments* (cut sponsor/intro/etc. out) or *Keep, mark as chapters*
+(leave them in but add chapter markers).
+
+**Cutting** *(server library, not images, not batches)*
+
+- **Cut sections (start-end, comma-separated)** — download only the given
+  timestamp ranges, e.g. `0:30-1:45, 3:10-4:00`. Because a cut can produce
+  several files, it's server-library only.
+- **Split by chapters** — *video only.* Save one file per chapter instead.
+
+**Advanced and delivery**
+
+- **Extra yt-dlp arguments** — pass extra flags straight to yt-dlp, e.g.
+  `--write-subs --sub-langs en`. Only an allowlisted safe subset of long options
+  is accepted; you can save named **Templates** (Save/Delete) to reuse a flag set.
+  *Shown for anything except images; ignored by sites with a direct extractor.*
+- **Schedule start (optional)** — a date/time to hold the job until; it waits as
+  *scheduled*, survives restarts, and can be cancelled from the queue. *Hidden for
+  the download-all batch.*
+- **Convert to web format** — save a web-ready `.web.mp4` immediately, skipping
+  the later transcoder pass. *Elite-v2 video saves only.*
+- **Download to this device** — *on by default.* Also stream the finished file to
+  your device, not just the server. *Hidden for the download-all batch.*
+
+**The confirm button** relabels itself for the context — *Download & import*,
+*Save to library*, *Save to Navidrome*, *Download all (N)*, and so on — so it
+always says exactly what pressing it will do. A **warning banner** may appear
+above the fields when something's worth knowing before you commit: the clip is
+too long for shorts (so it's routed to the server library instead), or it's
+already been downloaded/imported.
+
 ### Rules — automate the settings you'd otherwise pick every time
 
 Under **More → Rules** you can teach grabbit to fill in the download options for
