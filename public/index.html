@@ -1088,6 +1088,7 @@
       let singleData = null;     // last /api/resolve result
       let profileMode = false;
       let profileItems = [];
+      let profileSelection = new Set(); // ids the user picked to download
       let profileData = null;
       let currentUrl = '';
 
@@ -1364,6 +1365,7 @@
         profileMode = true;
         profileData = pd;
         profileItems = pd.items || [];
+        profileSelection = new Set();
         const head = document.createElement('div');
         head.style.cssText = 'margin:2px 2px 8px;font-size:13px;color:var(--muted)';
         const plName = pd.title && pd.title !== pd.creator ? pd.title + ' · ' : '';
@@ -1404,8 +1406,42 @@
         }
         cardsEl.appendChild(btns);
 
+        // Pick a subset to download — handy for big profiles: tap clips (or the
+        // quick "Select N" buttons), then "Download selected". Undownloaded
+        // videos only; images and already-downloaded clips aren't selectable.
+        const SEL_ICON = '<svg class="ic" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M8.5 12l2.5 2.5 4.5-4.5" /></svg>';
+        const selBar = document.createElement('div');
+        selBar.className = 'profbtns';
+        const mkBtn = (label, fn, cls) => { const b = document.createElement('button'); if (cls) b.className = cls; b.textContent = label; b.addEventListener('click', fn); return b; };
+        const sel10 = mkBtn('Select 10', () => selectNext(10));
+        const sel25 = mkBtn('Select 25', () => selectNext(25));
+        const selClear = mkBtn('Clear', () => { profileSelection.clear(); renderItems(); updateSelUi(); });
+        const dlSel = mkBtn('Download selected', () => { if (profileSelection.size) openSheetAll([...profileSelection]); }, 'primary');
+        selBar.append(sel10, sel25, selClear, dlSel);
+        cardsEl.appendChild(selBar);
+        function updateSelUi() {
+          const n = profileSelection.size;
+          dlSel.textContent = n ? 'Download selected (' + n + ')' : 'Download selected';
+          dlSel.disabled = !n;
+          selClear.disabled = !n;
+        }
+
         const itemsWrap = document.createElement('div');
         cardsEl.appendChild(itemsWrap);
+
+        // Add the first n not-yet-selected, undownloaded videos (in shown order).
+        function selectNext(n) {
+          const list = hideDownloaded ? profileItems.filter((it) => !it.downloaded) : profileItems;
+          let added = 0;
+          for (const it of list) {
+            if (added >= n) break;
+            if (it.mediaType === 'image' || it.downloaded || profileSelection.has(it.id)) continue;
+            profileSelection.add(it.id);
+            added++;
+          }
+          renderItems();
+          updateSelUi();
+        }
 
         function renderItems() {
           itemsWrap.innerHTML = '';
@@ -1419,6 +1455,7 @@
           }
           shown.forEach((it) => {
             const isImg = it.mediaType === 'image';
+            const selectable = !isImg && !it.downloaded;
             const status = it.downloaded ? 'downloaded' : importStatusLabel(it.imported, isImg, settings.channel);
             const card = mediaCard({
               title: it.title || it.filename,
@@ -1427,6 +1464,12 @@
               caption: it.description,
               status,
               onActions(actions) {
+                if (selectable) {
+                  const sb = document.createElement('button');
+                  sb.className = 'act'; sb.dataset.sel = '1'; sb.title = 'Select for download';
+                  sb.innerHTML = SEL_ICON;
+                  actions.appendChild(sb);
+                }
                 if (isImg) {
                   actions.appendChild(actBtn(ICON.image, () => openSheet('image', null, it)));
                 } else {
@@ -1442,10 +1485,28 @@
                 }
               },
             });
+            if (selectable) {
+              const sb = card.querySelector('[data-sel]');
+              const applySel = () => {
+                const on = profileSelection.has(it.id);
+                card.style.outline = on ? '2px solid var(--primary)' : '';
+                card.style.outlineOffset = on ? '-2px' : '';
+                sb.style.background = on ? 'var(--primary)' : '';
+                sb.style.color = on ? 'var(--on-primary)' : '';
+              };
+              sb.addEventListener('click', () => {
+                if (profileSelection.has(it.id)) profileSelection.delete(it.id);
+                else profileSelection.add(it.id);
+                applySel();
+                updateSelUi();
+              });
+              applySel();
+            }
             itemsWrap.appendChild(card);
           });
         }
         renderItems();
+        updateSelUi();
         $('fab').classList.add('show');
       }
 
@@ -1586,6 +1647,7 @@
       let sheetItem = null;      // for "all" or profile-single: the profile item; null for single resolve
       let sheetSingle = null;    // single resolve data
       let sheetAll = false;      // batch (download all) mode
+      let sheetSelectedIds = null; // when set, the batch downloads only these ids
       let sheetMulti = false;    // multi-link paste mode (multiUrls)
       let sheetSeq = 0;          // bumped per sheet open (one-shot triggers key on it)
 
@@ -1688,13 +1750,15 @@
         openSheetUi();
       }
 
-      // Batch (download all) sheet.
-      function openSheetAll() {
+      // Batch sheet. Pass an ids array to download only that selection.
+      function openSheetAll(ids) {
         if (!profileItems.length) return;
+        sheetSelectedIds = ids && ids.length ? ids.slice() : null;
         sheetAll = true; sheetMode = 'video'; sheetSingle = null; sheetItem = null; sheetMulti = false;
         openSheetCommon();
-        $('shTitle').textContent = 'Download all';
-        $('shSub').textContent = '@' + (profileData.creator || '?') + ' — ' + profileItems.length + ' items';
+        const n = sheetSelectedIds ? sheetSelectedIds.length : profileItems.length;
+        $('shTitle').textContent = sheetSelectedIds ? 'Download selected' : 'Download all';
+        $('shSub').textContent = '@' + (profileData.creator || '?') + ' — ' + n + ' item' + (n === 1 ? '' : 's');
         $('shCreator').value = profileData.creator || '';
         $('shTitleInput').value = '';
         applySheetRuleUi();
@@ -1831,7 +1895,9 @@
         else if (sheetAll && isNavidrome) {
           const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded).length;
           label = 'Download new to Navidrome (' + fresh + ')';
-        } else if (sheetAll) label = 'Download all (' + profileItems.length + ')';
+        } else if (sheetAll) label = sheetSelectedIds
+          ? 'Download selected (' + sheetSelectedIds.length + ')'
+          : 'Download all (' + profileItems.length + ')';
         else if (isNavidrome) label = 'Save to Navidrome';
         else if (isAudio) label = isServer ? 'Save audio' : 'Download audio';
         else if (isImage) label = device ? 'Download image' : 'Save image';
@@ -2035,15 +2101,16 @@
         }
 
         if (sheetAll) {
+          const selSet = sheetSelectedIds ? new Set(sheetSelectedIds) : null;
           if (segValue($('shDest')) === 'navidrome') {
             closeSheet();
             startNavidromeBatch(
-              profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded),
+              profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded && (!selSet || selSet.has(it.id))),
               $('shAfmt').value,
               $('shAq').value,
               segValue($('shNavLib'))
             );
-          } else startBatch();
+          } else startBatch(sheetSelectedIds);
           return;
         }
 
@@ -2298,7 +2365,7 @@
         };
       }
 
-      $('fab').addEventListener('click', openSheetAll);
+      $('fab').addEventListener('click', () => openSheetAll());
 
       // ----------------------------------------------------------------- DOWNLOADS (history)
       const historyList = $('historyList'), historyEmpty = $('historyEmpty');
