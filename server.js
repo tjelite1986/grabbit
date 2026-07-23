@@ -2521,6 +2521,11 @@ app.post('/api/jobs/clear', (_req, res) => {
 // Download a job and write it (with metadata + .md sidecar) into the channel's
 // _import folder. Shared by the batch profile downloader.
 async function saveJobToImport(job, channel, web, quality) {
+  // Profile items resolve from a listing that carries no tags; pull them from
+  // the clip's own post page now, only for the clips actually being saved.
+  if (job.pageUrl && (!Array.isArray(job.tags) || !job.tags.length)) {
+    try { await extractors.enrichJob(job); } catch { /* best effort */ }
+  }
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const destDir = channelDir(channel);
   const finalPath = path.join(destDir, `${stem}${web ? '.web.mp4' : '.mp4'}`);

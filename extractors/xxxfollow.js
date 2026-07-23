@@ -49,7 +49,25 @@ function decodeEntities(s) {
     .replace(/&gt;/g, '>');
 }
 
-function buildJob(userdir, userid, mediaid, title, creator) {
+// Per-post tags live on the individual post page as /tag/<slug> links (the
+// profile listing carries none). Slugs are normalised to clean hashtag tokens
+// (drop hyphens/punctuation) so buildCaption's `#` prefix yields valid tags.
+function scrapeTags(html) {
+  const out = [];
+  const seen = new Set();
+  const re = /href="\/tag\/([^"?#]+)"/gi;
+  let m;
+  while ((m = re.exec(html)) && out.length < 15) {
+    const token = decodeURIComponent(m[1]).toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (token.length >= 2 && !seen.has(token)) {
+      seen.add(token);
+      out.push(token);
+    }
+  }
+  return out;
+}
+
+function buildJob(userdir, userid, mediaid, title, creator, opts = {}) {
   const dir = `${BASE}/media/fans/post_public/${userdir}/${userid}`;
   return {
     kind: 'direct',
@@ -57,7 +75,9 @@ function buildJob(userdir, userid, mediaid, title, creator) {
     creator,
     title: title || String(mediaid),
     description: title || '',
-    tags: [],
+    tags: opts.tags || [],
+    // The individual post page, used to enrich tags lazily at download time.
+    pageUrl: opts.pageUrl || null,
     sourceUrl: `${BASE}/${creator}`,
     thumbnail: `${dir}/${mediaid}_small.webp`,
     filename: `${creator}-${mediaid}.mp4`,
@@ -89,7 +109,23 @@ async function resolve(url) {
 
   const ogTitle = decodeEntities((html.match(/og:title"[^>]*content="([^"]*)"/i) || [])[1] || '');
   const title = ogTitle.replace(/\s+(by|Starring)\s+[^|]*$/i, '').trim();
-  return buildJob(userdir, userid, mediaid, title, creator);
+  return buildJob(userdir, userid, mediaid, title, creator, { tags: scrapeTags(html), pageUrl: url });
+}
+
+// Fetch a profile item's own post page to pull its per-clip tags. Called by the
+// registry's enrichJob() at download time, so a profile preview stays a single
+// listing fetch and only the clips actually downloaded pay for the extra page.
+async function enrich(job) {
+  if (!job || !job.pageUrl) return job;
+  try {
+    const res = await fetchT(job.pageUrl, { headers: { 'User-Agent': UA } });
+    if (!res.ok) return job;
+    const tags = scrapeTags(await res.text());
+    if (tags.length) job.tags = tags;
+  } catch {
+    /* best effort — tags stay empty */
+  }
+  return job;
 }
 
 async function resolveProfile(url) {
@@ -101,7 +137,16 @@ async function resolveProfile(url) {
     const res = await fetchT(`${BASE}/${creator}?page=${page}`, { headers: { 'User-Agent': UA } });
     if (!res.ok) break;
     const html = await res.text();
-    // Each post: alt="<title> by <creator>" ... src=".../<mediaid>_small.<ext>"
+    // Each post is anchored by a preceding <a href="/<creator>/<postid>...">,
+    // then rendered as alt="<title> by <creator>" ... src=".../<mediaid>_small".
+    // Collect the post hrefs in document order so each media can be paired with
+    // its nearest preceding anchor (postid != mediaid, so they can't be joined
+    // by id — proximity is the reliable link). The href gives us the post page
+    // that carries the clip's tags, fetched later by enrich().
+    const hrefs = [];
+    const hrefRe = /href="(\/[A-Za-z0-9_.-]+\/\d+[A-Za-z0-9_.-]*)"/g;
+    let hm;
+    while ((hm = hrefRe.exec(html))) hrefs.push({ i: hm.index, url: hm[1] });
     const re =
       /alt="([^"]+?)\s+by\s+[^"]*?"[^>]*?post_public\/(\d+)\/([\d-]+)\/(\d+)_small/g;
     let m;
@@ -110,7 +155,16 @@ async function resolveProfile(url) {
       const [, rawTitle, userdir, userid, mediaid] = m;
       if (seen.has(mediaid)) continue;
       seen.add(mediaid);
-      items.push(buildJob(userdir, userid, mediaid, decodeEntities(rawTitle).trim(), creator));
+      let pageUrl = null;
+      for (const hf of hrefs) {
+        if (hf.i < m.index) pageUrl = hf.url;
+        else break;
+      }
+      items.push(
+        buildJob(userdir, userid, mediaid, decodeEntities(rawTitle).trim(), creator, {
+          pageUrl: pageUrl ? BASE + pageUrl : null,
+        })
+      );
       added++;
     }
     if (!added) break; // no new posts -> reached the end
@@ -119,4 +173,4 @@ async function resolveProfile(url) {
   return { creator, items };
 }
 
-module.exports = { name: 'xxxfollow', domain: 'xxxfollow.com', profiles: true, match, isProfile, resolve, resolveProfile };
+module.exports = { name: 'xxxfollow', domain: 'xxxfollow.com', profiles: true, match, isProfile, resolve, resolveProfile, enrich };

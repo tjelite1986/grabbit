@@ -88,4 +88,18 @@ async function resolveProfile(url) {
   return { extractor: extractor.name, ...result, items };
 }
 
-module.exports = { resolve, isProfile, resolveProfile, pick, siteExtractors, generic };
+// Some extractors can lazily enrich a resolved job (e.g. fetch a profile clip's
+// own post page for its tags) at download time. A no-op for jobs whose owning
+// extractor has no enrich() or that carry no pageUrl.
+async function enrichJob(job) {
+  try {
+    if (!job || !job.pageUrl) return job;
+    const ex = pick(job.pageUrl);
+    if (ex && typeof ex.enrich === 'function') return await ex.enrich(job);
+  } catch {
+    /* best effort — leave the job unchanged */
+  }
+  return job;
+}
+
+module.exports = { resolve, isProfile, resolveProfile, enrichJob, pick, siteExtractors, generic };
