@@ -1578,8 +1578,17 @@ app.get('/api/download', async (req, res) => {
     recordHistory({ ...histEntry, device: true });
     await pipeline(fs.createReadStream(finalPath), res);
   } catch (e) {
-    console.error('download failed:', e);
-    if (!res.headersSent) res.status(502).send('Download failed: ' + String(e.message || e));
+    const error = String(e.message || e);
+    console.error('download failed:', error);
+    // Save-only failure whose file isn't published yet -> park it for retry.
+    if (!device && job.mediaType !== 'image' && isRetryableError(e, error)) {
+      enqueueRetry({
+        url: job.sourceUrl || url, dest: dest === 'server' ? 'server' : 'elite',
+        channel, folder, web, quality, creator: req.query.creator ? String(req.query.creator) : job.creator,
+        title: job.title, thumbnail: job.thumbnail, reason: error,
+      });
+    }
+    if (!res.headersSent) res.status(502).send('Download failed: ' + error);
     else res.destroy();
   } finally {
     for (const f of cleanup) fs.rm(f, { force: true }, () => {});
@@ -1730,6 +1739,15 @@ app.get('/api/download-all', async (req, res) => {
     } catch (e) {
       failed++;
       const error = String(e.message || e);
+      // A clip whose file isn't published upstream yet (freshly-uploaded 404)
+      // is parked in the retry queue so it downloads automatically once ready.
+      let queued = false;
+      if (job.mediaType !== 'image' && isRetryableError(e, error)) {
+        queued = !!enqueueRetry({
+          url: job.sourceUrl || job.url, dest, channel, folder, web, quality,
+          creator: creatorOverride || job.creator, title, thumbnail: job.thumbnail, reason: error,
+        });
+      }
       // Persist the failure too — a batch scrolls past on screen, and nothing
       // was marked as downloaded, so the item stays retryable.
       recordHistory({
@@ -1737,7 +1755,7 @@ app.get('/api/download-all', async (req, res) => {
         sourceUrl: job.sourceUrl || job.url || null, thumbnail: job.thumbnail || null,
         extractor: job.extractor || null, imported: false, device: false, error,
       });
-      send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'failed', error });
+      send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'failed', error, queuedForRetry: queued });
     }
   }
   send({ type: 'done', saved, skipped, failed });
@@ -2406,6 +2424,145 @@ setInterval(() => {
   }
 }, 20 * 1000).unref();
 
+// ---------------------------------------------------------------------------
+// Retry queue: a clip whose media file isn't published upstream yet (a 404/403
+// on the CDN of a freshly-uploaded post — the page + metadata render before the
+// file is encoded) is parked here and re-attempted on a growing backoff until it
+// succeeds or ages out. Survives restarts via a DATA_DIR file. Works for both
+// the standalone UI and the elite-v2 Grab integration, since the retry runs
+// server-side and saves straight into the _import folder / server library.
+const RETRY_FILE = path.join(DATA_DIR, 'retry-queue.json');
+const RETRY_MAX_ATTEMPTS = 12;
+const RETRY_MAX_AGE_MS = 72 * 60 * 60 * 1000; // give a slow upstream up to 3 days
+const RETRY_BACKOFF_MIN = [20, 40, 60, 120, 180, 240, 360]; // minutes; last repeats
+
+function readRetryQueue() {
+  try { return JSON.parse(fs.readFileSync(RETRY_FILE, 'utf8')); } catch { return []; }
+}
+function writeRetryQueue(list) {
+  try { fs.writeFileSync(RETRY_FILE, JSON.stringify(list)); }
+  catch (e) { console.warn('retry-queue write failed:', e.message); }
+}
+// Dedup on the exact URL (not mediaKey, which drops the query string — xfree
+// distinguishes clips only by ?id=, so mediaKey would collapse them all to one).
+function retryKey(e) { return `${e.dest || 'elite'}:${e.channel || ''}:${e.folder || ''}:${e.url}`; }
+function retryDelayMs(attempts) {
+  return RETRY_BACKOFF_MIN[Math.min(attempts, RETRY_BACKOFF_MIN.length - 1)] * 60 * 1000;
+}
+function isRetryableError(err, msg) {
+  if (err && err.retryable === true) return true;
+  if (err && err.retryable === false) return false;
+  return /HTTP (403|404|408|425|429|5\d\d)|not published|timeout|timed out|ECONNRESET|network|EAI_AGAIN/i.test(String(msg || ''));
+}
+function enqueueRetry(entry) {
+  if (!validUrl(entry.url)) return null;
+  const list = readRetryQueue();
+  const key = retryKey(entry);
+  if (list.some((e) => retryKey(e) === key)) return null; // already queued
+  const rec = {
+    id: `retry-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    url: entry.url,
+    dest: entry.dest === 'server' ? 'server' : 'elite',
+    channel: entry.channel || 'main',
+    folder: entry.folder || null,
+    web: !!entry.web,
+    quality: entry.quality || null,
+    creator: entry.creator || null,
+    title: entry.title || null,
+    thumbnail: entry.thumbnail || null,
+    attempts: 0,
+    addedAt: Date.now(),
+    nextAt: Date.now() + retryDelayMs(0),
+    lastError: entry.reason || null,
+  };
+  writeRetryQueue([...list, rec]);
+  return rec;
+}
+
+async function attemptRetry(entry) {
+  const job = await extractors.resolve(entry.url);
+  if (entry.creator) job.creator = entry.creator;
+  if (entry.dest === 'server') await saveJobToServer(job, entry.folder, entry.quality);
+  else await saveJobToImport(job, entry.channel, entry.web, entry.quality);
+  const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
+  recordHistory({
+    creator: job.creator || null,
+    title: job.title || null,
+    channel: entry.dest === 'server'
+      ? `server/${path.basename(serverVideoDir(entry.folder))}`
+      : entry.channel,
+    filename: `${stem}${entry.dest === 'elite' && entry.web ? '.web.mp4' : '.mp4'}`,
+    sourceUrl: job.sourceUrl || entry.url,
+    thumbnail: job.thumbnail || null,
+    extractor: job.extractor || null,
+    imported: entry.dest === 'elite',
+    device: false,
+  });
+  markDownloaded(job.sourceUrl || entry.url, null, job.site, job.mediaId, entry.dest === 'elite' ? entry.channel : null);
+}
+
+let retryRunning = false;
+async function runRetryCycle() {
+  if (retryRunning) return;
+  retryRunning = true;
+  try {
+    const now = Date.now();
+    for (const e of readRetryQueue().filter((x) => x.nextAt <= now)) {
+      try {
+        await attemptRetry(e);
+        writeRetryQueue(readRetryQueue().filter((x) => x.id !== e.id));
+        console.log(`[retry] recovered ${e.url}`);
+      } catch (err) {
+        const msg = String((err && err.message) || err);
+        const cur = readRetryQueue();
+        const idx = cur.findIndex((x) => x.id === e.id);
+        if (idx < 0) continue;
+        cur[idx].attempts += 1;
+        cur[idx].lastError = msg;
+        const tooOld = now - cur[idx].addedAt > RETRY_MAX_AGE_MS;
+        if (!isRetryableError(err, msg) || cur[idx].attempts >= RETRY_MAX_ATTEMPTS || tooOld) {
+          cur.splice(idx, 1);
+          console.log(`[retry] gave up on ${e.url}: ${msg}`);
+        } else {
+          cur[idx].nextAt = now + retryDelayMs(cur[idx].attempts);
+        }
+        writeRetryQueue(cur);
+      }
+    }
+  } finally {
+    retryRunning = false;
+  }
+}
+setInterval(runRetryCycle, 5 * 60 * 1000).unref();
+setTimeout(runRetryCycle, 60 * 1000).unref(); // first sweep a minute after boot
+
+// GET /api/retry -> the pending retry queue (soonest first).
+app.get('/api/retry', (req, res) => {
+  res.json({ ok: true, items: readRetryQueue().sort((a, b) => a.nextAt - b.nextAt) });
+});
+// POST /api/retry/add -> manually schedule a clip that can't be downloaded yet.
+app.post('/api/retry/add', (req, res) => {
+  const url = req.query.url || (req.body && req.body.url);
+  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  const rec = enqueueRetry({
+    url,
+    dest: req.query.dest === 'server' ? 'server' : 'elite',
+    channel: CHANNELS[req.query.channel] || 'main',
+    folder: req.query.folder || null,
+    web: req.query.web === '1',
+    quality: parseQuality(req.query.quality),
+    creator: req.query.creator ? String(req.query.creator) : null,
+    reason: 'manual',
+  });
+  res.json({ ok: true, added: !!rec, item: rec || null });
+});
+// POST /api/retry/remove?id=... -> drop an entry. POST /api/retry/run -> sweep now.
+app.post('/api/retry/remove', (req, res) => {
+  writeRetryQueue(readRetryQueue().filter((e) => e.id !== req.query.id));
+  res.json({ ok: true });
+});
+app.post('/api/retry/run', (req, res) => { runRetryCycle(); res.json({ ok: true }); });
+
 // POST /api/jobs/:id/cancel -> cancel a scheduled or still-queued job.
 app.post('/api/jobs/:id/cancel', (req, res) => {
   const job = jobsMap.get(req.params.id);
@@ -2553,7 +2710,21 @@ async function downloadDirect(job, dest, opts = {}) {
     upstream = await fetch(url, { headers: job.headers || {} });
     if (upstream.ok && upstream.body) break;
   }
-  if (!upstream.ok || !upstream.body) throw new Error(`upstream HTTP ${upstream.status}`);
+  if (!upstream.ok || !upstream.body) {
+    // A 404/403 on the media URL usually means the file isn't published yet
+    // (freshly-uploaded clips on sites like xfree render the page + metadata
+    // before their CDN file is encoded). Flag these as retryable so the caller
+    // can schedule a later attempt instead of treating it as a hard failure.
+    const s = upstream.status;
+    const err = new Error(
+      s === 404 || s === 403
+        ? `file not published yet (upstream HTTP ${s}) — will retry later`
+        : `upstream HTTP ${s}`
+    );
+    err.status = s;
+    err.retryable = [403, 404, 408, 425, 429, 500, 502, 503, 504].includes(s);
+    throw err;
+  }
   const total = Number(upstream.headers.get('content-length')) || 0;
   const src = Readable.fromWeb(upstream.body);
   if (typeof opts.onProgress === 'function') {

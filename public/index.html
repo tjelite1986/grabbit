@@ -637,6 +637,26 @@
         </div>
 
         <div class="section">
+          <h2>Scheduled retries</h2>
+          <p style="margin:0;padding:0 16px 10px;color:var(--muted);font-size:13px">
+            Clips whose file isn't published upstream yet (a freshly-uploaded post
+            that 404s) are parked here and downloaded automatically once ready. A
+            failed profile download queues them for you; you can also add one by hand.
+          </p>
+          <div class="sites" id="retryList"></div>
+          <div style="padding:4px 16px 16px">
+            <div class="field">
+              <label>Video URL to retry later</label>
+              <input id="rtUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://www.xfree.com/video?id=…" />
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;margin:0 0 10px;font-size:13px;color:var(--muted)">
+              <input id="rt18" type="checkbox" /> Save to 18+ channel
+            </label>
+            <button type="button" id="rtAdd" style="padding:11px 18px;border-radius:12px;background:var(--primary);color:var(--on-primary);font-weight:600;font-size:14px">Schedule retry</button>
+          </div>
+        </div>
+
+        <div class="section">
           <h2>Supported sites</h2>
           <div class="sites" id="sitesList"></div>
         </div>
@@ -2461,6 +2481,57 @@
         } catch (err) { toast(err.message, 'bad'); }
       });
 
+      // ----------------------------------------------------------------- retry queue
+      // Clips whose upstream file isn't published yet, re-attempted on a backoff.
+      function fmtWhen(ts) {
+        const d = ts - Date.now();
+        if (d <= 0) return 'due now';
+        const m = Math.round(d / 60000);
+        return m < 60 ? 'in ' + m + ' min' : 'in ' + Math.round(m / 60) + ' h';
+      }
+      async function loadRetries() {
+        try {
+          const d = await fetchJson('/api/retry');
+          renderRetries(d.items || []);
+        } catch { renderRetries([]); }
+      }
+      function renderRetries(list) {
+        const el = $('retryList');
+        if (!el) return;
+        if (!list.length) {
+          el.innerHTML = '<span style="font-size:12.5px;color:var(--faint)">Nothing queued. Failed downloads of not-yet-published clips land here automatically.</span>';
+          return;
+        }
+        el.innerHTML = list.map((r) =>
+          '<span class="site" style="display:flex;align-items:center;gap:6px;max-width:100%">' +
+          '<span class="dot"></span>' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' +
+          esc(r.title || r.creator || r.url) +
+          ' <small>' + (r.channel === '18plus' ? '18+ · ' : '') + 'try ' + (r.attempts + 1) + ' ' + fmtWhen(r.nextAt) + '</small></span>' +
+          '<button type="button" class="rt-del" data-id="' + esc(r.id) + '" title="Remove" style="padding:0 0 0 6px;color:var(--muted)">✕</button></span>'
+        ).join('');
+      }
+      $('retryList').addEventListener('click', async (e) => {
+        const b = e.target.closest('.rt-del');
+        if (!b) return;
+        try {
+          await fetchJson('/api/retry/remove?id=' + encodeURIComponent(b.dataset.id), { method: 'POST' });
+          loadRetries();
+        } catch (err) { toast(err.message, 'bad'); }
+      });
+      $('rtAdd').addEventListener('click', async () => {
+        const url = $('rtUrl').value.trim();
+        if (!url) { toast('Paste a video URL first', 'bad'); return; }
+        const ch = $('rt18').checked ? '18plus' : 'main';
+        try {
+          const d = await fetchJson('/api/retry/add?channel=' + ch + '&url=' + encodeURIComponent(url), { method: 'POST' });
+          if (!d.ok) throw new Error(d.error || 'failed');
+          $('rtUrl').value = '';
+          loadRetries();
+          toast(d.added ? 'Queued — downloads automatically once available' : 'Already queued', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
+      });
+
       // ----------------------------------------------------------------- arg templates
       // Named sets of extra yt-dlp flags, offered by the sheet's template picker.
       let argTemplates = [];
@@ -2758,6 +2829,7 @@
       loadFolders();
       loadPlaylists();
       loadCookies();
+      loadRetries();
       loadTemplates();
       loadRules();
       connectJobStream(); // pick up any in-progress jobs (incl. across reloads)
