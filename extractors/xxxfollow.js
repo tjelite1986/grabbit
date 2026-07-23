@@ -78,7 +78,10 @@ function buildJob(userdir, userid, mediaid, title, creator, opts = {}) {
     tags: opts.tags || [],
     // The individual post page, used to enrich tags lazily at download time.
     pageUrl: opts.pageUrl || null,
-    sourceUrl: `${BASE}/${creator}`,
+    // Prefer the specific post URL so the downloaded-registry (and the caption's
+    // Source line) key on the clip, not the shared profile — otherwise one grab
+    // marked every clip of a creator as already downloaded.
+    sourceUrl: opts.pageUrl || `${BASE}/${creator}`,
     thumbnail: `${dir}/${mediaid}_small.webp`,
     filename: `${creator}-${mediaid}.mp4`,
     // Not every post has an _fhd variant; the downloader falls back in order.

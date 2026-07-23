@@ -413,7 +413,11 @@ function markDownloaded(sourceUrl, filename, site, mediaId, channel) {
 function downloadedEntry(sourceUrl, site, mediaId) {
   const map = readDownloaded();
   const key = idKey(site, mediaId);
-  if (key && map[key]) return map[key];
+  // A site-native id is authoritative — do NOT fall back to the sourceUrl key
+  // when we have one. Some extractors (xxxfollow) set sourceUrl to the shared
+  // PROFILE url, so the URL fallback would mark every clip of a creator as
+  // downloaded the moment any single one of them was.
+  if (key) return map[key] || null;
   return (sourceUrl && map[mediaKey(sourceUrl)]) || null;
 }
 
@@ -1339,7 +1343,7 @@ function updatePlaylist(id, patch) {
 async function checkPlaylistForNew(pl) {
   const profile = await extractors.resolveProfile(pl.url);
   const fresh = profile.items.filter(
-    (it) => it.mediaType !== 'image' && !isDownloaded(it.sourceUrl || it.url)
+    (it) => it.mediaType !== 'image' && !isDownloaded(it.sourceUrl || it.url, it.site, it.mediaId)
   );
   for (const it of fresh) startNavidromeJob(it.sourceUrl || it.url, pl.lib);
   return { total: profile.items.length, queued: fresh.length };
@@ -1624,8 +1628,10 @@ app.get('/api/profile', async (req, res) => {
         thumbnail: job.thumbnail || null,
         duration: durationKnown(job) ? Number(job.duration) : null,
         sourceUrl: job.sourceUrl || job.url || null,
-        // Marked in playlist views; "download new" skips these.
-        downloaded: isDownloaded(job.sourceUrl || job.url),
+        // Marked in playlist views; "download new" skips these. Check by the
+        // clip's own id (job.site/mediaId), not just sourceUrl — for xxxfollow
+        // sourceUrl is the shared profile url and would flag the whole creator.
+        downloaded: isDownloaded(job.sourceUrl || job.url, job.site, job.mediaId),
         tooLongForShorts: !isImage && tooLongForShorts(job),
         imported: {
           main: isImage ? (photoHas(stem) ? 'imported' : null) : importedStatus('main', job.creator, stem),
