@@ -558,6 +558,11 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// UMD build of html-to-image, loaded lazily by the client-side screenshot
+// tool (privacy panel). Served from node_modules so the repo stays vendor-free.
+app.get('/vendor/html-to-image.js', (_req, res) =>
+  res.sendFile(require.resolve('html-to-image/dist/html-to-image.js')));
+
 // PWA share-target entry: Android's share sheet opens /share?url=…&text=…; the
 // SPA reads the query client-side and prefills the grab box.
 app.get('/share', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));

@@ -313,6 +313,47 @@
       .fab.show { display: inline-flex; }
       .fab:active { filter: brightness(1.1); }
 
+      /* ---- privacy / screenshot ---- */
+      .shotfab {
+        position: fixed; right: max(16px, calc(50% - 320px + 16px)); bottom: calc(var(--nav-h) + 88px); z-index: 30;
+        width: 44px; height: 44px; border-radius: 999px;
+        display: grid; place-items: center;
+        background: var(--surface-2); border: 1px solid var(--line); color: var(--muted);
+        box-shadow: 0 8px 24px rgba(0,0,0,.45);
+      }
+      .shotfab.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+      .shotfab .ic { width: 20px; height: 20px; }
+      .shotpanel {
+        position: fixed; right: max(16px, calc(50% - 320px + 16px)); bottom: calc(var(--nav-h) + 142px); z-index: 31;
+        width: min(300px, calc(100vw - 32px));
+        background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+        padding: 14px 16px 16px; box-shadow: 0 16px 48px rgba(0,0,0,.55);
+        display: none;
+      }
+      .shotpanel.show { display: block; }
+      .shotpanel h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+      .shotpanel h3 .ic { width: 18px; height: 18px; color: var(--primary); }
+      .shotrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: 13.5px; }
+      .shotrow.sub { padding-left: 12px; color: var(--muted); }
+      .shotrow.off { opacity: .45; pointer-events: none; }
+      .shothead { margin: 10px 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--faint); }
+      .shotnote { margin: 8px 0 0; font-size: 11.5px; color: var(--faint); line-height: 1.45; }
+      .shotgo {
+        width: 100%; margin-top: 10px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        padding: 11px 0; border-radius: 12px; background: var(--primary); color: var(--on-primary); font-weight: 600; font-size: 14px;
+      }
+      .shotgo:disabled { opacity: .5; }
+      .shotgo .ic { width: 18px; height: 18px; }
+      .shotclear { color: var(--primary); font-size: 12px; padding: 2px 4px; }
+      .shotpicker-hint { margin-top: 8px; padding: 8px 10px; border-radius: 10px; font-size: 12px; background: var(--warn-dim); color: var(--warn); }
+      body.privacy-blur-media img:not([data-no-blur]),
+      body.privacy-blur-media video:not([data-no-blur]) { filter: blur(12px); transition: filter .15s ease; }
+      [data-manual-blur] { filter: blur(8px) !important; user-select: none; }
+      /* During a capture the whole stylesheet is cloned into the render, which
+         restarts CSS animations at frame 0 — the .view fade-in starts at
+         opacity 0, blanking the page. Freeze everything while shooting. */
+      body.screenshotting *, body.screenshotting { animation: none !important; transition: none !important; }
+
       /* ---- bottom nav ---- */
       .bottomnav {
         position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: var(--nav-h);
@@ -418,7 +459,7 @@
       <!-- ===================== HOME ===================== -->
       <section id="view-home" class="view active">
         <header class="appbar">
-          <div class="wordmark"><img src="/logo.svg" alt="" class="wordmark-logo" />Grabbit</div>
+          <div class="wordmark"><img src="/logo.svg" alt="" class="wordmark-logo" data-no-blur />Grabbit</div>
         </header>
 
         <form id="form" class="searchbar">
@@ -431,7 +472,7 @@
 
         <!-- Shown when the browser reports the app is installable. -->
         <div class="installbar hidden" id="installBar">
-          <img src="/icon-192.png" alt="" />
+          <img src="/icon-192.png" alt="" data-no-blur />
           <div class="t">Install Grabbit<small>Get the app on your home screen</small></div>
           <button type="button" class="go" id="installGo">Install</button>
           <button type="button" class="dismiss" id="installDismiss" title="Dismiss">
@@ -677,6 +718,42 @@
       <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5" /><path d="M5 21h14" /></svg>
       Download all
     </button>
+
+    <!-- Privacy / screenshot tool. data-screenshot-hide keeps it out of its
+         own captures. -->
+    <button id="shotFab" class="shotfab" data-screenshot-hide="1" aria-label="Privacy and screenshot" title="Privacy mode">
+      <svg class="ic" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.4L12 2 4 5.4V12c0 6.4 8 10 8 10z" /></svg>
+    </button>
+    <div id="shotPanel" class="shotpanel" data-screenshot-hide="1">
+      <h3><svg class="ic" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.4L12 2 4 5.4V12c0 6.4 8 10 8 10z" /></svg>Privacy mode</h3>
+      <div class="shotrow">
+        <span>Master toggle</span>
+        <label class="switch"><input type="checkbox" id="shotMaster" /><span class="track"></span></label>
+      </div>
+      <div class="shotrow sub off" id="shotBlurMediaRow">
+        <span>Blur images</span>
+        <label class="switch"><input type="checkbox" id="shotBlurMedia" checked /><span class="track"></span></label>
+      </div>
+      <div class="shotrow sub off" id="shotPickerRow">
+        <span>Tap to blur (custom)</span>
+        <label class="switch"><input type="checkbox" id="shotPicker" /><span class="track"></span></label>
+      </div>
+      <div class="shotrow" id="shotManualRow" hidden>
+        <span id="shotManualCount"></span>
+        <button id="shotClear" class="shotclear">Clear</button>
+      </div>
+      <div id="shotPickerHint" class="shotpicker-hint" hidden>Tap any element to toggle blur. Turn the picker off before navigating.</div>
+      <p class="shothead">Screenshot options</p>
+      <div class="shotrow">
+        <span>Full page</span>
+        <label class="switch"><input type="checkbox" id="shotFullPage" /><span class="track"></span></label>
+      </div>
+      <button id="shotGo" class="shotgo">
+        <svg class="ic" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
+        Download screenshot (PNG)
+      </button>
+      <p class="shotnote">The screenshot excludes this panel and the browser chrome. Full page captures the whole scrollable height (max 16000px).</p>
+    </div>
 
     <!-- ===================== BOTTOM NAV ===================== -->
     <nav class="bottomnav" id="nav">
@@ -3030,6 +3107,176 @@
           pushToggle.disabled = false;
         }
       });
+
+      // ----------------------------------------------------------------- privacy / screenshot
+      // Ported from elite-v2's PrivacyControls: a floating shield button with
+      // blur toggles (thumbnails + tap-to-blur) and a client-side DOM-to-PNG
+      // screenshot via html-to-image (lazy-loaded from /vendor/).
+      const PRIVACY_KEY = 'grabbit.privacy.v1';
+      const privacy = { blurMedia: true, fullPage: false };
+      try {
+        const storedPrivacy = JSON.parse(localStorage.getItem(PRIVACY_KEY) || '{}');
+        if (typeof storedPrivacy.blurMedia === 'boolean') privacy.blurMedia = storedPrivacy.blurMedia;
+        if (typeof storedPrivacy.fullPage === 'boolean') privacy.fullPage = storedPrivacy.fullPage;
+      } catch {}
+      function savePrivacy() { try { localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy)); } catch {} }
+
+      let privacyOn = false;
+      let pickerOn = false; // never persisted: a live picker intercepts every tap
+      const manualBlurred = new Set();
+      const shotFab = $('shotFab'), shotPanel = $('shotPanel'), shotGo = $('shotGo');
+
+      function reflectPrivacy() {
+        document.body.classList.toggle('privacy-blur-media', privacyOn && privacy.blurMedia);
+        shotFab.classList.toggle('on', privacyOn);
+        $('shotMaster').checked = privacyOn;
+        $('shotBlurMedia').checked = privacy.blurMedia;
+        $('shotPicker').checked = pickerOn;
+        $('shotFullPage').checked = privacy.fullPage;
+        $('shotBlurMediaRow').classList.toggle('off', !privacyOn);
+        $('shotPickerRow').classList.toggle('off', !privacyOn);
+        $('shotPickerHint').hidden = !(privacyOn && pickerOn);
+        $('shotManualRow').hidden = manualBlurred.size === 0;
+        $('shotManualCount').textContent =
+          manualBlurred.size + ' element' + (manualBlurred.size === 1 ? '' : 's') + ' blurred';
+      }
+
+      // Walk up to an img/video ancestor so a tap on a thumbnail blurs the
+      // whole image; otherwise blur exactly what was tapped. Taps inside the
+      // panel itself are ignored.
+      function findBlurTarget(target) {
+        if (!(target instanceof HTMLElement)) return null;
+        let el = target;
+        while (el && el !== document.body && el !== document.documentElement) {
+          if (el.dataset && el.dataset.screenshotHide === '1') return null;
+          if (el.tagName === 'IMG' || el.tagName === 'VIDEO') return el;
+          el = el.parentElement;
+        }
+        if (target.dataset && target.dataset.screenshotHide === '1') return null;
+        return target;
+      }
+      function onPickerTap(e) {
+        const target = findBlurTarget(e.target);
+        if (!target) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (target.dataset.manualBlur) {
+          delete target.dataset.manualBlur;
+          manualBlurred.delete(target);
+        } else {
+          target.dataset.manualBlur = '1';
+          manualBlurred.add(target);
+        }
+        reflectPrivacy();
+      }
+      function setPicker(on) {
+        if (pickerOn === on) return;
+        pickerOn = on;
+        if (on) document.addEventListener('click', onPickerTap, true);
+        else document.removeEventListener('click', onPickerTap, true);
+      }
+
+      shotFab.addEventListener('click', () => shotPanel.classList.toggle('show'));
+      $('shotMaster').addEventListener('change', (e) => {
+        privacyOn = e.target.checked;
+        if (!privacyOn) setPicker(false);
+        reflectPrivacy();
+      });
+      $('shotBlurMedia').addEventListener('change', (e) => {
+        privacy.blurMedia = e.target.checked;
+        savePrivacy();
+        reflectPrivacy();
+      });
+      $('shotPicker').addEventListener('change', (e) => {
+        setPicker(e.target.checked);
+        reflectPrivacy();
+      });
+      $('shotFullPage').addEventListener('change', (e) => {
+        privacy.fullPage = e.target.checked;
+        savePrivacy();
+      });
+      $('shotClear').addEventListener('click', () => {
+        manualBlurred.forEach((el) => delete el.dataset.manualBlur);
+        manualBlurred.clear();
+        reflectPrivacy();
+      });
+
+      let h2iPromise = null;
+      function loadHtmlToImage() {
+        if (window.htmlToImage) return Promise.resolve(window.htmlToImage);
+        if (!h2iPromise) {
+          h2iPromise = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = '/vendor/html-to-image.js';
+            s.onload = () => resolve(window.htmlToImage);
+            s.onerror = () => {
+              h2iPromise = null;
+              reject(new Error('Could not load the screenshot library'));
+            };
+            document.head.appendChild(s);
+          });
+        }
+        return h2iPromise;
+      }
+
+      let shooting = false;
+      shotGo.addEventListener('click', async () => {
+        if (shooting) return;
+        shooting = true;
+        shotGo.disabled = true;
+        const wasPicker = pickerOn;
+        setPicker(false);
+        try {
+          const htmlToImage = await loadHtmlToImage();
+          document.body.classList.add('screenshotting');
+          await new Promise((r) => setTimeout(r, 30)); // let toggles repaint first
+          const node = document.documentElement;
+          const opts = {
+            cacheBust: true,
+            pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+            backgroundColor: getComputedStyle(document.body).backgroundColor || '#0b0b0e',
+            filter: (n) => !(n instanceof HTMLElement && n.dataset && n.dataset.screenshotHide === '1'),
+            // A thumbnail that fails to load must not kill the whole render;
+            // it just comes out blank.
+            onImageErrorHandler: () => {},
+            width: document.documentElement.clientWidth,
+            // The page scrolls on the document itself, so scrollHeight already
+            // measures everything. Capped to stay under mobile canvas limits.
+            height: privacy.fullPage
+              ? Math.min(16000, Math.max(document.documentElement.scrollHeight, document.body.scrollHeight))
+              : window.innerHeight,
+            style: privacy.fullPage ? undefined : { transform: 'translateY(-' + window.scrollY + 'px)' },
+          };
+          let dataUrl = null;
+          try {
+            dataUrl = await htmlToImage.toPng(node, opts);
+          } catch (err) {
+            console.warn('[screenshot] attempt 1 failed, retrying without fonts', err);
+            dataUrl = await htmlToImage.toPng(node, Object.assign({}, opts, {
+              skipFonts: true,
+              imagePlaceholder:
+                'data:image/svg+xml;utf8,' +
+                encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="100%" height="100%" fill="#1f2026"/></svg>'),
+            }));
+          }
+          const a = document.createElement('a');
+          a.download = 'grabbit-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.png';
+          a.href = dataUrl;
+          a.click();
+          toast('Screenshot saved', 'good');
+        } catch (err) {
+          console.error('[screenshot] failed', err);
+          toast('Screenshot failed: ' + ((err && err.message) || 'unknown'), 'bad');
+        } finally {
+          document.body.classList.remove('screenshotting');
+          if (wasPicker) setPicker(true);
+          reflectPrivacy();
+          shooting = false;
+          shotGo.disabled = false;
+        }
+      });
+
+      reflectPrivacy();
 
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker
