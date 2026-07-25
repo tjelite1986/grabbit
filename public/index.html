@@ -848,9 +848,9 @@
         <button id="shotClear" class="shotclear">Clear</button>
       </div>
       <div id="shotPickerHint" class="shotpicker-hint hidden">Tap a word to blur just that word, or an image to blur it. Tap it again to undo. Turn the picker off before navigating.</div>
-      <p class="shothead">Screenshot options</p>
+      <p class="shothead" id="shotHead">Screenshot options</p>
       <div class="shotrow">
-        <span>Full page</span>
+        <span id="shotFullPageLabel">Full page</span>
         <label class="switch"><input type="checkbox" id="shotFullPage" /><span class="track"></span></label>
       </div>
       <div class="shotrow">
@@ -1246,6 +1246,7 @@
         const sheetEl = $('sheetBack');
         if (sheetEl.classList.contains('show')) sheetEl.classList.remove('show');
         document.body.classList.remove('sheet-open');
+        reflectPrivacy();
         if (pendingTab !== null) {
           const t = pendingTab;
           pendingTab = null;
@@ -1969,13 +1970,16 @@
       function openSheetUi() {
         syncSheet();
         sheetBack.classList.add('show');
-        // Lets the privacy/screenshot tool step aside while the sheet is up.
+        // Lets the privacy/screenshot tool step aside while the sheet is up,
+        // and relabel itself for shooting the sheet alone.
         document.body.classList.add('sheet-open');
+        reflectPrivacy();
         if (history.state == null || !history.state.sheet) history.pushState({ sheet: true }, '');
       }
       function closeSheet() {
         sheetBack.classList.remove('show');
         document.body.classList.remove('sheet-open');
+        reflectPrivacy();
         if (history.state && history.state.sheet) history.back();
       }
       sheetBack.addEventListener('click', (e) => { if (e.target === sheetBack) closeSheet(); });
@@ -3239,6 +3243,11 @@
       } catch {}
       function savePrivacy() { try { localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy)); } catch {} }
 
+      function sheetOpen() {
+        const el = document.getElementById('sheetBack');
+        return !!(el && el.classList.contains('show'));
+      }
+
       let privacyOn = false;
       let pickerOn = false; // never persisted: a live picker intercepts every tap
       let oneShotPick = false; // picker armed from the selection bubble, off after one tap
@@ -3257,6 +3266,12 @@
         $('shotPicker').checked = pickerOn;
         $('shotFullPage').checked = privacy.fullPage;
         $('shotNav').checked = privacy.includeNav;
+        // With a popup up it is the subject of the shot, and "full page" then
+        // means the popup's whole content — say so rather than surprise.
+        const onSheet = sheetOpen();
+        $('shotHead').textContent = onSheet ? 'Screenshot — popup only' : 'Screenshot options';
+        $('shotFullPageLabel').textContent = onSheet ? 'Whole popup' : 'Full page';
+        $('shotNav').closest('.shotrow').classList.toggle('hidden', onSheet);
         $('shotBlurMediaRow').classList.toggle('off', !privacyOn);
         $('shotPickerRow').classList.toggle('off', !privacyOn);
         $('shotSelRow').classList.toggle('off', !privacyOn);
@@ -3897,18 +3912,33 @@
         const wasPicker = pickerOn;
         setPicker(false);
         let restoreFieldBlurs = null;
+        let restoreSheet = null;
         try {
           const htmlToImage = await loadHtmlToImage();
           document.body.classList.add('screenshotting');
           document.body.classList.toggle('shot-no-nav', !privacy.includeNav);
+          const fullPage = privacy.fullPage;
+          // With a sheet up, the sheet IS the subject: shoot it alone, and let
+          // "Full page" mean the whole sheet rather than the whole document.
+          const sheetNode = sheetOpen() ? document.querySelector('.sheet') : null;
+          if (sheetNode && fullPage) {
+            // Unclamp before measuring/compensating so the whole sheet renders
+            // and there is no leftover scroll offset to correct for.
+            const prev = { maxHeight: sheetNode.style.maxHeight, overflowY: sheetNode.style.overflowY };
+            sheetNode.style.maxHeight = 'none';
+            sheetNode.style.overflowY = 'visible';
+            restoreSheet = () => {
+              sheetNode.style.maxHeight = prev.maxHeight;
+              sheetNode.style.overflowY = prev.overflowY;
+            };
+          }
           const restoreScroll = prepareScrollForCapture();
           const restoreFields = prepareFieldsForCapture();
           restoreFieldBlurs = () => {
             restoreFields();
             restoreScroll();
           };
-          const fullPage = privacy.fullPage;
-          if (fullPage) {
+          if (fullPage && !sheetNode) {
             // html-to-image copies each node's *computed* style into the clone.
             // With html/body at height:100% and body clipping vertically, that
             // clone is exactly one viewport tall and everything below the fold
@@ -3917,7 +3947,6 @@
             document.body.classList.add('shot-fullpage');
           }
           await new Promise((r) => setTimeout(r, 30)); // let toggles repaint first
-          const node = document.documentElement;
           // Capped to stay under mobile canvas limits.
           const fullHeight = Math.min(
             16000,
@@ -3937,6 +3966,15 @@
               ? { height: fullHeight + 'px', overflow: 'visible' }
               : { transform: 'translateY(-' + window.scrollY + 'px)' },
           };
+          let node = document.documentElement;
+          if (sheetNode) {
+            const rect = sheetNode.getBoundingClientRect();
+            node = sheetNode;
+            opts.width = Math.round(rect.width);
+            opts.height = Math.round(Math.min(16000, rect.height));
+            opts.backgroundColor = getComputedStyle(sheetNode).backgroundColor || opts.backgroundColor;
+            opts.style = undefined; // no viewport offset to undo: the node is the subject
+          }
           let dataUrl = null;
           try {
             dataUrl = await htmlToImage.toPng(node, opts);
@@ -3959,6 +3997,7 @@
           toast('Screenshot failed: ' + ((err && err.message) || 'unknown'), 'bad');
         } finally {
           if (restoreFieldBlurs) restoreFieldBlurs();
+          if (restoreSheet) restoreSheet();
           document.body.classList.remove('screenshotting');
           document.body.classList.remove('shot-no-nav');
           document.documentElement.classList.remove('shot-fullpage');
