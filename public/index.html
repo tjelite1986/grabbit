@@ -2075,10 +2075,12 @@
           msg = 'Audio only: the sound track is extracted and saved to the Navidrome music library.';
         } else if (!sheetAll) {
           const imp = sheetTarget && sheetTarget.imported;
-          if (imp && !isServer) {
+          // Images: the same warning applies to both destinations (the photos
+          // library and the posts import folder), so it also shows for server.
+          if (imp && (!isServer || isImage)) {
             const st = isImage ? imp.main : imp[channel];
             if (st === 'imported') msg = isImage ? 'Already in the photos library.' : 'Already in elite-v2 (' + channel + ') — it will not be re-imported.';
-            else if (st === 'pending') msg = 'Already queued in the ' + channel + ' import folder.';
+            else if (st === 'pending') msg = isImage ? 'Already queued in the posts import folder.' : 'Already queued in the ' + channel + ' import folder.';
           }
         }
         warn.textContent = msg;
@@ -2096,7 +2098,7 @@
           : 'Download all (' + profileItems.length + ')';
         else if (isNavidrome) label = 'Save to Navidrome';
         else if (isAudio) label = isServer ? 'Save audio' : 'Download audio';
-        else if (isImage) label = device ? 'Download image' : 'Save image';
+        else if (isImage) label = device ? 'Download image' : (isServer ? 'Save image' : 'Save image to posts');
         else if (isServer) label = device ? 'Download' : 'Save to library';
         else label = device ? 'Download & import' : 'Save & import';
         $('shConfirmLabel').textContent = label;

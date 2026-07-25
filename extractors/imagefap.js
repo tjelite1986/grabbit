@@ -37,6 +37,13 @@ function creatorFromUrl(url) {
   return 'imagefap';
 }
 
+// The gallery id, carried on every item so a whole gallery saved to the posts
+// import becomes carousel posts instead of one post per picture.
+function albumIdFromUrl(url) {
+  const m = url.match(/\/(?:pictures|gallery)\/(\d+)/i);
+  return m ? m[1] : null;
+}
+
 function idFromUrl(u) {
   const m = u.split('?')[0].match(/\/(\d+)\.[a-z0-9]+$/i);
   return m ? m[1] : u.split('?')[0].split('/').pop() || 'img';
@@ -99,6 +106,7 @@ async function thumbMap(url) {
 async function resolveProfile(url) {
   const [urls, thumbs] = await Promise.all([galleryUrls(url), thumbMap(url).catch(() => ({}))]);
   const creator = creatorFromUrl(url);
+  const albumId = albumIdFromUrl(url);
   const items = urls.map((u) => {
     const id = idFromUrl(u);
     return {
@@ -111,6 +119,7 @@ async function resolveProfile(url) {
       thumbnail: thumbs[id] || u,
       creator,
       sourceUrl: url,
+      albumId,
       ext: extFromUrl(u, 'jpg'),
     };
   });

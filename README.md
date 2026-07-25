@@ -680,6 +680,7 @@ environment variables:
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
 | `ELITE_ROOT` | elite-v2 shorts storage root — enables the elite destination. |
+| `ELITE_POSTS_ROOT` | elite-v2 posts storage root. Images saved to the elite destination are dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and import as that creator's posts; without it, point `ELITE_POSTS_IMPORT_DIR` straight at the drop folder. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 
 ### Notifications (optional)

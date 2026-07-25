@@ -26,6 +26,11 @@ const FFPROBE = process.env.FFPROBE_BIN || 'ffprobe';
 // land in <root>/<channel>/_import/ where the elite-v2 timer auto-imports them.
 const ELITE_ROOT = process.env.ELITE_ROOT || '/elitev2-shorts';
 const CHANNELS = { main: 'main', '18plus': '18plus' };
+// Root of the elite-v2 posts store (a host folder bind-mounted here). Images
+// saved with dest=elite land in <root>/_import/<creator>/ where elite-v2's posts
+// importer turns each drop folder into that creator's posts.
+const POSTS_ROOT = process.env.ELITE_POSTS_ROOT || '/elitev2-posts';
+const POSTS_IMPORT_DIR = process.env.ELITE_POSTS_IMPORT_DIR || path.join(POSTS_ROOT, '_import');
 // Audio extraction targets (yt-dlp --audio-format). 'best' keeps the source codec.
 const AUDIO_FORMATS = ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'];
 // Output containers for a server-library video save (yt-dlp --merge-output-format).
@@ -33,7 +38,7 @@ const VIDEO_CONTAINERS = ['mp4', 'mkv', 'webm'];
 const DATA_DIR = process.env.DATA_DIR || '/data';
 
 // Plain server download library (alternative to the elite-v2 import). Files are
-// auto-routed by type. PHOTOS_DIR is reserved for a later photo feature.
+// auto-routed by type; PHOTOS_DIR takes the images that are not sent to posts.
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/downloads';
 const VIDEOS_DIR = process.env.VIDEOS_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'videos');
 const AUDIO_DIR = process.env.AUDIO_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'mp3');
@@ -982,7 +987,7 @@ app.get('/api/resolve', async (req, res) => {
       kind: job.kind,
       // Whether this clip is already in elite-v2, per channel (for a UI warning).
       imported: {
-        main: isImage ? (photoHas(stem) ? 'imported' : null) : importedStatus('main', job.creator, stem),
+        main: isImage ? imageStatus(job.creator, stem) : importedStatus('main', job.creator, stem),
         '18plus': isImage ? null : importedStatus('18plus', job.creator, stem),
       },
       // First matching rule (if any): pre-fills the sheet; auto rules start
@@ -1498,8 +1503,9 @@ app.get('/api/download', async (req, res) => {
   // Optional: override the title (renames the saved file).
   if (req.query.title) job.title = String(req.query.title);
 
-  // Images always go to the photos library (they don't fit a video pipeline).
-  if (job.mediaType === 'image') return downloadImage(res, job, url, device);
+  // Images don't fit the video pipeline: with dest=elite they are dropped into
+  // elite-v2's posts import, otherwise into the plain photos library.
+  if (job.mediaType === 'image') return downloadImage(res, job, url, device, dest);
 
   // Audio-only: for the elite destination it's streamed (audio doesn't fit the
   // shorts pipeline); for the server library it's saved into the mp3 folder,
@@ -1639,7 +1645,7 @@ app.get('/api/profile', async (req, res) => {
         downloaded: isDownloaded(job.sourceUrl || job.url, job.site, job.mediaId),
         tooLongForShorts: !isImage && tooLongForShorts(job),
         imported: {
-          main: isImage ? (photoHas(stem) ? 'imported' : null) : importedStatus('main', job.creator, stem),
+          main: isImage ? imageStatus(job.creator, stem) : importedStatus('main', job.creator, stem),
           '18plus': isImage ? null : importedStatus('18plus', job.creator, stem),
         },
       };
@@ -1708,8 +1714,9 @@ app.get('/api/download-all', async (req, res) => {
     const id = job.id || stem;
     try {
       const isImage = job.mediaType === 'image';
+      const toPosts = isImage && dest === 'elite';
       const exists = isImage
-        ? photoHas(stem)
+        ? (toPosts ? postsPending(job.creator, stem) : photoHas(stem))
         : dest === 'server'
         ? serverHas(folder, stem)
         : importedStatus(channel, job.creator, stem);
@@ -1724,14 +1731,16 @@ app.get('/api/download-all', async (req, res) => {
         send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'skipped', error: 'too long for shorts' });
         continue;
       }
-      if (isImage) await saveImageToLibrary(job);
-      else if (dest === 'server') await saveJobToServer(job, folder, quality);
+      if (isImage) {
+        if (toPosts) await saveImageToPosts(job);
+        else await saveImageToLibrary(job);
+      } else if (dest === 'server') await saveJobToServer(job, folder, quality);
       else await saveJobToImport(job, channel, web, quality);
       recordHistory({
         creator: job.creator || null,
         title: job.title || null,
         channel: isImage
-          ? 'server/photos'
+          ? (toPosts ? 'elite/posts' : 'server/photos')
           : dest === 'server'
           ? `server/${path.basename(serverVideoDir(folder))}`
           : channel,
@@ -1741,7 +1750,7 @@ app.get('/api/download-all', async (req, res) => {
         sourceUrl: job.sourceUrl || url,
         thumbnail: job.thumbnail || null,
         extractor: job.extractor || null,
-        imported: !isImage && dest === 'elite',
+        imported: dest === 'elite',
         device: false,
       });
       saved++;
@@ -2066,18 +2075,29 @@ async function produceServerVideo(job, meta, params, onProgress) {
 }
 
 async function produceImage(job, meta, params) {
+  const toPosts = params.dest === 'elite';
   const stem = `${safeCreator(meta.creator)}_-_${safeTitle(meta.title)}`;
   const ext = safeExt(meta.ext, 'jpg');
   const outName = `${stem}.${ext}`;
-  fs.mkdirSync(PHOTOS_DIR, { recursive: true });
-  const libPath = path.join(PHOTOS_DIR, outName);
+  const dir = toPosts ? postsImportDir(meta.creator) : PHOTOS_DIR;
+  const libPath = path.join(dir, outName);
   setJob(job, { phase: 'downloading' });
-  if (!fs.existsSync(libPath)) await downloadDirect(meta, libPath);
-  recordJobHistory(meta, params, 'server/photos', outName, false);
+  if (!fs.existsSync(libPath)) {
+    if (toPosts) await saveImageToPosts(meta);
+    else {
+      fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+      await downloadDirect(meta, libPath);
+    }
+  }
+  recordJobHistory(meta, params, toPosts ? 'elite/posts' : 'server/photos', outName, toPosts);
   finishJob(job, {
-    saved: true, dest: 'server', dir: 'photos', filename: outName, mime: imageMime(ext),
+    saved: true,
+    dest: toPosts ? 'elite' : 'server',
+    dir: toPosts ? 'posts' : 'photos',
+    filename: outName,
+    mime: imageMime(ext),
     deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
-    message: 'Saved to photos.',
+    message: toPosts ? 'Saved to the posts import folder.' : 'Saved to photos.',
   });
 }
 
@@ -3100,8 +3120,11 @@ function serverHas(folder, stem) {
 }
 
 // --- Images ---------------------------------------------------------------
-// Images don't belong in a video pipeline, so they always land in the photos
-// library (any extension preserved). Used for mixed albums like erome.
+// Images don't belong in a video pipeline, so they get their own two targets:
+// dest=elite drops them into elite-v2's posts import (they become posts), any
+// other destination saves them in the plain photos library (extension
+// preserved). Used for mixed albums like erome, where the videos go to shorts
+// and the pictures to posts.
 
 function safeExt(ext, fallback) {
   const e = String(ext || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -3124,6 +3147,55 @@ function photoHas(stem) {
   }
 }
 
+// Mirror creatorUsername() in elite-v2's scripts/import-posts.mjs: a drop
+// subfolder's NAME is the creator there, so build it exactly the same way and
+// the images file under the creator the importer would have resolved anyway.
+function postsCreator(name) {
+  return (
+    String(name || 'unknown')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._]+/g, '')
+      .replace(/^[._]+|[._]+$/g, '')
+      .slice(0, 30) || 'unknown'
+  );
+}
+
+function postsImportDir(creator) {
+  return path.join(POSTS_IMPORT_DIR, postsCreator(creator));
+}
+
+// Create a drop folder elite-v2 can write to as well. mkdir's mode is masked by
+// the umask, which strips the group/other write bit — and on this ACL-carrying
+// tree that also cuts the ACL mask down, leaving the importer unable to delete
+// what it just imported (it then skips every file, forever). chmod is not
+// masked, so set the mode explicitly afterwards.
+function makeDropDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
+  try {
+    fs.chmodSync(dir, 0o777);
+  } catch {
+    /* someone else's folder — its mode is already whatever it needs to be */
+  }
+}
+
+// Is this image already waiting in the creator's posts drop folder?
+function postsPending(creator, stem) {
+  try {
+    return fs.readdirSync(postsImportDir(creator)).some((f) => f.startsWith(`${stem}.`));
+  } catch {
+    return false;
+  }
+}
+
+// Where an image goes for a given destination, and whether it is already there.
+// 'imported' means the photos library has it (nothing consumes that folder);
+// 'pending' means it is still queued for elite-v2's posts importer.
+function imageStatus(creator, stem) {
+  if (postsPending(creator, stem)) return 'pending';
+  return photoHas(stem) ? 'imported' : null;
+}
+
 // Download a direct image into the photos library; returns its path.
 async function saveImageToLibrary(job) {
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
@@ -3134,29 +3206,70 @@ async function saveImageToLibrary(job) {
   return finalPath;
 }
 
-// Single-image handler: save into the photos library and optionally stream it.
-async function downloadImage(res, job, url, device) {
+// Download an image into elite-v2's posts import, under the creator's own drop
+// folder, next to the JSON sidecar the posts importer reads: `description` is
+// the caption (its #tags become the post's hashtags) and `post_shortcode`
+// groups everything from one album into a single carousel post instead of one
+// post per picture. The file itself is fetched under a dot-name (both importers
+// skip dotfiles) and renamed last, so a run that starts mid-download never
+// picks up half a picture — or a picture without its caption.
+async function saveImageToPosts(job) {
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const ext = safeExt(job.ext, 'jpg');
   const outName = `${stem}.${ext}`;
-  fs.mkdirSync(PHOTOS_DIR, { recursive: true });
-  const libPath = path.join(PHOTOS_DIR, outName);
+  const dir = postsImportDir(job.creator);
+  makeDropDir(dir);
+  const finalPath = path.join(dir, outName);
+  const partPath = path.join(dir, `.${outName}.part`);
+  try {
+    await downloadDirect(job, partPath);
+    fs.writeFileSync(
+      `${finalPath}.json`,
+      JSON.stringify({ description: buildCaption(job), post_shortcode: job.albumId || null })
+    );
+    fs.renameSync(partPath, finalPath);
+  } catch (e) {
+    fs.rm(partPath, { force: true }, () => {});
+    throw e;
+  }
+  return { path: finalPath, name: outName, creator: postsCreator(job.creator) };
+}
+
+// Single-image handler: save it (posts import or photos library, per dest) and
+// optionally stream it to the device too.
+async function downloadImage(res, job, url, device, dest) {
+  const toPosts = dest === 'elite';
+  const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
+  const ext = safeExt(job.ext, 'jpg');
+  const outName = `${stem}.${ext}`;
+  const dir = toPosts ? postsImportDir(job.creator) : PHOTOS_DIR;
+  const libPath = path.join(dir, outName);
   const already = fs.existsSync(libPath);
   try {
-    if (!already) await downloadDirect(job, libPath);
+    if (!already) {
+      if (toPosts) await saveImageToPosts(job);
+      else {
+        fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+        await downloadDirect(job, libPath);
+      }
+    }
     recordHistory({
       creator: job.creator || null,
       title: job.title || null,
-      channel: 'server/photos',
+      channel: toPosts ? 'elite/posts' : 'server/photos',
       filename: outName,
       sourceUrl: job.sourceUrl || url,
       thumbnail: job.thumbnail || null,
       extractor: job.extractor || null,
-      imported: false,
+      imported: toPosts,
       device: !!device,
     });
     if (!device) {
-      return res.json({ ok: true, saved: !already, dest: 'server', dir: 'photos', filename: outName });
+      return res.json(
+        toPosts
+          ? { ok: true, saved: !already, dest: 'elite', dir: 'posts', creator: postsCreator(job.creator), filename: outName }
+          : { ok: true, saved: !already, dest: 'server', dir: 'photos', filename: outName }
+      );
     }
     res.setHeader('Content-Disposition', contentDisposition(outName));
     res.setHeader('Content-Type', imageMime(ext));
