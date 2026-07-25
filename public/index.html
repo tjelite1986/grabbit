@@ -392,6 +392,11 @@
       [data-manual-blur] { filter: blur(8px) !important; user-select: none; }
       /* Partial-text blur: a wrapper span around part of a text run. */
       [data-blur-span] { display: inline; }
+      /* Partial blur of a value inside an <input>: that text has no nodes to
+         wrap, so a measured overlay covers the selected run instead. */
+      .fieldblur { position: absolute; overflow: hidden; pointer-events: none; z-index: 5; }
+      .fieldblur b { position: absolute; top: 0; bottom: 0; display: block; }
+      .fieldblur i { display: block; font-style: normal; white-space: pre; filter: blur(5px); }
       /* During a capture the whole stylesheet is cloned into the render, which
          restarts CSS animations at frame 0 — the .view fade-in starts at
          opacity 0, blanking the page. Freeze everything while shooting. */
@@ -3267,7 +3272,10 @@
       // attribute would leave dead markup behind, so unwrap it instead.
       function unblur(el) {
         manualBlurred.delete(el);
-        if (el.dataset.blurSpan) {
+        if (el.dataset.fieldBlur) {
+          if (el.__cleanup) el.__cleanup();
+          el.remove();
+        } else if (el.dataset.blurSpan) {
           const parent = el.parentNode;
           if (parent) {
             while (el.firstChild) parent.insertBefore(el.firstChild, el);
@@ -3444,12 +3452,138 @@
         return el;
       }
 
+      // Text typed into an <input> has no DOM nodes to wrap, so a partial blur
+      // has to be an overlay measured against the field's own text metrics.
+      const textMeasure = document.createElement('canvas').getContext('2d');
+      function fieldFont(cs) {
+        return cs.font || [cs.fontStyle, cs.fontWeight, cs.fontSize, cs.fontFamily].join(' ');
+      }
+      function measureText(cs, text) {
+        textMeasure.font = fieldFont(cs);
+        let w = textMeasure.measureText(text).width;
+        const spacing = parseFloat(cs.letterSpacing);
+        if (spacing) w += spacing * text.length;
+        return w;
+      }
+      function fieldMetrics(el) {
+        const cs = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const padL = parseFloat(cs.paddingLeft) || 0;
+        const padR = parseFloat(cs.paddingRight) || 0;
+        const padT = parseFloat(cs.paddingTop) || 0;
+        const padB = parseFloat(cs.paddingBottom) || 0;
+        return {
+          cs,
+          left: rect.left + (parseFloat(cs.borderLeftWidth) || 0) + padL,
+          top: rect.top + (parseFloat(cs.borderTopWidth) || 0) + padT,
+          width: el.clientWidth - padL - padR,
+          height: el.clientHeight - padT - padB,
+        };
+      }
+      // The overlay has to hide the real text underneath, so it needs whatever
+      // background actually shows through the field.
+      function effectiveBackground(el) {
+        let node = el;
+        while (node && node !== document.documentElement) {
+          const c = getComputedStyle(node).backgroundColor;
+          if (c && c !== 'transparent' && !/^rgba\(0, 0, 0, 0\)$/.test(c)) return c;
+          node = node.parentElement;
+        }
+        return getComputedStyle(document.body).backgroundColor || '#101014';
+      }
+
+      function blurFieldSelection(el) {
+        if (el.tagName !== 'INPUT') return null; // textarea wraps; not measurable this way
+        const value = el.value || '';
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        if (start == null || end == null || end <= start) return null;
+        const before = value.slice(0, start);
+        const picked = value.slice(start, end);
+        const wrap = document.createElement('span');
+        wrap.className = 'fieldblur';
+        wrap.dataset.fieldBlur = '1';
+        const bar = document.createElement('b');
+        const txt = document.createElement('i');
+        txt.textContent = picked;
+        bar.appendChild(txt);
+        wrap.appendChild(bar);
+        document.body.appendChild(wrap);
+
+        // Characters trimmed off the front of the value for a capture (see
+        // prepareFieldsForCapture) — the overlay has to shift with them.
+        let cut = 0;
+        const place = () => {
+          const m = fieldMetrics(el);
+          const hiddenBefore = Math.max(0, cut - start);
+          const offset = measureText(m.cs, before.slice(Math.min(cut, before.length))) - el.scrollLeft;
+          const width = measureText(m.cs, picked.slice(hiddenBefore));
+          txt.textContent = picked.slice(hiddenBefore);
+          wrap.style.left = m.left + window.scrollX + 'px';
+          wrap.style.top = m.top + window.scrollY + 'px';
+          wrap.style.width = m.width + 'px';
+          wrap.style.height = m.height + 'px';
+          bar.style.left = offset + 'px';
+          bar.style.width = width + 'px';
+          bar.style.background = effectiveBackground(el);
+          txt.style.font = fieldFont(m.cs);
+          txt.style.letterSpacing = m.cs.letterSpacing;
+          txt.style.color = m.cs.color;
+          txt.style.lineHeight = m.height + 'px';
+        };
+        place();
+        if (!bar.getBoundingClientRect().width) {
+          wrap.remove();
+          return null;
+        }
+        // Follow the field: scrolling inside it moves the run, and editing the
+        // value invalidates the overlay entirely.
+        const drop = () => {
+          manualBlurred.delete(wrap);
+          cleanup();
+          wrap.remove();
+          reflectPrivacy();
+        };
+        const cleanup = () => {
+          el.removeEventListener('scroll', place);
+          el.removeEventListener('input', drop);
+          window.removeEventListener('resize', place);
+        };
+        el.addEventListener('scroll', place);
+        el.addEventListener('input', drop);
+        window.addEventListener('resize', place);
+        wrap.__cleanup = cleanup;
+        wrap.__place = place;
+        wrap.__field = el;
+        wrap.__setCut = (n) => {
+          cut = n;
+          place();
+        };
+        return wrap;
+      }
+
       function blurSelection() {
         const field = activeFieldSelection() || lastField;
         if (field && field.isConnected) {
+          const partial = blurFieldSelection(field);
+          if (partial) {
+            manualBlurred.add(partial);
+            // Dropping focus dismisses the keyboard but also rewinds the field
+            // to the start of its value, scrolling the covered run out of view.
+            // Put the view back where the user had it.
+            const keepScroll = field.scrollLeft;
+            field.blur();
+            requestAnimationFrame(() => {
+              field.scrollLeft = keepScroll;
+              partial.__place();
+            });
+            hideSelChip();
+            reflectPrivacy();
+            return;
+          }
           field.dataset.manualBlur = '1';
           manualBlurred.add(field);
-          field.blur(); // also dismisses the keyboard
+          field.blur();
           hideSelChip();
           reflectPrivacy();
           toast('Whole field blurred', 'good');
@@ -3673,6 +3807,48 @@
         return h2iPromise;
       }
 
+      // html-to-image renders an <input> from the start of its value — the clone
+      // carries no horizontal scroll, so a field the user has scrolled would
+      // show a different part of the text in the PNG than on screen (and any
+      // blur overlay would sit over the wrong characters). Trim each scrolled
+      // field down to what is actually visible for the duration of the shot.
+      function firstVisibleCharIndex(cs, value, scrollLeft) {
+        if (scrollLeft <= 0) return 0;
+        for (let i = 1; i <= value.length; i++) {
+          if (measureText(cs, value.slice(0, i)) >= scrollLeft) return i - 1;
+        }
+        return 0;
+      }
+
+      function prepareFieldsForCapture() {
+        const fields = new Set();
+        document.querySelectorAll('.fieldblur').forEach((o) => {
+          if (o.__field && o.__field.isConnected) fields.add(o.__field);
+        });
+        document.querySelectorAll('input').forEach((el) => {
+          if (el.value && el.scrollLeft > 0) fields.add(el);
+        });
+        const restore = [];
+        const cuts = new Map();
+        fields.forEach((el) => {
+          const value = el.value || '';
+          const cut = firstVisibleCharIndex(getComputedStyle(el), value, el.scrollLeft);
+          restore.push([el, value, el.scrollLeft]);
+          cuts.set(el, cut);
+          if (cut) el.value = value.slice(cut);
+          el.scrollLeft = 0;
+        });
+        const overlays = Array.from(document.querySelectorAll('.fieldblur'));
+        overlays.forEach((o) => o.__setCut && o.__setCut(cuts.get(o.__field) || 0));
+        return () => {
+          restore.forEach(([el, value, scrollLeft]) => {
+            el.value = value;
+            el.scrollLeft = scrollLeft;
+          });
+          overlays.forEach((o) => o.__setCut && o.__setCut(0));
+        };
+      }
+
       let shooting = false;
       shotGo.addEventListener('click', async () => {
         if (shooting) return;
@@ -3680,10 +3856,12 @@
         shotGo.disabled = true;
         const wasPicker = pickerOn;
         setPicker(false);
+        let restoreFieldBlurs = null;
         try {
           const htmlToImage = await loadHtmlToImage();
           document.body.classList.add('screenshotting');
           document.body.classList.toggle('shot-no-nav', !privacy.includeNav);
+          restoreFieldBlurs = prepareFieldsForCapture();
           const fullPage = privacy.fullPage;
           if (fullPage) {
             // html-to-image copies each node's *computed* style into the clone.
@@ -3735,6 +3913,7 @@
           console.error('[screenshot] failed', err);
           toast('Screenshot failed: ' + ((err && err.message) || 'unknown'), 'bad');
         } finally {
+          if (restoreFieldBlurs) restoreFieldBlurs();
           document.body.classList.remove('screenshotting');
           document.body.classList.remove('shot-no-nav');
           document.documentElement.classList.remove('shot-fullpage');
