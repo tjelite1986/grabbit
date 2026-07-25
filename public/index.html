@@ -322,7 +322,7 @@
          top of it so they never end up behind the keyboard. */
       .shotfab {
         position: fixed; left: max(12px, calc(50% - 320px + 12px));
-        bottom: calc(var(--nav-h) + 14px + var(--kb-inset, 0px)); z-index: 30;
+        bottom: calc(var(--nav-h) + 14px + var(--kb-inset, 0px)); z-index: 55;
         width: 36px; height: 36px; border-radius: 999px;
         display: grid; place-items: center;
         background: var(--surface-2); border: 1px solid var(--line); color: var(--muted);
@@ -333,7 +333,7 @@
       .shotfab .ic { width: 18px; height: 18px; }
       .shotpanel {
         position: fixed; left: max(12px, calc(50% - 320px + 12px));
-        bottom: calc(var(--nav-h) + 58px + var(--kb-inset, 0px)); z-index: 31;
+        bottom: calc(var(--nav-h) + 58px + var(--kb-inset, 0px)); z-index: 56;
         width: min(268px, calc(100vw - 24px));
         max-height: max(140px, min(54vh, 380px, calc(100vh - var(--nav-h) - var(--kb-inset, 0px) - 100px)));
         overflow-y: auto; overscroll-behavior: contain;
@@ -368,13 +368,25 @@
       /* Floating action next to the current text selection — reachable even when
          the keyboard covers the bottom of the screen. */
       .shotchip {
-        position: fixed; top: 0; left: 0; z-index: 32; display: none;
+        position: fixed; top: 0; left: 0; z-index: 57; display: none;
         align-items: stretch; border-radius: 999px; overflow: hidden;
         font-size: 13px; font-weight: 600;
         background: var(--primary); color: var(--on-primary);
         box-shadow: 0 8px 22px rgba(0,0,0,.5);
       }
       .shotchip.show { display: inline-flex; }
+      /* A bottom sheet owns the bottom of the screen, so move the tool up to
+         the top corner while one is open — otherwise it covers the sheet's
+         own controls and the sheet covers the panel. */
+      body.sheet-open .shotfab {
+        top: calc(12px + env(safe-area-inset-top)); bottom: auto;
+        left: auto; right: max(12px, calc(50% - 320px + 12px));
+      }
+      body.sheet-open .shotpanel {
+        top: calc(56px + env(safe-area-inset-top)); bottom: auto;
+        left: auto; right: max(12px, calc(50% - 320px + 12px));
+        max-height: max(140px, min(70vh, 420px));
+      }
       .shotchip button {
         color: inherit; font: inherit; padding: 7px 13px;
         display: inline-flex; align-items: center; gap: 6px;
@@ -1233,6 +1245,7 @@
       window.addEventListener('popstate', (e) => {
         const sheetEl = $('sheetBack');
         if (sheetEl.classList.contains('show')) sheetEl.classList.remove('show');
+        document.body.classList.remove('sheet-open');
         if (pendingTab !== null) {
           const t = pendingTab;
           pendingTab = null;
@@ -1956,10 +1969,13 @@
       function openSheetUi() {
         syncSheet();
         sheetBack.classList.add('show');
+        // Lets the privacy/screenshot tool step aside while the sheet is up.
+        document.body.classList.add('sheet-open');
         if (history.state == null || !history.state.sheet) history.pushState({ sheet: true }, '');
       }
       function closeSheet() {
         sheetBack.classList.remove('show');
+        document.body.classList.remove('sheet-open');
         if (history.state && history.state.sheet) history.back();
       }
       sheetBack.addEventListener('click', (e) => { if (e.target === sheetBack) closeSheet(); });
@@ -3820,6 +3836,30 @@
         return 0;
       }
 
+      // Same story vertically: a scrolled container (the options sheet, a long
+      // description) renders from its top in the clone, so the shot would show
+      // the header instead of what is on screen. Pull the content up by the
+      // scroll offset and zero the scroll, which leaves the live view looking
+      // identical while making the clone match it.
+      function prepareScrollForCapture() {
+        const restore = [];
+        document.body.querySelectorAll('*').forEach((el) => {
+          const top = el.scrollTop;
+          if (top <= 0) return;
+          const first = el.firstElementChild;
+          if (!first || el.closest('[data-screenshot-hide="1"]')) return;
+          restore.push([el, first, first.style.marginTop, top]);
+          first.style.marginTop = -top + 'px';
+          el.scrollTop = 0;
+        });
+        return () => {
+          restore.forEach(([el, first, marginTop, top]) => {
+            first.style.marginTop = marginTop;
+            el.scrollTop = top;
+          });
+        };
+      }
+
       function prepareFieldsForCapture() {
         const fields = new Set();
         document.querySelectorAll('.fieldblur').forEach((o) => {
@@ -3861,7 +3901,12 @@
           const htmlToImage = await loadHtmlToImage();
           document.body.classList.add('screenshotting');
           document.body.classList.toggle('shot-no-nav', !privacy.includeNav);
-          restoreFieldBlurs = prepareFieldsForCapture();
+          const restoreScroll = prepareScrollForCapture();
+          const restoreFields = prepareFieldsForCapture();
+          restoreFieldBlurs = () => {
+            restoreFields();
+            restoreScroll();
+          };
           const fullPage = privacy.fullPage;
           if (fullPage) {
             // html-to-image copies each node's *computed* style into the clone.
