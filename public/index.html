@@ -795,7 +795,7 @@
       </button>
       <button type="button" id="shotChipPart">
         <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="2.5" /></svg>
-        Part
+        One word
       </button>
     </div>
     <div id="shotPanel" class="shotpanel" data-screenshot-hide="1">
@@ -3304,19 +3304,43 @@
         const range = document.createRange();
         range.setStart(caret.startContainer, s);
         range.setEnd(caret.startContainer, e);
-        return range;
+        // The caret can land in a different text node than the one under the
+        // finger (overlays, line-clamped text). Trust it only if the word it
+        // found actually covers the point; otherwise scan for the real one.
+        if (rangeCoversPoint(range, x, y)) return range;
+        return wordRangeByScan(x, y) || range;
+      }
+
+      function rangeCoversPoint(range, x, y) {
+        const rects = range.getClientRects();
+        for (let k = 0; k < rects.length; k++) {
+          const r = rects[k];
+          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+        }
+        return false;
       }
 
       // Fallback for when the hit test lands on an overlay instead of the text
       // (cards stack a background layer and a gradient over their title): walk
-      // the words under the point and pick the one whose box contains it.
+      // the words under the point and pick the one whose box contains it. The
+      // hit element itself may hold no text at all, so widen the search a few
+      // levels up before giving up.
       function wordRangeByScan(x, y) {
-        const host = document.elementFromPoint(x, y);
-        if (!host) return null;
+        let host = document.elementFromPoint(x, y);
+        for (let depth = 0; host && depth < 5; depth++, host = host.parentElement) {
+          const found = scanWordsUnder(host, x, y);
+          if (found) return found;
+        }
+        return null;
+      }
+
+      function scanWordsUnder(host, x, y) {
+        if (host.closest('[data-screenshot-hide="1"]')) return null;
         const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
         let node;
         while ((node = walker.nextNode())) {
           const text = node.nodeValue || '';
+          if (!text.trim()) continue;
           let i = 0;
           while (i < text.length) {
             while (i < text.length && WORD_BREAK.test(text[i])) i++;
@@ -3326,11 +3350,7 @@
             const range = document.createRange();
             range.setStart(node, s);
             range.setEnd(node, i);
-            const rects = range.getClientRects();
-            for (let k = 0; k < rects.length; k++) {
-              const r = rects[k];
-              if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return range;
-            }
+            if (rangeCoversPoint(range, x, y)) return range;
           }
         }
         return null;
@@ -3352,6 +3372,23 @@
           if (range && blurRange(range)) {
             endOneShotPick();
             reflectPrivacy();
+            return;
+          }
+          // No word there: a tap on the picture part of a card should still
+          // blur the picture (thumbnails are background-image divs, not <img>).
+          const media = target.closest('[data-media-bg]') || target.querySelector(':scope > [data-media-bg]');
+          if (media) {
+            media.dataset.manualBlur = '1';
+            manualBlurred.add(media);
+            endOneShotPick();
+            reflectPrivacy();
+            return;
+          }
+          // Word mode must never quietly blur the whole line instead — that
+          // is exactly the outcome the user is trying to avoid. Say so and
+          // stay armed so the next tap can land properly.
+          if ((target.textContent || '').trim()) {
+            toast('Missed the text — tap right on the part to hide', 'bad');
             return;
           }
         }
@@ -3537,7 +3574,7 @@
         if (sel) sel.removeAllRanges();
         hideSelChip();
         reflectPrivacy();
-        toast('Tap the part you want to blur', 'good');
+        toast('Now tap the word you want to blur', 'good');
       }
       function endOneShotPick() {
         if (!oneShotPick) return;
