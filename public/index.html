@@ -646,6 +646,10 @@
             <div class="label"><div class="t">Notify when done</div><div class="d">Push notification when a download finishes</div></div>
             <label class="switch"><input type="checkbox" id="setPush" /><span class="track"></span></label>
           </div>
+          <div class="setrow">
+            <div class="label"><div class="t">Screenshot button</div><div class="d">Show the floating privacy/screenshot button</div></div>
+            <label class="switch"><input type="checkbox" id="setShotFab" checked /><span class="track"></span></label>
+          </div>
         </div>
 
         <div class="section">
@@ -738,11 +742,11 @@
         <span>Tap to blur (custom)</span>
         <label class="switch"><input type="checkbox" id="shotPicker" /><span class="track"></span></label>
       </div>
-      <div class="shotrow" id="shotManualRow" hidden>
+      <div class="shotrow hidden" id="shotManualRow">
         <span id="shotManualCount"></span>
         <button id="shotClear" class="shotclear">Clear</button>
       </div>
-      <div id="shotPickerHint" class="shotpicker-hint" hidden>Tap any element to toggle blur. Turn the picker off before navigating.</div>
+      <div id="shotPickerHint" class="shotpicker-hint hidden">Tap any element to toggle blur. Turn the picker off before navigating.</div>
       <p class="shothead">Screenshot options</p>
       <div class="shotrow">
         <span>Full page</span>
@@ -3113,11 +3117,12 @@
       // blur toggles (thumbnails + tap-to-blur) and a client-side DOM-to-PNG
       // screenshot via html-to-image (lazy-loaded from /vendor/).
       const PRIVACY_KEY = 'grabbit.privacy.v1';
-      const privacy = { blurMedia: true, fullPage: false };
+      const privacy = { blurMedia: true, fullPage: false, fabHidden: false };
       try {
         const storedPrivacy = JSON.parse(localStorage.getItem(PRIVACY_KEY) || '{}');
         if (typeof storedPrivacy.blurMedia === 'boolean') privacy.blurMedia = storedPrivacy.blurMedia;
         if (typeof storedPrivacy.fullPage === 'boolean') privacy.fullPage = storedPrivacy.fullPage;
+        if (typeof storedPrivacy.fabHidden === 'boolean') privacy.fabHidden = storedPrivacy.fabHidden;
       } catch {}
       function savePrivacy() { try { localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy)); } catch {} }
 
@@ -3127,6 +3132,9 @@
       const shotFab = $('shotFab'), shotPanel = $('shotPanel'), shotGo = $('shotGo');
 
       function reflectPrivacy() {
+        shotFab.classList.toggle('hidden', privacy.fabHidden);
+        if (privacy.fabHidden) shotPanel.classList.remove('show');
+        $('setShotFab').checked = !privacy.fabHidden;
         document.body.classList.toggle('privacy-blur-media', privacyOn && privacy.blurMedia);
         shotFab.classList.toggle('on', privacyOn);
         $('shotMaster').checked = privacyOn;
@@ -3135,8 +3143,8 @@
         $('shotFullPage').checked = privacy.fullPage;
         $('shotBlurMediaRow').classList.toggle('off', !privacyOn);
         $('shotPickerRow').classList.toggle('off', !privacyOn);
-        $('shotPickerHint').hidden = !(privacyOn && pickerOn);
-        $('shotManualRow').hidden = manualBlurred.size === 0;
+        $('shotPickerHint').classList.toggle('hidden', !(privacyOn && pickerOn));
+        $('shotManualRow').classList.toggle('hidden', manualBlurred.size === 0);
         $('shotManualCount').textContent =
           manualBlurred.size + ' element' + (manualBlurred.size === 1 ? '' : 's') + ' blurred';
       }
@@ -3198,6 +3206,11 @@
       $('shotClear').addEventListener('click', () => {
         manualBlurred.forEach((el) => delete el.dataset.manualBlur);
         manualBlurred.clear();
+        reflectPrivacy();
+      });
+      $('setShotFab').addEventListener('change', (e) => {
+        privacy.fabHidden = !e.target.checked;
+        savePrivacy();
         reflectPrivacy();
       });
 
