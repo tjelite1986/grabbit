@@ -314,45 +314,102 @@
       .fab:active { filter: brightness(1.1); }
 
       /* ---- privacy / screenshot ---- */
+      /* Bottom-left corner, opposite the "Download all" FAB: small and dimmed
+         until it is actually doing something, so it covers as little of the
+         page as possible. */
+      /* --kb-inset is the height the on-screen keyboard steals from the visual
+         viewport (0 when it is closed); both the button and the panel ride on
+         top of it so they never end up behind the keyboard. */
       .shotfab {
-        position: fixed; right: max(16px, calc(50% - 320px + 16px)); bottom: calc(var(--nav-h) + 88px); z-index: 30;
-        width: 44px; height: 44px; border-radius: 999px;
+        position: fixed; left: max(12px, calc(50% - 320px + 12px));
+        bottom: calc(var(--nav-h) + 14px + var(--kb-inset, 0px)); z-index: 30;
+        width: 36px; height: 36px; border-radius: 999px;
         display: grid; place-items: center;
         background: var(--surface-2); border: 1px solid var(--line); color: var(--muted);
-        box-shadow: 0 8px 24px rgba(0,0,0,.45);
+        box-shadow: 0 6px 18px rgba(0,0,0,.4); opacity: .5;
       }
-      .shotfab.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
-      .shotfab .ic { width: 20px; height: 20px; }
+      .shotfab.open { opacity: 1; }
+      .shotfab.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); opacity: 1; }
+      .shotfab .ic { width: 18px; height: 18px; }
       .shotpanel {
-        position: fixed; right: max(16px, calc(50% - 320px + 16px)); bottom: calc(var(--nav-h) + 142px); z-index: 31;
-        width: min(300px, calc(100vw - 32px));
+        position: fixed; left: max(12px, calc(50% - 320px + 12px));
+        bottom: calc(var(--nav-h) + 58px + var(--kb-inset, 0px)); z-index: 31;
+        width: min(268px, calc(100vw - 24px));
+        max-height: max(140px, min(54vh, 380px, calc(100vh - var(--nav-h) - var(--kb-inset, 0px) - 100px)));
+        overflow-y: auto; overscroll-behavior: contain;
         background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-        padding: 14px 16px 16px; box-shadow: 0 16px 48px rgba(0,0,0,.55);
+        padding: 10px 12px 12px; box-shadow: 0 12px 36px rgba(0,0,0,.55);
         display: none;
       }
       .shotpanel.show { display: block; }
-      .shotpanel h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
-      .shotpanel h3 .ic { width: 18px; height: 18px; color: var(--primary); }
-      .shotrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: 13.5px; }
-      .shotrow.sub { padding-left: 12px; color: var(--muted); }
+      .shotpanel h3 { margin: 0 0 2px; font-size: 14px; display: flex; align-items: center; gap: 7px; }
+      .shotpanel h3 .ic { width: 16px; height: 16px; color: var(--primary); }
+      .shotx { margin-left: auto; color: var(--muted); font-size: 16px; line-height: 1; padding: 2px 4px; }
+      .shotrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 13px; }
+      .shotrow.sub { padding-left: 10px; color: var(--muted); }
       .shotrow.off { opacity: .45; pointer-events: none; }
-      .shothead { margin: 10px 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--faint); }
-      .shotnote { margin: 8px 0 0; font-size: 11.5px; color: var(--faint); line-height: 1.45; }
+      .shothead { margin: 8px 0 0; font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--faint); }
+      .shotnote { margin: 6px 0 0; font-size: 11px; color: var(--faint); line-height: 1.4; }
       .shotgo {
-        width: 100%; margin-top: 10px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-        padding: 11px 0; border-radius: 12px; background: var(--primary); color: var(--on-primary); font-weight: 600; font-size: 14px;
+        width: 100%; margin-top: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        padding: 9px 0; border-radius: 12px; background: var(--primary); color: var(--on-primary); font-weight: 600; font-size: 13.5px;
       }
       .shotgo:disabled { opacity: .5; }
-      .shotgo .ic { width: 18px; height: 18px; }
+      .shotgo .ic { width: 16px; height: 16px; }
       .shotclear { color: var(--primary); font-size: 12px; padding: 2px 4px; }
-      .shotpicker-hint { margin-top: 8px; padding: 8px 10px; border-radius: 10px; font-size: 12px; background: var(--warn-dim); color: var(--warn); }
+      .shotseg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+      .shotseg button { padding: 3px 10px; font-size: 11.5px; color: var(--muted); background: var(--surface-2); }
+      .shotseg button.on { background: var(--primary); color: var(--on-primary); font-weight: 600; }
+      .shotbtn {
+        color: var(--primary); font-size: 12px; font-weight: 600; padding: 3px 10px;
+        border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2);
+      }
+      .shotpicker-hint { margin-top: 6px; padding: 7px 9px; border-radius: 10px; font-size: 11.5px; background: var(--warn-dim); color: var(--warn); }
+      /* Floating action next to the current text selection — reachable even when
+         the keyboard covers the bottom of the screen. */
+      .shotchip {
+        position: fixed; top: 0; left: 0; z-index: 32; display: none;
+        align-items: stretch; border-radius: 999px; overflow: hidden;
+        font-size: 13px; font-weight: 600;
+        background: var(--primary); color: var(--on-primary);
+        box-shadow: 0 8px 22px rgba(0,0,0,.5);
+      }
+      .shotchip.show { display: inline-flex; }
+      .shotchip button {
+        color: inherit; font: inherit; padding: 7px 13px;
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .shotchip button + button { border-left: 1px solid rgba(255,255,255,.35); }
+      .shotchip button:active { background: rgba(0,0,0,.18); }
+      .shotchip .ic { width: 15px; height: 15px; }
       body.privacy-blur-media img:not([data-no-blur]),
-      body.privacy-blur-media video:not([data-no-blur]) { filter: blur(12px); transition: filter .15s ease; }
+      body.privacy-blur-media video:not([data-no-blur]),
+      /* Most thumbnails are CSS background-images on a <div>, not an <img> — the
+         img/video rule alone only caught the queue list. */
+      body.privacy-blur-media [data-media-bg]:not([data-no-blur]) { filter: blur(12px); transition: filter .15s ease; }
+      /* Keep the letterbox backdrop of portrait cards heavier than the frame. */
+      body.privacy-blur-media .mcard .bg-blur[data-media-bg] { filter: blur(24px) brightness(.55); }
       [data-manual-blur] { filter: blur(8px) !important; user-select: none; }
+      /* Partial-text blur: a wrapper span around part of a text run. */
+      [data-blur-span] { display: inline; }
       /* During a capture the whole stylesheet is cloned into the render, which
          restarts CSS animations at frame 0 — the .view fade-in starts at
          opacity 0, blanking the page. Freeze everything while shooting. */
       body.screenshotting *, body.screenshotting { animation: none !important; transition: none !important; }
+      /* Full-page capture: html/body are height:100% and body clips vertically
+         (overflow-x:hidden), so the clone cut everything below the fold. Undo
+         both for the duration of the shot. */
+      html.shot-fullpage, body.shot-fullpage {
+        height: auto !important; min-height: 100% !important; overflow: visible !important;
+      }
+      /* Fixed chrome resolves against the viewport, so in a tall capture it
+         lands halfway down the image. Pin it to the end of the document
+         instead (body becomes the containing block). */
+      html.shot-fullpage body { position: relative; }
+      html.shot-fullpage .bottomnav { position: absolute; bottom: 0; }
+      html.shot-fullpage .fab { position: absolute; bottom: calc(var(--nav-h) + 18px); }
+      /* "Bottom bar" switched off in the panel. */
+      body.shot-no-nav .bottomnav, body.shot-no-nav .fab { display: none !important; }
 
       /* ---- bottom nav ---- */
       .bottomnav {
@@ -728,8 +785,24 @@
     <button id="shotFab" class="shotfab" data-screenshot-hide="1" aria-label="Privacy and screenshot" title="Privacy mode">
       <svg class="ic" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.4L12 2 4 5.4V12c0 6.4 8 10 8 10z" /></svg>
     </button>
+    <!-- Floating actions for the current selection. "Part" exists because a
+         long-press on a link selects the whole anchor on Android and the
+         handles cannot be narrowed inside it. -->
+    <div id="shotSelChip" class="shotchip" data-screenshot-hide="1">
+      <button type="button" id="shotChipBlur">
+        <svg class="ic" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.4L12 2 4 5.4V12c0 6.4 8 10 8 10z" /></svg>
+        Blur
+      </button>
+      <button type="button" id="shotChipPart">
+        <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="2.5" /></svg>
+        Part
+      </button>
+    </div>
     <div id="shotPanel" class="shotpanel" data-screenshot-hide="1">
-      <h3><svg class="ic" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.4L12 2 4 5.4V12c0 6.4 8 10 8 10z" /></svg>Privacy mode</h3>
+      <h3>
+        <svg class="ic" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.4L12 2 4 5.4V12c0 6.4 8 10 8 10z" /></svg>Privacy mode
+        <button id="shotClose" class="shotx" aria-label="Close">✕</button>
+      </h3>
       <div class="shotrow">
         <span>Master toggle</span>
         <label class="switch"><input type="checkbox" id="shotMaster" /><span class="track"></span></label>
@@ -742,21 +815,36 @@
         <span>Tap to blur (custom)</span>
         <label class="switch"><input type="checkbox" id="shotPicker" /><span class="track"></span></label>
       </div>
+      <div class="shotrow sub off hidden" id="shotScopeRow">
+        <span>A tap blurs</span>
+        <span class="shotseg" id="shotScope">
+          <button type="button" data-scope="word">Word</button>
+          <button type="button" data-scope="element">Whole</button>
+        </span>
+      </div>
+      <div class="shotrow sub off" id="shotSelRow">
+        <span>Blur selected text</span>
+        <button id="shotBlurSel" class="shotbtn" type="button">Blur</button>
+      </div>
       <div class="shotrow hidden" id="shotManualRow">
         <span id="shotManualCount"></span>
         <button id="shotClear" class="shotclear">Clear</button>
       </div>
-      <div id="shotPickerHint" class="shotpicker-hint hidden">Tap any element to toggle blur. Turn the picker off before navigating.</div>
+      <div id="shotPickerHint" class="shotpicker-hint hidden">Tap a word to blur just that word, or an image to blur it. Tap it again to undo. Turn the picker off before navigating.</div>
       <p class="shothead">Screenshot options</p>
       <div class="shotrow">
         <span>Full page</span>
         <label class="switch"><input type="checkbox" id="shotFullPage" /><span class="track"></span></label>
       </div>
+      <div class="shotrow">
+        <span>Bottom bar</span>
+        <label class="switch"><input type="checkbox" id="shotNav" checked /><span class="track"></span></label>
+      </div>
       <button id="shotGo" class="shotgo">
         <svg class="ic" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
         Download screenshot (PNG)
       </button>
-      <p class="shotnote">The screenshot excludes this panel and the browser chrome. Full page captures the whole scrollable height (max 16000px).</p>
+      <p class="shotnote">Tap Blur next to a selection, or switch on Tap to blur and tap single words.</p>
     </div>
 
     <!-- ===================== BOTTOM NAV ===================== -->
@@ -1003,7 +1091,8 @@
       </div>
     </div>
 
-    <div id="toast"></div>
+    <!-- Transient chrome: never part of a capture. -->
+    <div id="toast" data-screenshot-hide="1"></div>
 
     <script>
       // ----------------------------------------------------------------- utils
@@ -1376,7 +1465,7 @@
         const card = document.createElement('div');
         card.className = 'mcard' + (thumbnail ? ' has-img' : '');
         let inner = '';
-        if (thumbnail) inner += '<div class="bg" style="' + esc('background-image:' + cssUrl(thumbnail)) + '"></div>';
+        if (thumbnail) inner += '<div class="bg" data-media-bg="1" style="' + esc('background-image:' + cssUrl(thumbnail)) + '"></div>';
         if (status) inner += '<span class="pill-status">' + esc(status) + '</span>';
         inner += '<div class="top"><div class="mtitle">' + esc(title) + '</div>' + (sub ? '<div class="msub">' + esc(sub) + '</div>' : '');
         if (caption && caption.trim()) inner += '<div class="mdesc">' + esc(caption.trim()) + '</div>';
@@ -1398,6 +1487,7 @@
               card.classList.add('portrait');
               const blur = document.createElement('div');
               blur.className = 'bg-blur';
+              blur.dataset.mediaBg = '1';
               blur.style.backgroundImage = cssUrl(thumbnail);
               card.insertBefore(blur, card.firstChild);
             }
@@ -2529,7 +2619,7 @@
           const icon = kind === 'audio' ? ICON.audio : kind === 'image' ? ICON.image : ICON.video;
           const hasImg = !!it.thumbnail;
           return '<div class="hcard' + (hasImg ? ' has-img' : '') + (it.error ? ' failed' : '') + '">' +
-            (hasImg ? '<div class="bg" style="' + esc('background-image:' + cssUrl(it.thumbnail)) + '"></div>' : '') +
+            (hasImg ? '<div class="bg" data-media-bg="1" style="' + esc('background-image:' + cssUrl(it.thumbnail)) + '"></div>' : '') +
             '<div class="h-main">' +
               '<div class="h-title">' + link + '</div>' +
               '<div class="h-row">' +
@@ -3117,17 +3207,20 @@
       // blur toggles (thumbnails + tap-to-blur) and a client-side DOM-to-PNG
       // screenshot via html-to-image (lazy-loaded from /vendor/).
       const PRIVACY_KEY = 'grabbit.privacy.v1';
-      const privacy = { blurMedia: true, fullPage: false, fabHidden: false };
+      const privacy = { blurMedia: true, fullPage: false, fabHidden: false, tapScope: 'word', includeNav: true };
       try {
         const storedPrivacy = JSON.parse(localStorage.getItem(PRIVACY_KEY) || '{}');
         if (typeof storedPrivacy.blurMedia === 'boolean') privacy.blurMedia = storedPrivacy.blurMedia;
         if (typeof storedPrivacy.fullPage === 'boolean') privacy.fullPage = storedPrivacy.fullPage;
         if (typeof storedPrivacy.fabHidden === 'boolean') privacy.fabHidden = storedPrivacy.fabHidden;
+        if (storedPrivacy.tapScope === 'element' || storedPrivacy.tapScope === 'word') privacy.tapScope = storedPrivacy.tapScope;
+        if (typeof storedPrivacy.includeNav === 'boolean') privacy.includeNav = storedPrivacy.includeNav;
       } catch {}
       function savePrivacy() { try { localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy)); } catch {} }
 
       let privacyOn = false;
       let pickerOn = false; // never persisted: a live picker intercepts every tap
+      let oneShotPick = false; // picker armed from the selection bubble, off after one tap
       const manualBlurred = new Set();
       const shotFab = $('shotFab'), shotPanel = $('shotPanel'), shotGo = $('shotGo');
 
@@ -3137,12 +3230,19 @@
         $('setShotFab').checked = !privacy.fabHidden;
         document.body.classList.toggle('privacy-blur-media', privacyOn && privacy.blurMedia);
         shotFab.classList.toggle('on', privacyOn);
+        shotFab.classList.toggle('open', shotPanel.classList.contains('show'));
         $('shotMaster').checked = privacyOn;
         $('shotBlurMedia').checked = privacy.blurMedia;
         $('shotPicker').checked = pickerOn;
         $('shotFullPage').checked = privacy.fullPage;
+        $('shotNav').checked = privacy.includeNav;
         $('shotBlurMediaRow').classList.toggle('off', !privacyOn);
         $('shotPickerRow').classList.toggle('off', !privacyOn);
+        $('shotSelRow').classList.toggle('off', !privacyOn);
+        $('shotScopeRow').classList.toggle('hidden', !(privacyOn && pickerOn));
+        $('shotScopeRow').classList.toggle('off', !privacyOn);
+        Array.from($('shotScope').children).forEach((btn) =>
+          btn.classList.toggle('on', btn.dataset.scope === privacy.tapScope));
         $('shotPickerHint').classList.toggle('hidden', !(privacyOn && pickerOn));
         $('shotManualRow').classList.toggle('hidden', manualBlurred.size === 0);
         $('shotManualCount').textContent =
@@ -3163,20 +3263,288 @@
         if (target.dataset && target.dataset.screenshotHide === '1') return null;
         return target;
       }
+      // A partial-text blur is a wrapper span we injected — dropping the
+      // attribute would leave dead markup behind, so unwrap it instead.
+      function unblur(el) {
+        manualBlurred.delete(el);
+        if (el.dataset.blurSpan) {
+          const parent = el.parentNode;
+          if (parent) {
+            while (el.firstChild) parent.insertBefore(el.firstChild, el);
+            parent.removeChild(el);
+            parent.normalize();
+          }
+        } else {
+          delete el.dataset.manualBlur;
+        }
+      }
+
+      // The word under the finger. Word boundaries include the usual URL
+      // separators, so tapping a link blurs one path segment instead of the
+      // whole address (there is no whitespace to break on in a URL).
+      const WORD_BREAK = /[\s/\\?&=:#,;|]/;
+      function wordRangeAt(x, y) {
+        let caret = null;
+        if (document.caretRangeFromPoint) {
+          caret = document.caretRangeFromPoint(x, y);
+        } else if (document.caretPositionFromPoint) {
+          const pos = document.caretPositionFromPoint(x, y);
+          if (pos) {
+            caret = document.createRange();
+            caret.setStart(pos.offsetNode, pos.offset);
+          }
+        }
+        if (!caret || caret.startContainer.nodeType !== Node.TEXT_NODE) return wordRangeByScan(x, y);
+        const text = caret.startContainer.nodeValue || '';
+        let s = caret.startOffset;
+        let e = s;
+        while (s > 0 && !WORD_BREAK.test(text[s - 1])) s--;
+        while (e < text.length && !WORD_BREAK.test(text[e])) e++;
+        if (e <= s) return null;
+        const range = document.createRange();
+        range.setStart(caret.startContainer, s);
+        range.setEnd(caret.startContainer, e);
+        return range;
+      }
+
+      // Fallback for when the hit test lands on an overlay instead of the text
+      // (cards stack a background layer and a gradient over their title): walk
+      // the words under the point and pick the one whose box contains it.
+      function wordRangeByScan(x, y) {
+        const host = document.elementFromPoint(x, y);
+        if (!host) return null;
+        const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          const text = node.nodeValue || '';
+          let i = 0;
+          while (i < text.length) {
+            while (i < text.length && WORD_BREAK.test(text[i])) i++;
+            const s = i;
+            while (i < text.length && !WORD_BREAK.test(text[i])) i++;
+            if (i <= s) continue;
+            const range = document.createRange();
+            range.setStart(node, s);
+            range.setEnd(node, i);
+            const rects = range.getClientRects();
+            for (let k = 0; k < rects.length; k++) {
+              const r = rects[k];
+              if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return range;
+            }
+          }
+        }
+        return null;
+      }
+
       function onPickerTap(e) {
         const target = findBlurTarget(e.target);
         if (!target) return;
         e.preventDefault();
         e.stopPropagation();
         if (target.dataset.manualBlur) {
-          delete target.dataset.manualBlur;
-          manualBlurred.delete(target);
+          unblur(target); // works for word spans and whole elements alike
+          endOneShotPick();
+          reflectPrivacy();
+          return;
+        }
+        if (privacy.tapScope === 'word' && target.tagName !== 'IMG' && target.tagName !== 'VIDEO') {
+          const range = wordRangeAt(e.clientX, e.clientY);
+          if (range && blurRange(range)) {
+            endOneShotPick();
+            reflectPrivacy();
+            return;
+          }
+        }
+        target.dataset.manualBlur = '1';
+        manualBlurred.add(target);
+        endOneShotPick();
+        reflectPrivacy();
+      }
+
+      // Blur only part of a text run — a price, a username, half of a link —
+      // by wrapping every text node inside the selection in its own span.
+      function blurRange(range) {
+        const root = range.commonAncestorContainer;
+        const nodes = [];
+        if (root.nodeType === Node.TEXT_NODE) {
+          nodes.push(root);
         } else {
-          target.dataset.manualBlur = '1';
-          manualBlurred.add(target);
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          let n;
+          while ((n = walker.nextNode())) if (range.intersectsNode(n)) nodes.push(n);
+        }
+        let count = 0;
+        nodes.forEach((node) => {
+          if (!node.nodeValue || !node.nodeValue.trim()) return;
+          const parent = node.parentElement;
+          if (!parent || parent.closest('[data-screenshot-hide="1"]')) return;
+          const start = node === range.startContainer ? range.startOffset : 0;
+          const end = node === range.endContainer ? range.endOffset : node.nodeValue.length;
+          if (end <= start) return;
+          // Split off the parts outside the selection so only the selected
+          // characters end up inside the blurred span.
+          let target = node;
+          if (end < target.nodeValue.length) target.splitText(end);
+          if (start > 0) target = target.splitText(start);
+          const span = document.createElement('span');
+          span.dataset.manualBlur = '1';
+          span.dataset.blurSpan = '1';
+          target.parentNode.insertBefore(span, target);
+          span.appendChild(target);
+          manualBlurred.add(span);
+          count++;
+        });
+        return count;
+      }
+
+      // Text selected inside an <input>/<textarea> lives in the field's value,
+      // not in the DOM, so there are no nodes to wrap — those get blurred whole.
+      function activeFieldSelection() {
+        const el = document.activeElement;
+        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return null;
+        if (el.selectionStart == null || el.selectionStart === el.selectionEnd) return null;
+        if (el.closest('[data-screenshot-hide="1"]')) return null;
+        return el;
+      }
+
+      function blurSelection() {
+        const field = activeFieldSelection() || lastField;
+        if (field && field.isConnected) {
+          field.dataset.manualBlur = '1';
+          manualBlurred.add(field);
+          field.blur(); // also dismisses the keyboard
+          hideSelChip();
+          reflectPrivacy();
+          toast('Whole field blurred', 'good');
+          return;
+        }
+        const sel = window.getSelection();
+        // Adjusting the selection handles on a phone briefly collapses the
+        // selection, so fall back to the last one the bubble was shown for.
+        const ranges = [];
+        if (sel && !sel.isCollapsed && sel.rangeCount) {
+          for (let i = 0; i < sel.rangeCount; i++) ranges.push(sel.getRangeAt(i));
+        } else if (lastRange) {
+          ranges.push(lastRange);
+        }
+        if (!ranges.length) {
+          toast('Select some text first, then tap Blur', 'bad');
+          return;
+        }
+        let wrapped = 0;
+        ranges.forEach((r) => { wrapped += blurRange(r); });
+        if (sel) sel.removeAllRanges();
+        hideSelChip();
+        if (!wrapped) {
+          toast('Nothing to blur in that selection', 'bad');
+          return;
         }
         reflectPrivacy();
       }
+
+      // ---- selection bubble + keyboard-aware placement ----
+      // Selecting text pops the keyboard on mobile, which covers the bottom of
+      // the screen where the panel lives. Offer the same action right next to
+      // the selection, and lift the bottom chrome by the keyboard's height.
+      const selChip = $('shotSelChip');
+      const vvp = window.visualViewport;
+      // The selection the bubble currently stands for. Kept around after the
+      // selection collapses so dragging the handles cannot strand the bubble.
+      let lastRange = null;
+      let lastField = null;
+      let chipGraceTimer = null;
+      function viewTop() { return vvp ? vvp.offsetTop : 0; }
+      function viewBottom() { return vvp ? vvp.offsetTop + vvp.height : window.innerHeight; }
+      function hideSelChip() {
+        clearTimeout(chipGraceTimer);
+        chipGraceTimer = null;
+        lastRange = null;
+        lastField = null;
+        selChip.classList.remove('show');
+      }
+
+      function selectionRect() {
+        const field = activeFieldSelection();
+        if (field) return field.getBoundingClientRect();
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+        const range = sel.getRangeAt(0);
+        const host = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+          ? range.commonAncestorContainer
+          : range.commonAncestorContainer.parentElement;
+        if (host && host.closest('[data-screenshot-hide="1"]')) return null;
+        const rect = range.getBoundingClientRect();
+        return rect && (rect.width || rect.height) ? rect : null;
+      }
+
+      function positionSelChip() {
+        if (!privacyOn) return hideSelChip();
+        const rect = selectionRect();
+        if (!rect) {
+          // Nothing selected right now. If the bubble is already up, leave it
+          // where it is for a moment — on a phone every attempt to narrow a
+          // selection collapses it first, and yanking the button away mid-edit
+          // is exactly what made it unusable.
+          if (!selChip.classList.contains('show') || !(lastRange || lastField)) return hideSelChip();
+          if (!chipGraceTimer) chipGraceTimer = setTimeout(hideSelChip, 6000);
+          return;
+        }
+        clearTimeout(chipGraceTimer);
+        chipGraceTimer = null;
+        const field = activeFieldSelection();
+        const sel = window.getSelection();
+        lastField = field;
+        lastRange = field ? null : sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : lastRange;
+        selChip.classList.add('show');
+        const w = selChip.offsetWidth || 84;
+        const h = selChip.offsetHeight || 32;
+        let top = rect.top - h - 8;
+        if (top < viewTop() + 6) top = rect.bottom + 8;
+        top = Math.min(Math.max(top, viewTop() + 6), viewBottom() - h - 6);
+        let left = rect.left + rect.width / 2 - w / 2;
+        left = Math.min(Math.max(left, 8), window.innerWidth - w - 8);
+        selChip.style.top = top + 'px';
+        selChip.style.left = left + 'px';
+      }
+
+      function reflectKeyboard() {
+        const inset = vvp ? Math.max(0, window.innerHeight - vvp.height - vvp.offsetTop) : 0;
+        document.documentElement.style.setProperty('--kb-inset', inset + 'px');
+        positionSelChip();
+      }
+      if (vvp) {
+        vvp.addEventListener('resize', reflectKeyboard);
+        vvp.addEventListener('scroll', reflectKeyboard);
+      }
+      document.addEventListener('selectionchange', () => requestAnimationFrame(positionSelChip));
+      window.addEventListener('scroll', positionSelChip, true);
+      selChip.addEventListener('pointerdown', (e) => e.preventDefault());
+      selChip.addEventListener('mousedown', (e) => e.preventDefault());
+      selChip.addEventListener('click', (e) => {
+        if (e.target.closest('#shotChipPart')) startWordPick();
+        else blurSelection();
+      });
+
+      // "Part": arm a single word pick. A long-press on a link selects the whole
+      // anchor, so narrowing by selection is not possible there — one tap on the
+      // piece to hide is.
+      function startWordPick() {
+        privacy.tapScope = 'word';
+        savePrivacy();
+        oneShotPick = !pickerOn;
+        setPicker(true);
+        const sel = window.getSelection();
+        if (sel) sel.removeAllRanges();
+        hideSelChip();
+        reflectPrivacy();
+        toast('Tap the part you want to blur', 'good');
+      }
+      function endOneShotPick() {
+        if (!oneShotPick) return;
+        oneShotPick = false;
+        setPicker(false);
+      }
+
       function setPicker(on) {
         if (pickerOn === on) return;
         pickerOn = on;
@@ -3184,11 +3552,32 @@
         else document.removeEventListener('click', onPickerTap, true);
       }
 
-      shotFab.addEventListener('click', () => shotPanel.classList.toggle('show'));
+      shotFab.addEventListener('click', () => {
+        shotPanel.classList.toggle('show');
+        reflectPrivacy();
+      });
+      $('shotClose').addEventListener('click', () => {
+        shotPanel.classList.remove('show');
+        reflectPrivacy();
+      });
+      // Tap anywhere else to dismiss — the panel still covers a chunk of a phone
+      // screen. Skipped while the picker is live: those taps are blur toggles.
+      document.addEventListener('click', (e) => {
+        if (!shotPanel.classList.contains('show') || pickerOn) return;
+        if (shotPanel.contains(e.target) || shotFab.contains(e.target) || selChip.contains(e.target)) return;
+        shotPanel.classList.remove('show');
+        reflectPrivacy();
+      });
+      // Pressing a button normally collapses the text selection before the
+      // click fires — keep it alive so "Blur" has something to work on.
+      $('shotBlurSel').addEventListener('pointerdown', (e) => e.preventDefault());
+      $('shotBlurSel').addEventListener('mousedown', (e) => e.preventDefault());
+      $('shotBlurSel').addEventListener('click', blurSelection);
       $('shotMaster').addEventListener('change', (e) => {
         privacyOn = e.target.checked;
         if (!privacyOn) setPicker(false);
         reflectPrivacy();
+        positionSelChip();
       });
       $('shotBlurMedia').addEventListener('change', (e) => {
         privacy.blurMedia = e.target.checked;
@@ -3199,12 +3588,23 @@
         setPicker(e.target.checked);
         reflectPrivacy();
       });
+      $('shotScope').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-scope]');
+        if (!btn) return;
+        privacy.tapScope = btn.dataset.scope;
+        savePrivacy();
+        reflectPrivacy();
+      });
       $('shotFullPage').addEventListener('change', (e) => {
         privacy.fullPage = e.target.checked;
         savePrivacy();
       });
+      $('shotNav').addEventListener('change', (e) => {
+        privacy.includeNav = e.target.checked;
+        savePrivacy();
+      });
       $('shotClear').addEventListener('click', () => {
-        manualBlurred.forEach((el) => delete el.dataset.manualBlur);
+        Array.from(manualBlurred).forEach(unblur);
         manualBlurred.clear();
         reflectPrivacy();
       });
@@ -3242,8 +3642,23 @@
         try {
           const htmlToImage = await loadHtmlToImage();
           document.body.classList.add('screenshotting');
+          document.body.classList.toggle('shot-no-nav', !privacy.includeNav);
+          const fullPage = privacy.fullPage;
+          if (fullPage) {
+            // html-to-image copies each node's *computed* style into the clone.
+            // With html/body at height:100% and body clipping vertically, that
+            // clone is exactly one viewport tall and everything below the fold
+            // is cut off — so unclamp both elements for the duration.
+            document.documentElement.classList.add('shot-fullpage');
+            document.body.classList.add('shot-fullpage');
+          }
           await new Promise((r) => setTimeout(r, 30)); // let toggles repaint first
           const node = document.documentElement;
+          // Capped to stay under mobile canvas limits.
+          const fullHeight = Math.min(
+            16000,
+            Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, window.innerHeight)
+          );
           const opts = {
             cacheBust: true,
             pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
@@ -3253,12 +3668,10 @@
             // it just comes out blank.
             onImageErrorHandler: () => {},
             width: document.documentElement.clientWidth,
-            // The page scrolls on the document itself, so scrollHeight already
-            // measures everything. Capped to stay under mobile canvas limits.
-            height: privacy.fullPage
-              ? Math.min(16000, Math.max(document.documentElement.scrollHeight, document.body.scrollHeight))
-              : window.innerHeight,
-            style: privacy.fullPage ? undefined : { transform: 'translateY(-' + window.scrollY + 'px)' },
+            height: fullPage ? fullHeight : window.innerHeight,
+            style: fullPage
+              ? { height: fullHeight + 'px', overflow: 'visible' }
+              : { transform: 'translateY(-' + window.scrollY + 'px)' },
           };
           let dataUrl = null;
           try {
@@ -3282,6 +3695,9 @@
           toast('Screenshot failed: ' + ((err && err.message) || 'unknown'), 'bad');
         } finally {
           document.body.classList.remove('screenshotting');
+          document.body.classList.remove('shot-no-nav');
+          document.documentElement.classList.remove('shot-fullpage');
+          document.body.classList.remove('shot-fullpage');
           if (wasPicker) setPicker(true);
           reflectPrivacy();
           shooting = false;
