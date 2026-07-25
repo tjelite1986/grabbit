@@ -3523,7 +3523,7 @@
           // selection collapses it first, and yanking the button away mid-edit
           // is exactly what made it unusable.
           if (!selChip.classList.contains('show') || !(lastRange || lastField)) return hideSelChip();
-          if (!chipGraceTimer) chipGraceTimer = setTimeout(hideSelChip, 6000);
+          if (!chipGraceTimer) chipGraceTimer = setTimeout(hideSelChip, 12000);
           return;
         }
         clearTimeout(chipGraceTimer);
@@ -3535,8 +3535,11 @@
         selChip.classList.add('show');
         const w = selChip.offsetWidth || 84;
         const h = selChip.offsetHeight || 32;
-        let top = rect.top - h - 8;
-        if (top < viewTop() + 6) top = rect.bottom + 8;
+        // Below the selection by default: Android draws its own selection
+        // toolbar (Copy/Share/Select all) directly above it, and a bubble put
+        // there disappears behind system UI.
+        let top = rect.bottom + 10;
+        if (top > viewBottom() - h - 6) top = rect.top - h - 10;
         top = Math.min(Math.max(top, viewTop() + 6), viewBottom() - h - 6);
         let left = rect.left + rect.width / 2 - w / 2;
         left = Math.min(Math.max(left, 8), window.innerWidth - w - 8);
@@ -3597,14 +3600,15 @@
         shotPanel.classList.remove('show');
         reflectPrivacy();
       });
-      // Tap anywhere else to dismiss — the panel still covers a chunk of a phone
-      // screen. Skipped while the picker is live: those taps are blur toggles.
-      document.addEventListener('click', (e) => {
-        if (!shotPanel.classList.contains('show') || pickerOn) return;
-        if (shotPanel.contains(e.target) || shotFab.contains(e.target) || selChip.contains(e.target)) return;
-        shotPanel.classList.remove('show');
-        reflectPrivacy();
-      });
+      // Opening the panel must not clear the text that was just selected —
+      // otherwise narrowing a selection and then reaching for the panel is a
+      // dead end: the tap that reopens it throws the selection away.
+      shotFab.addEventListener('pointerdown', (e) => e.preventDefault());
+      shotFab.addEventListener('mousedown', (e) => e.preventDefault());
+      // NOTE: no tap-outside-to-dismiss here. Every attempt to adjust a
+      // selection is a tap outside the panel, and closing on those made the
+      // panel impossible to keep open while working on a selection. Close it
+      // with the ✕ or the shield button instead.
       // Pressing a button normally collapses the text selection before the
       // click fires — keep it alive so "Blur" has something to work on.
       $('shotBlurSel').addEventListener('pointerdown', (e) => e.preventDefault());
