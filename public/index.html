@@ -3966,6 +3966,16 @@
               ? { height: fullHeight + 'px', overflow: 'visible' }
               : { transform: 'translateY(-' + window.scrollY + 'px)' },
           };
+          if (fullPage && !sheetNode) {
+            // The bottom bar is anchored to the end of <body>, and with
+            // height:auto that box stops at the last card — on a short page the
+            // bar would ride up under it, on a tall one it is fine by accident.
+            // Pin body to the image height so the bar always lands at the very
+            // bottom of the shot.
+            // !important, because the .shot-fullpage rule sets min-height:100%
+            // with !important and would otherwise win over an inline value.
+            document.body.style.setProperty('min-height', fullHeight + 'px', 'important');
+          }
           let node = document.documentElement;
           if (sheetNode) {
             const rect = sheetNode.getBoundingClientRect();
@@ -3998,6 +4008,7 @@
         } finally {
           if (restoreFieldBlurs) restoreFieldBlurs();
           if (restoreSheet) restoreSheet();
+          document.body.style.removeProperty('min-height');
           document.body.classList.remove('screenshotting');
           document.body.classList.remove('shot-no-nav');
           document.documentElement.classList.remove('shot-fullpage');
