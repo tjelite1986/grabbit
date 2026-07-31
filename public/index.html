@@ -236,6 +236,9 @@
       }
       .hcard.has-img { min-height: 150px; border-color: transparent; align-items: stretch; }
       .hcard.has-img .bg { position: absolute; inset: 0; background-size: cover; background-position: center; }
+      /* Music rows use a real <img> for the cover: hundreds of rows must load
+         their art lazily, which a background-image cannot do. */
+      .hcard.has-img img.bg { width: 100%; height: 100%; object-fit: cover; }
       .hcard.has-img::after {
         content: ""; position: absolute; inset: 0;
         background: linear-gradient(180deg, rgba(0,0,0,.35), rgba(0,0,0,.65));
@@ -2897,6 +2900,16 @@
         loadHistory();
       });
 
+      // A cover request 404s when the file carries no art. Error events don't
+      // bubble, so this listens in the capture phase.
+      historyList.addEventListener('error', (e) => {
+        const img = e.target;
+        if (!img || img.tagName !== 'IMG' || !img.classList.contains('bg')) return;
+        const card = img.closest('.hcard');
+        if (card) card.classList.remove('has-img');
+        img.remove();
+      }, true);
+
       function itemKind(it) {
         const f = (it.filename || '').toLowerCase();
         if (/\.(mp3|m4a|opus|ogg|aac)$/.test(f) || /^(audio|navidrome)\//.test(it.channel || '')) return 'audio';
@@ -3032,7 +3045,12 @@
           const link = sh ? '<a href="' + esc(sh) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title;
           const album = [t.album, t.year ? '(' + t.year + ')' : ''].filter(Boolean).join(' ');
           const meta = [artist, album].filter(Boolean).map(esc).join(' · ');
-          return '<div class="hcard' + (t.missing ? ' failed' : '') + '">' +
+          // The album art embedded in the file, extracted+cached server-side.
+          // The stamp busts that cache when the track is retagged.
+          const cover = t.missing ? '' :
+            '/api/music/cover?id=' + encodeURIComponent(t.id) + '&v=' + (t.editedAt || t.time || 0);
+          return '<div class="hcard' + (cover ? ' has-img' : '') + (t.missing ? ' failed' : '') + '">' +
+            (cover ? '<img class="bg" data-media-bg="1" loading="lazy" decoding="async" alt="" src="' + esc(cover) + '">' : '') +
             '<div class="h-main">' +
               '<div class="h-title">' + link + '</div>' +
               '<div class="h-row">' +

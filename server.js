@@ -844,6 +844,8 @@ async function scanMusicLibraries() {
     tracks.sort((a, b) => b.time - a.time);
     musicLastScan = Date.now();
     writeMusic(tracks);
+    pruneCovers();
+    warmCovers();
     return { added: fresh.length, missing: gone, total: tracks.length };
   } finally {
     musicScanRunning = false;
@@ -2035,6 +2037,131 @@ app.get('/api/music', (req, res) => {
 // picker next to the genres field.
 app.get('/api/genres', (_req, res) => res.json({ ok: true, genres: knownGenres() }));
 
+// Cover art for a library track, as a small JPEG. The album art is embedded in
+// the file itself, so it is extracted once (ffmpeg reads the attached picture
+// of opus/m4a/mp3/flac alike) and cached on the data volume — a list of a
+// thousand rows must not re-decode a thousand files.
+const COVER_DIR = path.join(DATA_DIR, 'covers');
+const COVER_SIZE = 200;
+
+function coverCachePath(row) {
+  // The id is Grabbit's own and safe as a name; the edit time busts the cache
+  // when a track is retagged with new art.
+  const stamp = row.editedAt || row.time || 0;
+  return path.join(COVER_DIR, `${String(row.id).replace(/[^a-zA-Z0-9_-]/g, '_')}-${stamp}.jpg`);
+}
+
+// Extracting art is an ffmpeg run per file, and a freshly scrolled list asks
+// for dozens at once — more than a Pi should start at the same time.
+const COVER_MAX_PARALLEL = 3;
+let coverRunning = 0;
+const coverQueue = [];
+
+function withCoverSlot(fn) {
+  return new Promise((resolve) => {
+    const run = () => {
+      coverRunning++;
+      Promise.resolve()
+        .then(fn)
+        .catch(() => false)
+        .then((v) => {
+          coverRunning--;
+          const next = coverQueue.shift();
+          if (next) next();
+          resolve(v);
+        });
+    };
+    if (coverRunning < COVER_MAX_PARALLEL) run();
+    else coverQueue.push(run);
+  });
+}
+
+function extractCover(src, out) {
+  return new Promise((resolve) => {
+    const p = spawn(FFMPEG, [
+      '-loglevel', 'error', '-y',
+      '-i', src,
+      // The embedded picture is a video stream; take the first one only.
+      '-map', '0:v:0', '-frames:v', '1',
+      '-vf', `scale=${COVER_SIZE}:${COVER_SIZE}:force_original_aspect_ratio=increase,crop=${COVER_SIZE}:${COVER_SIZE}`,
+      '-f', 'mjpeg', out,
+    ]);
+    p.on('error', () => resolve(false));
+    p.on('close', (code) => resolve(code === 0 && fs.existsSync(out) && fs.statSync(out).size > 0));
+  });
+}
+
+// GET /api/music/cover?id=...  -> square cover thumbnail, 404 when the file
+// carries no art. Answers are immutable: the url carries the track's stamp.
+app.get('/api/music/cover', async (req, res) => {
+  const row = readMusic().find((t) => t.id === String(req.query.id || ''));
+  if (!row) return res.status(404).end();
+  const cached = coverCachePath(row);
+  const send = () => {
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.type('jpeg').sendFile(cached);
+  };
+  if (fs.existsSync(cached)) return send();
+  const src = path.join(NAV_LIBS[row.lib === 'kids' ? 'kids' : 'main'], row.file);
+  if (!fs.existsSync(src)) return res.status(404).end();
+  try {
+    fs.mkdirSync(COVER_DIR, { recursive: true });
+  } catch {
+    /* fall through — the extract will fail and answer 404 */
+  }
+  const ok = await withCoverSlot(() => extractCover(src, cached));
+  if (!ok) {
+    fs.rm(cached, { force: true }, () => {});
+    return res.status(404).end();
+  }
+  send();
+});
+
+// Extract the covers the cache is still missing, in the background and a few
+// at a time, so the list is instant instead of decoding a file per row on
+// first sight. Runs after a scan; a request that beats it extracts its own.
+let coverWarmRunning = false;
+async function warmCovers() {
+  if (coverWarmRunning) return;
+  coverWarmRunning = true;
+  try {
+    let made = 0;
+    for (const row of readMusic()) {
+      if (row.missing) continue;
+      const cached = coverCachePath(row);
+      if (fs.existsSync(cached)) continue;
+      const src = path.join(NAV_LIBS[row.lib === 'kids' ? 'kids' : 'main'], row.file);
+      if (!fs.existsSync(src)) continue;
+      try {
+        fs.mkdirSync(COVER_DIR, { recursive: true });
+      } catch {
+        return;
+      }
+      if (await withCoverSlot(() => extractCover(src, cached))) made++;
+      else fs.rm(cached, { force: true }, () => {});
+    }
+    if (made) console.log(`music covers: extracted ${made}`);
+  } finally {
+    coverWarmRunning = false;
+  }
+}
+
+// A retagged track leaves its old cover behind (the file name carries the
+// stamp the log has since changed), so a scan drops whatever no row claims.
+function pruneCovers() {
+  let live;
+  let files;
+  try {
+    live = new Set(readMusic().map((t) => path.basename(coverCachePath(t))));
+    files = fs.readdirSync(COVER_DIR);
+  } catch {
+    return;
+  }
+  for (const f of files) {
+    if (!live.has(f)) fs.rm(path.join(COVER_DIR, f), { force: true }, () => {});
+  }
+}
+
 // GET /api/music/description?id=... -> the description behind a library
 // track, for the edit sheet: whatever the file itself carries, and otherwise
 // the source page's own description (the real artist/title often hides there).
@@ -2157,6 +2284,7 @@ app.post('/api/music/edit', express.json(), async (req, res) => {
   }
 
   rememberGenres(genres);
+  const staleCover = coverCachePath(row);
   Object.assign(row, {
     lib: toLib,
     file: path.relative(toRoot, newPath),
@@ -2171,6 +2299,7 @@ app.post('/api/music/edit', express.json(), async (req, res) => {
     editedAt: Date.now(),
   });
   writeMusic(tracks);
+  fs.rm(staleCover, { force: true }, () => {});
   console.log(`music edit: ${row.file}`);
   res.json({ ok: true, track: row, moved: newPath !== oldPath });
 });

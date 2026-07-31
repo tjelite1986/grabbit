@@ -263,7 +263,10 @@ Two different questions, answered by two different files in `DATA_DIR`:
   came from. Unlike the download history (capped at the last 200 downloads of
   any kind) this log is never trimmed, so it stays a complete record.
 
-**Downloads → Music** lists that log: search across artist/title/album, filter
+**Downloads → Music** lists that log — each row under the track's own cover
+art, extracted from the file once and cached as a small JPEG in
+`DATA_DIR/covers` (a scan pre-extracts what is missing, a few at a time, and
+drops covers no track claims any more). Search across artist/title/album, filter
 by library, and **Rescan** to reconcile it with what is actually on disk. A scan
 walks both music roots, reads the tags of anything the log has not seen (so
 files copied in by hand, or downloaded before the log existed, still show up)
