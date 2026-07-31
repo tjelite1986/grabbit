@@ -271,6 +271,16 @@ and flags rows whose file has since disappeared. One scan also runs shortly
 after every start, and **More → Music library** has the same scan next to the
 current track count and the time of the last one.
 
+**Editing a track you already have.** Every row in the music list has a pencil
+button: it opens the same tag fields the download sheet uses — song title,
+artists, release type, album, date, genres (with the picker) and which library
+the track belongs to — but applies them to the file that is already on disk. No
+download happens: the tags are rewritten in place (cover art survives), the file
+is re-filed under the layout the new tags imply, the folders it left behind are
+removed if empty, and the music log follows along. The iTunes/Deezer lookup is
+available there too, so a badly tagged rip can be fixed from a database match.
+Grabbit refuses the save if another track already sits under the new name.
+
 **Duplicate detection.** The same song is uploaded many times — a topic channel,
 an official video, a lyric video — and each of those is a *different source*, so
 the downloaded registry cannot recognise it. Grabbit therefore also matches

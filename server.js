@@ -1241,6 +1241,22 @@ function safeMusicPart(name, fallback) {
   return clampBytes(cut, 100) || fallback;
 }
 
+// Where a track belongs inside a music library:
+// [Artist]/[Album(Year)]/[Artist] - [Album(Year)] - [Title].ext
+// Artist + album repeat in the file name on purpose — the file stays traceable
+// even when it ends up outside its folder.
+function musicLibraryTarget(root, { artist, album, year, title, ext }) {
+  const artistDir = safeMusicPart(artist, 'Unknown Artist');
+  const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? `(${year})` : '');
+  // Three parts of up to 100 bytes each would still overflow the 255-byte
+  // limit on their own, so the assembled stem gets its own budget.
+  const stemName = `${artistDir} - ${albumDir} - ${safeMusicPart(title, 'Unknown')}`;
+  return {
+    dir: path.join(root, artistDir, albumDir),
+    filename: `${clampBytes(stemName, 200) || 'track'}.${ext}`,
+  };
+}
+
 // Rewrite the tags of an audio file in place via mutagen (yt-dlp's tag
 // library, present in the image). Values: string, list (multi-value tag —
 // several artists/genres, which Navidrome reads natively), '' / [] (clears
@@ -1937,6 +1953,128 @@ app.get('/api/music', (req, res) => {
 // GET /api/genres -> every genre Grabbit knows, most-used first, for the
 // picker next to the genres field.
 app.get('/api/genres', (_req, res) => res.json({ ok: true, genres: knownGenres() }));
+
+// POST /api/music/edit -> retag and re-file a track that is already in a
+// library: the same fields the download sheet offers, applied to a file that
+// is already on disk instead of to a fresh download. Body (JSON):
+//   { id, title, artists, album, release, date, genres, lib }
+// artists/genres are the raw field strings (same grammar as a download).
+app.post('/api/music/edit', express.json(), async (req, res) => {
+  const body = req.body || {};
+  const tracks = readMusic();
+  const row = tracks.find((t) => t.id === String(body.id || ''));
+  if (!row) return res.status(404).json({ ok: false, error: 'Track not found in the music log' });
+
+  const fromRoot = NAV_LIBS[row.lib === 'kids' ? 'kids' : 'main'];
+  const oldPath = path.join(fromRoot, row.file);
+  if (!fs.existsSync(oldPath)) {
+    return res.status(410).json({ ok: false, error: 'The file is no longer in the library — run a scan.' });
+  }
+
+  const artists = body.artists ? splitList(String(body.artists)) : (row.artists || []);
+  if (!artists.length) artists.push('Unknown Artist');
+  const title = String(body.title || row.title || '').trim() || 'Unknown';
+  const release = ['album', 'single', 'ep'].includes(body.release) ? body.release : 'album';
+  // A single is filed as its own album, exactly as a fresh download would be.
+  const album = (release === 'single' ? title : String(body.album || '').trim() || title).trim();
+  const date = body.date ? String(body.date).slice(0, 10) : null;
+  const yearNum = Number(String(date || '').slice(0, 4));
+  const year = yearNum >= 1900 && yearNum <= new Date().getFullYear() + 1 ? String(yearNum) : null;
+  const genres = body.genres != null ? splitGenres(String(body.genres)) : (row.genres || []);
+  // Moving between the main and the kids library is a plain move of the file.
+  const toLib = body.lib === 'kids' ? 'kids' : body.lib === 'main' ? 'main' : (row.lib === 'kids' ? 'kids' : 'main');
+  const toRoot = NAV_LIBS[toLib];
+
+  const ext = safeExt(path.extname(oldPath).slice(1), 'm4a');
+  const target = musicLibraryTarget(toRoot, { artist: artists[0], album, year, title, ext });
+  const newPath = path.join(target.dir, target.filename);
+  // Never let a crafted field write outside the library root.
+  if (path.relative(toRoot, newPath).startsWith('..')) {
+    return res.status(400).json({ ok: false, error: 'Invalid target path' });
+  }
+  if (newPath !== oldPath && fs.existsSync(newPath)) {
+    return res.status(409).json({ ok: false, error: 'Another track is already filed under that name.' });
+  }
+
+  try {
+    await tagAudio(oldPath, {
+      title,
+      artist: artists,
+      albumartist: artists[0],
+      album,
+      date: year ? date : null,
+      genre: genres,
+      releasetype: release,
+      // Same clean-up a download does: no leftover video description/links.
+      synopsis: '',
+      description: '',
+      comment: '',
+      purl: '',
+    });
+  } catch (e) {
+    return res.status(422).json({ ok: false, error: 'Tagging failed: ' + String(e.message || e) });
+  }
+
+  if (newPath !== oldPath) {
+    try {
+      fs.mkdirSync(target.dir, { recursive: true });
+      fs.renameSync(oldPath, newPath);
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: 'Could not move the file: ' + String(e.message || e) });
+    }
+    pruneEmptyDirs(path.dirname(oldPath), fromRoot);
+    // The downloaded registry shows the file name it saved; keep it truthful
+    // so a later scan can still tie this file back to its source url.
+    const map = readDownloaded();
+    let touched = false;
+    for (const v of Object.values(map)) {
+      if (v && v.filename === row.filename) {
+        v.filename = target.filename;
+        touched = true;
+      }
+    }
+    if (touched) {
+      try {
+        fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(map));
+      } catch (e) {
+        console.warn('downloaded registry write failed:', e.message);
+      }
+    }
+  }
+
+  rememberGenres(genres);
+  Object.assign(row, {
+    lib: toLib,
+    file: path.relative(toRoot, newPath),
+    filename: target.filename,
+    artists,
+    title,
+    album,
+    year,
+    genres,
+    release,
+    missing: false,
+    editedAt: Date.now(),
+  });
+  writeMusic(tracks);
+  console.log(`music edit: ${row.file}`);
+  res.json({ ok: true, track: row, moved: newPath !== oldPath });
+});
+
+// Drop the directories a moved track left behind, up to (but never including)
+// the library root.
+function pruneEmptyDirs(dir, root) {
+  let cur = dir;
+  while (cur.startsWith(root) && cur !== root) {
+    try {
+      if (fs.readdirSync(cur).length) return;
+      fs.rmdirSync(cur);
+    } catch {
+      return;
+    }
+    cur = path.dirname(cur);
+  }
+}
 
 // POST /api/music/scan -> reconcile the log with the libraries on disk.
 app.post('/api/music/scan', async (_req, res) => {
@@ -2674,18 +2812,11 @@ async function produceAudio(job, meta, params, onProgress) {
         } catch (e) {
           console.warn('audio tagging failed, saving untagged:', String(e.message || e));
         }
-        // Library layout: [Artist]/[Album(Year)]/[Artist] - [Album(Year)] - [Title].ext
-        // Artist + album repeat in the file name on purpose: the file stays
-        // traceable even when it ends up outside its folder.
-        const artistDir = safeMusicPart(artists[0], 'Unknown Artist');
-        const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? `(${year})` : '');
         // What ended up in the tags, for the music log written after the copy.
         navTags = { artists, title: songTitle, album, year, genres };
-        libDir = path.join(navRoot, artistDir, albumDir);
-        // Three parts of up to 100 bytes each would still overflow the 255-byte
-        // limit on their own, so the assembled stem gets its own budget.
-        const stemName = `${artistDir} - ${albumDir} - ${safeMusicPart(songTitle, 'Unknown')}`;
-        finalName = `${clampBytes(stemName, 200) || 'track'}.${realExt}`;
+        const target = musicLibraryTarget(navRoot, { artist: artists[0], album, year, title: songTitle, ext: realExt });
+        libDir = target.dir;
+        finalName = target.filename;
       }
       fs.mkdirSync(libDir, { recursive: true });
       const libPath = path.join(libDir, finalName);
@@ -2703,6 +2834,7 @@ async function produceAudio(job, meta, params, onProgress) {
           album: navTags.album || null,
           year: navTags.year || null,
           genres: navTags.genres || [],
+          release: params.release,
           duration: durationKnown(meta) ? Math.round(Number(meta.duration)) : null,
           sourceUrl: meta.sourceUrl || params.url,
           source: 'grabbit',

@@ -970,7 +970,7 @@
           <input id="shTags" type="text" autocomplete="off" placeholder="#tag1 #tag2" />
         </div>
 
-        <div class="field">
+        <div class="field" id="shDestField">
           <label>Save to</label>
           <div class="seg" id="shDest">
             <button type="button" data-v="" class="on">Elite-v2 shorts</button>
@@ -1913,6 +1913,9 @@
       // ----------------------------------------------------------------- SHEET
       const sheetBack = $('sheetBack'), sheet = $('sheet');
       let sheetMode = 'video';   // video | audio | image
+      // Set when the sheet edits a track that is already in the library
+      // (retag + rename, no download). Holds the music-log row.
+      let sheetEdit = null;
       let sheetItem = null;      // for "all" or profile-single: the profile item; null for single resolve
       let sheetSingle = null;    // single resolve data
       let sheetAll = false;      // batch (download all) mode
@@ -2008,6 +2011,7 @@
         sheetAll = false;
         sheetMulti = false;
         openSheetCommon();
+        sheetEdit = null;
         const item = single || profileItem;
         $('shTitle').textContent = mode === 'audio' ? 'Download audio' : mode === 'image' ? 'Download image' : 'Download video';
         $('shSub').textContent = (item && (item.title || item.filename)) || '';
@@ -2024,6 +2028,7 @@
         if (!profileItems.length) return;
         sheetSelectedIds = ids && ids.length ? ids.slice() : null;
         sheetAll = true; sheetMode = 'video'; sheetSingle = null; sheetItem = null; sheetMulti = false;
+        sheetEdit = null;
         openSheetCommon();
         const n = sheetSelectedIds ? sheetSelectedIds.length : profileItems.length;
         $('shTitle').textContent = sheetSelectedIds ? 'Download selected' : 'Download all';
@@ -2038,12 +2043,41 @@
       function openSheetMulti(mode) {
         if (!multiUrls.length) return;
         sheetMode = mode; sheetSingle = null; sheetItem = null; sheetAll = false; sheetMulti = true;
+        sheetEdit = null;
         openSheetCommon();
         $('shTitle').textContent = 'Download ' + multiUrls.length + ' links';
         $('shSub').textContent = 'Each file is named and tagged from its own metadata.';
         $('shCreator').value = '';
         $('shTitleInput').value = '';
         openSheetUi();
+      }
+
+      // Edit a track that is already in a music library: the same tag fields as
+      // a Navidrome download, applied to the file on disk (retag + re-file).
+      function openSheetEdit(track) {
+        sheetEdit = track;
+        sheetMode = 'audio';
+        sheetSingle = null; sheetItem = null; sheetAll = false; sheetMulti = false;
+        openSheetCommon();
+        segSet($('shDest'), 'navidrome');
+        segSet($('shNavLib'), track.lib === 'kids' ? 'kids' : 'main');
+        $('shTitle').textContent = 'Edit track';
+        $('shSub').textContent = track.file;
+        // A single was filed under its own name, which is how it reads back.
+        const release = track.release || (track.album && track.title && track.album === track.title ? 'single' : 'album');
+        segSet($('shMusicRelease'), release);
+        $('shMusicTitle').value = track.title || '';
+        $('shMusicArtists').value = (track.artists || []).join(', ');
+        $('shMusicAlbum').value = release === 'single' ? '' : track.album || '';
+        $('shMusicDate').value = track.year || '';
+        $('shMusicGenres').value = (track.genres || []).join(', ');
+        // Fields come from the file's own tags; the iTunes/Deezer lookup stays
+        // available and only fills what is still empty.
+        musicFilledSeq = sheetSeq;
+        musicCandidates = [];
+        $('shDescBox').classList.add('hidden');
+        openSheetUi();
+        musicLookup();
       }
 
       function openSheetUi() {
@@ -2068,6 +2102,23 @@
 
       // Reflect option dependencies + confirm label inside the sheet.
       function syncSheet() {
+        // Editing a library track: no destination, no download options — only
+        // the tag fields, which is exactly what gets written to the file.
+        if (sheetEdit) {
+          for (const id of ['shTitleField', 'shCreatorField', 'shTagsField', 'shDestField', 'shChannelField',
+            'shFolderField', 'shNewFolderField', 'shVideoOpts', 'shAudioField', 'shContainerField',
+            'shThumbRow', 'shSubsRow', 'shSponsorRow', 'shCutsField', 'shSplitRow', 'shXargsField',
+            'shAtField', 'shWebRow', 'shDeviceRow']) $(id).classList.add('hidden');
+          $('shNavLibField').classList.remove('hidden');
+          $('shMusicFields').classList.remove('hidden');
+          const rel = segValue($('shMusicRelease'));
+          $('shMusicAlbumField').classList.toggle('hidden', rel === 'single');
+          $('shMusicAlbumLabel').textContent = rel === 'ep' ? 'EP name' : 'Album';
+          $('shWarn').textContent = 'The file is retagged and re-filed in place — nothing is downloaded.';
+          $('shWarn').classList.add('show');
+          $('shConfirmLabel').textContent = 'Save changes';
+          return;
+        }
         const isAudio = sheetMode === 'audio';
         const isImage = sheetMode === 'image';
         const isVideo = sheetMode === 'video';
@@ -2443,7 +2494,39 @@
         return p;
       }
 
+      // Save an edit instead of starting a download.
+      async function saveTrackEdit() {
+        const btn = $('shConfirm');
+        btn.disabled = true;
+        try {
+          const r = await fetch('/api/music/edit', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              id: sheetEdit.id,
+              title: $('shMusicTitle').value.trim(),
+              artists: $('shMusicArtists').value.trim(),
+              release: segValue($('shMusicRelease')),
+              album: $('shMusicAlbum').value.trim(),
+              date: $('shMusicDate').value.trim(),
+              genres: $('shMusicGenres').value.trim(),
+              lib: segValue($('shNavLib')),
+            }),
+          });
+          const d = await r.json();
+          if (!d.ok) { toast(d.error || 'Could not save the changes', 'bad'); return; }
+          toast(d.moved ? 'Retagged and renamed' : 'Tags updated', 'good');
+          closeSheet();
+          loadMusic();
+        } catch {
+          toast('Could not save the changes', 'bad');
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
       $('shConfirm').addEventListener('click', async () => {
+        if (sheetEdit) return saveTrackEdit();
         // Persist sheet choices as the new defaults.
         settings.dest = segValue($('shDest'));
         settings.channel = segValue($('shChannel'));
@@ -2761,6 +2844,14 @@
       });
 
       historyList.addEventListener('click', async (e) => {
+        // Edit an existing library track (music rows only).
+        const edit = e.target.closest('.h-edit');
+        if (edit) {
+          e.preventDefault();
+          const track = musicItems.find((t) => t.id === edit.dataset.id);
+          if (track) openSheetEdit(track);
+          return;
+        }
         // Re-download: refill the home form with the source URL and fetch it.
         const redo = e.target.closest('.h-redo');
         if (redo) {
@@ -2923,6 +3014,11 @@
               (t.missing ? '<div class="h-err">File is no longer in the library</div>' : '') +
             '</div>' +
             '<div class="h-side">' +
+              // Retag/rename the file that is already in the library.
+              (t.missing ? '' :
+                '<button class="h-edit" type="button" data-id="' + esc(t.id) + '" title="Edit tags and file name">' +
+                '<svg class="ic" viewBox="0 0 24 24"><path d="M4 20h4l10-10a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>' +
+                '</button>') +
               (sh
                 ? '<button class="h-redo" type="button" data-url="' + esc(sh) + '" title="Download again">' +
                   '<svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>' +
