@@ -2015,6 +2015,9 @@ app.get('/api/music', (req, res) => {
   const lib = req.query.lib === 'main' || req.query.lib === 'kids' ? req.query.lib : null;
   const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 200));
   const offset = Math.max(0, Number(req.query.offset) || 0);
+  // Where a track stands in a tidy-up pass: done = ticked off (an edit ticks
+  // it off too), todo = still to look at, edited = the tags were changed here.
+  const status = ['done', 'todo', 'edited'].includes(req.query.status) ? req.query.status : null;
   let items = readMusic();
   if (lib) items = items.filter((t) => t.lib === lib);
   if (q) {
@@ -2024,13 +2027,35 @@ app.get('/api/music', (req, res) => {
         .some((v) => String(v).toLowerCase().includes(q))
     );
   }
+  // Counted before the status filter, so the UI can say "N of M done".
+  const done = items.filter((t) => t.done).length;
+  const edited = items.filter((t) => t.editedAt).length;
+  if (status === 'done') items = items.filter((t) => t.done);
+  else if (status === 'todo') items = items.filter((t) => !t.done);
+  else if (status === 'edited') items = items.filter((t) => t.editedAt);
   res.json({
     ok: true,
     total: items.length,
+    done,
+    edited,
     scanning: musicScanRunning,
     lastScan: musicLastScan || null,
     items: items.slice(offset, offset + limit),
   });
+});
+
+// POST /api/music/done  { id, done } -> tick a track off (or un-tick it).
+// Purely a review marker: nothing on disk changes.
+app.post('/api/music/done', (req, res) => {
+  const body = req.body || {};
+  const tracks = readMusic();
+  const row = tracks.find((t) => t.id === String(body.id || ''));
+  if (!row) return res.status(404).json({ ok: false, error: 'Track not found in the music log' });
+  const on = body.done !== false;
+  row.done = on;
+  row.doneAt = on ? Date.now() : null;
+  writeMusic(tracks);
+  res.json({ ok: true, track: row });
 });
 
 // GET /api/genres -> every genre Grabbit knows, most-used first, for the
@@ -2297,6 +2322,9 @@ app.post('/api/music/edit', express.json(), async (req, res) => {
     release,
     missing: false,
     editedAt: Date.now(),
+    // Editing a track IS reviewing it; untick by hand to look at it again.
+    done: true,
+    doneAt: Date.now(),
   });
   writeMusic(tracks);
   fs.rm(staleCover, { force: true }, () => {});

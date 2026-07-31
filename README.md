@@ -267,7 +267,21 @@ Two different questions, answered by two different files in `DATA_DIR`:
 art, extracted from the file once and cached as a small JPEG in
 `DATA_DIR/covers` (a scan pre-extracts what is missing, a few at a time, and
 drops covers no track claims any more). Search across artist/title/album, filter
-by library, and **Rescan** to reconcile it with what is actually on disk. A scan
+by library, and **Rescan** to reconcile it with what is actually on disk.
+
+**Working through the library.** Each row carries two review markers, for
+cleaning up a library a bit at a time:
+
+- an **edited** badge with the time, on every track whose tags were changed here
+  — so a pass over a badly tagged import shows what has already been fixed;
+- a **tick** button that marks a track as dealt with (dimmed and struck through).
+  Saving an edit ticks the track off on its own; tracks that were fine as they
+  were can be ticked off without touching them, and a tick can be undone.
+
+The chip next to the library filter cycles **All tracks → Needs a look → Ticked
+off → Edited here**, and the line above the list counts how many are ticked off
+and how many were edited. Both markers live in the music log only — nothing on
+disk changes. A scan
 walks both music roots, reads the tags of anything the log has not seen (so
 files copied in by hand, or downloaded before the log existed, still show up)
 and flags rows whose file has since disappeared. One scan also runs shortly

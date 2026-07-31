@@ -217,6 +217,14 @@
       .genrepick .gchip .n { color: var(--faint); font-size: 11px; margin-left: 5px; }
       .genrepick .empty-note { font-size: 12.5px; color: var(--faint); padding: 2px; }
 
+      /* ---- review markers on a music row ---- */
+      .h-done { color: var(--faint); padding: 6px; border-radius: 999px; }
+      .h-done.on { color: #7ee2a8; }
+      .h-done:active { background: var(--surface-3); }
+      .hcard.done { opacity: .62; }
+      .hcard.done .h-title { text-decoration: line-through; text-decoration-thickness: 1px; }
+      .badge.edited { color: #ffd79b; border-color: #5e4526; background: rgba(94,69,38,.28); }
+
       /* ---- music log toolbar (Downloads > Music) ---- */
       .musicbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: -6px 0 14px; }
       .musicbar input[type="search"] {
@@ -634,6 +642,7 @@
         <div class="musicbar hidden" id="musicBar">
           <input id="musicSearch" type="search" placeholder="Search artist, title, album…" autocomplete="off" />
           <button class="chip" id="musicLib" type="button" data-lib="">All libraries</button>
+          <button class="chip" id="musicStatus" type="button">All tracks</button>
           <button class="chip" id="musicScan" type="button" title="Rescan the libraries on disk">
             <svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 4v5h-5" /></svg>
             Rescan
@@ -2875,6 +2884,32 @@
       });
 
       historyList.addEventListener('click', async (e) => {
+        // Tick a music row off (or undo it) — a review marker, nothing on disk.
+        const tick = e.target.closest('.h-done');
+        if (tick) {
+          e.preventDefault();
+          const track = musicItems.find((t) => t.id === tick.dataset.id);
+          if (!track) return;
+          tick.disabled = true;
+          try {
+            const r = await fetch('/api/music/done', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ id: track.id, done: !track.done }),
+            });
+            const d = await r.json();
+            if (!d.ok) { toast(d.error || 'Could not update the track', 'bad'); return; }
+            track.done = !!(d.track && d.track.done);
+            // A status filter is showing a subset — refetch so the row leaves it.
+            if (musicStatus) loadMusic();
+            else { renderMusic(); loadMusicCounts(); }
+          } catch {
+            toast('Could not update the track', 'bad');
+          } finally {
+            tick.disabled = false;
+          }
+          return;
+        }
         // Edit an existing library track (music rows only).
         const edit = e.target.closest('.h-edit');
         if (edit) {
@@ -2979,6 +3014,7 @@
       // Navidrome library — the download history above holds only the last 200
       // downloads of any kind, so music scrolls out of it within days.
       let musicItems = [], musicTotal = 0, musicLib = '', musicQuery = '', musicTimer = null;
+      let musicStatus = '', musicDone = 0, musicEdited = 0;
 
       function reflectMusicMode() {
         const on = hFilter === 'music';
@@ -2992,20 +3028,42 @@
         const params = new URLSearchParams({ limit: '500' });
         if (musicQuery) params.set('q', musicQuery);
         if (musicLib) params.set('lib', musicLib);
+        if (musicStatus) params.set('status', musicStatus);
         try {
           const r = await fetch('/api/music?' + params.toString());
           const d = await r.json();
           musicItems = (d.items || []).filter(Boolean);
           musicTotal = d.total || 0;
+          musicDone = d.done || 0;
+          musicEdited = d.edited || 0;
           const scanned = d.lastScan ? 'last scan ' + relTime(d.lastScan) : 'not scanned yet';
           $('musicNote').textContent =
             musicTotal + ' track' + (musicTotal === 1 ? '' : 's') +
             (musicItems.length < musicTotal ? ' (showing ' + musicItems.length + ')' : '') +
-            ' · ' + scanned;
+            ' · ' + musicDone + ' ticked off · ' + musicEdited + ' edited · ' + scanned;
           renderMusic();
         } catch {
           toast('Could not load the music log', 'bad');
         }
+      }
+
+      // Refresh just the counters (a tick doesn't change which rows are shown
+      // unless a status filter is active).
+      async function loadMusicCounts() {
+        const params = new URLSearchParams({ limit: '1' });
+        if (musicQuery) params.set('q', musicQuery);
+        if (musicLib) params.set('lib', musicLib);
+        try {
+          const r = await fetch('/api/music?' + params.toString());
+          const d = await r.json();
+          musicDone = d.done || 0;
+          musicEdited = d.edited || 0;
+          const scanned = d.lastScan ? 'last scan ' + relTime(d.lastScan) : 'not scanned yet';
+          $('musicNote').textContent =
+            musicTotal + ' track' + (musicTotal === 1 ? '' : 's') +
+            (musicItems.length < musicTotal ? ' (showing ' + musicItems.length + ')' : '') +
+            ' · ' + musicDone + ' ticked off · ' + musicEdited + ' edited · ' + scanned;
+        } catch { /* leave the line as it was */ }
       }
 
       $('musicSearch').addEventListener('input', (e) => {
@@ -3022,6 +3080,18 @@
         btn.classList.toggle('active', !!next);
         loadMusic();
       });
+      $('musicStatus').addEventListener('click', () => {
+        // Cycles All -> still to do -> ticked off -> edited here.
+        const next = { '': 'todo', todo: 'done', done: 'edited', edited: '' }[musicStatus];
+        musicStatus = next;
+        const btn = $('musicStatus');
+        btn.textContent = next === 'todo' ? 'Needs a look'
+          : next === 'done' ? 'Ticked off'
+          : next === 'edited' ? 'Edited here' : 'All tracks';
+        btn.classList.toggle('active', !!next);
+        loadMusic();
+      });
+
       $('musicScan').addEventListener('click', async () => {
         const btn = $('musicScan');
         const markup = btn.innerHTML;
@@ -3049,17 +3119,27 @@
           // The stamp busts that cache when the track is retagged.
           const cover = t.missing ? '' :
             '/api/music/cover?id=' + encodeURIComponent(t.id) + '&v=' + (t.editedAt || t.time || 0);
-          return '<div class="hcard' + (cover ? ' has-img' : '') + (t.missing ? ' failed' : '') + '">' +
+          return '<div class="hcard' + (cover ? ' has-img' : '') + (t.missing ? ' failed' : '') + (t.done ? ' done' : '') + '">' +
             (cover ? '<img class="bg" data-media-bg="1" loading="lazy" decoding="async" alt="" src="' + esc(cover) + '">' : '') +
             '<div class="h-main">' +
               '<div class="h-title">' + link + '</div>' +
               '<div class="h-row">' +
                 '<span class="badge chserver">' + (t.lib === 'kids' ? 'navidrome/kids' : 'navidrome/music') + '</span>' +
+                // Tags changed by hand here, and when.
+                (t.editedAt ? '<span class="badge edited">edited ' + esc(relTime(t.editedAt)) + '</span>' : '') +
                 (meta ? meta + ' · ' : '') + relTime(t.time) +
               '</div>' +
               (t.missing ? '<div class="h-err">File is no longer in the library</div>' : '') +
             '</div>' +
             '<div class="h-side">' +
+              // Tick a track off once it has been dealt with (an edit ticks it
+              // off on its own) — what is left is what still needs a look.
+              '<button class="h-done' + (t.done ? ' on' : '') + '" type="button" data-id="' + esc(t.id) + '"' +
+                ' title="' + (t.done ? 'Ticked off — tap to undo' : 'Tick off as done') + '">' +
+                (t.done
+                  ? '<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>'
+                  : '<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/></svg>') +
+              '</button>' +
               // Retag/rename the file that is already in the library.
               (t.missing ? '' :
                 '<button class="h-edit" type="button" data-id="' + esc(t.id) + '" title="Edit tags and file name">' +
