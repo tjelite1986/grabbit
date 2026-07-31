@@ -418,17 +418,364 @@ function markDownloaded(sourceUrl, filename, site, mediaId, channel) {
 function downloadedEntry(sourceUrl, site, mediaId) {
   const map = readDownloaded();
   const key = idKey(site, mediaId);
-  // A site-native id is authoritative — do NOT fall back to the sourceUrl key
-  // when we have one. Some extractors (xxxfollow) set sourceUrl to the shared
-  // PROFILE url, so the URL fallback would mark every clip of a creator as
-  // downloaded the moment any single one of them was.
-  if (key) return map[key] || null;
-  return (sourceUrl && map[mediaKey(sourceUrl)]) || null;
+  if (key && map[key]) return map[key];
+  const urlKey = sourceUrl ? mediaKey(sourceUrl) : null;
+  if (!urlKey) return null;
+  // The site slug is not stable across the two paths that produce it: a single
+  // URL is resolved by yt-dlp and names itself ("youtube"), while a playlist
+  // listing has no extractor info and falls back to the hostname
+  // ("music.youtube.com"). So an id-key miss is not proof of a new clip and
+  // the URL key gets a second chance — but only when it identifies THIS clip.
+  // Some extractors (xxxfollow) set sourceUrl to the shared PROFILE url, and
+  // trusting that key would mark every clip of a creator as downloaded the
+  // moment any single one of them was; such a key never carries the clip's
+  // own id, which is exactly what this test looks for.
+  if (key && !urlKey.includes(String(mediaId))) return null;
+  return map[urlKey] || null;
 }
 
 function isDownloaded(sourceUrl, site, mediaId) {
   return !!downloadedEntry(sourceUrl, site, mediaId);
 }
+
+// A registry key back into a URL, for rows whose own source url was never
+// stored (the registry predates the music log). Only the URL-shaped keys can
+// be turned back — an `id:site:mediaId` key carries no address.
+function urlFromKey(key) {
+  if (!key || key.startsWith('id:')) return null;
+  if (key.startsWith('yt:')) return `https://www.youtube.com/watch?v=${key.slice(3)}`;
+  return `https://${key}`;
+}
+
+// ---------------------------------------------------------------------------
+// Music log: one row per track that lives in a Navidrome library. The download
+// history is capped at HISTORY_MAX and dominated by video saves, so music
+// scrolls out of it within days — this log is uncapped and answers "which
+// songs are in the library, and where did each come from". Rows are keyed by
+// the track's path inside its library, so a scan can also pick up files that
+// arrived some other way (copied in by hand, or downloaded before this log
+// existed).
+const MUSIC_FILE = path.join(DATA_DIR, 'music.json');
+const AUDIO_EXTS = new Set(['.opus', '.m4a', '.mp3', '.flac', '.ogg', '.aac', '.wav', '.webm']);
+let musicCache = null;
+let musicScanRunning = false;
+let musicLastScan = 0;
+let musicSeq = 0;
+// Artist/title index over the log, rebuilt lazily whenever it changes.
+let musicIndex = null;
+let musicIndexVersion = -1;
+let musicVersion = 0;
+
+function readMusic() {
+  if (!musicCache) {
+    try {
+      const data = JSON.parse(fs.readFileSync(MUSIC_FILE, 'utf8'));
+      musicCache = Array.isArray(data.tracks) ? data.tracks : [];
+      musicLastScan = Number(data.lastScan) || 0;
+    } catch {
+      musicCache = [];
+    }
+  }
+  return musicCache;
+}
+
+function writeMusic(tracks) {
+  musicCache = tracks;
+  // Invalidates the artist/title index built for library lookups.
+  musicVersion++;
+  try {
+    fs.writeFileSync(MUSIC_FILE, JSON.stringify({ lastScan: musicLastScan, tracks }));
+  } catch (e) {
+    console.warn('music log write failed:', e.message);
+  }
+}
+
+function musicKey(lib, file) {
+  return `${lib}/${file}`;
+}
+
+// Add (or refresh) one track. A re-download of the same path replaces its row
+// rather than stacking a second one — the library only holds one such file.
+function recordMusic(entry) {
+  const tracks = readMusic();
+  const key = musicKey(entry.lib, entry.file);
+  const at = entry.time || Date.now();
+  const i = tracks.findIndex((t) => musicKey(t.lib, t.file) === key);
+  const row = { id: `${at}-${musicSeq++}`, time: at, missing: false, ...entry };
+  if (i >= 0) tracks[i] = { ...tracks[i], ...row, id: tracks[i].id };
+  else tracks.unshift(row);
+  writeMusic(tracks);
+}
+
+// ---------------------------------------------------------------------------
+// "Do we already have this song?" — matching a clip against the library by its
+// tags rather than its URL. The downloaded registry only recognises a repeat of
+// the same SOURCE; the same track uploaded again (a different video id, another
+// channel, a re-upload) is a different source but the same song, and Navidrome
+// would end up with it twice.
+function musicNorm(s) {
+  return String(s == null ? '' : s)
+    .toLowerCase()
+    .normalize('NFKD')
+    // Noise the sites add to a title but a music library never keeps.
+    .replace(/\((?:official\s*)?(?:music\s*)?(?:video|audio|lyrics?|visualizer|hd|hq)\)/g, ' ')
+    .replace(/\[(?:official\s*)?(?:music\s*)?(?:video|audio|lyrics?|visualizer|hd|hq)\]/g, ' ')
+    // "Artist - Topic" is YouTube's auto-generated channel for a real artist.
+    .replace(/\s*-\s*topic\s*$/, ' ')
+    .replace(/[\u0300-\u036f]/g, '')
+    // Keep letters from every script — a CJK or Cyrillic title is still a
+    // title, and dropping it would make those tracks unmatchable.
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    // Upload-quality noise that survived the bracket forms above ("\u2026 HD",
+    // "\u2026 official video", "\u2026 4k remaster"). Only ever trailing words \u2014 the
+    // same words inside a title are part of it.
+    .replace(/(?:\s+(?:official|music|video|audio|lyrics?|visualizer|remastered?|hd|hq|4k|mv))+$/, '')
+    .trim();
+}
+
+function buildMusicIndex() {
+  const byTrack = new Map();
+  const byTitle = new Map();
+  for (const t of readMusic()) {
+    if (t.missing) continue;
+    const title = musicNorm(t.title);
+    if (!title) continue;
+    if (!byTitle.has(title)) byTitle.set(title, t);
+    for (const a of t.artists && t.artists.length ? t.artists : ['']) {
+      const key = `${musicNorm(a)}|${title}`;
+      if (!byTrack.has(key)) byTrack.set(key, t);
+    }
+  }
+  return { byTrack, byTitle };
+}
+
+function getMusicIndex() {
+  if (!musicIndex || musicIndexVersion !== musicVersion) {
+    musicIndex = buildMusicIndex();
+    musicIndexVersion = musicVersion;
+  }
+  return musicIndex;
+}
+
+// What a video title might mean as a song title. Video titles are written as
+// "Artist - Song" far more often than a tagged library is, so the artist
+// prefix has to come off before the two can be compared. A suffix like
+// "(Live ...)" is deliberately kept — that is a different recording.
+function titleCandidates(title, artists) {
+  const base = musicNorm(title);
+  if (!base) return [];
+  const out = [base];
+  const dash = String(title).split(/\s+[-–—]\s+/);
+  if (dash.length > 1) {
+    const tail = musicNorm(dash.slice(1).join(' - '));
+    if (tail) out.push(tail);
+  }
+  for (const a of (artists || []).filter(Boolean)) {
+    const na = musicNorm(a);
+    if (!na) continue;
+    for (const c of [...out]) {
+      if (c.startsWith(na + ' ')) out.push(c.slice(na.length + 1));
+    }
+  }
+  return [...new Set(out)].filter(Boolean);
+}
+
+// A track already in a Navidrome library, or null. `weak` means only the title
+// matched (the artist read differently on the two sides) — enough to warn about
+// but never enough to skip a download on its own.
+function libraryMatch({ artists, title }) {
+  const cands = titleCandidates(title, artists);
+  if (!cands.length) return null;
+  const { byTrack, byTitle } = getMusicIndex();
+  const hitOf = (t, weak) => ({ lib: t.lib, file: t.file, title: t.title, artists: t.artists || [], weak });
+  for (const c of cands) {
+    for (const a of (artists || []).filter(Boolean)) {
+      const hit = byTrack.get(`${musicNorm(a)}|${c}`);
+      if (hit) return hitOf(hit, false);
+    }
+  }
+  for (const c of cands) {
+    const loose = byTitle.get(c);
+    if (loose) return hitOf(loose, true);
+  }
+  return null;
+}
+
+// The artist/title a resolved job would be filed under, for the lookup above.
+// Site music metadata wins; the uploader/title are the fallback every clip has.
+function musicIdentity(job) {
+  const m = (job && job.music) || {};
+  const artists = m.artist ? splitArtists(m.artist) : [];
+  if (job && job.creator) artists.push(job.creator);
+  return { artists, title: m.track || (job && job.title) || '' };
+}
+
+// Read tags off a batch of files in one python process (mutagen, the same
+// library the tagger writes with). One JSON object per line back.
+const READ_TAGS_SCRIPT = [
+  'import sys, json',
+  'from mutagen import File',
+  'for line in sys.stdin:',
+  "    p = line.rstrip('\\n')",
+  '    if not p: continue',
+  "    out = {'path': p}",
+  '    try:',
+  '        f = File(p, easy=True)',
+  '        t = dict(f.tags or {}) if f is not None else {}',
+  '        def vals(k):',
+  '            v = t.get(k)',
+  '            if v is None: return []',
+  '            if isinstance(v, list): return [str(x) for x in v if str(x).strip()]',
+  '            return [str(v)] if str(v).strip() else []',
+  "        out['artists'] = vals('artist') or vals('albumartist')",
+  "        out['title'] = (vals('title') or [''])[0]",
+  "        out['album'] = (vals('album') or [''])[0]",
+  "        out['date'] = (vals('date') or [''])[0]",
+  "        out['genres'] = vals('genre')",
+  "        info = getattr(f, 'info', None)",
+  "        out['duration'] = round(info.length) if info is not None and getattr(info, 'length', None) else None",
+  '    except Exception as e:',
+  "        out['error'] = str(e)",
+  '    print(json.dumps(out))',
+].join('\n');
+
+function readTags(paths) {
+  return new Promise((resolve) => {
+    if (!paths.length) return resolve(new Map());
+    const p = spawn('python3', ['-c', READ_TAGS_SCRIPT]);
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('error', () => resolve(new Map()));
+    p.on('close', () => {
+      if (err.trim()) console.warn('tag read warnings:', err.trim().split('\n').pop());
+      const map = new Map();
+      for (const line of out.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const row = JSON.parse(line);
+          map.set(row.path, row);
+        } catch {
+          /* skip an unparsable row */
+        }
+      }
+      resolve(map);
+    });
+    p.stdin.on('error', () => {});
+    p.stdin.end(paths.join('\n') + '\n');
+  });
+}
+
+function walkAudio(root) {
+  const found = [];
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) stack.push(p);
+      else if (AUDIO_EXTS.has(path.extname(e.name).toLowerCase())) found.push(p);
+    }
+  }
+  return found;
+}
+
+// Where a file on disk came from, best effort: the history log knows the exact
+// source url of anything grabbit downloaded, the downloaded registry knows at
+// least the identity. Both are matched on the file NAME — the library layout
+// (artist/album folders) is derived from tags that may since have changed.
+function sourceIndexByFilename() {
+  const byName = new Map();
+  for (const [key, v] of Object.entries(readDownloaded())) {
+    if (v && v.filename && !byName.has(v.filename)) byName.set(v.filename, urlFromKey(key));
+  }
+  // History wins where it has a row: it stores the real url, not a rebuilt one.
+  for (const e of readHistory()) {
+    if (e.filename && e.sourceUrl) byName.set(e.filename, e.sourceUrl);
+  }
+  return byName;
+}
+
+// Reconcile the log with what is actually on disk: add tracks it has never
+// seen (with their tags), and flag rows whose file is gone. Never deletes a
+// row — a track that was downloaded and later removed is still an answer to
+// "did grabbit fetch this".
+async function scanMusicLibraries() {
+  if (musicScanRunning) return { skipped: true };
+  musicScanRunning = true;
+  try {
+    const tracks = readMusic();
+    const known = new Map(tracks.map((t) => [musicKey(t.lib, t.file), t]));
+    const seen = new Set();
+    const fresh = [];
+    for (const [lib, root] of Object.entries(NAV_LIBS)) {
+      for (const p of walkAudio(root)) {
+        const file = path.relative(root, p);
+        const key = musicKey(lib, file);
+        seen.add(key);
+        if (!known.has(key)) fresh.push({ lib, root, file, path: p, key });
+      }
+    }
+    const tags = await readTags(fresh.map((f) => f.path));
+    const sources = sourceIndexByFilename();
+    for (const f of fresh) {
+      const t = tags.get(f.path) || {};
+      let mtime = Date.now();
+      try {
+        mtime = fs.statSync(f.path).mtimeMs;
+      } catch {
+        /* keep the fallback */
+      }
+      const name = path.basename(f.file);
+      tracks.push({
+        id: `scan-${Math.round(mtime)}-${musicSeq++}`,
+        time: Math.round(mtime),
+        lib: f.lib,
+        file: f.file,
+        filename: name,
+        artists: t.artists && t.artists.length ? t.artists : [],
+        title: t.title || path.parse(name).name,
+        album: t.album || null,
+        year: (String(t.date || '').match(/\d{4}/) || [null])[0],
+        genres: t.genres || [],
+        duration: t.duration || null,
+        sourceUrl: sources.get(name) || null,
+        // The row was reconstructed from the file itself, not written when the
+        // track was downloaded — its time is the file's, not a download time.
+        source: 'scan',
+        missing: false,
+      });
+    }
+    let gone = 0;
+    for (const t of tracks) {
+      const missing = !seen.has(musicKey(t.lib, t.file));
+      if (missing !== !!t.missing) t.missing = missing;
+      if (missing) gone++;
+    }
+    tracks.sort((a, b) => b.time - a.time);
+    musicLastScan = Date.now();
+    writeMusic(tracks);
+    return { added: fresh.length, missing: gone, total: tracks.length };
+  } finally {
+    musicScanRunning = false;
+  }
+}
+
+// First pass after boot so the log reflects the library even on a fresh
+// install (or after an upgrade that introduced it). Later scans are on demand.
+setTimeout(() => {
+  scanMusicLibraries()
+    .then((r) => r && !r.skipped && console.log(`music scan: ${r.added} new, ${r.missing} missing, ${r.total} total`))
+    .catch((e) => console.warn('music scan failed:', String(e.message || e)));
+}, 20 * 1000).unref();
 
 // ---------------------------------------------------------------------------
 // Saved playlists: subscriptions the user re-opens to check for new tracks.
@@ -981,6 +1328,9 @@ app.get('/api/resolve', async (req, res) => {
       probeFatal: !!job.probeFatal,
       // Already saved once (any destination) per the downloaded registry.
       downloaded: isDownloaded(job.sourceUrl || url, job.site, job.mediaId),
+      // The same song already in a Navidrome library, even when it was grabbed
+      // from a different upload (null when it isn't).
+      inLibrary: libraryMatch(musicIdentity(job)),
       // Too long to belong in the shorts library (UI forces the server library).
       tooLongForShorts: !isImage && tooLongForShorts(job),
       filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
@@ -1352,9 +1702,19 @@ function updatePlaylist(id, patch) {
 
 async function checkPlaylistForNew(pl) {
   const profile = await extractors.resolveProfile(pl.url);
-  const fresh = profile.items.filter(
-    (it) => it.mediaType !== 'image' && !isDownloaded(it.sourceUrl || it.url, it.site, it.mediaId)
-  );
+  const fresh = profile.items.filter((it) => {
+    if (it.mediaType === 'image') return false;
+    if (isDownloaded(it.sourceUrl || it.url, it.site, it.mediaId)) return false;
+    // The song may already be in the library from another upload. Only a
+    // full artist+title match blocks it — a title-only hit is too weak to
+    // silently skip a track the playlist asked for.
+    const hit = libraryMatch(musicIdentity(it));
+    if (hit && !hit.weak) {
+      console.log(`playlist watch: "${it.title}" is already in the library (${hit.file}) — skipped`);
+      return false;
+    }
+    return true;
+  });
   for (const it of fresh) startNavidromeJob(it.sourceUrl || it.url, pl.lib);
   return { total: profile.items.length, queued: fresh.length };
 }
@@ -1456,6 +1816,43 @@ app.post('/api/playlists/delete', (req, res) => {
 // GET /api/history -> recent downloads, newest first.
 app.get('/api/history', (_req, res) => {
   res.json({ ok: true, items: readHistory().slice(0, 100) });
+});
+
+// GET /api/music?q=&lib=main|kids&limit=&offset= -> the music log (every track
+// in a Navidrome library), newest first. Unlike /api/history this never rolls
+// over, so it is the answer to "which songs were downloaded".
+app.get('/api/music', (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const lib = req.query.lib === 'main' || req.query.lib === 'kids' ? req.query.lib : null;
+  const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 200));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  let items = readMusic();
+  if (lib) items = items.filter((t) => t.lib === lib);
+  if (q) {
+    items = items.filter((t) =>
+      [t.title, t.album, t.filename, ...(t.artists || []), ...(t.genres || [])]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(q))
+    );
+  }
+  res.json({
+    ok: true,
+    total: items.length,
+    scanning: musicScanRunning,
+    lastScan: musicLastScan || null,
+    items: items.slice(offset, offset + limit),
+  });
+});
+
+// POST /api/music/scan -> reconcile the log with the libraries on disk.
+app.post('/api/music/scan', async (_req, res) => {
+  try {
+    const r = await scanMusicLibraries();
+    if (r.skipped) return res.status(409).json({ ok: false, error: 'A scan is already running.' });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
 });
 
 // POST /api/history/delete?id=...  (omit id to clear all)
@@ -1643,6 +2040,10 @@ app.get('/api/profile', async (req, res) => {
         // clip's own id (job.site/mediaId), not just sourceUrl — for xxxfollow
         // sourceUrl is the shared profile url and would flag the whole creator.
         downloaded: isDownloaded(job.sourceUrl || job.url, job.site, job.mediaId),
+        // Same song, different upload: matched against the music library by
+        // artist + title. A flat playlist listing carries no music tags, so
+        // this leans on the video title and the uploader.
+        inLibrary: isImage ? null : libraryMatch(musicIdentity(job)),
         tooLongForShorts: !isImage && tooLongForShorts(job),
         imported: {
           main: isImage ? imageStatus(job.creator, stem) : importedStatus('main', job.creator, stem),
@@ -2135,6 +2536,7 @@ async function produceAudio(job, meta, params, onProgress) {
       const navRoot = NAV_LIBS[parseNavLib(params.navLib)];
       let libDir = nav ? navRoot : AUDIO_DIR;
       let finalName = outName;
+      let navTags = null;
       if (nav) {
         // Tags: UI-provided fields win; site metadata (yt-dlp) fills the gaps.
         const m = meta.music || {};
@@ -2181,6 +2583,8 @@ async function produceAudio(job, meta, params, onProgress) {
         // traceable even when it ends up outside its folder.
         const artistDir = safeMusicPart(artists[0], 'Unknown Artist');
         const albumDir = safeMusicPart(album, 'Unknown Album') + (year ? `(${year})` : '');
+        // What ended up in the tags, for the music log written after the copy.
+        navTags = { artists, title: songTitle, album, year, genres };
         libDir = path.join(navRoot, artistDir, albumDir);
         // Three parts of up to 100 bytes each would still overflow the 255-byte
         // limit on their own, so the assembled stem gets its own budget.
@@ -2192,6 +2596,22 @@ async function produceAudio(job, meta, params, onProgress) {
       fs.copyFileSync(outPath, libPath);
       const kids = nav && parseNavLib(params.navLib) === 'kids';
       recordJobHistory(meta, params, nav ? (kids ? 'navidrome/kids' : 'navidrome/music') : 'server/mp3', finalName, false);
+      // Music gets its own uncapped log as well — the history rolls over.
+      if (nav && navTags) {
+        recordMusic({
+          lib: kids ? 'kids' : 'main',
+          file: path.relative(navRoot, libPath),
+          filename: finalName,
+          artists: navTags.artists,
+          title: navTags.title,
+          album: navTags.album || null,
+          year: navTags.year || null,
+          genres: navTags.genres || [],
+          duration: durationKnown(meta) ? Math.round(Number(meta.duration)) : null,
+          sourceUrl: meta.sourceUrl || params.url,
+          source: 'grabbit',
+        });
+      }
       finishJob(job, {
         saved: true, dest: params.dest, dir: nav ? (kids ? 'kids' : 'music') : 'mp3', filename: finalName, mime,
         deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,

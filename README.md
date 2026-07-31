@@ -71,6 +71,10 @@ hour-long files.
   a co-hosted app such as [elite-v2](https://github.com/tjelite1986/elite-v2).
 - **Playlist watching**: save a playlist and Grabbit polls it on an interval,
   fetching new entries automatically.
+- **Music log & duplicate detection**: every track saved into a music library
+  is logged permanently (Downloads → Music), and Grabbit matches new downloads
+  against that library by artist + title — so the same song from a *different*
+  upload is recognised before it lands in the library twice.
 - **Cookies for private content**: store Netscape `cookies.txt` files under
   More → Cookies (one default file plus optional per-domain files). Every
   yt-dlp call — resolve, download, playlists — automatically uses the matching
@@ -210,7 +214,8 @@ many items it holds. Each card has:
   them, and each file still names and tags itself from its own metadata (so the
   per-item title/tag fields are hidden in a batch).
 - **Download new to Navidrome (N)** — queues every item you *haven't* downloaded
-  yet as tagged audio into your music library, skipping the ones already done.
+  yet as tagged audio into your music library, skipping the ones already done
+  *and* the ones whose song is already in the library under another upload.
   Disabled when there's nothing new. `(N)` is how many are fresh.
 - **Hide downloaded (N) / Show all** — collapse the items you've already grabbed
   so only new ones show. The choice is remembered between visits.
@@ -245,6 +250,40 @@ becomes **Remove saved playlist** once saved). Saved playlists live under
   itself.
 - **The trash icon** — remove the saved playlist (this only unsubscribes; it
   never touches files you've already downloaded).
+
+### The music log and "do I already have this song?"
+
+Two different questions, answered by two different files in `DATA_DIR`:
+
+- `downloaded.json` — **have I fetched this source before?** Keyed by the clip's
+  URL and its site-native id. It is what marks playlist items as *downloaded*
+  and what the watcher skips.
+- `music.json` — **which songs are in my music libraries?** One row per track:
+  library, path, artist(s), title, album, year, genres, and the source URL it
+  came from. Unlike the download history (capped at the last 200 downloads of
+  any kind) this log is never trimmed, so it stays a complete record.
+
+**Downloads → Music** lists that log: search across artist/title/album, filter
+by library, and **Rescan** to reconcile it with what is actually on disk. A scan
+walks both music roots, reads the tags of anything the log has not seen (so
+files copied in by hand, or downloaded before the log existed, still show up)
+and flags rows whose file has since disappeared. One scan also runs shortly
+after every start.
+
+**Duplicate detection.** The same song is uploaded many times — a topic channel,
+an official video, a lyric video — and each of those is a *different source*, so
+the downloaded registry cannot recognise it. Grabbit therefore also matches
+against the music log by **artist + title**, ignoring the noise video titles
+carry (`(Official Music Video)`, `[Lyrics] HD`, an `Artist - ` prefix, the
+`- Topic` channel suffix). What happens with a match:
+
+- a **full match** (artist *and* title) shows *in library* on the item card, is
+  excluded from *Download new to Navidrome* and is skipped by the watcher;
+- a **title-only match** (the artist reads differently on the two sides) is only
+  a warning in the download sheet — never a reason to skip a track by itself.
+
+A suffix that means a *different recording* — `(Live …)`, a remix name — is
+deliberately kept, so those are not treated as duplicates of the studio version.
 
 ### Default download options — every setting explained
 

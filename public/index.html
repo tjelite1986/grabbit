@@ -196,6 +196,15 @@
       .chip.active { background: var(--primary-dim); border-color: transparent; color: #cdd6ff; }
       .chip .ic { width: 17px; height: 17px; }
 
+      /* ---- music log toolbar (Downloads > Music) ---- */
+      .musicbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: -6px 0 14px; }
+      .musicbar input[type="search"] {
+        flex: 1 1 100%; min-width: 0; background: var(--surface-2); border: 1px solid var(--line);
+        border-radius: 999px; color: var(--text); padding: 9px 14px; font-size: 14px; outline: none;
+      }
+      .musicbar input[type="search"]:focus { border-color: var(--surface-hi); }
+      .musicnote { font-size: 12.5px; color: var(--faint); margin: -8px 0 14px; }
+
       /* ---- history rows (Downloads) ---- */
       #historyList { display: flex; flex-direction: column; gap: 14px; }
       .hcard {
@@ -592,8 +601,21 @@
           <button class="chip" data-filter="video">Video</button>
           <button class="chip" data-filter="audio">Audio</button>
           <button class="chip" data-filter="image">Images</button>
+          <button class="chip" data-filter="music">Music</button>
           <button class="chip" data-filter="failed">Failed</button>
         </div>
+
+        <!-- Music mode: the download history is capped, so tracks are listed
+             from the separate (uncapped) music log instead. -->
+        <div class="musicbar hidden" id="musicBar">
+          <input id="musicSearch" type="search" placeholder="Search artist, title, album…" autocomplete="off" />
+          <button class="chip" id="musicLib" type="button" data-lib="">All libraries</button>
+          <button class="chip" id="musicScan" type="button" title="Rescan the libraries on disk">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 4v5h-5" /></svg>
+            Rescan
+          </button>
+        </div>
+        <div class="musicnote hidden" id="musicNote"></div>
 
         <div id="historyList"></div>
         <div id="historyEmpty" class="empty hidden">
@@ -1121,6 +1143,13 @@
       const cssUrl = (u) => 'url("' + String(u == null ? '' : u).replace(/[\\"]/g, '\\$&').replace(/[\r\n]/g, '') + '")';
       // Only http(s) links are safe to render as clickable (blocks javascript:/data:).
       const safeHref = (u) => /^https?:\/\//i.test(String(u || '')) ? String(u) : '';
+      // Already in a Navidrome library as the same song (artist + title), even
+      // though it came from another upload. A title-only ("weak") match is only
+      // shown as a warning — never used to skip a download.
+      const inLibrary = (it) => !!(it && it.inLibrary && !it.inLibrary.weak);
+      // Nothing to fetch: the source was downloaded before, or the song is in
+      // the library already.
+      const haveIt = (it) => !!(it && (it.downloaded || inLibrary(it)));
       // Fetch JSON but fail with a readable message when the body isn't JSON — a
       // long download can exceed the Traefik/Cloudflare gateway timeout, which
       // then returns an HTML error page (the old code blindly ran r.json() on it
@@ -1442,7 +1471,7 @@
             ? { ...d, sourceUrl: url, url, standalone: true }
             : { sourceUrl: url, url, standalone: true, title: null, mediaType: 'video' };
           const isImg = it.mediaType === 'image';
-          const status = d ? (d.downloaded ? 'downloaded' : importStatusLabel(d.imported, isImg, settings.channel)) : null;
+          const status = d ? (d.downloaded ? 'downloaded' : inLibrary(d) ? 'in library' : importStatusLabel(d.imported, isImg, settings.channel)) : null;
           return mediaCard({
             title: it.title || url,
             sub: d
@@ -1570,7 +1599,7 @@
         saveBtn.textContent = savedEntry ? 'Remove saved playlist' : 'Save playlist';
         saveBtn.addEventListener('click', () => (savedEntry ? deletePlaylist(savedEntry.id) : savePlaylist(pd)));
         btns.appendChild(saveBtn);
-        const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded);
+        const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !haveIt(it));
         const dlNew = document.createElement('button');
         dlNew.className = 'primary';
         dlNew.textContent = fresh.length ? 'Download new to Navidrome (' + fresh.length + ')' : 'Nothing new — all downloaded';
@@ -1581,7 +1610,7 @@
         btns.appendChild(dlNew);
 
         // Hide items already in the downloaded registry (persisted preference).
-        const doneCount = profileItems.filter((it) => it.downloaded).length;
+        const doneCount = profileItems.filter((it) => haveIt(it)).length;
         if (doneCount) {
           const hideBtn = document.createElement('button');
           const hideLabel = () => (hideDownloaded ? 'Show all (' + profileItems.length + ')' : 'Hide downloaded (' + doneCount + ')');
@@ -1621,11 +1650,11 @@
 
         // Add the first n not-yet-selected, undownloaded videos (in shown order).
         function selectNext(n) {
-          const list = hideDownloaded ? profileItems.filter((it) => !it.downloaded) : profileItems;
+          const list = hideDownloaded ? profileItems.filter((it) => !haveIt(it)) : profileItems;
           let added = 0;
           for (const it of list) {
             if (added >= n) break;
-            if (it.mediaType === 'image' || it.downloaded || profileSelection.has(it.id)) continue;
+            if (it.mediaType === 'image' || haveIt(it) || profileSelection.has(it.id)) continue;
             profileSelection.add(it.id);
             added++;
           }
@@ -1635,7 +1664,7 @@
 
         function renderItems() {
           itemsWrap.innerHTML = '';
-          const shown = hideDownloaded ? profileItems.filter((it) => !it.downloaded) : profileItems;
+          const shown = hideDownloaded ? profileItems.filter((it) => !haveIt(it)) : profileItems;
           if (!shown.length) {
             const empty = document.createElement('div');
             empty.style.cssText = 'margin:16px 2px;font-size:13px;color:var(--muted)';
@@ -1645,8 +1674,8 @@
           }
           shown.forEach((it) => {
             const isImg = it.mediaType === 'image';
-            const selectable = !isImg && !it.downloaded;
-            const status = it.downloaded ? 'downloaded' : importStatusLabel(it.imported, isImg, settings.channel);
+            const selectable = !isImg && !haveIt(it);
+            const status = it.downloaded ? 'downloaded' : inLibrary(it) ? 'in library' : importStatusLabel(it.imported, isImg, settings.channel);
             const card = mediaCard({
               title: it.title || it.filename,
               sub: (it.duration ? fmtClock(it.duration) + ' · ' : '') + (isImg ? 'image' : 'video') + (it.tooLongForShorts ? ' · server only' : ''),
@@ -2069,8 +2098,16 @@
         if (tooLong) {
           const dur = sheetTarget.duration ? ' (' + fmtClock(sheetTarget.duration) + ')' : '';
           msg = 'Too long for shorts' + dur + ' — saving to the server library instead.';
+        } else if (isNavidrome && !sheetAll && sheetTarget && sheetTarget.inLibrary) {
+          // The same song is already in a Navidrome library — possibly from a
+          // different upload, which the downloaded registry cannot see.
+          const hit = sheetTarget.inLibrary;
+          const who = (hit.artists || []).join(', ');
+          const what = [who, hit.title].filter(Boolean).join(' – ') || hit.file;
+          msg = (hit.weak ? 'A track with this title is already in the library' : 'Already in the Navidrome library')
+            + ' (' + (hit.lib === 'kids' ? 'kids' : 'main') + '): ' + what + '.';
         } else if (isNavidrome && sheetAll) {
-          msg = 'Each track is downloaded as audio and tagged automatically from its own metadata; already-downloaded tracks are skipped.';
+          msg = 'Each track is downloaded as audio and tagged automatically from its own metadata; tracks already downloaded, or already in the library, are skipped.';
         } else if (isNavidrome && isVideo) {
           msg = 'Audio only: the sound track is extracted and saved to the Navidrome music library.';
         } else if (!sheetAll) {
@@ -2091,7 +2128,7 @@
         let label;
         if (sheetMulti) label = 'Download ' + multiUrls.length + ' links';
         else if (sheetAll && isNavidrome) {
-          const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded).length;
+          const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !haveIt(it)).length;
           label = 'Download new to Navidrome (' + fresh + ')';
         } else if (sheetAll) label = sheetSelectedIds
           ? 'Download selected (' + sheetSelectedIds.length + ')'
@@ -2303,7 +2340,7 @@
           if (segValue($('shDest')) === 'navidrome') {
             closeSheet();
             startNavidromeBatch(
-              profileItems.filter((it) => it.mediaType !== 'image' && !it.downloaded && (!selSet || selSet.has(it.id))),
+              profileItems.filter((it) => it.mediaType !== 'image' && !haveIt(it) && (!selSet || selSet.has(it.id))),
               $('shAfmt').value,
               $('shAq').value,
               segValue($('shNavLib'))
@@ -2587,7 +2624,8 @@
           // keep the sort chip visually active too
         }
         $('dlChips').querySelector('[data-sort]').classList.add('active');
-        renderHistory();
+        if (hFilter === 'music') { reflectMusicMode(); loadMusic(); }
+        else { reflectMusicMode(); renderHistory(); }
       });
 
       historyList.addEventListener('click', async (e) => {
@@ -2616,6 +2654,7 @@
       }
 
       async function loadHistory() {
+        if (hFilter === 'music') return loadMusic();
         try {
           const r = await fetch('/api/history');
           const d = await r.json();
@@ -2625,6 +2664,7 @@
       }
 
       function renderHistory() {
+        historyEmpty.querySelector('p').textContent = 'No downloads yet';
         let items = historyItems.slice();
         // Failures are their own filter; the type filters only list real saves.
         if (hFilter === 'failed') items = items.filter((it) => it.error);
@@ -2665,6 +2705,106 @@
                   '</button>'
                 : '') +
               '<div class="typebox">' + icon + '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      // ----------------------------------------------------------------- DOWNLOADS (music log)
+      // The music log is a separate, uncapped list of every track saved into a
+      // Navidrome library — the download history above holds only the last 200
+      // downloads of any kind, so music scrolls out of it within days.
+      let musicItems = [], musicTotal = 0, musicLib = '', musicQuery = '', musicTimer = null;
+
+      function reflectMusicMode() {
+        const on = hFilter === 'music';
+        $('musicBar').classList.toggle('hidden', !on);
+        $('musicNote').classList.toggle('hidden', !on);
+        // "Clear all" wipes the download history — meaningless for the library.
+        $('dlClear').classList.toggle('hidden', on);
+      }
+
+      async function loadMusic() {
+        const params = new URLSearchParams({ limit: '500' });
+        if (musicQuery) params.set('q', musicQuery);
+        if (musicLib) params.set('lib', musicLib);
+        try {
+          const r = await fetch('/api/music?' + params.toString());
+          const d = await r.json();
+          musicItems = (d.items || []).filter(Boolean);
+          musicTotal = d.total || 0;
+          const scanned = d.lastScan ? 'last scan ' + relTime(d.lastScan) : 'not scanned yet';
+          $('musicNote').textContent =
+            musicTotal + ' track' + (musicTotal === 1 ? '' : 's') +
+            (musicItems.length < musicTotal ? ' (showing ' + musicItems.length + ')' : '') +
+            ' · ' + scanned;
+          renderMusic();
+        } catch {
+          toast('Could not load the music log', 'bad');
+        }
+      }
+
+      $('musicSearch').addEventListener('input', (e) => {
+        musicQuery = e.target.value.trim();
+        clearTimeout(musicTimer);
+        musicTimer = setTimeout(loadMusic, 200);
+      });
+      $('musicLib').addEventListener('click', () => {
+        // Cycles All -> Main -> Kids; the two libraries are separate Navidromes.
+        const next = { '': 'main', main: 'kids', kids: '' }[musicLib];
+        musicLib = next;
+        const btn = $('musicLib');
+        btn.textContent = next === 'main' ? 'Main library' : next === 'kids' ? 'Kids library' : 'All libraries';
+        btn.classList.toggle('active', !!next);
+        loadMusic();
+      });
+      $('musicScan').addEventListener('click', async () => {
+        const btn = $('musicScan');
+        btn.disabled = true;
+        try {
+          const r = await fetch('/api/music/scan', { method: 'POST' });
+          const d = await r.json();
+          if (d.ok) toast('Scan done: ' + d.added + ' new, ' + d.total + ' total', 'good');
+          else toast(d.error || 'Scan failed', 'bad');
+        } catch {
+          toast('Scan failed', 'bad');
+        } finally {
+          btn.disabled = false;
+          loadMusic();
+        }
+      });
+
+      function renderMusic() {
+        historyEmpty.querySelector('p').textContent = musicQuery ? 'No matching tracks' : 'No music saved yet';
+        if (!musicItems.length) {
+          historyList.innerHTML = '';
+          historyEmpty.classList.remove('hidden');
+          return;
+        }
+        historyEmpty.classList.add('hidden');
+        historyList.innerHTML = musicItems.map((t) => {
+          const artist = (t.artists || []).join(', ');
+          const title = esc(t.title || t.filename || 'track');
+          const sh = safeHref(t.sourceUrl);
+          const link = sh ? '<a href="' + esc(sh) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title;
+          const album = [t.album, t.year ? '(' + t.year + ')' : ''].filter(Boolean).join(' ');
+          const meta = [artist, album].filter(Boolean).map(esc).join(' · ');
+          return '<div class="hcard' + (t.missing ? ' failed' : '') + '">' +
+            '<div class="h-main">' +
+              '<div class="h-title">' + link + '</div>' +
+              '<div class="h-row">' +
+                '<span class="badge chserver">' + (t.lib === 'kids' ? 'navidrome/kids' : 'navidrome/music') + '</span>' +
+                (meta ? meta + ' · ' : '') + relTime(t.time) +
+              '</div>' +
+              (t.missing ? '<div class="h-err">File is no longer in the library</div>' : '') +
+            '</div>' +
+            '<div class="h-side">' +
+              (sh
+                ? '<button class="h-redo" type="button" data-url="' + esc(sh) + '" title="Download again">' +
+                  '<svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>' +
+                  '</button>'
+                : '') +
+              '<div class="typebox">' + ICON.audio + '</div>' +
             '</div>' +
           '</div>';
         }).join('');
