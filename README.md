@@ -293,6 +293,15 @@ carry (`(Official Music Video)`, `[Lyrics] HD`, an `Artist - ` prefix, the
 - a **title-only match** (the artist reads differently on the two sides) is only
   a warning in the download sheet — never a reason to skip a track by itself.
 
+Both sides are read generously, because a rip is filed under whatever the site
+gave it: a credit line is compared per artist as well as whole (`Rocco,
+Pulsedriver & Ninkid` also matches plain `Rocco`), a library track is indexed
+under every reading of its title (so `STARSET - Brave New World (Official Music
+Video)`, saved under the channel `starsetonline`, is also found as `Brave New
+World`), and a title-only hit counts as a full match when one side names the
+other's artist inside its title — which is exactly what a channel-tagged rip
+looks like.
+
 A suffix that means a *different recording* — `(Live …)`, a remix name — is
 deliberately kept, so those are not treated as duplicates of the studio version.
 

@@ -534,17 +534,44 @@ function musicNorm(s) {
     .trim();
 }
 
+// One credit line can name several artists ("Rocco, Pulsedriver & Ninkid"),
+// and the two sides of a comparison rarely split them the same way. Every
+// component is indexed alongside the whole line so either spelling matches.
+function artistParts(artists) {
+  const out = [];
+  for (const a of artists || []) {
+    const whole = musicNorm(a);
+    if (whole) out.push(whole);
+    for (const piece of String(a).split(/\s*(?:,|&|\/|\+|\bfeat\.?\b|\bft\.?\b|\bvs\.?\b|\bx\b|\bwith\b)\s*/i)) {
+      const n = musicNorm(piece);
+      if (n && n !== whole) out.push(n);
+    }
+  }
+  return [...new Set(out)];
+}
+
+// Library rows are indexed under every reading of their title, not just the
+// tagged one: a YouTube rip is filed with the whole video title as the song
+// title ("STARSET - Brave New World (Official Music Video)"), and the song it
+// holds is what a later download has to be recognised against.
+const TITLE_ROWS_MAX = 25;
+
 function buildMusicIndex() {
   const byTrack = new Map();
   const byTitle = new Map();
   for (const t of readMusic()) {
     if (t.missing) continue;
-    const title = musicNorm(t.title);
-    if (!title) continue;
-    if (!byTitle.has(title)) byTitle.set(title, t);
-    for (const a of t.artists && t.artists.length ? t.artists : ['']) {
-      const key = `${musicNorm(a)}|${title}`;
-      if (!byTrack.has(key)) byTrack.set(key, t);
+    const titles = titleCandidates(t.title, t.artists);
+    if (!titles.length) continue;
+    const parts = artistParts(t.artists && t.artists.length ? t.artists : ['']);
+    for (const title of titles) {
+      const rows = byTitle.get(title);
+      if (!rows) byTitle.set(title, [t]);
+      else if (rows.length < TITLE_ROWS_MAX) rows.push(t);
+      for (const a of parts.length ? parts : ['']) {
+        const key = `${a}|${title}`;
+        if (!byTrack.has(key)) byTrack.set(key, t);
+      }
     }
   }
   return { byTrack, byTitle };
@@ -584,20 +611,40 @@ function titleCandidates(title, artists) {
 // A track already in a Navidrome library, or null. `weak` means only the title
 // matched (the artist read differently on the two sides) — enough to warn about
 // but never enough to skip a download on its own.
+// Does `name` appear as whole words inside `text`? Both are already normalised
+// to lowercase words, so padding makes this a word-boundary test.
+function namedIn(name, text) {
+  return name.length >= 3 && ` ${text} `.includes(` ${name} `);
+}
+
 function libraryMatch({ artists, title }) {
   const cands = titleCandidates(title, artists);
   if (!cands.length) return null;
   const { byTrack, byTitle } = getMusicIndex();
   const hitOf = (t, weak) => ({ lib: t.lib, file: t.file, title: t.title, artists: t.artists || [], weak });
+  const mine = artistParts(artists);
   for (const c of cands) {
-    for (const a of (artists || []).filter(Boolean)) {
-      const hit = byTrack.get(`${musicNorm(a)}|${c}`);
+    for (const a of mine) {
+      const hit = byTrack.get(`${a}|${c}`);
       if (hit) return hitOf(hit, false);
     }
   }
+  // A title-only hit is still conclusive when one side names the other's
+  // artist inside its title. YouTube rips are filed under the channel with the
+  // whole video title as the song title ("You Love Dance.TV" / "Rocco,
+  // Pulsedriver & Ninkid – Take me to the Rave"), so the artist regularly
+  // lives in the title on exactly one of the two sides.
+  const myTitle = musicNorm(title);
   for (const c of cands) {
-    const loose = byTitle.get(c);
-    if (loose) return hitOf(loose, true);
+    const rows = byTitle.get(c);
+    if (!rows || !rows.length) continue;
+    // Several tracks can share a title; prefer one that ties to this artist.
+    const named = rows.find((r) => {
+      const theirTitle = musicNorm(r.title);
+      return artistParts(r.artists || []).some((a) => namedIn(a, myTitle))
+        || mine.some((a) => namedIn(a, theirTitle));
+    });
+    return hitOf(named || rows[0], !named);
   }
   return null;
 }
