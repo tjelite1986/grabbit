@@ -687,6 +687,40 @@ const READ_TAGS_SCRIPT = [
   '    print(json.dumps(out))',
 ].join('\n');
 
+const READ_DESC_SCRIPT = [
+  'import sys, json',
+  'from mutagen import File',
+  'f = File(sys.argv[1])',
+  'out = []',
+  'if f is not None and f.tags:',
+  '    for k, v in f.tags.items():',
+  // MP4 spells its text tags with a leading (c) sign (\xa9des); strip it so one
+  // list of names covers every container.
+  "        if str(k).lower().lstrip('\\xa9') in ('description', 'des', 'desc', 'ldes', 'comment', 'comm', 'synopsis'):",
+  '            text = v if isinstance(v, str) else (str(v[0]) if isinstance(v, list) and v else str(v))',
+  '            if text.strip(): out.append(text.strip())',
+  'print(json.dumps(out))',
+].join('\n');
+
+// The description text carried by the file itself (yt-dlp writes the video
+// description into it unless Grabbit cleared it), newest tag first.
+function readFileDescription(file) {
+  return new Promise((resolve) => {
+    const p = spawn('python3', ['-c', READ_DESC_SCRIPT, file]);
+    let out = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.on('error', () => resolve([]));
+    p.on('close', () => {
+      try {
+        const list = JSON.parse(out.trim() || '[]');
+        resolve(Array.isArray(list) ? list : []);
+      } catch {
+        resolve([]);
+      }
+    });
+  });
+}
+
 function readTags(paths) {
   return new Promise((resolve) => {
     if (!paths.length) return resolve(new Map());
@@ -2000,6 +2034,39 @@ app.get('/api/music', (req, res) => {
 // GET /api/genres -> every genre Grabbit knows, most-used first, for the
 // picker next to the genres field.
 app.get('/api/genres', (_req, res) => res.json({ ok: true, genres: knownGenres() }));
+
+// GET /api/music/description?id=... -> the description behind a library
+// track, for the edit sheet: whatever the file itself carries, and otherwise
+// the source page's own description (the real artist/title often hides there).
+// The source lookup runs yt-dlp, so this is only fetched when asked for.
+app.get('/api/music/description', async (req, res) => {
+  const row = readMusic().find((t) => t.id === String(req.query.id || ''));
+  if (!row) return res.status(404).json({ ok: false, error: 'Track not found in the music log' });
+  const file = path.join(NAV_LIBS[row.lib === 'kids' ? 'kids' : 'main'], row.file);
+  let text = '';
+  let from = null;
+  try {
+    const embedded = fs.existsSync(file) ? await readFileDescription(file) : [];
+    if (embedded.length) {
+      text = embedded.join('\n\n');
+      from = 'file';
+    }
+  } catch {
+    /* fall through to the source lookup */
+  }
+  if (!text && row.sourceUrl) {
+    try {
+      const job = await extractors.resolve(row.sourceUrl);
+      if (job && job.description && job.description.trim()) {
+        text = job.description.trim();
+        from = 'source';
+      }
+    } catch (e) {
+      return res.json({ ok: true, description: '', from: null, sourceUrl: row.sourceUrl, error: String(e.message || e) });
+    }
+  }
+  res.json({ ok: true, description: text.slice(0, 20000), from, sourceUrl: row.sourceUrl || null });
+});
 
 // POST /api/music/edit -> retag and re-file a track that is already in a
 // library: the same fields the download sheet offers, applied to a file that

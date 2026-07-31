@@ -1015,7 +1015,7 @@
           <!-- The source description often reveals the real song title when
                the video title is clickbait — readable while filling the tags. -->
           <details class="desc hidden" id="shDescBox">
-            <summary>Source description (real title often hides here)</summary>
+            <summary id="shDescSummary">Source description (real title often hides here)</summary>
             <pre id="shDescText"></pre>
           </details>
           <div class="field">
@@ -2075,9 +2075,36 @@
         // available and only fills what is still empty.
         musicFilledSeq = sheetSeq;
         musicCandidates = [];
-        $('shDescBox').classList.add('hidden');
+        loadTrackDescription(track, sheetSeq);
         openSheetUi();
         musicLookup();
+      }
+
+      // What the track says about itself: the text embedded in the file, or
+      // failing that the source page's description (fetched on demand — it
+      // runs yt-dlp). Same box the download sheet uses.
+      async function loadTrackDescription(track, seq) {
+        const box = $('shDescBox');
+        box.open = false;
+        box.classList.remove('hidden');
+        $('shDescSummary').textContent = 'Description';
+        $('shDescText').textContent = 'Loading…';
+        try {
+          const r = await fetch('/api/music/description?id=' + encodeURIComponent(track.id));
+          const d = await r.json();
+          if (seq !== sheetSeq) return;   // the sheet moved on
+          const text = (d.description || '').trim();
+          if (!text) {
+            box.classList.add('hidden');
+            return;
+          }
+          $('shDescSummary').textContent = d.from === 'file'
+            ? 'Description (from the file)'
+            : 'Source description (real title often hides here)';
+          $('shDescText').textContent = text;
+        } catch {
+          if (seq === sheetSeq) box.classList.add('hidden');
+        }
       }
 
       function openSheetUi() {
@@ -2339,6 +2366,7 @@
         // hides there when the video title is clickbait. Playlist items lack
         // it in the flat listing, so it's fetched on demand (cached per item).
         const desc = ((sheetSingle && sheetSingle.description) || '').trim();
+        $('shDescSummary').textContent = 'Source description (real title often hides here)';
         $('shDescText').textContent = desc;
         $('shDescBox').classList.toggle('hidden', !desc);
         $('shDescBox').open = false;

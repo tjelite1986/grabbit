@@ -278,8 +278,11 @@ the track belongs to — but applies them to the file that is already on disk. N
 download happens: the tags are rewritten in place (cover art survives), the file
 is re-filed under the layout the new tags imply, the folders it left behind are
 removed if empty, and the music log follows along. The iTunes/Deezer lookup is
-available there too, so a badly tagged rip can be fixed from a database match.
-Grabbit refuses the save if another track already sits under the new name.
+available there too, so a badly tagged rip can be fixed from a database match,
+and the track's **description** is shown above the fields — the text embedded in
+the file, or failing that the source page's own description, which is where the
+real artist and title usually hide when the video title is clickbait. Grabbit
+refuses the save if another track already sits under the new name.
 
 **Duplicate detection.** The same song is uploaded many times — a topic channel,
 an official video, a lyric video — and each of those is a *different source*, so
