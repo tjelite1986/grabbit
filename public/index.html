@@ -196,6 +196,27 @@
       .chip.active { background: var(--primary-dim); border-color: transparent; color: #cdd6ff; }
       .chip .ic { width: 17px; height: 17px; }
 
+      /* ---- genre picker (download sheet) ---- */
+      .genretoggle {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 7px 12px; border-radius: 999px; font-size: 13px; font-weight: 500;
+        background: var(--surface-2); border: 1px solid var(--line); color: var(--muted);
+      }
+      .genretoggle.open { background: var(--primary-dim); border-color: transparent; color: #cdd6ff; }
+      .genretoggle .ic { width: 15px; height: 15px; }
+      .genrepick {
+        display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px;
+        max-height: 190px; overflow-y: auto;
+        padding: 10px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line);
+      }
+      .genrepick .gchip {
+        padding: 6px 11px; border-radius: 999px; font-size: 12.5px;
+        background: var(--surface); border: 1px solid var(--line); color: var(--muted);
+      }
+      .genrepick .gchip.on { background: var(--primary-dim); border-color: transparent; color: #cdd6ff; }
+      .genrepick .gchip .n { color: var(--faint); font-size: 11px; margin-left: 5px; }
+      .genrepick .empty-note { font-size: 12.5px; color: var(--faint); padding: 2px; }
+
       /* ---- music log toolbar (Downloads > Music) ---- */
       .musicbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: -6px 0 14px; }
       .musicbar input[type="search"] {
@@ -1033,9 +1054,18 @@
               <input id="shMusicDate" type="text" autocomplete="off" placeholder="YYYY or YYYY-MM-DD" />
             </div>
             <div class="field">
-              <label>Genres (comma-separated)</label>
-              <input id="shMusicGenres" type="text" autocomplete="off" placeholder="Pop, Rock" />
+              <label>Genres (commas, spaces or #hashtags)</label>
+              <input id="shMusicGenres" type="text" autocomplete="off" placeholder="#neurofunk #dnb  ·  Pop, Rock" />
             </div>
+          </div>
+          <!-- Pick from what the library already uses instead of typing. Kept
+               outside the two-column row so the chips get the full width. -->
+          <div class="field">
+            <button type="button" class="genretoggle" id="shGenrePickBtn">
+              <svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h10" /></svg>
+              <span id="shGenrePickLabel">Pick genres from list</span>
+            </button>
+            <div class="genrepick hidden" id="shGenrePick"></div>
           </div>
         </div>
 
@@ -2160,6 +2190,88 @@
         else label = device ? 'Download & import' : 'Save & import';
         $('shConfirmLabel').textContent = label;
       }
+
+      // ------------------------------------------------------- genre picker
+      // The genres field accepts hashtags, commas or plain spaces; the picker
+      // writes back in whichever of those styles the field is already using,
+      // so tapping chips and typing stay interchangeable. Same split rules as
+      // the server (see splitGenres in server.js).
+      let genreVocab = null;      // [{name, count}] from /api/genres
+      let genrePickOpen = false;
+
+      function parseGenreField(text) {
+        const t = String(text || '').trim();
+        if (!t) return [];
+        const glued = /(?:^|\s)(?:&|and|n|of|the|y)(?:\s|$)/i.test(t);
+        const parts = t.includes('#') ? t.split('#')
+          : /[,;]/.test(t) ? t.split(/[,;]/)
+          : glued ? [t] : t.split(/\s+/);
+        const out = [];
+        for (const p of parts) {
+          const g = p.trim().replace(/\s+/g, ' ');
+          if (g && !out.some((x) => x.toLowerCase() === g.toLowerCase())) out.push(g);
+        }
+        return out;
+      }
+
+      function writeGenreField(list) {
+        const hash = $('shMusicGenres').value.includes('#');
+        $('shMusicGenres').value = hash ? list.map((g) => '#' + g).join(' ') : list.join(', ');
+        renderGenrePick();
+      }
+
+      function renderGenrePick() {
+        const box = $('shGenrePick');
+        if (!genrePickOpen) { box.classList.add('hidden'); return; }
+        box.classList.remove('hidden');
+        if (!genreVocab) { box.innerHTML = '<div class="empty-note">Loading…</div>'; return; }
+        if (!genreVocab.length) {
+          box.innerHTML = '<div class="empty-note">No genres yet — the ones you type here show up in this list.</div>';
+          return;
+        }
+        const chosen = parseGenreField($('shMusicGenres').value).map((g) => g.toLowerCase());
+        box.innerHTML = genreVocab.map((g) =>
+          '<button type="button" class="gchip' + (chosen.includes(g.name.toLowerCase()) ? ' on' : '') + '" data-g="' + esc(g.name) + '">' +
+          esc(g.name) + (g.count ? '<span class="n">' + g.count + '</span>' : '') + '</button>'
+        ).join('');
+      }
+
+      async function loadGenreVocab(force) {
+        // Show what we have at once, then refresh — a save made since the last
+        // open may have added a genre.
+        if (genreVocab) renderGenrePick();
+        if (genreVocab && !force) return;
+        try {
+          const r = await fetch('/api/genres');
+          const d = await r.json();
+          genreVocab = d.genres || [];
+        } catch {
+          genreVocab = [];
+        }
+        renderGenrePick();
+      }
+
+      $('shGenrePickBtn').addEventListener('click', () => {
+        genrePickOpen = !genrePickOpen;
+        $('shGenrePickBtn').classList.toggle('open', genrePickOpen);
+        $('shGenrePickLabel').textContent = genrePickOpen ? 'Hide genre list' : 'Pick genres from list';
+        if (genrePickOpen) loadGenreVocab(true);
+        else renderGenrePick();
+      });
+
+      $('shGenrePick').addEventListener('click', (e) => {
+        const chip = e.target.closest('.gchip');
+        if (!chip) return;
+        const name = chip.dataset.g;
+        const list = parseGenreField($('shMusicGenres').value);
+        const i = list.findIndex((g) => g.toLowerCase() === name.toLowerCase());
+        if (i >= 0) list.splice(i, 1);
+        else list.push(name);
+        writeGenreField(list);
+      });
+
+      // Typing keeps the chips in sync with the field.
+      $('shMusicGenres').addEventListener('input', () => { if (genrePickOpen) renderGenrePick(); });
 
       // ------------------------------------------------------------ music tags
       // Navidrome tag fields: pre-filled from the site's own metadata (yt-dlp

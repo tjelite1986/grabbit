@@ -1511,6 +1511,96 @@ function splitList(s) {
     .filter(Boolean);
 }
 
+// The genres field takes whichever separator was at hand: hashtags copied off
+// a track page ("#neurofunk #darkdnb"), a comma list ("Drum & Bass, Techno") or
+// plain words ("neurofunk darkdnb dnb"). The separator is picked from what the
+// text actually contains, so a multi-word genre survives as long as it is
+// written with the separator its neighbours use — spaces only split a line
+// that has neither hashtags nor commas.
+function splitGenres(s) {
+  const text = String(s || '').trim();
+  if (!text) return [];
+  // "Drum & Bass" or "Rhythm and Blues" is one genre, not three words: a
+  // connector means the spaces belong to the name, so it is left whole.
+  const glued = /(?:^|\s)(?:&|and|n|of|the|y)(?:\s|$)/i.test(text);
+  const parts = text.includes('#')
+    ? text.split('#')
+    : /[,;]/.test(text)
+      ? text.split(/[,;]/)
+      : glued
+        ? [text]
+        : text.split(/\s+/);
+  const out = [];
+  for (const p of parts) {
+    // Hashtag style is written without spaces; a stray one is not a separator.
+    const g = p.trim().replace(/\s+/g, ' ');
+    if (g && !out.some((x) => x.toLowerCase() === g.toLowerCase())) out.push(g);
+  }
+  return out;
+}
+
+// Genres the user has typed at least once. The library's own genres (read off
+// the music log) already make a decent vocabulary, but a genre only becomes
+// visible there once a track carrying it has been saved — this file remembers
+// the moment it was entered, so the picker can offer it right away.
+const GENRES_FILE = path.join(DATA_DIR, 'genres.json');
+let typedGenresCache = null;
+
+function readTypedGenres() {
+  if (!typedGenresCache) {
+    try {
+      const list = JSON.parse(fs.readFileSync(GENRES_FILE, 'utf8'));
+      typedGenresCache = Array.isArray(list) ? list.filter((g) => typeof g === 'string') : [];
+    } catch {
+      typedGenresCache = [];
+    }
+  }
+  return typedGenresCache;
+}
+
+function rememberGenres(genres) {
+  const list = readTypedGenres();
+  let added = false;
+  for (const g of genres || []) {
+    const name = String(g).trim();
+    if (!name || list.some((x) => x.toLowerCase() === name.toLowerCase())) continue;
+    list.push(name);
+    added = true;
+  }
+  if (!added) return;
+  try {
+    fs.writeFileSync(GENRES_FILE, JSON.stringify(list));
+  } catch (e) {
+    console.warn('genre list write failed:', e.message);
+  }
+}
+
+// Every genre Grabbit knows about: those in the music library (with how many
+// tracks carry them) plus the ones typed but not yet saved to a track.
+function knownGenres() {
+  const counts = new Map();
+  const label = new Map();
+  for (const t of readMusic()) {
+    for (const g of t.genres || []) {
+      const name = String(g).trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      counts.set(key, (counts.get(key) || 0) + 1);
+      if (!label.has(key)) label.set(key, name);
+    }
+  }
+  for (const name of readTypedGenres()) {
+    const key = name.toLowerCase();
+    if (!counts.has(key)) {
+      counts.set(key, 0);
+      label.set(key, name);
+    }
+  }
+  return [...counts.entries()]
+    .map(([key, count]) => ({ name: label.get(key), count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
 // Song metadata candidates from public music databases (iTunes Search +
 // Deezer, both keyless). Candidates: {source, title, artists[], album, date,
 // genres[], cover}. Used by the /api/music-meta endpoint (UI auto-fill) and
@@ -1843,6 +1933,10 @@ app.get('/api/music', (req, res) => {
     items: items.slice(offset, offset + limit),
   });
 });
+
+// GET /api/genres -> every genre Grabbit knows, most-used first, for the
+// picker next to the genres field.
+app.get('/api/genres', (_req, res) => res.json({ ok: true, genres: knownGenres() }));
 
 // POST /api/music/scan -> reconcile the log with the libraries on disk.
 app.post('/api/music/scan', async (_req, res) => {
@@ -2551,10 +2645,12 @@ async function produceAudio(job, meta, params, onProgress) {
         // sites hand out nonsense release years ("1674") often enough.
         const yearNum = Number(String(date || '').slice(0, 4));
         const year = yearNum >= 1900 && yearNum <= new Date().getFullYear() + 1 ? String(yearNum) : null;
-        let genres = params.genres ? splitList(params.genres) : m.genre ? [m.genre] : [];
+        let genres = params.genres ? splitGenres(params.genres) : m.genre ? [m.genre] : [];
         // No genre from the UI or the site: look one up (iTunes/Deezer) so
         // the library doesn't end up genre-less — the norm for YouTube rips.
         if (!genres.length) genres = await lookupGenres(artists[0], songTitle).catch(() => []);
+        // Anything typed by hand joins the picker's list right away.
+        if (params.genres) rememberGenres(splitGenres(params.genres));
         try {
           await tagAudio(outPath, {
             title: songTitle,
@@ -2795,8 +2891,9 @@ app.get('/api/jobs/start', (req, res) => {
       titleOverride: req.query.title ? String(req.query.title) : null,
       // Edited hashtag list; '' clears the clip's tags entirely.
       tagsOverride: typeof req.query.tags === 'string' ? String(req.query.tags).slice(0, 500) : null,
-      // Navidrome tag fields (all optional): artists/genres are ","- or ";"-
-      // separated lists, date is YYYY or YYYY-MM-DD. release is album|single|ep
+      // Navidrome tag fields (all optional): artists is a ","- or ";"-separated
+      // list, genres also take hashtags or plain spaces (see splitGenres),
+      // date is YYYY or YYYY-MM-DD. release is album|single|ep
       // (single files the song as its own album); legacy single=1 still works.
       artists: req.query.artists ? String(req.query.artists).slice(0, 300) : null,
       album: req.query.album ? String(req.query.album).slice(0, 200) : null,

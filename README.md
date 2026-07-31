@@ -398,7 +398,19 @@ batches, which tag each track automatically from its own metadata)*
 - **Album / EP name** — *hidden for Single.* The album/EP the track belongs to.
 - **Release date** — `YYYY` or `YYYY-MM-DD`; the year becomes the `(Year)` in the
   folder path.
-- **Genres (comma-separated)** — one or more genre tags.
+- **Genres (commas, spaces or #hashtags)** — one or more genre tags, written
+  with whichever separator you have at hand: `#neurofunk #darkdnb #dnb`,
+  `neurofunk darkdnb dnb` or `Pop, Rock`. The separator is taken from the text
+  itself — hashtags win, then commas/semicolons, and only a line with neither
+  is split on spaces. Multi-word genres therefore need a comma or a hashtag
+  (`#hard rock #dnb`), except when a connector makes the name obvious
+  (`Drum & Bass`, `Rhythm and Blues`), which is kept whole. Duplicates are
+  dropped.
+- **Pick genres from list** — opens every genre Grabbit knows, most-used first
+  with a track count: the genres already in your music libraries plus the ones
+  you have typed here before (kept in `DATA_DIR/genres.json`). Tap to add or
+  remove; the field is rewritten in whichever style it already uses (hashtags
+  or commas), so typing and tapping mix freely.
 
 **Quality and format**
 
