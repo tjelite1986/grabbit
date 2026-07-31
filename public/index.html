@@ -551,7 +551,13 @@
       /* Result-card description (collapsed by default) */
       .desc { margin: 2px 2px 12px; font-size: 13px; color: var(--muted); }
       .desc summary { cursor: pointer; padding: 4px 0; color: var(--text); font-weight: 500; }
-      .desc pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 6px 0 0; max-height: 40vh; overflow-y: auto; }
+      /* No max-height/overflow here on purpose. Selecting text in the sheet on
+         Chrome for Android painted the selection highlight without the glyphs —
+         the text under the selection went blank — and a nested scroll container
+         is a known trigger for that kind of stale repaint. Not proven to be the
+         whole story (input values blanked too), but the sheet is the only
+         scroller now, and the box stays collapsed until it is opened. */
+      .desc pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 6px 0 0; }
 
       /* Saved playlists (home) */
       .plsec { margin-top: 18px; }
