@@ -268,7 +268,8 @@ by library, and **Rescan** to reconcile it with what is actually on disk. A scan
 walks both music roots, reads the tags of anything the log has not seen (so
 files copied in by hand, or downloaded before the log existed, still show up)
 and flags rows whose file has since disappeared. One scan also runs shortly
-after every start.
+after every start, and **More → Music library** has the same scan next to the
+current track count and the time of the last one.
 
 **Duplicate detection.** The same song is uploaded many times — a topic channel,
 an official video, a lyric video — and each of those is a *different source*, so
