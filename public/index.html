@@ -79,10 +79,10 @@
       @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
       .appbar {
-        position: sticky; top: 0; z-index: 20;
+        /* Static since the global .topchrome took over as the sticky header —
+           a second sticky bar would slide in underneath it. */
         display: flex; align-items: center; gap: 8px;
-        padding: 22px 0 12px;
-        background: linear-gradient(var(--bg) 70%, transparent);
+        padding: 14px 0 12px;
       }
       .appbar h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: .2px; flex: 1; }
       .appbar .spacer { flex: 1; }
@@ -99,6 +99,32 @@
         margin-bottom: 18px;
       }
       .searchbar:focus-within { border-color: var(--surface-hi); }
+      /* Global top chrome: the search bar + quick icons live above every tab,
+         with the destination-mode pills pinned right under them. */
+      .topchrome {
+        position: sticky; top: 0; z-index: 30;
+        margin: 0 -16px; padding: 10px 16px 0;
+        background: color-mix(in srgb, var(--bg) 88%, transparent);
+        backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+        border-bottom: 1px solid var(--line);
+      }
+      .toprow { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .toprow .searchbar { flex: 1; min-width: 0; margin-bottom: 0; }
+      .toprow .iconbtn {
+        flex: none; display: grid; place-items: center; width: 44px; height: 44px;
+        color: var(--text); background: var(--surface); border: 1px solid var(--line);
+        border-radius: 999px;
+      }
+      .toprow .iconbtn:active { background: var(--surface-2); }
+      .modebar {
+        display: flex; gap: 4px; padding: 4px; margin-bottom: 12px;
+        background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+      }
+      .modebar .mode {
+        flex: 1; padding: 7px 0; border-radius: 999px;
+        font-size: 13px; color: var(--muted); background: none;
+      }
+      .modebar .mode.active { background: var(--primary-dim); color: #cdd6ff; font-weight: 600; }
       .searchbar .ic { color: var(--muted); flex: none; }
       .searchbar input {
         flex: 1; min-width: 0; background: none; border: 0; outline: none;
@@ -583,20 +609,35 @@
   </head>
   <body>
     <main>
+      <!-- Global top chrome: search + Home/More shortcuts on every tab, and
+           the destination-mode switcher (Grabbit = everything; the others
+           narrow history, queue and the default destination). -->
+      <div class="topchrome">
+        <div class="toprow">
+          <form id="form" class="searchbar">
+            <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+            <input id="url" type="text" inputmode="search" placeholder="Search or insert URL(s)" autocomplete="off" autocapitalize="off" spellcheck="false" required />
+            <button id="go" class="go" type="submit" title="Fetch">
+              <svg class="ic" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M13 5l7 7-7 7" /></svg>
+            </button>
+          </form>
+          <button class="iconbtn" id="topHome" type="button" title="Home">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8" /><path d="M5 10v10h5v-6h4v6h5V10" /></svg>
+          </button>
+          <button class="iconbtn" id="topMore" type="button" title="Settings">
+            <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z" /></svg>
+          </button>
+        </div>
+        <div class="modebar" id="modeBar">
+          <button class="mode active" type="button" data-mode="">Grabbit</button>
+          <button class="mode" type="button" data-mode="elite">Elitev2</button>
+          <button class="mode" type="button" data-mode="music">Music</button>
+          <button class="mode" type="button" data-mode="audiobooks">Audiobook</button>
+        </div>
+      </div>
+
       <!-- ===================== HOME ===================== -->
       <section id="view-home" class="view active">
-        <header class="appbar">
-          <div class="wordmark"><img src="/logo.svg" alt="" class="wordmark-logo" data-no-blur />Grabbit</div>
-        </header>
-
-        <form id="form" class="searchbar">
-          <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
-          <input id="url" type="text" inputmode="search" placeholder="Search or insert URL(s)" autocomplete="off" autocapitalize="off" spellcheck="false" required />
-          <button id="go" class="go" type="submit" title="Fetch">
-            <svg class="ic" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M13 5l7 7-7 7" /></svg>
-          </button>
-        </form>
-
         <!-- Shown when the browser reports the app is installable. -->
         <div class="installbar hidden" id="installBar">
           <img src="/icon-192.png" alt="" data-no-blur />
@@ -616,11 +657,22 @@
         </div>
 
         <div id="cards"></div>
+      </section>
+
+      <!-- ===================== PLAYLISTS ===================== -->
+      <section id="view-playlists" class="view">
+        <header class="appbar">
+          <h1>Playlists</h1>
+        </header>
 
         <!-- Saved playlists: open one to re-check it for new tracks. -->
         <div id="plSection" class="plsec hidden">
-          <h2>Saved playlists</h2>
           <div id="plRows"></div>
+        </div>
+        <div id="plEmpty" class="empty">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M4 6h12"/><path d="M4 12h12"/><path d="M4 18h8"/><circle cx="18" cy="16" r="3"/><path d="M21 16V8"/></svg>
+          <p>No saved playlists</p>
+          <small>Open a playlist or profile link and save it — it shows up here and can auto-download new tracks.</small>
         </div>
       </section>
 
@@ -953,9 +1005,10 @@
 
     <!-- ===================== BOTTOM NAV ===================== -->
     <nav class="bottomnav" id="nav">
-      <button class="navitem active" data-tab="home">
-        <span class="pill"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8" /><path d="M5 10v10h5v-6h4v6h5V10" /></svg></span>
-        <span class="lab">Home</span>
+      <!-- Home moved to the top bar's house icon; playlists took its slot. -->
+      <button class="navitem" data-tab="playlists">
+        <span class="pill"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h12"/><path d="M4 12h12"/><path d="M4 18h8"/><circle cx="18" cy="16" r="3"/><path d="M21 16V8"/></svg></span>
+        <span class="lab">Playlists</span>
       </button>
       <button class="navitem" data-tab="downloads">
         <span class="pill"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5" /><path d="M5 21h14" /></svg></span>
@@ -1354,6 +1407,7 @@
         window.scrollTo(0, 0);
         if (tab === 'downloads') loadHistory();
         if (tab === 'more') loadMusicStats();
+        if (tab === 'playlists') loadPlaylists();
       }
 
       // Device Back support: a non-home tab holds exactly ONE extra history
@@ -1397,6 +1451,47 @@
         const b = e.target.closest('.navitem');
         if (b) showTab(b.dataset.tab);
       });
+      $('topHome').addEventListener('click', () => showTab('home'));
+      $('topMore').addEventListener('click', () => showTab('more'));
+
+      // --------------------------------------------------- destination modes
+      // Grabbit is the everything view; the other three narrow the app to one
+      // destination: history and queue only show that target's items, and the
+      // download sheet opens with it preselected. Client state only.
+      const MODE_KEY = 'grabbit.mode.v1';
+      let mode = '';
+      try {
+        const m = localStorage.getItem(MODE_KEY) || '';
+        if (['', 'elite', 'music', 'audiobooks'].includes(m)) mode = m;
+      } catch { /* default to the everything view */ }
+      // History rows are matched on their channel label (see recordHistory).
+      const MODE_CHANNEL = {
+        elite: (c) => c === 'main' || c === '18plus' || c === 'elite' || c.startsWith('elite/'),
+        music: (c) => c.startsWith('navidrome/'),
+        audiobooks: (c) => c.startsWith('audiobooks/'),
+      };
+      // The sheet's preselected destination for the current mode.
+      function modeDest() {
+        if (mode === 'elite') return '';
+        if (mode === 'music') return 'navidrome';
+        if (mode === 'audiobooks') return 'audiobooks';
+        return settings.dest;
+      }
+      function reflectMode() {
+        document.querySelectorAll('#modeBar .mode').forEach((b) =>
+          b.classList.toggle('active', (b.dataset.mode || '') === mode)
+        );
+      }
+      $('modeBar').addEventListener('click', (e) => {
+        const b = e.target.closest('.mode');
+        if (!b) return;
+        mode = b.dataset.mode || '';
+        try { localStorage.setItem(MODE_KEY, mode); } catch { /* session-only then */ }
+        reflectMode();
+        renderHistory();
+        renderQueue();
+      });
+      reflectMode();
 
       // ----------------------------------------------------------------- icons
       const ICON = {
@@ -1460,6 +1555,8 @@
         entryAuto = false;
         const raw = urlInput.value.trim();
         if (!raw) return;
+        // The search box lives in the global top bar — results render on Home.
+        if (currentTab !== 'home') showTab('home');
         homeError.classList.add('hidden');
         cardsEl.innerHTML = '';
         homeEmpty.classList.add('hidden');
@@ -1856,6 +1953,7 @@
         const rows = $('plRows');
         rows.innerHTML = '';
         $('plSection').classList.toggle('hidden', !savedPlaylists.length);
+        $('plEmpty').classList.toggle('hidden', !!savedPlaylists.length);
         savedPlaylists.forEach((p) => {
           const row = document.createElement('button');
           row.className = 'plrow';
@@ -2015,8 +2113,9 @@
 
       function openSheetCommon() {
         sheetSeq++;
-        // Apply current defaults to the sheet controls.
-        segSet($('shDest'), settings.dest);
+        // Apply current defaults to the sheet controls. The active mode wins
+        // over the saved default destination; Grabbit mode uses the setting.
+        segSet($('shDest'), modeDest());
         segSet($('shChannel'), settings.channel);
         segSet($('shNavLib'), settings.navLib);
         $('shFolder').value = folderList.includes(settings.folder) ? settings.folder : (folderList[0] || 'videos');
@@ -2850,7 +2949,9 @@
 
       // Merge server jobs + batch rows into one time-sorted list.
       function queueEntries() {
-        const jobs = [...jobMap.values()].map((j) => ({
+        // Same narrowing as the history: a mode only shows its own jobs.
+        const wantDest = mode === 'elite' ? 'elite' : mode === 'music' ? 'navidrome' : mode === 'audiobooks' ? 'audiobooks' : null;
+        const jobs = [...jobMap.values()].filter((j) => !wantDest || j.dest === wantDest).map((j) => ({
           id: j.id, title: j.title || j.filename || 'download', thumbnail: j.thumbnail,
           status: j.status, percent: j.percent, phase: j.phase, speed: j.speed, eta: j.eta,
           message: j.message, error: j.error, duration: j.duration, at: j.at, _t: j.createdAt || 0,
@@ -3162,6 +3263,8 @@
       function renderHistory() {
         historyEmpty.querySelector('p').textContent = 'No downloads yet';
         let items = historyItems.slice();
+        // Mode view: Elitev2/Music/Audiobook narrow the list to that target.
+        if (mode && MODE_CHANNEL[mode]) items = items.filter((it) => MODE_CHANNEL[mode](String(it.channel || '')));
         // Failures are their own filter; the type filters only list real saves.
         if (hFilter === 'failed') items = items.filter((it) => it.error);
         else if (hFilter !== 'all') items = items.filter((it) => !it.error && itemKind(it) === hFilter);
@@ -3880,7 +3983,7 @@
           else urlInput.focus();
           return;
         }
-        if (['home', 'downloads', 'queue', 'more'].includes(tab)) showTab(tab);
+        if (['home', 'playlists', 'downloads', 'queue', 'more'].includes(tab)) showTab(tab);
         if (action === 'paste') {
           (navigator.clipboard && navigator.clipboard.readText
             ? navigator.clipboard.readText()
