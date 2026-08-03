@@ -83,7 +83,9 @@ hour-long files.
 - **Cutting**: give timestamp sections (`0:30-1:45, 3:10-4:00`) to download
   only those parts (`--download-sections` + `--force-keyframes-at-cuts`), or
   toggle *Split by chapters* for one file per chapter (`--split-chapters`).
-  Server-library destination only, since a cut can produce several files.
+  Since a cut can produce several files, this is limited to the two
+  destinations that can hold them: the server library, and the audiobook
+  library (where the chapters become numbered parts of one book).
 - **SponsorBlock**: per download, either remove the sponsored segments or keep
   them but embed them as chapters.
 - **Scheduling**: pick a start time in the sheet; the job waits as `scheduled`,
@@ -179,6 +181,21 @@ library folder and Grabbit files each track into a clean, scannable tree:
 
 (Artist and album repeat in the file name on purpose, so a track stays
 identifiable even if it ends up outside its folder.)
+
+**Audiobooks and audio stories get their own shelf.** The *Audiobooks /
+stories* destination is a separate library where every book or story lives in
+its own folder:
+
+```
+[Author]/[Book]/[NN - ][Part].ext
+```
+
+A story that arrives as a single file keeps the plain book name; a book that
+comes as one long recording can be split on its chapters (**Split by chapters**
+in the download sheet), and each chapter lands as a numbered, individually
+tagged part of the same book. Adding a part later continues the numbering
+instead of overwriting part one, and the source thumbnail is saved as
+`cover.jpg` next to the book, which is what audiobook players look for.
 
 **Auto or hand-picked metadata.** Leave tagging on **auto** and Grabbit names
 and tags the track for you. Prefer to curate it? Do it manually and pick the
@@ -342,6 +359,8 @@ up only once the destination is Navidrome); that's noted per setting.
   - *Server library* — a plain folder library on the server.
   - *Navidrome (music)* — a tagged music library: audio only, filed by
     artist/album (see the naming scheme above).
+  - *Audiobooks / stories* — a tagged audiobook library: audio only, one folder
+    per book, filed by author/book (see the naming scheme above).
 
 - **Music library** — *shown only when Save to = Navidrome.* Which music library
   the audio lands in: *My music* or *Kids* (a separate library/instance).
@@ -410,7 +429,8 @@ once. Each entry below says when it appears.
 **Where it goes**
 
 - **Save to** — the destination for this download: *Elite-v2 shorts*, *Server
-  library* or *Navidrome*. This choice drives which fields below appear.
+  library*, *Navidrome* or *Audiobooks*. This choice drives which fields below
+  appear.
 - **Music library** — *Navidrome only.* *My music* or *Kids*.
 - **Channel** — *Elite-v2 shorts only.* *main* or *18+*.
 - **Library folder** — *server-library video only.* Pick an existing subfolder,
@@ -451,6 +471,22 @@ batches, which tag each track automatically from its own metadata)*
   remove; the field is rewritten in whichever style it already uses (hashtags
   or commas), so typing and tapping mix freely.
 
+**Audiobook tagging** *(shows only for a single Audiobooks save — not batches,
+where each item names its own book from its own metadata)*
+
+- **Source description** — the same collapsible panel as above. Worth opening
+  for a book: audiobook uploads usually spell out the author, the narrator and
+  the chapter timestamps there, and those timestamps go straight into *Cut
+  sections* further down.
+- **Author / narrator** — becomes the artist tag and the top folder level.
+- **Book / story title** — becomes the album tag and the book's own folder.
+  Editing it also retitles the part, until you edit the part by hand.
+- **Part title** — names the file and its title tag. A story that arrives as one
+  file can keep the book title. *Hidden when Split by chapters is on*, since
+  each chapter then titles itself.
+- **Year** and **Genres** — as for music; an empty genre defaults to
+  `Audiobook` rather than being looked up in a music database.
+
 **Quality and format**
 
 - **Quality** — resolution cap for yt-dlp sites (*Best* or 2160p…360p). *Shown
@@ -458,8 +494,8 @@ batches, which tag each track automatically from its own metadata)*
 - **Container** — output format *mp4 / mkv / webm*. *Server-library video only*
   (Elite shorts stay plain mp4; mkv/webm need yt-dlp).
 - **Audio format** + **Bitrate** — same choices as the defaults; bitrate applies
-  to lossy formats only. *Shown for audio downloads* (including a Navidrome save,
-  which always extracts audio).
+  to lossy formats only. *Shown for audio downloads* (including a Navidrome or
+  Audiobooks save, which always extract audio; audiobooks default to `m4a`).
 
 **Video extras** *(server-library video only)*
 
@@ -470,12 +506,14 @@ batches, which tag each track automatically from its own metadata)*
 *Off*, *Remove segments* (cut sponsor/intro/etc. out) or *Keep, mark as chapters*
 (leave them in but add chapter markers).
 
-**Cutting** *(server library, not images, not batches)*
+**Cutting** *(server or audiobook library, not images, not batches)*
 
 - **Cut sections (start-end, comma-separated)** — download only the given
   timestamp ranges, e.g. `0:30-1:45, 3:10-4:00`. Because a cut can produce
-  several files, it's server-library only.
-- **Split by chapters** — *video only.* Save one file per chapter instead.
+  several files, only the server and audiobook libraries take it.
+- **Split by chapters** — *video, or any audiobook save.* Save one file per
+  chapter instead. For an audiobook each chapter becomes a numbered part inside
+  the book's folder, tagged individually.
 
 **Advanced and delivery**
 
@@ -770,6 +808,7 @@ environment variables:
 | `VIDEOS_DOWNLOAD_DIR` / `AUDIO_DOWNLOAD_DIR` / `PHOTOS_DOWNLOAD_DIR` / `ADULTS_DOWNLOAD_DIR` | Per-type overrides inside the library. |
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
+| `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |
 | `ELITE_ROOT` | elite-v2 shorts storage root — enables the elite destination. |
 | `ELITE_POSTS_ROOT` | elite-v2 posts storage root. Images saved to the elite destination are dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and import as that creator's posts; without it, point `ELITE_POSTS_IMPORT_DIR` straight at the drop folder. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
@@ -844,6 +883,8 @@ mkdir -p data downloads/{videos,mp3,adults,photos}
 # only if you'll use the music-server destination — point this at the same
 # folder your music server scans (create it wherever that library lives)
 mkdir -p music
+# only if you'll use the audiobook destination
+mkdir -p audiobooks
 ```
 
 - **`data/`** — Grabbit's own state: download history, scheduled jobs, saved
@@ -853,6 +894,9 @@ mkdir -p music
   `videos/`, `mp3/`, `adults/` (18+) and `photos/`.
 - **`music/`** — only for the *Navidrome (music)* destination; make it the exact
   directory your music server already scans, so tracks appear there.
+- **`audiobooks/`** — only for the *Audiobooks / stories* destination; one
+  folder per book, so an audiobook player can pick each one up as a single
+  title.
 
 **Permissions.** By default the container runs as **root**, so it can always
 write these folders, and the files it creates are owned by `root`. That's fine
@@ -862,7 +906,7 @@ can also move or delete them — pin the container to that user and pre-own the
 folders (use your own values from `id -u` and `id -g`):
 
 ```bash
-sudo chown -R 1000:1000 data downloads music
+sudo chown -R 1000:1000 data downloads music audiobooks
 ```
 
 …and add `user: "1000:1000"` to the service in the next step.
@@ -923,6 +967,8 @@ services:
       - PHOTOS_DOWNLOAD_DIR=/downloads/photos
       # --- music-server destination (point the volume below at your library) ---
       - NAVIDROME_MUSIC_DIR=/music
+      # --- audiobook destination (one folder per book, filed by author) ---
+      - AUDIOBOOKS_DIR=/audiobooks
       # --- behaviour ---
       - MAX_ACTIVE_JOBS=2        # how many downloads run at once (rest queue)
       - WATCH_INTERVAL_MINUTES=60 # how often watched playlists are polled
@@ -931,6 +977,7 @@ services:
       - ./data:/data            # grabbit state — the container writes to /data (DATA_DIR)
       - ./downloads:/downloads  # the plain server library (matches DOWNLOAD_DIR above)
       - ./music:/music          # your music library (matches NAVIDROME_MUSIC_DIR above)
+      - ./audiobooks:/audiobooks # your audiobook library (matches AUDIOBOOKS_DIR above)
 ```
 
 Then start it:
@@ -957,11 +1004,12 @@ Open **http://your-host:3000**. To watch logs: `docker logs -f grabbit`.
   line** if a reverse proxy fronts Grabbit (below).
 - **`environment:`** — the settings from the [Configuration](#configuration)
   tables. The `${...}` values are filled from `.env`; the plain ones are literal.
-  Container-internal paths (`/downloads`, `/music`) must match the right side of
-  the volume mounts.
+  Container-internal paths (`/downloads`, `/music`, `/audiobooks`) must match
+  the right side of the volume mounts.
 - **`volumes:`** — `HOST:CONTAINER` bind mounts. The **`./data`** mount is the
-  one you must never lose. `./downloads` and `./music` only matter for those
-  destinations — drop a mount and its env vars if you don't use that destination.
+  one you must never lose. `./downloads`, `./music` and `./audiobooks` only
+  matter for those destinations — drop a mount and its env vars if you don't use
+  that destination.
 
 Rebuilds are needed after **any** code change, because the source is copied into
 the image (there's no live bind mount of the app), so make a habit of

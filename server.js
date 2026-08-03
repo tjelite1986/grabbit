@@ -51,11 +51,21 @@ const NAVIDROME_DIR = process.env.NAVIDROME_MUSIC_DIR || path.join(DOWNLOAD_DIR,
 // (kids). Same tagging/layout, different root — nothing saved here ever shows
 // up in the main library.
 const NAVIDROME_KIDS_DIR = process.env.NAVIDROME_KIDS_DIR || path.join(DOWNLOAD_DIR, 'navidrome-kids');
+// Audiobook / audio-story library (host mount). dest=audiobooks saves extracted
+// audio into <root>/<Author>/<Book>/ — one folder per book or story, whether it
+// ends up holding a single file or one file per chapter.
+const AUDIOBOOKS_DIR = process.env.AUDIOBOOKS_DIR || path.join(DOWNLOAD_DIR, 'audiobooks');
 
-// Download destination: elite (shorts import), server (plain library) or
-// navidrome (music library; audio-only, forces audio extraction).
+// Download destination: elite (shorts import), server (plain library),
+// navidrome (music library) or audiobooks (book/story library). The last two
+// are audio-only and force audio extraction.
 function parseDest(v) {
-  return v === 'server' || v === 'navidrome' ? v : 'elite';
+  return v === 'server' || v === 'navidrome' || v === 'audiobooks' ? v : 'elite';
+}
+
+// The audio-library destinations: extracted audio, tagged, filed into a tree.
+function isAudioLibraryDest(dest) {
+  return dest === 'navidrome' || dest === 'audiobooks';
 }
 
 // Which Navidrome library a dest=navidrome save lands in.
@@ -1140,7 +1150,7 @@ function sanitizeRules(input) {
       if (Number.isFinite(n) && n > 0) m[k] = Math.round(n);
     }
     const a = {};
-    if ('dest' in apply && ['', 'server', 'navidrome'].includes(apply.dest)) a.dest = apply.dest;
+    if ('dest' in apply && ['', 'server', 'navidrome', 'audiobooks'].includes(apply.dest)) a.dest = apply.dest;
     if ('lib' in apply && ['main', 'kids'].includes(apply.lib)) a.lib = apply.lib;
     if ('channel' in apply && CHANNELS[apply.channel]) a.channel = apply.channel;
     const folder = cleanRuleStr(apply.folder, 40);
@@ -1338,6 +1348,101 @@ function musicLibraryTarget(root, { artist, album, year, title, ext }) {
     dir: path.join(root, artistDir, albumDir),
     filename: `${clampBytes(stemName, 200) || 'track'}.${ext}`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Audiobook library layout: [Author]/[Book]/[NN - ][Part].ext — one folder per
+// book or story. A story that arrives as a single file keeps the plain book
+// name; parts (chapter split, or a second file added to an existing book) get
+// a zero-padded prefix so the folder sorts in reading order.
+const AUDIO_FILE_RE = /\.(m4a|m4b|mp3|opus|ogg|oga|flac|wav|aac|alac|wma)$/i;
+
+function audiobookDir(root, author, book) {
+  return path.join(root, safeMusicPart(author, 'Unknown Author'), safeMusicPart(book, 'Unknown Book'));
+}
+
+// How many parts a book folder already holds — the basis for the next part
+// number, so adding a chapter later continues the numbering instead of
+// overwriting part one.
+function audiobookPartCount(dir) {
+  try {
+    return fs.readdirSync(dir).filter((f) => AUDIO_FILE_RE.test(f)).length;
+  } catch {
+    return 0; // The book folder does not exist yet.
+  }
+}
+
+// track = null -> unnumbered (the single-file story case).
+function audiobookFileName(part, ext, track) {
+  const name = clampBytes(safeMusicPart(part, 'Part'), 180) || 'Part';
+  return `${track ? String(track).padStart(2, '0') + ' - ' : ''}${name}.${ext}`;
+}
+
+// Two jobs run at once by default (MAX_ACTIVE_JOBS), and both may be adding
+// parts to the same book. Reserving a part number is read-then-write, so the
+// whole reserve+copy runs serialized per book folder.
+const bookFolderLocks = new Map();
+function withBookFolderLock(dir, fn) {
+  const prev = bookFolderLocks.get(dir) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  // Keep the chain alive on failure; the caller still sees the rejection.
+  bookFolderLocks.set(dir, next.catch(() => {}));
+  return next;
+}
+
+// Best effort: drop the source thumbnail next to the book as cover.jpg, which
+// is what audiobook players (Audiobookshelf, Symfonium, Navidrome) look for.
+async function saveBookCover(meta, dir) {
+  const url = meta.thumbnail;
+  if (!url) return;
+  const target = path.join(dir, 'cover.jpg');
+  if (fs.existsSync(target)) return;
+  try {
+    await downloadDirect({ ...meta, downloadUrl: url, fallbackUrls: [] }, target);
+  } catch (e) {
+    console.warn('audiobook cover download failed:', String(e.message || e));
+    fs.rm(target, { force: true }, () => {});
+  }
+}
+
+// The tag set written to every audiobook file. Keeping album=book and
+// albumartist=author is what makes a book show up as one item in the players.
+function audiobookTags({ author, book, part, track, date, year, genres }) {
+  return {
+    title: part,
+    artist: [author],
+    albumartist: author,
+    album: book,
+    tracknumber: track ? String(track) : null,
+    // Implausible dates are dropped entirely, not written half-wrong.
+    date: year ? date : null,
+    genre: genres,
+    releasetype: 'audiobook',
+    // Clear the video-site leftovers (description, watch links) that yt-dlp's
+    // --embed-metadata writes.
+    synopsis: '',
+    description: '',
+    comment: '',
+    purl: '',
+  };
+}
+
+// Author/book/part/date/genres for a job, from the UI fields with the site
+// metadata filling the gaps. A one-file story ends up with part == book.
+function audiobookMeta(meta, params) {
+  const m = meta.music || {};
+  const author = (params.artists ? splitList(params.artists)[0] : null) || m.artist || meta.creator || 'Unknown Author';
+  const book = (params.album || meta.title || 'Unknown Book').trim();
+  const part = (params.titleOverride || meta.title || book).trim();
+  const date = params.date || (m.year ? String(m.year) : null);
+  // Only a plausible year is written into the tag — sites hand out nonsense
+  // release years often enough.
+  const yearNum = Number(String(date || '').slice(0, 4));
+  const year = yearNum >= 1900 && yearNum <= new Date().getFullYear() + 1 ? String(yearNum) : null;
+  // No genre lookup here (the music databases know nothing about audiobooks);
+  // an unset genre just gets the obvious default.
+  const genres = params.genres ? splitGenres(params.genres) : m.genre ? [m.genre] : ['Audiobook'];
+  return { author, book, part, date, year, genres };
 }
 
 // Rewrite the tags of an audio file in place via mutagen (yt-dlp's tag
@@ -2371,7 +2476,8 @@ app.post('/api/history/delete', (req, res) => {
 // GET /api/download?url=...&dest=elite|server&channel=main|18plus&device=1|0&web=1|0&quality=N&audio=1&afmt=
 //   dest=elite (default) saves into the elite-v2 shorts _import; dest=server
 //     saves into the plain server library (videos/mp3/adults). dest=navidrome
-//     is jobs-API only (tagging + library sorting live there) and is rejected.
+//     and dest=audiobooks are jobs-API only (tagging + library sorting live
+//     there) and are rejected.
 //   device=1 (default) streams the file to the browser; device=0 saves only.
 //   web=1 saves a web-optimized .web.mp4 (lands ready; the transcoder skips it).
 //   quality=720|1080|... caps the download resolution (yt-dlp sites only).
@@ -2379,8 +2485,8 @@ app.post('/api/history/delete', (req, res) => {
 app.get('/api/download', async (req, res) => {
   const url = req.query.url;
   const dest = parseDest(req.query.dest);
-  if (dest === 'navidrome') {
-    return res.status(400).json({ ok: false, error: 'dest=navidrome is only supported via /api/jobs/start (it tags and sorts the file).' });
+  if (isAudioLibraryDest(dest)) {
+    return res.status(400).json({ ok: false, error: `dest=${dest} is only supported via /api/jobs/start (it tags and sorts the file).` });
   }
   const channel = CHANNELS[req.query.channel] || 'main';
   const folder = req.query.folder; // server-library target folder (videos/adults/photos)
@@ -3015,10 +3121,10 @@ async function produceAudio(job, meta, params, onProgress) {
   setJob(job, { phase: 'downloading' });
   try {
     if (meta.kind === 'ytdlp') {
-      // Navidrome files always get the cover embedded — it's the album art.
+      // Library files always get the cover embedded — it's the album art.
       outPath = await downloadYtdlpAudio(meta, base, afmt, {
         aq: params.aq,
-        embedThumb: params.embedThumb || params.dest === 'navidrome',
+        embedThumb: params.embedThumb || isAudioLibraryDest(params.dest),
         sponsorblock: params.sponsorblock,
         extraArgs: params.extraArgs,
       });
@@ -3033,7 +3139,35 @@ async function produceAudio(job, meta, params, onProgress) {
     const realExt = safeExt(path.extname(outPath).slice(1), 'm4a');
     const mime = audioMime(realExt);
     const outName = `${stem}.${realExt}`;
-    if (params.dest === 'server' || params.dest === 'navidrome') {
+    if (params.dest === 'audiobooks') {
+      const book = audiobookMeta(meta, params);
+      const libDir = audiobookDir(AUDIOBOOKS_DIR, book.author, book.book);
+      // Reserve the part number and write inside the folder lock: a second job
+      // adding to the same book must not claim the same number.
+      const finalName = await withBookFolderLock(libDir, async () => {
+        fs.mkdirSync(libDir, { recursive: true });
+        const existing = audiobookPartCount(libDir);
+        // First file in a fresh book folder stays unnumbered — a one-file story
+        // is the common case and "Book.m4a" reads better than "01 - Book.m4a".
+        const track = existing + 1;
+        const name = audiobookFileName(book.part, realExt, existing ? track : null);
+        try {
+          await tagAudio(outPath, audiobookTags({ ...book, track }));
+        } catch (e) {
+          console.warn('audiobook tagging failed, saving untagged:', String(e.message || e));
+        }
+        fs.copyFileSync(outPath, path.join(libDir, name));
+        return name;
+      });
+      await saveBookCover(meta, libDir);
+      const libPath = path.join(libDir, finalName);
+      recordJobHistory(meta, params, `audiobooks/${book.author}`, finalName, false);
+      finishJob(job, {
+        saved: true, dest: 'audiobooks', dir: book.book, filename: finalName, mime,
+        deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
+        message: `Saved to audiobooks/${book.author}/${book.book}.`,
+      });
+    } else if (params.dest === 'server' || params.dest === 'navidrome') {
       const nav = params.dest === 'navidrome';
       // Main library or the separate kids one — different Navidrome instances.
       const navRoot = NAV_LIBS[parseNavLib(params.navLib)];
@@ -3134,17 +3268,31 @@ async function produceAudio(job, meta, params, onProgress) {
   }
 }
 
+// The chapter files ytdlpCut produces are "<stem> - chNN <Chapter title>.ext";
+// for an audiobook the chapter title is what belongs in the tag and file name.
+function chapterPartTitle(filename, fallback) {
+  const m = /- ch\d+\s+(.*)\.[^.]+$/.exec(filename);
+  return (m && m[1].trim()) || fallback;
+}
+
 // Cut downloads: timestamp sections (--download-sections) and/or chapter
 // splitting (--split-chapters) can produce SEVERAL files, so they bypass the
 // single-file pipeline — yt-dlp writes into a temp dir and everything it
-// produced is moved into the server library. Server-library dest only.
+// produced is moved into the library. Server-library and audiobook dests only
+// (a book folder is exactly the place a chapter split belongs).
 async function produceCut(job, meta, params, onProgress) {
   if (meta.kind !== 'ytdlp') {
     throw new Error('Cutting needs a yt-dlp-handled site (this one uses a direct downloader).');
   }
   const stem = `${safeCreator(meta.creator)}_-_${safeTitle(meta.title)}`;
   const audio = !!params.audio;
-  const dir = audio ? AUDIO_DIR : serverVideoDir(params.folder);
+  const toBook = params.dest === 'audiobooks';
+  const book = toBook ? audiobookMeta(meta, params) : null;
+  const dir = toBook
+    ? audiobookDir(AUDIOBOOKS_DIR, book.author, book.book)
+    : audio
+      ? AUDIO_DIR
+      : serverVideoDir(params.folder);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-cut-'));
   try {
     await ytdlpCut(meta, tmpDir, stem, {
@@ -3173,25 +3321,57 @@ async function produceCut(job, meta, params, onProgress) {
     }
     if (!files.length) throw new Error('yt-dlp produced no output (no matching sections/chapters?)');
     files.sort();
-    fs.mkdirSync(dir, { recursive: true });
-    const savedNames = [];
-    for (const f of files) {
-      const target = path.join(dir, f);
-      fs.copyFileSync(path.join(tmpDir, f), target);
-      savedNames.push(f);
+    let savedNames;
+    if (toBook) {
+      // Every cut becomes a numbered part of the book, tagged individually and
+      // continuing the numbering of whatever the folder already holds.
+      savedNames = await withBookFolderLock(dir, async () => {
+        fs.mkdirSync(dir, { recursive: true });
+        const offset = audiobookPartCount(dir);
+        const names = [];
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i];
+          const src = path.join(tmpDir, f);
+          const track = offset + i + 1;
+          const part = chapterPartTitle(f, `${book.book} ${track}`);
+          try {
+            await tagAudio(src, audiobookTags({ ...book, part, track }));
+          } catch (e) {
+            console.warn('audiobook tagging failed, saving untagged:', String(e.message || e));
+          }
+          const name = audiobookFileName(part, safeExt(path.extname(f).slice(1), 'm4a'), track);
+          fs.copyFileSync(src, path.join(dir, name));
+          names.push(name);
+        }
+        return names;
+      });
+      await saveBookCover(meta, dir);
+    } else {
+      fs.mkdirSync(dir, { recursive: true });
+      savedNames = [];
+      for (const f of files) {
+        fs.copyFileSync(path.join(tmpDir, f), path.join(dir, f));
+        savedNames.push(f);
+      }
     }
-    recordJobHistory(meta, params, `server/${path.basename(dir)}`, savedNames[0], false);
+    recordJobHistory(
+      meta, params,
+      toBook ? `audiobooks/${book.author}` : `server/${path.basename(dir)}`,
+      savedNames[0], false
+    );
     const single = savedNames.length === 1 ? path.join(dir, savedNames[0]) : null;
     finishJob(job, {
       saved: true,
-      dest: 'server',
-      dir: path.basename(dir),
+      dest: toBook ? 'audiobooks' : 'server',
+      dir: toBook ? book.book : path.basename(dir),
       filename: savedNames[0],
       mime: single ? (audio ? audioMime(safeExt(path.extname(single).slice(1), 'm4a')) : videoMime(safeExt(path.extname(single).slice(1), 'mp4'))) : null,
       deliverable: !!params.device && !!single,
       finalPath: params.device && single ? single : null,
       deliverTemp: false,
-      message: `Saved ${savedNames.length} cut file(s) to library/${path.basename(dir)}.`,
+      message: toBook
+        ? `Saved ${savedNames.length} part(s) to audiobooks/${book.author}/${book.book}.`
+        : `Saved ${savedNames.length} cut file(s) to library/${path.basename(dir)}.`,
     });
   } finally {
     fs.rm(tmpDir, { recursive: true, force: true }, () => {});
@@ -3278,9 +3458,11 @@ app.get('/api/jobs/start', (req, res) => {
       device: req.query.device !== '0',
       web: req.query.web === '1',
       quality: parseQuality(req.query.quality),
-      audio: req.query.audio === '1' || dest === 'navidrome',
+      audio: req.query.audio === '1' || isAudioLibraryDest(dest),
       // Target Navidrome library (main | kids); ignored for other dests.
       navLib: parseNavLib(req.query.lib),
+      // m4a for audiobooks: the container every audiobook player handles, and
+      // it keeps chapter-length files seekable.
       afmt: AUDIO_FORMATS.includes(req.query.afmt) ? req.query.afmt : dest === 'navidrome' ? 'opus' : 'm4a',
       aq: parseAudioQuality(req.query.aq),
       container: parseContainer(req.query.container),
@@ -3298,6 +3480,8 @@ app.get('/api/jobs/start', (req, res) => {
       // list, genres also take hashtags or plain spaces (see splitGenres),
       // date is YYYY or YYYY-MM-DD. release is album|single|ep
       // (single files the song as its own album); legacy single=1 still works.
+      // dest=audiobooks reuses the same three: artists = author (first one
+      // wins), album = book title, title = the part's title.
       artists: req.query.artists ? String(req.query.artists).slice(0, 300) : null,
       album: req.query.album ? String(req.query.album).slice(0, 200) : null,
       release: ['album', 'single', 'ep'].includes(req.query.release)
@@ -3309,10 +3493,11 @@ app.get('/api/jobs/start', (req, res) => {
   } catch (e) {
     return res.status(400).json({ ok: false, error: String(e.message || e) });
   }
-  // Cut downloads produce loose library files, which only the server library
-  // can hold (elite-v2 shorts import and Navidrome tagging are single-file).
-  if ((params.sections.length || params.splitChapters) && params.dest !== 'server') {
-    return res.status(400).json({ ok: false, error: 'Cutting/splitting is only supported for the server library.' });
+  // Cut downloads produce several files at once: the server library takes them
+  // as loose files, an audiobook takes them as numbered parts of one book. The
+  // elite-v2 shorts import and Navidrome tagging are single-file only.
+  if ((params.sections.length || params.splitChapters) && !['server', 'audiobooks'].includes(params.dest)) {
+    return res.status(400).json({ ok: false, error: 'Cutting/splitting is only supported for the server and audiobook libraries.' });
   }
   const at = parseAt(req.query.at);
   const job = newJob({ dest: params.dest, channel: params.channel, lib: params.navLib, device: params.device });

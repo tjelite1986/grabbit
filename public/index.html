@@ -514,6 +514,12 @@
         flex: 1; padding: 11px; border-radius: 12px; background: var(--surface-2);
         border: 1px solid var(--line); color: var(--muted); font-weight: 600; font-size: 14px;
       }
+      /* Four destinations don't fit one phone-width row — their words can't
+         shrink past min-content, which would push the whole sheet sideways.
+         Wrapping keeps every option reachable (two rows on a phone, one on a
+         wide sheet). */
+      .seg.wrap { flex-wrap: wrap; }
+      .seg.wrap button { flex: 1 1 130px; min-width: 0; }
       .seg button.on { background: var(--primary-dim); border-color: transparent; color: #cdd6ff; }
       .row2 { display: flex; gap: 12px; }
       .row2 .field { flex: 1; }
@@ -703,6 +709,7 @@
               <option value="">Elite-v2 shorts</option>
               <option value="server">Server library</option>
               <option value="navidrome">Navidrome (music)</option>
+              <option value="audiobooks">Audiobooks / stories</option>
             </select>
           </div>
           <div class="setrow hidden" id="setNavLibRow">
@@ -990,10 +997,11 @@
 
         <div class="field" id="shDestField">
           <label>Save to</label>
-          <div class="seg" id="shDest">
+          <div class="seg wrap" id="shDest">
             <button type="button" data-v="" class="on">Elite-v2 shorts</button>
             <button type="button" data-v="server">Server library</button>
             <button type="button" data-v="navidrome">Navidrome</button>
+            <button type="button" data-v="audiobooks">Audiobooks</button>
           </div>
         </div>
 
@@ -1026,16 +1034,19 @@
           <input id="shNewFolder" type="text" autocomplete="off" placeholder="my-folder" />
         </div>
 
+        <!-- The source description often reveals the real song title, or an
+             audiobook's author and chapter list, when the video title is
+             clickbait — readable while filling the tags. Sits outside the tag
+             blocks below because both of them use it. -->
+        <details class="desc hidden" id="shDescBox">
+          <summary id="shDescSummary">Source description (real title often hides here)</summary>
+          <pre id="shDescText"></pre>
+        </details>
+
         <!-- Navidrome tag fields: filled from site metadata + music-database
              lookup; the values become the file's tags and its library path
              ([Artist]/[Album (Year)]/[Title].ext). -->
         <div class="hidden" id="shMusicFields">
-          <!-- The source description often reveals the real song title when
-               the video title is clickbait — readable while filling the tags. -->
-          <details class="desc hidden" id="shDescBox">
-            <summary id="shDescSummary">Source description (real title often hides here)</summary>
-            <pre id="shDescText"></pre>
-          </details>
           <div class="field">
             <label>Metadata lookup (iTunes + Deezer)</label>
             <div class="row2">
@@ -1084,6 +1095,35 @@
               <span id="shGenrePickLabel">Pick genres from list</span>
             </button>
             <div class="genrepick hidden" id="shGenrePick"></div>
+          </div>
+        </div>
+
+        <!-- Audiobook fields: author + book title decide the library path
+             (<author>/<book>/) and the tags, so a book always lands in its own
+             folder. The part title names the single file; with chapter
+             splitting on, each chapter names itself instead. -->
+        <div class="hidden" id="shBookFields">
+          <div class="field">
+            <label>Author / narrator</label>
+            <input id="shBookAuthor" type="text" autocomplete="off" placeholder="J.R.R. Tolkien" />
+          </div>
+          <div class="field">
+            <label>Book / story title (its own folder)</label>
+            <input id="shBookTitle" type="text" autocomplete="off" />
+          </div>
+          <div class="field" id="shBookPartField">
+            <label>Part title (a one-file story can keep the book title)</label>
+            <input id="shBookPart" type="text" autocomplete="off" />
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Year</label>
+              <input id="shBookDate" type="text" autocomplete="off" placeholder="YYYY or YYYY-MM-DD" />
+            </div>
+            <div class="field">
+              <label>Genres (commas, spaces or #hashtags)</label>
+              <input id="shBookGenres" type="text" autocomplete="off" placeholder="Audiobook, Fantasy" />
+            </div>
           </div>
         </div>
 
@@ -1257,7 +1297,7 @@
       // poisoned/legacy data can neither accumulate junk nor feed an unexpected
       // value into a request.
       const SETTING_ENUMS = {
-        dest: ['', 'server', 'navidrome'], channel: ['main', '18plus'], navLib: ['main', 'kids'],
+        dest: ['', 'server', 'navidrome', 'audiobooks'], channel: ['main', '18plus'], navLib: ['main', 'kids'],
         quality: ['', '2160', '1440', '1080', '720', '480', '360'],
         afmt: ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'],
         aq: ['', '320', '256', '192', '160', '128', '96'],
@@ -1447,7 +1487,7 @@
           // A fully-automatic rule on a shared link: fill the sheet from the
           // rule and confirm it programmatically — zero-decision download.
           if (wasAuto && d.rule && d.rule.auto) {
-            const mode = d.rule.apply && (d.rule.apply.audio || d.rule.apply.dest === 'navidrome')
+            const mode = d.rule.apply && (d.rule.apply.audio || d.rule.apply.dest === 'navidrome' || d.rule.apply.dest === 'audiobooks')
               ? 'audio' : d.mediaType === 'image' ? 'image' : 'video';
             openSheet(mode, d);
             $('shConfirm').click();
@@ -1868,20 +1908,23 @@
         } catch (err) { toast(err.message, 'bad'); }
       }
 
-      // Queue every given playlist item as an audio job into Navidrome. Each
-      // track resolves and tags itself from its own metadata; the server caps
-      // how many download at once, the rest wait as 'queued'.
-      async function startNavidromeBatch(items, afmt, aq, lib) {
+      // Queue every given playlist item as an audio job into one of the audio
+      // libraries (Navidrome, or audiobooks — where each item names its own
+      // book from its own metadata). Each track resolves and tags itself; the
+      // server caps how many download at once, the rest wait as 'queued'.
+      async function startNavidromeBatch(items, afmt, aq, lib, dest) {
         if (!items.length) return;
         connectJobStream();
+        const target = dest === 'audiobooks' ? 'audiobooks' : 'navidrome';
+        const books = target === 'audiobooks';
         const navLib = lib === 'kids' ? 'kids' : 'main';
         let started = 0;
         for (const it of items) {
           const p = new URLSearchParams();
-          p.set('dest', 'navidrome');
-          p.set('lib', navLib);
+          p.set('dest', target);
+          if (!books) p.set('lib', navLib);
           p.set('audio', '1');
-          p.set('afmt', afmt || settings.afmt || 'opus');
+          p.set('afmt', afmt || settings.afmt || (books ? 'm4a' : 'opus'));
           if (aq || settings.aq) p.set('aq', aq || settings.aq);
           p.set('device', '0');
           p.set('url', it.sourceUrl || it.url || '');
@@ -1891,7 +1934,12 @@
           } catch { /* keep queueing the rest */ }
         }
         urlInput.value = '';
-        toast('Queued ' + started + ' tracks for Navidrome' + (navLib === 'kids' ? ' (kids)' : ''), 'good');
+        toast(
+          books
+            ? 'Queued ' + started + ' items for the audiobook library'
+            : 'Queued ' + started + ' tracks for Navidrome' + (navLib === 'kids' ? ' (kids)' : ''),
+          'good'
+        );
         showTab('queue');
       }
 
@@ -2102,9 +2150,8 @@
       // failing that the source page's description (fetched on demand — it
       // runs yt-dlp). Same box the download sheet uses.
       async function loadTrackDescription(track, seq) {
-        const box = $('shDescBox');
-        box.open = false;
-        box.classList.remove('hidden');
+        $('shDescBox').open = false;
+        showDesc(true);
         $('shDescSummary').textContent = 'Description';
         $('shDescText').textContent = 'Loading…';
         try {
@@ -2113,7 +2160,7 @@
           if (seq !== sheetSeq) return;   // the sheet moved on
           const text = (d.description || '').trim();
           if (!text) {
-            box.classList.add('hidden');
+            showDesc(false);
             return;
           }
           $('shDescSummary').textContent = d.from === 'file'
@@ -2121,7 +2168,7 @@
             : 'Source description (real title often hides here)';
           $('shDescText').textContent = text;
         } catch {
-          if (seq === sheetSeq) box.classList.add('hidden');
+          if (seq === sheetSeq) showDesc(false);
         }
       }
 
@@ -2153,7 +2200,7 @@
           for (const id of ['shTitleField', 'shCreatorField', 'shTagsField', 'shDestField', 'shChannelField',
             'shFolderField', 'shNewFolderField', 'shVideoOpts', 'shAudioField', 'shContainerField',
             'shThumbRow', 'shSubsRow', 'shSponsorRow', 'shCutsField', 'shSplitRow', 'shXargsField',
-            'shAtField', 'shWebRow', 'shDeviceRow']) $(id).classList.add('hidden');
+            'shAtField', 'shWebRow', 'shDeviceRow', 'shBookFields']) $(id).classList.add('hidden');
           $('shNavLibField').classList.remove('hidden');
           $('shMusicFields').classList.remove('hidden');
           const rel = segValue($('shMusicRelease'));
@@ -2168,18 +2215,23 @@
         const isImage = sheetMode === 'image';
         const isVideo = sheetMode === 'video';
 
-        // Navidrome takes audio only; lock it out for images.
-        const navBtn = $('shDest').querySelector('[data-v="navidrome"]');
-        const navBlocked = isImage;
-        if (navBlocked && segValue($('shDest')) === 'navidrome') segSet($('shDest'), 'server');
-        navBtn.style.pointerEvents = navBlocked ? 'none' : '';
-        navBtn.style.opacity = navBlocked ? '0.4' : '';
+        // The audio libraries take audio only; lock them out for images.
+        const audioLibBlocked = isImage;
+        for (const v of ['navidrome', 'audiobooks']) {
+          const btn = $('shDest').querySelector('[data-v="' + v + '"]');
+          if (audioLibBlocked && segValue($('shDest')) === v) segSet($('shDest'), 'server');
+          btn.style.pointerEvents = audioLibBlocked ? 'none' : '';
+          btn.style.opacity = audioLibBlocked ? '0.4' : '';
+        }
         const isNavidrome = segValue($('shDest')) === 'navidrome';
+        const isBooks = segValue($('shDest')) === 'audiobooks';
+        const isAudioLib = isNavidrome || isBooks;
 
         // A long video can't go into shorts: force the server library and lock the
-        // elite option out. (Navidrome saves the audio track, so the cap doesn't apply.)
+        // elite option out. (The audio libraries save the audio track, so the cap
+        // doesn't apply.)
         const sheetTarget = sheetSingle || sheetItem;
-        const tooLong = isVideo && !isNavidrome && !sheetAll && !!(sheetTarget && sheetTarget.tooLongForShorts);
+        const tooLong = isVideo && !isAudioLib && !sheetAll && !!(sheetTarget && sheetTarget.tooLongForShorts);
         const eliteBtn = $('shDest').querySelector('[data-v=""]');
         if (tooLong) segSet($('shDest'), 'server');
         eliteBtn.style.pointerEvents = tooLong ? 'none' : '';
@@ -2188,33 +2240,49 @@
         const dest = segValue($('shDest'));
         const isServer = dest === 'server';
         const channel = segValue($('shChannel'));
-        // Navidrome is audio-only: a video pick saves the extracted audio track.
-        const audioish = isAudio || isNavidrome;
+        // The audio libraries are audio-only: a video pick saves the extracted
+        // audio track.
+        const audioish = isAudio || isAudioLib;
+        // Per-book fields only make sense for one link at a time; a batch lets
+        // every item name its own book from its own metadata.
+        const bookFields = isBooks && !sheetAll && !sheetMulti;
 
-        $('shChannelField').classList.toggle('hidden', isServer || isImage || isNavidrome);
+        $('shChannelField').classList.toggle('hidden', isServer || isImage || isAudioLib);
         $('shNavLibField').classList.toggle('hidden', !isNavidrome);
         const folderVisible = isServer && !isImage && !isAudio;
         $('shFolderField').classList.toggle('hidden', !folderVisible);
         $('shNewFolderField').classList.toggle('hidden', !(folderVisible && $('shFolder').value === '__new__'));
-        // Navidrome: the tag fields replace the plain title/profile inputs.
+        // The library tag fields replace the plain title/profile inputs.
         // Batches/multi-link skip them — every track tags itself from its own
         // metadata.
-        $('shCreatorField').classList.toggle('hidden', isNavidrome || sheetMulti);
-        $('shMusicFields').classList.toggle('hidden', !isNavidrome || sheetAll || sheetMulti);
+        $('shCreatorField').classList.toggle('hidden', isAudioLib || sheetMulti);
+        const musicFields = isNavidrome && !sheetAll && !sheetMulti;
+        $('shMusicFields').classList.toggle('hidden', !musicFields);
+        $('shBookFields').classList.toggle('hidden', !bookFields);
+        // The description box belongs to both tag blocks, so it lives outside
+        // them: show it wherever one of them is up and it has something to say.
+        $('shDescBox').classList.toggle('hidden', !((musicFields || bookFields) && descHasText));
         const musicRel = segValue($('shMusicRelease'));
         $('shMusicAlbumField').classList.toggle('hidden', musicRel === 'single');
         $('shMusicAlbumLabel').textContent = musicRel === 'ep' ? 'EP name' : 'Album';
-        if (isNavidrome && !sheetAll && !sheetMulti && musicFilledSeq !== sheetSeq) {
+        if (musicFields && musicFilledSeq !== sheetSeq) {
           musicFilledSeq = sheetSeq;
           musicPrefill();
           musicLookup();
         }
+        if (bookFields && bookFilledSeq !== sheetSeq) {
+          bookFilledSeq = sheetSeq;
+          bookPrefill();
+        }
+        // With chapter splitting on, every chapter names itself — the single
+        // part-title field would name nothing.
+        $('shBookPartField').classList.toggle('hidden', $('shSplit').checked);
         // Title is editable per clip (single resolve or one profile item).
-        $('shTitleField').classList.toggle('hidden', (!sheetSingle && !sheetItem) || isNavidrome);
-        // Hashtags feed the caption/keywords; navidrome uses genres instead
-        // and the batch endpoints have no per-clip tags.
-        $('shTagsField').classList.toggle('hidden', isNavidrome || sheetAll || sheetMulti);
-        $('shVideoOpts').classList.toggle('hidden', !isVideo || isNavidrome);
+        $('shTitleField').classList.toggle('hidden', (!sheetSingle && !sheetItem) || isAudioLib);
+        // Hashtags feed the caption/keywords; the audio libraries use genres
+        // instead and the batch endpoints have no per-clip tags.
+        $('shTagsField').classList.toggle('hidden', isAudioLib || sheetAll || sheetMulti);
+        $('shVideoOpts').classList.toggle('hidden', !isVideo || isAudioLib);
         $('shAudioField').classList.toggle('hidden', !audioish);
         // Container + extras (thumbnail/subs/sponsorblock) only apply to a
         // server-library video save (elite shorts must stay plain mp4).
@@ -2224,11 +2292,12 @@
         $('shSubsRow').classList.toggle('hidden', !advancedVideo);
         // SponsorBlock also applies to audio extraction (cuts sponsor reads).
         $('shSponsorRow').classList.toggle('hidden', !(advancedVideo || audioish));
-        // Cutting/splitting produce loose library files -> server library only,
-        // and per-clip timestamps make no sense for a batch/multi run.
-        const cutsOk = isServer && !isImage && !sheetAll && !sheetMulti;
+        // Cutting/splitting produce several files at once: loose ones in the
+        // server library, numbered parts inside the book folder for audiobooks.
+        // Per-clip timestamps make no sense for a batch/multi run.
+        const cutsOk = (isServer || isBooks) && !isImage && !sheetAll && !sheetMulti;
         $('shCutsField').classList.toggle('hidden', !cutsOk);
-        $('shSplitRow').classList.toggle('hidden', !(cutsOk && isVideo));
+        $('shSplitRow').classList.toggle('hidden', !(cutsOk && (isVideo || isBooks)));
         // Extra yt-dlp args apply anywhere yt-dlp runs (ignored by direct sites).
         $('shXargsField').classList.toggle('hidden', isImage);
         // Scheduling works for job-based downloads (not the download-all batch).
@@ -2256,6 +2325,12 @@
           msg = 'Each track is downloaded as audio and tagged automatically from its own metadata; tracks already downloaded, or already in the library, are skipped.';
         } else if (isNavidrome && isVideo) {
           msg = 'Audio only: the sound track is extracted and saved to the Navidrome music library.';
+        } else if (isBooks && sheetAll) {
+          msg = 'Each item is saved as audio into its own book folder, named from its own metadata.';
+        } else if (isBooks) {
+          msg = $('shSplit').checked
+            ? 'Each chapter becomes a numbered part inside the book folder.'
+            : 'Audio only: saved as audiobooks/<author>/<book>/. Turn on chapter splitting for a book that comes as one long file.';
         } else if (!sheetAll) {
           const imp = sheetTarget && sheetTarget.imported;
           // Images: the same warning applies to both destinations (the photos
@@ -2273,13 +2348,14 @@
         const device = $('shDevice').checked;
         let label;
         if (sheetMulti) label = 'Download ' + multiUrls.length + ' links';
-        else if (sheetAll && isNavidrome) {
+        else if (sheetAll && isAudioLib) {
           const fresh = profileItems.filter((it) => it.mediaType !== 'image' && !haveIt(it)).length;
-          label = 'Download new to Navidrome (' + fresh + ')';
+          label = isBooks ? 'Download new to audiobooks (' + fresh + ')' : 'Download new to Navidrome (' + fresh + ')';
         } else if (sheetAll) label = sheetSelectedIds
           ? 'Download selected (' + sheetSelectedIds.length + ')'
           : 'Download all (' + profileItems.length + ')';
         else if (isNavidrome) label = 'Save to Navidrome';
+        else if (isBooks) label = 'Save to audiobooks';
         else if (isAudio) label = isServer ? 'Save audio' : 'Download audio';
         else if (isImage) label = device ? 'Download image' : (isServer ? 'Save image' : 'Save image to posts');
         else if (isServer) label = device ? 'Download' : 'Save to library';
@@ -2377,22 +2453,37 @@
       let musicCandidates = [];
       let musicFilledSeq = -1;   // sheetSeq the fields were last prefilled for
       let musicLookupToken = 0;
-      function musicPrefill() {
-        const src = sheetSingle || sheetItem || {};
-        const m = src.music || {};
-        // Source description inside the sheet: the real song title usually
-        // hides there when the video title is clickbait. Playlist items lack
-        // it in the flat listing, so it's fetched on demand (cached per item).
+      // Whether the description box currently has anything to show. Kept as
+      // state because syncSheet re-evaluates visibility on every change (e.g.
+      // toggling the destination back and forth) while the prefill that filled
+      // the box only runs once per sheet.
+      let descHasText = false;
+      function showDesc(has) {
+        descHasText = has;
+        $('shDescBox').classList.toggle('hidden', !has);
+      }
+
+      // Source description inside the sheet: the real song title — or an
+      // audiobook's author and chapter list — usually hides there when the
+      // video title is clickbait. Playlist items lack it in the flat listing,
+      // so it's fetched on demand (cached per item). Shared by the music and
+      // audiobook tag blocks.
+      function descPrefill() {
         const desc = ((sheetSingle && sheetSingle.description) || '').trim();
         $('shDescSummary').textContent = 'Source description (real title often hides here)';
         $('shDescText').textContent = desc;
-        $('shDescBox').classList.toggle('hidden', !desc);
+        showDesc(!!desc);
         $('shDescBox').open = false;
         if (!sheetSingle && sheetItem && (sheetItem.sourceUrl || sheetItem.url)) {
           $('shDescText').textContent = 'Loading…';
-          $('shDescBox').classList.remove('hidden');
+          showDesc(true);
           loadItemDetails(sheetItem, sheetSeq);
         }
+      }
+      function musicPrefill() {
+        const src = sheetSingle || sheetItem || {};
+        const m = src.music || {};
+        descPrefill();
         $('shMusicTitle').value = m.track || src.title || '';
         $('shMusicArtists').value = m.artist || '';
         $('shMusicAlbum').value = m.album || '';
@@ -2402,6 +2493,34 @@
         musicCandidates = [];
         $('shMusicPick').innerHTML = '<option value="">…</option>';
       }
+      // --------------------------------------------------------- audiobook tags
+      // Author + book title decide the folder the book gets (<author>/<book>/),
+      // so they are pre-filled from whatever the source says and edited by hand
+      // — sites rarely label an audiobook the way a shelf should.
+      let bookFilledSeq = -1;   // sheetSeq the fields were last prefilled for
+      function bookPrefill() {
+        const src = sheetSingle || sheetItem || {};
+        const m = src.music || {};
+        $('shBookAuthor').value = m.artist || src.creator || '';
+        $('shBookTitle').value = m.album || src.title || '';
+        $('shBookPart').value = m.track || src.title || '';
+        $('shBookDate').value = m.year ? String(m.year) : '';
+        $('shBookGenres').value = m.genre || '';
+        delete $('shBookPart').dataset.edited;
+        // An audiobook upload usually spells out the author, narrator and the
+        // chapter timestamps in its description — the same box the music
+        // fields use, and the source for the cut-sections field below it.
+        descPrefill();
+      }
+      // Retitling the book follows through to a one-file story's part title,
+      // as long as that field hasn't been edited by hand.
+      $('shBookTitle').addEventListener('input', () => {
+        if (!$('shBookPart').dataset.edited) $('shBookPart').value = $('shBookTitle').value;
+      });
+      $('shBookPart').addEventListener('input', () => { $('shBookPart').dataset.edited = '1'; });
+      // Chapter splitting hides the part-title field; keep the sheet in sync.
+      $('shSplit').addEventListener('change', syncSheet);
+
       // Fetch a playlist item's full metadata (description + music tags) when
       // its sheet opens; the flat playlist listing doesn't carry them.
       async function loadItemDetails(it, seq) {
@@ -2416,13 +2535,23 @@
         const d = it._resolved;
         const desc = ((d && d.description) || '').trim();
         $('shDescText').textContent = desc;
-        $('shDescBox').classList.toggle('hidden', !desc);
+        showDesc(!!desc);
         if (d && Array.isArray(d.tags) && d.tags.length && !$('shTags').value.trim()) {
           $('shTags').value = d.tags.join(' ');
         }
+        const setv = (id, v) => { if (v && !$(id).value.trim()) $(id).value = v; };
+        // The audiobook fields want the same late-arriving metadata, but not
+        // the music-database lookup — it knows nothing about books.
+        if (d && segValue($('shDest')) === 'audiobooks') {
+          const m = d.music || {};
+          setv('shBookAuthor', m.artist || d.creator);
+          setv('shBookTitle', m.album || d.title);
+          setv('shBookPart', m.track || d.title);
+          setv('shBookDate', m.year ? String(m.year) : '');
+          return;
+        }
         if (d && d.music) {
           const m = d.music;
-          const setv = (id, v) => { if (v && !$(id).value.trim()) $(id).value = v; };
           setv('shMusicTitle', m.track);
           setv('shMusicArtists', m.artist);
           setv('shMusicAlbum', m.album);
@@ -2480,8 +2609,9 @@
         const dest = segValue($('shDest'));
         const channel = segValue($('shChannel'));
         const creator = $('shCreator').value.trim();
-        // Navidrome is audio-only, whatever the sheet mode.
-        const isAudio = sheetMode === 'audio' || dest === 'navidrome';
+        // The audio libraries are audio-only, whatever the sheet mode.
+        const isAudioLib = dest === 'navidrome' || dest === 'audiobooks';
+        const isAudio = sheetMode === 'audio' || isAudioLib;
         const p = new URLSearchParams();
         p.set('channel', channel);
         if (dest) p.set('dest', dest);
@@ -2489,12 +2619,27 @@
           const f = $('shFolder').value === '__new__' ? $('shNewFolder').value.trim() : $('shFolder').value;
           if (f) p.set('folder', f);
         }
-        // Editable title (per clip) renames the saved file. For navidrome
-        // the song-title tag field plays that role instead.
-        if ((sheetSingle || sheetItem) && dest !== 'navidrome' && $('shTitleInput').value.trim()) p.set('title', $('shTitleInput').value.trim());
+        // Editable title (per clip) renames the saved file. For the audio
+        // libraries the song/part-title tag field plays that role instead.
+        if ((sheetSingle || sheetItem) && !isAudioLib && $('shTitleInput').value.trim()) p.set('title', $('shTitleInput').value.trim());
         // Edited hashtag list replaces the clip's tags (caption + keywords).
-        if ((sheetSingle || sheetItem) && dest !== 'navidrome' && !$('shTagsField').classList.contains('hidden')) {
+        if ((sheetSingle || sheetItem) && !isAudioLib && !$('shTagsField').classList.contains('hidden')) {
           p.set('tags', $('shTags').value.trim());
+        }
+        // Audiobooks reuse the tag params: artists = author, album = book
+        // title, title = the part's title.
+        if (dest === 'audiobooks' && !$('shBookFields').classList.contains('hidden')) {
+          const author = $('shBookAuthor').value.trim();
+          if (author) p.set('artists', author);
+          const bookTitle = $('shBookTitle').value.trim();
+          if (bookTitle) p.set('album', bookTitle);
+          // With chapter splitting on, each chapter titles itself.
+          const part = $('shBookPart').value.trim();
+          if (part && !$('shBookPartField').classList.contains('hidden')) p.set('title', part);
+          const bd = $('shBookDate').value.trim();
+          if (bd) p.set('date', bd);
+          const bg = $('shBookGenres').value.trim();
+          if (bg) p.set('genres', bg);
         }
         if (dest === 'navidrome') {
           p.set('lib', segValue($('shNavLib')));
@@ -2598,13 +2743,15 @@
 
         if (sheetAll) {
           const selSet = sheetSelectedIds ? new Set(sheetSelectedIds) : null;
-          if (segValue($('shDest')) === 'navidrome') {
+          const batchDest = segValue($('shDest'));
+          if (batchDest === 'navidrome' || batchDest === 'audiobooks') {
             closeSheet();
             startNavidromeBatch(
               profileItems.filter((it) => it.mediaType !== 'image' && !haveIt(it) && (!selSet || selSet.has(it.id))),
               $('shAfmt').value,
               $('shAq').value,
-              segValue($('shNavLib'))
+              segValue($('shNavLib')),
+              batchDest
             );
           } else startBatch(sheetSelectedIds);
           return;
@@ -2613,9 +2760,11 @@
         if (sheetItem && !sheetSingle) {
           // A pasted link has no profile behind it, so it always runs as its own
           // job — the batch endpoint needs a profile URL to enumerate.
-          if (sheetItem.standalone || sheetMode === 'audio' || segValue($('shDest')) === 'navidrome') {
-            // Audio (or Navidrome) for one playlist item: run it as a normal
-            // job against the item's own URL — the batch pipeline is video-only.
+          const itemDest = segValue($('shDest'));
+          if (sheetItem.standalone || sheetMode === 'audio' || itemDest === 'navidrome' || itemDest === 'audiobooks') {
+            // Audio (or an audio library) for one playlist item: run it as a
+            // normal job against the item's own URL — the batch pipeline is
+            // video-only.
             closeSheet();
             const p = buildQuery({ batch: false });
             p.set('url', sheetItem.sourceUrl || sheetItem.url || '');
@@ -2953,7 +3102,7 @@
 
       function itemKind(it) {
         const f = (it.filename || '').toLowerCase();
-        if (/\.(mp3|m4a|opus|ogg|aac)$/.test(f) || /^(audio|navidrome)\//.test(it.channel || '')) return 'audio';
+        if (/\.(mp3|m4a|m4b|opus|ogg|aac|flac)$/.test(f) || /^(audio|navidrome|audiobooks)\//.test(it.channel || '')) return 'audio';
         if (/\.(jpg|jpeg|png|webp|gif)$/.test(f) || /photos$/.test(it.channel || '')) return 'image';
         return 'video';
       }
@@ -3408,7 +3557,7 @@
         }
       }
 
-      const RULE_DEST_NAMES = { '': 'Elite shorts', server: 'Server library', navidrome: 'Navidrome' };
+      const RULE_DEST_NAMES = { '': 'Elite shorts', server: 'Server library', navidrome: 'Navidrome', audiobooks: 'Audiobooks' };
       function ruleSummary(r) {
         const m = r.match || {}, a = r.apply || {};
         const when = [
@@ -3464,7 +3613,7 @@
           '<h4>Then</h4>' +
           '<div class="rgrid">' +
           '<div class="field"><label>Save to</label><select id="ruDest">' +
-            ruleOpt('-', "Don't change", dest) + ruleOpt('', 'Elite-v2 shorts', dest) + ruleOpt('server', 'Server library', dest) + ruleOpt('navidrome', 'Navidrome (music)', dest) +
+            ruleOpt('-', "Don't change", dest) + ruleOpt('', 'Elite-v2 shorts', dest) + ruleOpt('server', 'Server library', dest) + ruleOpt('navidrome', 'Navidrome (music)', dest) + ruleOpt('audiobooks', 'Audiobooks / stories', dest) +
           '</select></div>' +
           '<div class="field"><label>Channel</label><select id="ruChannel">' +
             ruleOpt('-', "Don't change", channel) + ruleOpt('main', 'main', channel) + ruleOpt('18plus', '18+', channel) +
