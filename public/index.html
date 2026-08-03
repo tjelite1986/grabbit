@@ -1415,6 +1415,7 @@
       let profileMode = false;
       let profileItems = [];
       let profileSelection = new Set(); // ids the user picked to download
+      let profileSelUrl = null;         // which profile URL the selection belongs to
       let profileData = null;
       let currentUrl = '';
 
@@ -1692,7 +1693,12 @@
         profileMode = true;
         profileData = pd;
         profileItems = pd.items || [];
-        profileSelection = new Set();
+        // Keep the picks that still exist — a re-render (mark-as-downloaded,
+        // playlist save) must not silently wipe a hand-built selection. A
+        // different profile (new URL) starts clean.
+        if (profileSelUrl !== currentUrl) { profileSelection = new Set(); profileSelUrl = currentUrl; }
+        const ids = new Set(profileItems.map((it) => it.id));
+        profileSelection = new Set([...profileSelection].filter((id) => ids.has(id)));
         const head = document.createElement('div');
         head.style.cssText = 'margin:2px 2px 8px;font-size:13px;color:var(--muted)';
         const plName = pd.title && pd.title !== pd.creator ? pd.title + ' · ' : '';
@@ -2643,6 +2649,11 @@
         }
         if (dest === 'navidrome') {
           p.set('lib', segValue($('shNavLib')));
+        }
+        // Only when the tag fields are actually shown (single track). In
+        // multi-link/batch mode they hold a PREVIOUS track's values — sending
+        // those would tag every download identically and overwrite files.
+        if (dest === 'navidrome' && !$('shMusicFields').classList.contains('hidden')) {
           const mt = $('shMusicTitle').value.trim();
           if (mt) p.set('title', mt);
           const a = $('shMusicArtists').value.trim();
@@ -2794,7 +2805,17 @@
       let qTab = 'running';
       let activeSource = null;       // active batch EventSource
       const jobMap = new Map();      // server job id -> public job
-      const delivered = new Set();   // jobs already auto-downloaded to the device
+      // Jobs already auto-downloaded to the device. Persisted: the job stream
+      // replays a full snapshot on every connect (reload, second tab), and a
+      // finished deliverable job must not fire a new download each time.
+      const DELIVERED_KEY = 'grabbit.delivered.v1';
+      const delivered = new Set((() => {
+        try { return JSON.parse(localStorage.getItem(DELIVERED_KEY)) || []; } catch { return []; }
+      })());
+      function rememberDelivered(id) {
+        delivered.add(id);
+        try { localStorage.setItem(DELIVERED_KEY, JSON.stringify([...delivered].slice(-200))); } catch {}
+      }
       let queueRows = [];            // batch rows {id,title,thumbnail,status,meta,_t}
 
       $('qtabs').addEventListener('click', (e) => {
@@ -2805,7 +2826,15 @@
       });
 
       $('qClear').addEventListener('click', async () => {
-        try { await fetch('/api/jobs/clear', { method: 'POST' }); } catch {}
+        // Only clear locally when the server cleared too — otherwise the next
+        // SSE snapshot replay brings every "removed" job straight back.
+        try {
+          const r = await fetch('/api/jobs/clear', { method: 'POST' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+        } catch {
+          toast('Could not clear the queue', 'bad');
+          return;
+        }
         for (const [id, j] of jobMap) if (j.status === 'done' || j.status === 'error') jobMap.delete(id);
         queueRows = queueRows.filter((r) => r.status === 'busy' || r.status === 'queued');
         if (!activeSource) qSummary.classList.remove('show');
@@ -2903,7 +2932,7 @@
           jobMap.set(j.id, j);
           // Auto-deliver to the device once a device-bound job is ready.
           if (j.status === 'done' && j.device && j.deliverable && !delivered.has(j.id)) {
-            delivered.add(j.id);
+            rememberDelivered(j.id);
             const a = document.createElement('a');
             a.href = '/api/jobs/' + encodeURIComponent(j.id) + '/file';
             a.download = '';
@@ -2980,7 +3009,7 @@
         urlInput.value = '';
 
         src.onmessage = (ev) => {
-          const d = JSON.parse(ev.data);
+          let d; try { d = JSON.parse(ev.data); } catch { return; }
           if (d.type === 'start') {
             qSummaryText.textContent = 'Downloading ' + d.total + ' items to ' + d.channel + '…';
           } else if (d.type === 'progress') {
@@ -3020,7 +3049,12 @@
       $('dlRefresh').addEventListener('click', loadHistory);
       $('dlClear').addEventListener('click', async () => {
         if (!confirm('Clear the entire download list?')) return;
-        await fetch('/api/history/delete', { method: 'POST' });
+        try {
+          await fetch('/api/history/delete', { method: 'POST' });
+        } catch {
+          toast('Could not clear the list', 'bad');
+          return;
+        }
         loadHistory();
       });
       $('dlChips').addEventListener('click', (e) => {
@@ -3114,7 +3148,15 @@
           const d = await r.json();
           historyItems = (d.items || []).filter(Boolean);
           renderHistory();
-        } catch { /* leave as-is */ }
+        } catch {
+          // On the very first load there is nothing to "leave as-is" — show a
+          // hint instead of a fully blank tab.
+          if (!historyItems.length) {
+            historyList.innerHTML = '';
+            historyEmpty.querySelector('p').textContent = 'Could not load the list — tap refresh to retry';
+            historyEmpty.classList.remove('hidden');
+          }
+        }
       }
 
       function renderHistory() {
@@ -3179,7 +3221,11 @@
         $('dlClear').classList.toggle('hidden', on);
       }
 
+      // Serialize responses: while typing, a slow response for an old query
+      // must not overwrite the list for the current one.
+      let musicLoadToken = 0;
       async function loadMusic() {
+        const token = ++musicLoadToken;
         const params = new URLSearchParams({ limit: '500' });
         if (musicQuery) params.set('q', musicQuery);
         if (musicLib) params.set('lib', musicLib);
@@ -3187,6 +3233,7 @@
         try {
           const r = await fetch('/api/music?' + params.toString());
           const d = await r.json();
+          if (token !== musicLoadToken) return;
           musicItems = (d.items || []).filter(Boolean);
           musicTotal = d.total || 0;
           musicDone = d.done || 0;
@@ -3198,19 +3245,21 @@
             ' · ' + musicDone + ' ticked off · ' + musicEdited + ' edited · ' + scanned;
           renderMusic();
         } catch {
-          toast('Could not load the music log', 'bad');
+          if (token === musicLoadToken) toast('Could not load the music log', 'bad');
         }
       }
 
       // Refresh just the counters (a tick doesn't change which rows are shown
       // unless a status filter is active).
       async function loadMusicCounts() {
+        const token = musicLoadToken;
         const params = new URLSearchParams({ limit: '1' });
         if (musicQuery) params.set('q', musicQuery);
         if (musicLib) params.set('lib', musicLib);
         try {
           const r = await fetch('/api/music?' + params.toString());
           const d = await r.json();
+          if (token !== musicLoadToken) return;
           musicDone = d.done || 0;
           musicEdited = d.edited || 0;
           const scanned = d.lastScan ? 'last scan ' + relTime(d.lastScan) : 'not scanned yet';
@@ -3729,16 +3778,28 @@
         });
       }
 
+      // The enable switch: clicks land on the overlay span, never the input
+      // itself, so the toggle is handled via the bubbling change event. The
+      // click handler below must ignore the switch or it opens the editor
+      // (and re-renders away the input before its change can fire).
+      $('rulesList').addEventListener('change', async (e) => {
+        const t = e.target;
+        if (!t.matches('input[data-act="toggle"]')) return;
+        const row = t.closest('.rulerow');
+        if (!row) return;
+        const i = Number(row.dataset.i);
+        rules[i].enabled = t.checked;
+        if (!(await persistRules())) rules[i].enabled = !t.checked;
+        renderRules();
+      });
+
       $('rulesList').addEventListener('click', async (e) => {
+        if (e.target.closest('.switch')) return;
         const act = e.target.closest('[data-act]');
         const row = e.target.closest('.rulerow');
         if (act && row) {
           const i = Number(row.dataset.i);
-          if (act.dataset.act === 'toggle') {
-            rules[i].enabled = act.checked;
-            if (!(await persistRules())) rules[i].enabled = !act.checked;
-            renderRules();
-          } else if (act.dataset.act === 'up' && i > 0) {
+          if (act.dataset.act === 'up' && i > 0) {
             [rules[i - 1], rules[i]] = [rules[i], rules[i - 1]];
             if (await persistRules()) renderRules();
           } else if (act.dataset.act === 'down' && i < rules.length - 1) {
@@ -3775,6 +3836,12 @@
       window.addEventListener('pagehide', () => {
         if (activeSource) { activeSource.close(); activeSource = null; }
         if (jobStream) { jobStream.close(); jobStream = null; }
+      });
+      // Reopen the job stream when the page comes back (bfcache restore, app
+      // switch) — otherwise the queue silently stops updating.
+      window.addEventListener('pageshow', () => connectJobStream());
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') connectJobStream();
       });
 
       // ----------------------------------------------------------------- init

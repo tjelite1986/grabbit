@@ -147,11 +147,16 @@ async function resolveProfile(url) {
     // by id — proximity is the reliable link). The href gives us the post page
     // that carries the clip's tags, fetched later by enrich().
     const hrefs = [];
-    const hrefRe = /href="(\/[A-Za-z0-9_.-]+\/\d+[A-Za-z0-9_.-]*)"/g;
+    // Only this creator's post links — a bare /<segment>/<digits> pattern also
+    // matches e.g. /tag/123, which would pair media with the wrong page.
+    const creatorEsc = creator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const hrefRe = new RegExp(`href="(/${creatorEsc}/\\d+[A-Za-z0-9_.-]*)"`, 'g');
     let hm;
     while ((hm = hrefRe.exec(html))) hrefs.push({ i: hm.index, url: hm[1] });
+    // Greedy title group: alt is "<title> by <creator>", and the title itself
+    // may contain " by " — anchor on the LAST occurrence, not the first.
     const re =
-      /alt="([^"]+?)\s+by\s+[^"]*?"[^>]*?post_public\/(\d+)\/([\d-]+)\/(\d+)_small/g;
+      /alt="([^"]+)\s+by\s+[^"]*?"[^>]*?post_public\/(\d+)\/([\d-]+)\/(\d+)_small/g;
     let m;
     let added = 0;
     while ((m = re.exec(html))) {

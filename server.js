@@ -93,7 +93,9 @@ function sanitizeFolder(name) {
 // videos). A built-in name keeps its env-configured path; any other name is a
 // (sanitized) subfolder of the grabbit downloads dir, created on demand.
 function serverVideoDir(folder) {
-  if (SERVER_VIDEO_FOLDERS[folder]) return SERVER_VIDEO_FOLDERS[folder];
+  // Own-property check: a plain object lookup lets folder=constructor reach
+  // the prototype and return a function, which then crashes path.join.
+  if (Object.hasOwn(SERVER_VIDEO_FOLDERS, folder)) return SERVER_VIDEO_FOLDERS[folder];
   return path.join(DOWNLOAD_DIR, sanitizeFolder(folder));
 }
 
@@ -913,7 +915,14 @@ function parseCookies(header) {
   for (const part of String(header || '').split(';')) {
     const i = part.indexOf('=');
     if (i < 0) continue;
-    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    const raw = part.slice(i + 1).trim();
+    // A malformed %-sequence (cookie set by some other app on the domain) must
+    // not throw inside the auth middleware — that would 500 every request.
+    try {
+      out[part.slice(0, i).trim()] = decodeURIComponent(raw);
+    } catch {
+      out[part.slice(0, i).trim()] = raw;
+    }
   }
   return out;
 }
@@ -958,10 +967,11 @@ app.get('/login', (req, res) => {
 
 app.post('/login', (req, res) => {
   if (!GRABBIT_PASSWORD) return res.redirect('/');
-  const ok =
-    typeof req.body.password === 'string' &&
-    req.body.password.length === GRABBIT_PASSWORD.length &&
-    crypto.timingSafeEqual(Buffer.from(req.body.password), Buffer.from(GRABBIT_PASSWORD));
+  // Compare byte lengths, not string lengths — timingSafeEqual throws on a
+  // byte-length mismatch, which multibyte input could otherwise trigger.
+  const attempt = typeof req.body.password === 'string' ? Buffer.from(req.body.password) : null;
+  const expected = Buffer.from(GRABBIT_PASSWORD);
+  const ok = attempt && attempt.length === expected.length && crypto.timingSafeEqual(attempt, expected);
   if (!ok) return res.status(401).type('html').send(loginPage('Wrong password.'));
   res.cookie(AUTH_COOKIE, AUTH_TOKEN, {
     httpOnly: true,
@@ -1190,6 +1200,8 @@ function matchRule(ctx) {
     if (m.title && !ruleTextMatch(m.title, ctx.title)) continue;
     if (m.mediaType && ctx.mediaType !== m.mediaType) continue;
     // Duration bounds require a known duration; unknown never satisfies them.
+    // (Number(null) is 0, which would slip through a max-only bound.)
+    if ((m.minDuration || m.maxDuration) && !Number.isFinite(Number(ctx.duration ?? NaN))) continue;
     if (m.minDuration && !(Number(ctx.duration) >= m.minDuration)) continue;
     if (m.maxDuration && !(Number(ctx.duration) <= m.maxDuration)) continue;
     return r;
@@ -1981,6 +1993,8 @@ function startNavidromeJob(url, navLib) {
     genres: null,
   };
   const job = newJob({ dest: 'navidrome', channel: 'main', lib: params.navLib, device: false });
+  // Kept on the job so POST /api/jobs/:id/retry works for watcher jobs too.
+  job.params = params;
   scheduleJob(job, params);
   return job;
 }
@@ -2207,6 +2221,9 @@ function withCoverSlot(fn) {
 }
 
 function extractCover(src, out) {
+  // Write to a unique temp and rename into place — two concurrent requests for
+  // the same cover must not serve a half-written file.
+  const tmp = `${out}.${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
   return new Promise((resolve) => {
     const p = spawn(FFMPEG, [
       '-loglevel', 'error', '-y',
@@ -2214,10 +2231,21 @@ function extractCover(src, out) {
       // The embedded picture is a video stream; take the first one only.
       '-map', '0:v:0', '-frames:v', '1',
       '-vf', `scale=${COVER_SIZE}:${COVER_SIZE}:force_original_aspect_ratio=increase,crop=${COVER_SIZE}:${COVER_SIZE}`,
-      '-f', 'mjpeg', out,
+      '-f', 'mjpeg', tmp,
     ]);
-    p.on('error', () => resolve(false));
-    p.on('close', (code) => resolve(code === 0 && fs.existsSync(out) && fs.statSync(out).size > 0));
+    const done = (ok) => {
+      if (ok) {
+        try {
+          fs.renameSync(tmp, out);
+        } catch {
+          ok = false;
+        }
+      }
+      if (!ok) fs.rm(tmp, { force: true }, () => {});
+      resolve(ok);
+    };
+    p.on('error', () => done(false));
+    p.on('close', (code) => done(code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 0));
   });
 }
 
@@ -2573,6 +2601,9 @@ app.get('/api/download', async (req, res) => {
     // 3. Write the .md caption sidecar elite-v2 reads on import.
     if (!skipImport) {
       fs.writeFileSync(path.join(destDir, `${stem}.md`), buildCaption(job));
+      // Register the save so playlist views and "download new" recognise the
+      // clip as fetched — the jobs/batch paths do this via finishJob.
+      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
     }
 
     const histEntry = {
@@ -2764,7 +2795,10 @@ app.get('/api/download-all', async (req, res) => {
         device: false,
       });
       saved++;
-      markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, channel);
+      // The channel only means something for a shorts save (see finishJob) — a
+      // server/photos save recorded under a channel makes a later shorts
+      // download of the same clip look like a repeat and get skipped.
+      markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, dest === 'elite' ? channel : null);
       send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'saved' });
     } catch (e) {
       failed++;
@@ -2840,7 +2874,10 @@ function newJob(fields) {
     createdAt: Date.now(), doneAt: null, finalPath: null, deliverTemp: false,
     ...fields,
   };
-  jobsMap.set(id, job);
+  // Key on job.id, not the freshly generated id — restored scheduled jobs pass
+  // their persisted id in `fields`, and a mismatched map key breaks
+  // cancel/retry/file lookups and pruning for them.
+  jobsMap.set(job.id, job);
   emitJob(job);
   return job;
 }
@@ -3841,10 +3878,24 @@ async function downloadDirect(job, dest, opts = {}) {
   // Extractors may list lower-quality fallbackUrls for sites where the best
   // variant doesn't exist for every post (e.g. xxxfollow _fhd -> plain -> _sd).
   const urls = [job.downloadUrl, ...(job.fallbackUrls || [])];
+  // Stall guard: a dead-but-open TCP connection would otherwise leave the job
+  // hanging forever, permanently occupying one of the MAX_ACTIVE_JOBS slots.
+  const ctrl = new AbortController();
+  let idleTimer = null;
+  const armIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => ctrl.abort(new Error('download stalled (no data for 120s)')), 120000);
+    if (idleTimer.unref) idleTimer.unref();
+  };
+  armIdle();
+  try {
   let upstream;
   for (const url of urls) {
-    upstream = await fetch(url, { headers: job.headers || {} });
+    armIdle();
+    upstream = await fetch(url, { headers: job.headers || {}, signal: ctrl.signal });
     if (upstream.ok && upstream.body) break;
+    // Drop the unconsumed body of a failed candidate so its socket is freed.
+    if (upstream.body) upstream.body.cancel().catch(() => {});
   }
   if (!upstream.ok || !upstream.body) {
     // A 404/403 on the media URL usually means the file isn't published yet
@@ -3863,6 +3914,7 @@ async function downloadDirect(job, dest, opts = {}) {
   }
   const total = Number(upstream.headers.get('content-length')) || 0;
   const src = Readable.fromWeb(upstream.body);
+  src.on('data', armIdle);
   if (typeof opts.onProgress === 'function') {
     let downloaded = 0;
     let lastPct = -1;
@@ -3876,6 +3928,9 @@ async function downloadDirect(job, dest, opts = {}) {
     });
   }
   await pipeline(src, fs.createWriteStream(dest));
+  } finally {
+    clearTimeout(idleTimer);
+  }
 }
 
 // yt-dlp writes to the literal -o path for a single format, but when it has to
@@ -3886,7 +3941,10 @@ function resolveYtdlpOutput(dest) {
   const dir = path.dirname(dest);
   const base = path.basename(dest);
   try {
-    const match = fs.readdirSync(dir).find((f) => f.startsWith(`${base}.`));
+    // Never pick up yt-dlp's own in-progress/leftover files as the result.
+    const match = fs
+      .readdirSync(dir)
+      .find((f) => f.startsWith(`${base}.`) && !/\.(part|ytdl|temp)$/i.test(f));
     if (match) return path.join(dir, match);
   } catch {
     /* ignore */
@@ -3957,7 +4015,9 @@ function downloadYtdlpRaw(job, dest, opts = {}) {
     });
     p.on('close', (code) => {
       ck.cleanup();
-      const out = resolveYtdlpOutput(dest);
+      // A non-zero exit means the download did not finish — a leftover partial
+      // file must not be reported (and later imported) as a success.
+      const out = code === 0 ? resolveYtdlpOutput(dest) : null;
       if (out) {
         // Normalize to the path the caller expects to read (embedMetadata etc.).
         if (out !== dest) {
@@ -4017,9 +4077,11 @@ function downloadYtdlpAudioRaw(job, destNoExt, afmt, opts = {}) {
       // For a known format the file is <destNoExt>.<afmt>; for 'best' the codec
       // (and extension) is whatever the source was — find it.
       const known = `${destNoExt}.${afmt}`;
-      if (afmt !== 'best' && fs.existsSync(known)) return resolve(known);
-      const match = siblings.find((f) => !isImage(f) && !/\.(part|src)$/i.test(f));
-      if (match) return resolve(path.join(dir, match));
+      if (code === 0) {
+        if (afmt !== 'best' && fs.existsSync(known)) return resolve(known);
+        const match = siblings.find((f) => !isImage(f) && !/\.(part|src|ytdl|temp)$/i.test(f));
+        if (match) return resolve(path.join(dir, match));
+      }
       reject(new Error(err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
     });
   });
@@ -4097,6 +4159,9 @@ async function downloadAudio(res, job, url, afmt, dest) {
   try {
     if (job.kind === 'ytdlp') {
       outPath = await downloadYtdlpAudio(job, base, afmt);
+      // The real extension can differ from afmt (afmt=best, vorbis->ogg,
+      // alac->m4a) — track the actual file or it leaks in tmp.
+      if (!cleanup.includes(outPath)) cleanup.push(outPath);
     } else {
       await downloadDirect(job, srcTmp);
       await extractAudio(srcTmp, outPath, afmt);
@@ -4119,11 +4184,15 @@ async function downloadAudio(res, job, url, afmt, dest) {
         imported: false,
         device: false,
       });
+      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
       return res.json({ ok: true, saved: true, dest: 'server', dir: 'mp3', filename: outName });
     }
 
-    const mime = audioMime(afmt);
-    res.setHeader('Content-Disposition', contentDisposition(`${stem}.${afmt}`));
+    // Name and type by what was actually produced, not the requested afmt
+    // ('best' is not an extension, vorbis lands in .ogg, alac in .m4a).
+    const streamExt = safeExt(path.extname(outPath).slice(1), afmt);
+    const mime = audioMime(streamExt);
+    res.setHeader('Content-Disposition', contentDisposition(`${stem}.${streamExt}`));
     res.setHeader('Content-Type', mime);
     res.setHeader('Content-Length', fs.statSync(outPath).size);
     recordHistory({
@@ -4179,6 +4248,9 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
       extractor: job.extractor || null,
       imported: false,
     };
+    // Register a fresh library save (channel null: a server save must not make
+    // a later shorts download look like a repeat) — matches finishJob.
+    if (!already) markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
     if (!device) {
       recordHistory({ ...histEntry, device: false });
       return res.json({ ok: true, saved: !already, dest: 'server', dir: path.basename(dir), filename: outName });

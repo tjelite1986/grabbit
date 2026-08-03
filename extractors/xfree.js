@@ -121,8 +121,10 @@ async function resolve(url) {
 async function resolveProfile(url) {
   const creator = (new URL(url).pathname.match(/^\/([A-Za-z0-9_.-]+)/) || [])[1] || 'xfree';
   const html = await impersonateFetch(url);
-  // Video ids the page exposes (5+ digits avoids junk like "1234").
-  const ids = [...new Set((html.match(/id=(\d{5,})/g) || []).map((m) => m.slice(3)))];
+  // Video ids the page exposes (5+ digits avoids junk like "1234"). The left
+  // boundary matters: a bare /id=/ also matches uid=, vid=, postid= etc.
+  // `;` covers HTML-escaped separators (&amp;id=...).
+  const ids = [...new Set([...html.matchAll(/[?&;]id=(\d{5,})/g)].map((m) => m[1]))];
   if (!ids.length) throw new Error('no videos found on this profile page');
 
   const items = [];

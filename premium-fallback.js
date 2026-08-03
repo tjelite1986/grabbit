@@ -98,7 +98,8 @@ function isPlayable(id) {
 
 function flatSearch(query, n = 8) {
   return new Promise((resolve) => {
-    const p = spawn(YTDLP, ['--flat-playlist', '-J', '--no-warnings', '--', `ytsearch${n}:${query}`]);
+    // stderr discarded — an unread pipe can fill up and block yt-dlp forever.
+    const p = spawn(YTDLP, ['--flat-playlist', '-J', '--no-warnings', '--', `ytsearch${n}:${query}`], { stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
     p.stdout.on('data', (d) => (out += d));
     p.on('close', () => {
@@ -154,7 +155,16 @@ async function findFreeAlternate(url) {
     : null;
   const redirect = await ytmRedirectId(id).catch(() => null);
   if (redirect && (await isPlayable(redirect))) {
-    return { url: `https://www.youtube.com/watch?v=${redirect}`, via: 'ytmusic-redirect', origin };
+    // The page scan can pick up an unrelated videoId (a related track, queue
+    // data) — accept the redirect only when its title still looks like the
+    // same track. Unverifiable (no oEmbed on either side) counts as a match.
+    const rMeta = origin ? await oembed(redirect).catch(() => null) : null;
+    const nOrig = origin ? norm(origin.title) : '';
+    const nRedir = rMeta ? norm(rMeta.title) : '';
+    const sameTrack = !nOrig || !nRedir || nRedir.includes(nOrig) || nOrig.includes(nRedir);
+    if (sameTrack) {
+      return { url: `https://www.youtube.com/watch?v=${redirect}`, via: 'ytmusic-redirect', origin };
+    }
   }
   if (!meta || !meta.title) return null;
   const candidates = await searchFreeCandidates(id, meta.title, meta.author).catch(() => []);

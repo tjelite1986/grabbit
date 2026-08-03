@@ -50,7 +50,9 @@ function flatPlaylist(url) {
   return new Promise((resolve) => {
     const ck = cookieArgs(url);
     const args = ['--flat-playlist', '-J', '--no-warnings', ...ck.args, '--', url];
-    const p = spawn(YTDLP, args);
+    // stderr must be drained (or discarded) — a paused pipe fills the OS
+    // buffer on chatty channels and blocks yt-dlp, so `close` never fires.
+    const p = spawn(YTDLP, args, { stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
     p.stdout.on('data', (d) => (out += d));
     p.on('close', (code) => {

@@ -50,7 +50,7 @@ function pick(url) {
 function siteOf(job, url) {
   if (job && job.site) return job.site;
   try {
-    return new URL(String(job && job.sourceUrl) || String(url)).hostname.replace(/^(www|m)\./i, '').toLowerCase() || null;
+    return new URL(String((job && job.sourceUrl) || url)).hostname.replace(/^(www|m)\./i, '').toLowerCase() || null;
   } catch {
     return null;
   }

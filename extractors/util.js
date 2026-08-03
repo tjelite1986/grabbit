@@ -3,14 +3,15 @@
 // Turn a raw, messy description into a concise human title:
 // drop hashtags and markdown noise, collapse whitespace, cap the length.
 function cleanTitle(text, max = 90) {
-  const out = String(text || '')
+  const cleaned = String(text || '')
     .replace(/#[\p{L}\p{N}_]+/gu, '') // hashtags
     .replace(/https?:\/\/\S+/g, '') // stray links
     .replace(/[#*_`~>|]+/g, ' ') // markdown punctuation
     .replace(/\s+/g, ' ') // collapse newlines/spaces
-    .trim()
-    .slice(0, max)
     .trim();
+  // Cap by code points — a plain .slice() can cut an emoji's surrogate pair in
+  // half at the boundary and leave a lone surrogate in filenames/captions.
+  const out = [...cleaned].slice(0, max).join('').trim();
   // If nothing meaningful is left (e.g. a hashtags-only caption), report empty
   // so callers fall back to the video id.
   return /[\p{L}\p{N}]/u.test(out) ? out : '';

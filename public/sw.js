@@ -1,6 +1,6 @@
 // Minimal service worker: makes the app installable and keeps the static
 // shell available offline. All API traffic goes straight to the network.
-const CACHE = 'grabbit-v2';
+const CACHE = 'grabbit-v3';
 const SHELL = [
   '/',
   '/manifest.webmanifest',
@@ -72,7 +72,11 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(req)
       .then((res) => {
-        if (res.ok && res.type === 'basic') {
+        // res.redirected guards the shell: an expired session 302s '/' to
+        // /login, and caching that followed response would replace the offline
+        // app shell with the login form. /share?... is unique per share —
+        // caching it grows the cache without bound and is never needed.
+        if (res.ok && res.type === 'basic' && !res.redirected && url.pathname !== '/share') {
           const copy = res.clone();
           caches.open(CACHE).then((cache) => cache.put(req, copy));
         }

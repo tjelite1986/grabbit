@@ -183,6 +183,18 @@ async function resolveProfile(url) {
 // (pageProps.firstVideo): plain `id`, signed `downloadLink` (full quality,
 // `source.src` is the lower-res player stream), tag objects, and SEO titles
 // under texts.profile.<user|pornstar|producer>.default.text.
+// The actual downloadable URL in a firstVideo object, or undefined. Shared by
+// the resolve() guard and jobFromNextVideo so a video that merely *has* a
+// sources array (possibly empty) doesn't produce a job without a downloadUrl.
+function nextVideoSource(fv) {
+  return (
+    fv.downloadLink ||
+    (fv.source && fv.source.src) ||
+    (Array.isArray(fv.sources) && (fv.sources.find((s) => s && s.type === 'video/mp4') || {}).src) ||
+    undefined
+  );
+}
+
 function jobFromNextVideo(fv) {
   const id = String(fv.id);
   const creator =
@@ -201,10 +213,7 @@ function jobFromNextVideo(fv) {
   title = String(title).replace(/\s*\|\s*Tik\.?\s*Porn\s*$/i, '').replace(/\s+/g, ' ').trim()
     || (fv.action && fv.action.name) || id;
   const tagNames = Array.isArray(fv.tags) ? fv.tags.map((t) => t && t.name).filter(Boolean) : [];
-  const mp4Source =
-    fv.downloadLink ||
-    (fv.source && fv.source.src) ||
-    (Array.isArray(fv.sources) && (fv.sources.find((s) => s && s.type === 'video/mp4') || {}).src);
+  const mp4Source = nextVideoSource(fv);
   return {
     kind: 'direct',
     id,
@@ -242,7 +251,7 @@ async function resolve(url) {
   // names (id/downloadLink instead of video_id/download_url).
   const data = nextData(html);
   const fv = data && data.props && data.props.pageProps && data.props.pageProps.firstVideo;
-  if (fv && fv.id != null && (!wantId || String(fv.id) === wantId) && (fv.downloadLink || fv.source || fv.sources)) {
+  if (fv && fv.id != null && (!wantId || String(fv.id) === wantId) && nextVideoSource(fv)) {
     return jobFromNextVideo(fv);
   }
 
