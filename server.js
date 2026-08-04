@@ -2536,6 +2536,18 @@ app.get('/api/download', async (req, res) => {
   if (req.query.creator) job.creator = String(req.query.creator);
   // Optional: override the title (renames the saved file).
   if (req.query.title) job.title = String(req.query.title);
+  // Optional: override the caption text and the hashtags that go with it. Both
+  // land in the .md sidecar via buildCaption, so a caller that lets a person
+  // tidy the metadata before saving (elite-v2's Grab tool) gets its edits into
+  // the library rather than the extractor's raw description. An explicitly
+  // empty description means "no description", hence the != null test.
+  if (req.query.description != null) job.description = String(req.query.description);
+  if (req.query.tags != null) {
+    job.tags = String(req.query.tags)
+      .split(/[\s,]+/)
+      .map((t) => t.trim().replace(/^#/, ''))
+      .filter(Boolean);
+  }
 
   // Images don't fit the video pipeline: with dest=elite they are dropped into
   // elite-v2's posts import, otherwise into the plain photos library.
