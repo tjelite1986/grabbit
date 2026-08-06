@@ -1,15 +1,18 @@
 // Minimal service worker: makes the app installable and keeps the static
 // shell available offline. All API traffic goes straight to the network.
-// v6: the icon set was replaced with the new Grabbit logo — bump so the old
-// shell cache (and its stale icons) is dropped on activate.
-const CACHE = 'grabbit-v6';
+// v7: the icon set was replaced with the new Grabbit logo — bump so the old
+// shell cache (and its stale icons) is dropped on activate. The icon URLs
+// carry ?v=2 to match the manifest: Android bakes the icon into a generated
+// APK at install time and only rebuilds it when the manifest itself changed,
+// so an icon swapped behind an unchanged URL never reaches the home screen.
+const CACHE = 'grabbit-v7';
 const SHELL = [
   '/',
   '/manifest.webmanifest',
-  '/favicon-32.png',
-  '/icon-192.png',
-  '/icon-512.png',
-  '/apple-touch-icon.png',
+  '/favicon-32.png?v=2',
+  '/icon-192.png?v=2',
+  '/icon-512.png?v=2',
+  '/apple-touch-icon.png?v=2',
 ];
 
 self.addEventListener('install', (event) => {
@@ -44,8 +47,8 @@ self.addEventListener('push', (event) => {
       if (wins.some((w) => w.focused)) return;
       await self.registration.showNotification(d.title || 'grabbit', {
         body: d.body || '',
-        icon: '/icon-192.png',
-        badge: '/icon-192.png',
+        icon: '/icon-192.png?v=2',
+        badge: '/icon-192.png?v=2',
         tag: d.tag || undefined,
         data: { url: d.url || '/?tab=queue' },
       });
