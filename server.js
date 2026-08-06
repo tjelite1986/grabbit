@@ -1011,7 +1011,32 @@ app.use((req, res, next) => {
   return res.redirect('/login');
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+// The app shell, the service worker, the manifest and the icons must always be
+// revalidated. Express sends no Cache-Control of its own, so Cloudflare falls
+// back to its default browser TTL of 4 hours — a new icon or a new build then
+// stays invisible for that long, and the service worker re-caches the stale
+// copy it was served. 'no-cache' still allows caching, it just forces an
+// ETag revalidation, which is a cheap 304 for these few small files.
+const REVALIDATE = new Set([
+  'index.html',
+  'sw.js',
+  'manifest.webmanifest',
+  'favicon-32.png',
+  'apple-touch-icon.png',
+  'icon-192.png',
+  'icon-512.png',
+  'icon-maskable-512.png',
+]);
+
+app.use(
+  express.static(path.join(__dirname, 'public'), {
+    setHeaders: (res, filePath) => {
+      if (REVALIDATE.has(path.basename(filePath))) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    },
+  })
+);
 
 // UMD build of html-to-image, loaded lazily by the client-side screenshot
 // tool (privacy panel). Served from node_modules so the repo stays vendor-free.

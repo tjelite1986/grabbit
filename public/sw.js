@@ -1,8 +1,8 @@
 // Minimal service worker: makes the app installable and keeps the static
 // shell available offline. All API traffic goes straight to the network.
-// v5: the icon set was replaced with the new Grabbit logo — bump so the old
+// v6: the icon set was replaced with the new Grabbit logo — bump so the old
 // shell cache (and its stale icons) is dropped on activate.
-const CACHE = 'grabbit-v5';
+const CACHE = 'grabbit-v6';
 const SHELL = [
   '/',
   '/manifest.webmanifest',
@@ -16,7 +16,10 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE)
-      .then((cache) => cache.addAll(SHELL))
+      // cache: 'reload' bypasses the browser's HTTP cache. Without it addAll is
+      // happy to re-cache whatever stale copy the browser is still holding, so
+      // bumping CACHE above would not actually pick up a changed shell or icon.
+      .then((cache) => cache.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
