@@ -1,8 +1,8 @@
 // Minimal service worker: makes the app installable and keeps the static
 // shell available offline. All API traffic goes straight to the network.
-// v4: the icon set was replaced with the new Grabbit logo — bump so the old
+// v5: the icon set was replaced with the new Grabbit logo — bump so the old
 // shell cache (and its stale icons) is dropped on activate.
-const CACHE = 'grabbit-v4';
+const CACHE = 'grabbit-v5';
 const SHELL = [
   '/',
   '/manifest.webmanifest',
