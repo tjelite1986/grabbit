@@ -936,7 +936,7 @@ function loginPage(error) {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Grabbit — sign in</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" href="/favicon-32.png">
 <style>
   :root { color-scheme: dark; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -951,7 +951,7 @@ function loginPage(error) {
   .err { color:#f87171; font-size:13px; margin-bottom:12px; }
 </style></head><body>
 <form method="post" action="/login">
-  <img src="/logo.svg" alt="" width="72" height="72" style="display:block;margin:0 auto 10px">
+  <img src="/icon-192.png" alt="" width="72" height="72" style="display:block;margin:0 auto 10px;border-radius:16px">
   <h1 style="text-align:center">Grabbit</h1>
   <p style="text-align:center">Sign in to continue</p>
   ${error ? `<div class="err">${error}</div>` : ''}
@@ -991,11 +991,11 @@ app.post('/logout', (_req, res) => {
 // manifest and service worker must also stay reachable without a session,
 // otherwise install and SW updates break when the auth cookie expires.
 const PUBLIC_ASSETS = new Set([
-  '/favicon.svg',
-  '/logo.svg',
+  '/favicon-32.png',
   '/apple-touch-icon.png',
   '/icon-192.png',
   '/icon-512.png',
+  '/icon-maskable-512.png',
   '/manifest.webmanifest',
   '/sw.js',
 ]);
