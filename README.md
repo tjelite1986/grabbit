@@ -449,10 +449,11 @@ batches, which tag each track automatically from its own metadata)*
 - **Metadata lookup (iTunes + Deezer)** — a dropdown of matches from a music
   database; picking one fills every tag field below at once. The button beside it
   re-runs the search. Each row is marked by how well it answers: `✓` matched both
-  the artist and the title and is the only kind that fills the fields on its own,
-  `~` matched the title alone, `?` neither — a near miss stays pickable but is
-  never written for you, because searching a common word answers with somebody
-  else's song. The search is built from the artist and title fields (plus the
+  the artist and the title, `≈` matched the artist and a title one typo away
+  (found in that artist's own catalogue, so `Eyes Dem Open` still finds
+  `EYES THEM OPEN`), `~` matched the title alone, `?` neither. Only `✓` and `≈`
+  fill the fields on their own — a near miss stays pickable but is never written
+  for you, because searching a common word answers with somebody else's song. The search is built from the artist and title fields (plus the
   channel name), not from the raw video title, whose brackets and genre words no
   catalogue indexes.
   When the fields are still empty, Grabbit reads the credit line out of the video

@@ -1846,6 +1846,57 @@ function knownGenres() {
 // Deezer, both keyless). Candidates: {source, title, artists[], album, date,
 // genres[], cover}. Used by the /api/music-meta endpoint (UI auto-fill) and
 // by the download-time genre auto-fill.
+async function musicApiFetch(u) {
+  // accept-language pins Deezer's localized genre names to English.
+  const r = await fetch(u, {
+    headers: { 'user-agent': 'grabbit/1.0', 'accept-language': 'en' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!r.ok) throw new Error(`upstream ${r.status}`);
+  return r.json();
+}
+
+// One iTunes song row in the shape the picker and the matcher expect.
+function itunesCandidate(r) {
+  return {
+    source: 'itunes',
+    title: r.trackName || null,
+    artists: splitArtists(r.artistName),
+    album: r.collectionName || null,
+    date: r.releaseDate ? String(r.releaseDate).slice(0, 10) : null,
+    genres: r.primaryGenreName ? [r.primaryGenreName] : [],
+    cover: r.artworkUrl100 || null,
+  };
+}
+
+/**
+ * Every song iTunes files under an artist, found by name.
+ *
+ * Term search ranks by popularity, so a small artist's own track can be
+ * missing from it while the artist's page carries it — searching "Giannotti
+ * Eyes Dem Open" answers with JayBlem and Harry Styles, and never with the
+ * GIANNOTTI MUSIC album track it is a misspelling of. Asking who the artist
+ * is and reading their catalogue is the only way to see it.
+ */
+async function artistCatalogue(name) {
+  const wanted = foldName(name);
+  if (!wanted) return [];
+  const found = await musicApiFetch(
+    `https://itunes.apple.com/search?entity=musicArtist&limit=5&term=${encodeURIComponent(name)}`
+  ).catch(() => null);
+  const artist = (found && found.results ? found.results : []).find((a) => {
+    const got = foldName(a.artistName);
+    return got && (got === wanted || ` ${got} `.includes(` ${wanted} `) || ` ${wanted} `.includes(` ${got} `));
+  });
+  if (!artist) return [];
+  const songs = await musicApiFetch(
+    `https://itunes.apple.com/lookup?id=${artist.artistId}&entity=song&limit=200`
+  ).catch(() => null);
+  return (songs && songs.results ? songs.results : [])
+    .filter((r) => r.wrapperType === 'track' && r.trackName)
+    .map(itunesCandidate);
+}
+
 async function musicMetaCandidates(q) {
   const out = [];
   const seen = new Set();
@@ -1856,29 +1907,14 @@ async function musicMetaCandidates(q) {
       out.push(c);
     }
   };
-  const jfetch = async (u) => {
-    // accept-language pins Deezer's localized genre names to English.
-    const r = await fetch(u, { headers: { 'user-agent': 'grabbit/1.0', 'accept-language': 'en' }, signal: AbortSignal.timeout(8000) });
-    if (!r.ok) throw new Error(`upstream ${r.status}`);
-    return r.json();
-  };
+  const jfetch = musicApiFetch;
   // Both lookups run in parallel; either one failing alone is fine.
   const [itunes, deezer] = await Promise.allSettled([
     jfetch(`https://itunes.apple.com/search?media=music&entity=song&limit=6&term=${encodeURIComponent(q)}`),
     jfetch(`https://api.deezer.com/search?limit=4&q=${encodeURIComponent(q)}`),
   ]);
   if (itunes.status === 'fulfilled') {
-    for (const r of itunes.value.results || []) {
-      push({
-        source: 'itunes',
-        title: r.trackName || null,
-        artists: splitArtists(r.artistName),
-        album: r.collectionName || null,
-        date: r.releaseDate ? String(r.releaseDate).slice(0, 10) : null,
-        genres: r.primaryGenreName ? [r.primaryGenreName] : [],
-        cover: r.artworkUrl100 || null,
-      });
-    }
+    for (const r of itunes.value.results || []) push(itunesCandidate(r));
   }
   if (deezer.status === 'fulfilled') {
     const rows = deezer.value.data || [];
@@ -1909,6 +1945,9 @@ function foldName(s) {
     .toLowerCase()
     .replace(/\(.*?\)|\[.*?\]/g, ' ')
     .replace(/\b(feat\.?|ft\.?|featuring|with)\b.*$/i, ' ')
+    // An apostrophe closes up rather than splitting: typed without one,
+    // "Monsters" must still fold to the same thing as "Monster's".
+    .replace(/['’´`]/g, '')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -1923,6 +1962,46 @@ function foldName(s) {
  * searching "Giannotti Control" returns Giuseppe Giannotti's "Zero Control",
  * and auto-filling that is worse than leaving the fields empty.
  */
+// Levenshtein distance, abandoned as soon as it cannot come in under `max` —
+// the strings are song titles, so the table is tiny either way.
+function editDistance(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + cost);
+      if (row[j] < best) best = row[j];
+    }
+    if (best > max) return max + 1;
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/**
+ * Two spellings of the same song title.
+ *
+ * Only ever consulted once the artist has already matched, because on its own
+ * a typo's worth of distance is not evidence of anything: within one artist's
+ * catalogue "Eyes Dem Open" and "EYES THEM OPEN" are the same track, while
+ * across the whole of iTunes they would be a coin flip. Word count must agree
+ * so a missing word ("Zero Control" vs "Control") never passes, and short
+ * titles get no slack at all — "NWO" and "NWA" are one edit apart.
+ */
+function titleClose(a, b) {
+  if (!a || !b || a === b) return Boolean(a && a === b);
+  if (a.split(' ').length !== b.split(' ').length) return false;
+  const len = Math.max(a.length, b.length);
+  // One edit per 7 characters, and none at all below eight: "Eyes Them Open"
+  // against "Eyes Dem Open" is two edits, while "NWO" and "NWA" are one.
+  if (len < 8) return false;
+  const budget = Math.min(3, Math.max(1, Math.floor(len / 7)));
+  return editDistance(a, b, budget) <= budget;
+}
+
 function candidateMatch(candidate, want) {
   const wantArtist = foldName(want.artist);
   const wantTitle = foldName(want.title);
@@ -1949,11 +2028,13 @@ function candidateMatch(candidate, want) {
       cArtists.some((a) => holds(wantTitle, a)));
 
   if (titleSame && artistOk) return 'full';
+  // Same artist, one typo apart: the catalogue's spelling of the same song.
+  if (artistOk && titleClose(cTitle, wantTitle)) return 'close';
   if (titleNear || (artistOk && !wantTitle)) return 'partial';
   return 'none';
 }
 
-const MATCH_RANK = { full: 0, partial: 1, none: 2 };
+const MATCH_RANK = { full: 0, close: 1, partial: 2, none: 3 };
 
 /**
  * Look a song up in the music databases from the pieces we actually have.
@@ -1981,14 +2062,31 @@ async function musicMetaLookup({ artist, title, channel }) {
 
   const out = [];
   const seen = new Set();
-  for (const term of attempts) {
-    for (const c of await musicMetaCandidates(term)) {
+  const take = (candidates, keepOnlyMatches) => {
+    for (const c of candidates) {
       const key = ((c.artists || []).join(',') + '|' + c.title).toLowerCase();
       if (seen.has(key)) continue;
+      const match = candidateMatch(c, want);
+      // A catalogue is 200 songs long — only the ones that answer the question
+      // belong in a picker, or one artist would bury every other candidate.
+      if (keepOnlyMatches && match !== 'full' && match !== 'close') continue;
       seen.add(key);
-      out.push({ ...c, match: candidateMatch(c, want) });
+      out.push({ ...c, match });
     }
-    if (out.some((c) => c.match === 'full')) break;
+  };
+  const settled = () => out.some((c) => c.match === 'full' || c.match === 'close');
+
+  for (const term of attempts) {
+    take(await musicMetaCandidates(term));
+    if (settled()) break;
+  }
+  // Still nothing: the search may simply not rank the artist's own track.
+  // Read their catalogue and look for the title in there instead.
+  if (!settled() && title) {
+    for (const name of [channel, artist].filter(Boolean)) {
+      take(await artistCatalogue(name).catch(() => []), true);
+      if (settled()) break;
+    }
   }
   out.sort((a, b) => MATCH_RANK[a.match] - MATCH_RANK[b.match]);
   return out.slice(0, 10);
@@ -2014,7 +2112,8 @@ app.get('/api/music-meta', async (req, res) => {
     ok: true,
     candidates,
     // Safe to apply without asking; null when nothing vouched for the artist.
-    best: candidates.find((c) => c.match === 'full') || null,
+    // A 'close' row qualifies: same artist, same title bar a typo.
+    best: candidates.find((c) => c.match === 'full' || c.match === 'close') || null,
     // What the video itself says, for when no database knows the track.
     tagGenres: genresFromTags(splitList(str(req.query.tags))),
   });
@@ -2130,7 +2229,7 @@ function genresFromTags(tags) {
 async function lookupGenres(artist, title, tags) {
   const candidates = await musicMetaLookup({ artist, title });
   for (const c of candidates) {
-    if (c.match !== 'full' || !c.genres || !c.genres.length) continue;
+    if ((c.match !== 'full' && c.match !== 'close') || !c.genres || !c.genres.length) continue;
     return normalizeGenres(c.genres).slice(0, 3);
   }
   return genresFromTags(tags);

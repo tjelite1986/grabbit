@@ -2696,7 +2696,8 @@
                 const al = c.album ? ' · ' + c.album : '';
                 // A near miss stays pickable but says so, because the database
                 // answers "Giannotti Control" with a different Giannotti.
-                const mark = c.match === 'full' ? '✓ ' : c.match === 'partial' ? '~ ' : '? ';
+                const mark =
+                  c.match === 'full' ? '✓ ' : c.match === 'close' ? '≈ ' : c.match === 'partial' ? '~ ' : '? ';
                 return '<option value="' + i + '">' + esc(mark + c.artists.join(', ') + ' — ' + c.title + al + y + ' [' + c.source + ']') + '</option>';
               })
               .join('');
