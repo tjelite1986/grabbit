@@ -2083,11 +2083,17 @@ const GENRE_VOCABULARY = [
 function genresFromTags(tags) {
   if (!Array.isArray(tags) || !tags.length) return [];
   const fold = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const canonical = new Map();
+  for (const [alias, label] of GENRE_VOCABULARY) {
+    if (label) canonical.set(fold(alias), label);
+  }
   const vocabulary = new Map();
-  // The library's own genres first, so its spelling wins the key.
+  // The library's own genres first, so its spelling wins the key — except
+  // where the library itself files a synonym ("dnb"), which resolves to the
+  // full name or the same tag line yields both readings of one genre.
   for (const name of knownGenres().map((g) => g.name)) {
     const key = fold(name);
-    if (key && !vocabulary.has(key)) vocabulary.set(key, name);
+    if (key && !vocabulary.has(key)) vocabulary.set(key, canonical.get(key) || name);
   }
   for (const [alias, label] of GENRE_VOCABULARY) {
     const key = fold(alias);
