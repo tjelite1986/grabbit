@@ -2668,13 +2668,23 @@
 
       async function musicLookup() {
         const src = sheetSingle || sheetItem || {};
-        const q = [$('shMusicArtists').value.trim(), $('shMusicTitle').value.trim()].filter(Boolean).join(' ') || src.title || '';
-        if (!q) return;
+        const artist = $('shMusicArtists').value.trim();
+        const title = $('shMusicTitle').value.trim();
+        // The channel is sent too: it is often the catalogue's artist name
+        // ("GIANNOTTI MUSIC") when the title's credit line is shorter, and the
+        // server reads a credit line out of `q` when no fields are filled in.
+        const p = new URLSearchParams();
+        if (artist) p.set('artist', artist);
+        if (title) p.set('title', title);
+        if (src.creator) p.set('channel', src.creator);
+        if (!artist && !title) p.set('q', src.title || '');
+        if (Array.isArray(src.tags) && src.tags.length) p.set('tags', src.tags.slice(0, 20).join(';'));
+        if (![...p.keys()].some((k) => k !== 'tags' && p.get(k))) return;
         const token = ++musicLookupToken;
         const pick = $('shMusicPick');
         pick.innerHTML = '<option value="">Searching…</option>';
         try {
-          const r = await fetch('/api/music-meta?q=' + encodeURIComponent(q));
+          const r = await fetch('/api/music-meta?' + p.toString());
           const d = await r.json();
           if (token !== musicLookupToken) return;
           musicCandidates = d.candidates || [];
@@ -2684,11 +2694,22 @@
               .map((c, i) => {
                 const y = c.date ? ' (' + c.date.slice(0, 4) + ')' : '';
                 const al = c.album ? ' · ' + c.album : '';
-                return '<option value="' + i + '">' + esc(c.artists.join(', ') + ' — ' + c.title + al + y + ' [' + c.source + ']') + '</option>';
+                // A near miss stays pickable but says so, because the database
+                // answers "Giannotti Control" with a different Giannotti.
+                const mark = c.match === 'full' ? '✓ ' : c.match === 'partial' ? '~ ' : '? ';
+                return '<option value="' + i + '">' + esc(mark + c.artists.join(', ') + ' — ' + c.title + al + y + ' [' + c.source + ']') + '</option>';
               })
               .join('');
-          // Auto-fill: the top match fills whatever is still empty.
-          if (musicCandidates[0]) applyMusicCandidate(musicCandidates[0], false);
+          // Auto-fill only from a candidate that matched BOTH artist and title.
+          // A top result that merely shares a word is someone else's song, and
+          // writing it into the tags is worse than leaving the fields empty.
+          if (d.best) applyMusicCandidate(d.best, false);
+          // Nothing in the databases: the video's own tags are then the only
+          // genre there is (self-released tracks live only on the channel).
+          if (!d.best && Array.isArray(d.tagGenres) && d.tagGenres.length) {
+            const setv = (id, v) => { if (v && !$(id).value.trim()) $(id).value = v; };
+            setv('shMusicGenres', d.tagGenres.join(', '));
+          }
         } catch {
           if (token === musicLookupToken) pick.innerHTML = '<option value="">Lookup failed</option>';
         }

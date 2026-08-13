@@ -448,7 +448,17 @@ batches, which tag each track automatically from its own metadata)*
   clickbait.
 - **Metadata lookup (iTunes + Deezer)** — a dropdown of matches from a music
   database; picking one fills every tag field below at once. The button beside it
-  re-runs the search.
+  re-runs the search. Each row is marked by how well it answers: `✓` matched both
+  the artist and the title and is the only kind that fills the fields on its own,
+  `~` matched the title alone, `?` neither — a near miss stays pickable but is
+  never written for you, because searching a common word answers with somebody
+  else's song. The search is built from the artist and title fields (plus the
+  channel name), not from the raw video title, whose brackets and genre words no
+  catalogue indexes.
+  When the fields are still empty, Grabbit reads the credit line out of the video
+  title itself (`Artist – Track (Official 2026)`), so a track that only ever
+  existed on its artist's channel still arrives tagged. If no database knows it
+  either, the genre field falls back to the genres named in the video's own tags.
 - **Song title** — the track title tag.
 - **Artists / group (comma-separated)** — one or more artists.
 - **Release type** — *Album*, *Single* or *EP*. A *Single* has no album and is

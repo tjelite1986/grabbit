@@ -14,7 +14,7 @@ const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 
 const extractors = require('./extractors');
-const { cleanDescription } = require('./extractors/util');
+const { cleanDescription, parseTrackTitle } = require('./extractors/util');
 const { cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 
@@ -1902,10 +1902,122 @@ async function musicMetaCandidates(q) {
   return out.slice(0, 10);
 }
 
+// Compare names the way a listener would: case, punctuation and the version
+// suffix a video title carries are not what makes two songs the same.
+function foldName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/\(.*?\)|\[.*?\]/g, ' ')
+    .replace(/\b(feat\.?|ft\.?|featuring|with)\b.*$/i, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * How well a database candidate answers what was asked for.
+ *
+ * 'full' means it is safe to write into the tags unasked; 'partial' means the
+ * title lines up but nobody vouched for the artist, so it belongs in the picker
+ * and nowhere else. Without this every lookup has to say yes to something —
+ * searching "Giannotti Control" returns Giuseppe Giannotti's "Zero Control",
+ * and auto-filling that is worse than leaving the fields empty.
+ */
+function candidateMatch(candidate, want) {
+  const wantArtist = foldName(want.artist);
+  const wantTitle = foldName(want.title);
+  const cTitle = foldName(candidate.title);
+  const cArtists = (candidate.artists || []).map(foldName).filter(Boolean);
+  // Whole words only: "control" sits inside "zero control" as a substring but
+  // never as the same song.
+  const holds = (a, b) => Boolean(a && b && ` ${a} `.includes(` ${b} `));
+  const either = (a, b) => holds(a, b) || holds(b, a);
+
+  // A full match needs the SAME title, not a title containing it — one extra
+  // word is a different song ("Zero Control" vs "Control"). The version
+  // suffix is already gone, so "(Radio Edit)" still counts as equal.
+  const titleSame = Boolean(wantTitle) && cTitle === wantTitle;
+  const titleNear = either(cTitle, wantTitle);
+  // The credit line may name more artists than the catalogue does (a remix
+  // credit) or fewer (a channel called "GIANNOTTI MUSIC"), so either side may
+  // hold the other — but only as whole words, and only next to the same title.
+  const artistOk =
+    Boolean(wantArtist) &&
+    (cArtists.some((a) => either(a, wantArtist)) ||
+      // Channel-tagged uploads name the artist inside the title instead
+      holds(cTitle, wantArtist) ||
+      cArtists.some((a) => holds(wantTitle, a)));
+
+  if (titleSame && artistOk) return 'full';
+  if (titleNear || (artistOk && !wantTitle)) return 'partial';
+  return 'none';
+}
+
+const MATCH_RANK = { full: 0, partial: 1, none: 2 };
+
+/**
+ * Look a song up in the music databases from the pieces we actually have.
+ *
+ * The searches are tried in order of how much they claim to know and stop at
+ * the first FULL match, because a plain video title ("Giannotti – Control
+ * (Electro / Jump Up Neurofunk | Official 2026)") returns nothing at all from
+ * either database — the brackets and genre words are noise no catalogue
+ * indexes. Everything found along the way is still returned, ranked, so the
+ * picker can offer the near misses.
+ */
+async function musicMetaLookup({ artist, title, channel }) {
+  const want = { artist: artist || channel || '', title: title || '' };
+  const attempts = [];
+  const add = (q) => {
+    const term = String(q || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (term && !attempts.includes(term)) attempts.push(term);
+  };
+  add([artist, title].filter(Boolean).join(' '));
+  // The channel is often the catalogue's artist name even when the title's
+  // credit line is shorter ("Giannotti" vs "GIANNOTTI MUSIC").
+  if (channel && channel !== artist) add([channel, title].filter(Boolean).join(' '));
+  add(title);
+  if (!attempts.length) add(artist || channel);
+
+  const out = [];
+  const seen = new Set();
+  for (const term of attempts) {
+    for (const c of await musicMetaCandidates(term)) {
+      const key = ((c.artists || []).join(',') + '|' + c.title).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...c, match: candidateMatch(c, want) });
+    }
+    if (out.some((c) => c.match === 'full')) break;
+  }
+  out.sort((a, b) => MATCH_RANK[a.match] - MATCH_RANK[b.match]);
+  return out.slice(0, 10);
+}
+
 app.get('/api/music-meta', async (req, res) => {
-  const q = String(req.query.q || '').trim().slice(0, 200);
-  if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
-  res.json({ ok: true, candidates: await musicMetaCandidates(q) });
+  const str = (v) => String(v || '').trim().slice(0, 200);
+  const channel = str(req.query.channel);
+  let artist = str(req.query.artist);
+  let title = str(req.query.title);
+  const q = str(req.query.q);
+  // Older callers (and the "search again" button) send one blob: read the
+  // credit line out of it rather than handing the noise to the databases.
+  if (!title && q) {
+    const parsed = parseTrackTitle(q, channel);
+    artist = artist || (parsed && parsed.artist) || '';
+    title = (parsed && parsed.track) || q;
+  }
+  if (!artist && !title && !channel) return res.status(400).json({ ok: false, error: 'Missing q' });
+
+  const candidates = await musicMetaLookup({ artist, title, channel });
+  res.json({
+    ok: true,
+    candidates,
+    // Safe to apply without asking; null when nothing vouched for the artist.
+    best: candidates.find((c) => c.match === 'full') || null,
+    // What the video itself says, for when no database knows the track.
+    tagGenres: genresFromTags(splitList(str(req.query.tags))),
+  });
 });
 
 // The music library keeps every genre in English with one spelling: iTunes
@@ -1940,24 +2052,82 @@ function normalizeGenres(genres) {
   return out;
 }
 
+// Genres nobody in the library has used yet, so a first neurofunk rip is not
+// left genre-less waiting for a second one. Kept to real genre names — the
+// library's own vocabulary supplies everything else.
+// [what a tag may say, what the library calls it] — the second entry keeps a
+// rip filed under the spelling already in use instead of a synonym beside it.
+const GENRE_VOCABULARY = [
+  ['Drum & Bass'], ['Drum and Bass', 'Drum & Bass'], ["Drum'n'Bass", 'Drum & Bass'],
+  ['DnB', 'Drum & Bass'], ['D&B', 'Drum & Bass'], ['Neurofunk'], ['Jump Up'], ['Liquid DnB'],
+  ['Jungle'], ['Breakbeat'], ['Dubstep'], ['Riddim'], ['Bass Music'], ['Future Bass'], ['Trap'],
+  ['Garage'], ['UK Garage'], ['House'], ['Tech House'], ['Deep House'], ['Techno'], ['Trance'],
+  ['Psytrance'], ['Hardstyle'], ['Hardcore'], ['Electro'], ['EDM'], ['Electronic'], ['Ambient'],
+  ['Lo-Fi'], ['Synthwave'], ['Hip-Hop'], ['Hip Hop', 'Hip-Hop'], ['Rap', 'Hip-Hop'], ['R&B'],
+  ['Soul'], ['Funk'], ['Disco'], ['Pop'], ['Rock'], ['Hard Rock'], ['Metal'], ['Punk'], ['Indie'],
+  ['Alternative'], ['Jazz'], ['Blues'], ['Reggae'], ['Dancehall'], ['Ska'], ['Country'], ['Folk'],
+  ['Classical'], ['Soundtrack'], ['Latin'], ['Afrobeats'], ['K-Pop'], ['Schlager'], ['Dansband'],
+  ['Dance'],
+];
+
+/**
+ * Genres read off the video's own tags.
+ *
+ * The last resort, and for a self-released track the only one: no catalogue
+ * has it, but the uploader tagged it "jump up neurofunk", "drum and bass
+ * 2026", "bass music". A tag counts only when a known genre sits inside it as
+ * whole words, so "Giannotti Control" contributes nothing while
+ * "electro bass music" gives Electro. The library's own spellings win, which
+ * keeps a rip filed next to what is already there.
+ */
+function genresFromTags(tags) {
+  if (!Array.isArray(tags) || !tags.length) return [];
+  const fold = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const vocabulary = new Map();
+  // The library's own genres first, so its spelling wins the key.
+  for (const name of knownGenres().map((g) => g.name)) {
+    const key = fold(name);
+    if (key && !vocabulary.has(key)) vocabulary.set(key, name);
+  }
+  for (const [alias, label] of GENRE_VOCABULARY) {
+    const key = fold(alias);
+    if (key && !vocabulary.has(key)) vocabulary.set(key, label || alias);
+  }
+
+  // One genre per tag — the longest reading of it, so "jump up neurofunk"
+  // yields Neurofunk rather than both halves — kept in the order the uploader
+  // wrote them, which is the only ranking the tags themselves carry.
+  const out = [];
+  for (const tag of tags) {
+    const hay = ` ${fold(tag)} `;
+    let best = null;
+    for (const [key, name] of vocabulary) {
+      // Whole words: "trap" must not be found inside "trapped".
+      if (!hay.includes(` ${key} `)) continue;
+      if (!best || key.length > best.key.length) best = { key, name };
+    }
+    if (!best) continue;
+    // One reading of the same thing is enough: skip a genre already contained
+    // in a broader one that was picked ("bass" under "Bass Music").
+    if (out.some((g) => fold(g).includes(fold(best.name)) || fold(best.name).includes(fold(g)))) continue;
+    out.push(best.name);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 // Best-effort genre lookup for a track (used when neither the UI nor the
 // source site provided one — which is the norm for YouTube, whose "genre" is
-// a video category and deliberately dropped). Picks the first candidate that
-// plausibly matches artist + title.
-async function lookupGenres(artist, title) {
-  const fold = (s) => String(s || '').toLowerCase().trim();
-  const nArtist = fold(artist);
-  const nTitle = fold(title);
-  const candidates = await musicMetaCandidates(`${artist} ${title}`.trim().slice(0, 200));
+// a video category and deliberately dropped). Only a full artist+title match
+// may set a genre; a title-only hit is a different song by someone else.
+// Nothing in the databases falls back on the video's own tags.
+async function lookupGenres(artist, title, tags) {
+  const candidates = await musicMetaLookup({ artist, title });
   for (const c of candidates) {
-    if (!c.genres || !c.genres.length) continue;
-    const cArtists = fold((c.artists || []).join(' '));
-    const cTitle = fold(c.title);
-    const artistOk = !nArtist || cArtists.includes(nArtist) || nArtist.includes(fold((c.artists || [])[0]));
-    const titleOk = !nTitle || cTitle.includes(nTitle) || nTitle.includes(cTitle);
-    if (artistOk && titleOk) return normalizeGenres(c.genres).slice(0, 3);
+    if (c.match !== 'full' || !c.genres || !c.genres.length) continue;
+    return normalizeGenres(c.genres).slice(0, 3);
   }
-  return [];
+  return genresFromTags(tags);
 }
 
 // GET /api/playlists -> saved playlists (subscriptions for new-track checks).
@@ -3265,7 +3435,11 @@ async function produceAudio(job, meta, params, onProgress) {
         let genres = params.genres ? splitGenres(params.genres) : m.genre ? [m.genre] : [];
         // No genre from the UI or the site: look one up (iTunes/Deezer) so
         // the library doesn't end up genre-less — the norm for YouTube rips.
-        if (!genres.length) genres = await lookupGenres(artists[0], songTitle).catch(() => []);
+        // The video's own tags are the last resort, and the only source for a
+        // self-released track no catalogue carries.
+        if (!genres.length) {
+          genres = await lookupGenres(artists[0], songTitle, meta.tags).catch(() => []);
+        }
         // Anything typed by hand joins the picker's list right away.
         if (params.genres) rememberGenres(splitGenres(params.genres));
         try {

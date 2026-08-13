@@ -5,7 +5,7 @@
 // (see runYtdlp in server.js); here we only probe metadata for a nice filename.
 
 const { spawn } = require('child_process');
-const { cleanTitle, titleFrom } = require('./util');
+const { cleanTitle, titleFrom, parseTrackTitle } = require('./util');
 const { cookieArgs } = require('../cookies');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('../premium-fallback');
 
@@ -222,7 +222,30 @@ async function resolve(url) {
         // not a music genre — worthless as a tag, so only pass it through for
         // other sites.
         genre: /youtube/i.test(info.extractor || '') ? null : info.genre || null,
+        // Straight from the site's own tags, so the sheet can say so.
+        source: 'site',
       };
+    } else {
+      // No music tags at all — the norm for an artist or label channel
+      // uploading its own release. The title is then the only credit line
+      // there is ("Giannotti – Control (Official 2026)"), and reading it beats
+      // tagging the file with the channel name and the whole raw title. Only
+      // for something that looks like a song: the site says Music, or the
+      // title carries an explicit credit dash.
+      const parsed = parseTrackTitle(info.title, creator);
+      const looksMusical =
+        /music/i.test((info.categories || []).join(' ')) || /\S\s+[–—-]\s+\S/.test(info.title || '');
+      if (parsed && looksMusical) {
+        music = {
+          artist: parsed.artist,
+          track: parsed.track,
+          album: null,
+          // A self-released track has no release date beyond the upload.
+          year: plausibleYear(info.release_date) || plausibleYear(info.upload_date) || null,
+          genre: null,
+          source: 'title',
+        };
+      }
     }
   }
   // sourceUrl stays the pasted URL so the downloaded-registry dedupe keys off
