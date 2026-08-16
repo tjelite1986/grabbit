@@ -3745,6 +3745,19 @@ function ytdlpCut(job, tmpDir, stem, opts = {}) {
     const mainTpl = hasSections
       ? path.join(tmpDir, `${stem} [%(section_start)d-%(section_end)d].%(ext)s`)
       : path.join(tmpDir, `${stem}.%(ext)s`);
+    // A chapter file's name carries the site's own chapter title, which
+    // nothing bounds — a full stem plus a long chapter name runs past the
+    // filesystem's 255-byte limit and the download dies with ENAMETOOLONG.
+    // The stem is shortened here and the chapter title capped so the worst
+    // case still fits: 80 + " - chNN " + 40 characters (120 bytes at three
+    // bytes per character) + extension, leaving room for the suffixes yt-dlp
+    // appends while downloading (".part", ".f<format_id>"). The chapter file
+    // is copied into the library under this name, and produceCut reads the
+    // chapter title back out of it, so both stay readable.
+    const chapterTpl = path.join(
+      tmpDir,
+      `${clampBytes(stem, 80) || 'video'} - ch%(section_number)02d %(section_title).40s.%(ext)s`,
+    );
     const args = [
       '--no-warnings', '--no-playlist',
       ...ck.args,
@@ -3758,7 +3771,7 @@ function ytdlpCut(job, tmpDir, stem, opts = {}) {
       ...(hasSections ? opts.sections.flatMap((s) => ['--download-sections', s]) : []),
       ...(hasSections ? ['--force-keyframes-at-cuts'] : []),
       ...(opts.splitChapters
-        ? ['--split-chapters', '-o', `chapter:${path.join(tmpDir, `${stem} - ch%(section_number)02d %(section_title)s.%(ext)s`)}`]
+        ? ['--split-chapters', '-o', `chapter:${chapterTpl}`]
         : []),
       ...(opts.extraArgs || []),
       ...(wantProgress
