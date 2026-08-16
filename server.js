@@ -16,6 +16,7 @@ const { pipeline } = require('stream/promises');
 const extractors = require('./extractors');
 const { cleanDescription, parseTrackTitle } = require('./extractors/util');
 const { cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
+const { safeFetch } = require('./url-guard');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 
 const PORT = process.env.PORT || 3000;
@@ -2264,7 +2265,7 @@ let watchCycleRunning = false;
 
 // Queue one track as an audio job into Navidrome, same defaults as the UI's
 // batch button (opus; the cover is embedded as album art by produceAudio).
-function startNavidromeJob(url, navLib) {
+function startNavidromeJob(url, navLib, watch = null) {
   const params = {
     url,
     dest: 'navidrome',
@@ -2292,7 +2293,7 @@ function startNavidromeJob(url, navLib) {
     date: null,
     genres: null,
   };
-  const job = newJob({ dest: 'navidrome', channel: 'main', lib: params.navLib, device: false });
+  const job = newJob({ dest: 'navidrome', channel: 'main', lib: params.navLib, device: false, watch });
   // Kept on the job so POST /api/jobs/:id/retry works for watcher jobs too.
   job.params = params;
   scheduleJob(job, params);
@@ -2308,11 +2309,52 @@ function updatePlaylist(id, patch) {
   }
 }
 
+// A watched track is only marked downloaded once it saves, so anything that
+// fails looks new again on the next cycle and is re-queued — forever, for a
+// video that has been deleted or is geo-blocked. Failures are counted per
+// playlist and the track is dropped after MAX_WATCH_FAILURES attempts.
+const MAX_WATCH_FAILURES = Math.max(1, Number(process.env.MAX_WATCH_FAILURES) || 3);
+
+function watchFailureCount(pl, key) {
+  return (pl && pl.failures && pl.failures[key]) || 0;
+}
+
+function recordWatchFailure(playlistId, key) {
+  if (!playlistId || !key) return;
+  const list = readPlaylists();
+  const pl = list.find((p) => p.id === playlistId);
+  if (!pl) return;
+  const failures = { ...(pl.failures || {}) };
+  failures[key] = (failures[key] || 0) + 1;
+  pl.failures = failures;
+  writePlaylists(list);
+  if (failures[key] >= MAX_WATCH_FAILURES) {
+    console.warn(`playlist watch: giving up on ${key} after ${failures[key]} failed attempt(s)`);
+  }
+}
+
+// A track that eventually succeeds should not carry its earlier failures.
+function clearWatchFailure(playlistId, key) {
+  if (!playlistId || !key) return;
+  const list = readPlaylists();
+  const pl = list.find((p) => p.id === playlistId);
+  if (!pl || !pl.failures || !(key in pl.failures)) return;
+  const failures = { ...pl.failures };
+  delete failures[key];
+  pl.failures = failures;
+  writePlaylists(list);
+}
+
 async function checkPlaylistForNew(pl) {
   const profile = await extractors.resolveProfile(pl.url);
+  let exhausted = 0;
   const fresh = profile.items.filter((it) => {
     if (it.mediaType === 'image') return false;
     if (isDownloaded(it.sourceUrl || it.url, it.site, it.mediaId)) return false;
+    if (watchFailureCount(pl, mediaKey(it.sourceUrl || it.url)) >= MAX_WATCH_FAILURES) {
+      exhausted++;
+      return false;
+    }
     // The song may already be in the library from another upload. Only a
     // full artist+title match blocks it — a title-only hit is too weak to
     // silently skip a track the playlist asked for.
@@ -2323,8 +2365,11 @@ async function checkPlaylistForNew(pl) {
     }
     return true;
   });
-  for (const it of fresh) startNavidromeJob(it.sourceUrl || it.url, pl.lib);
-  return { total: profile.items.length, queued: fresh.length };
+  for (const it of fresh) {
+    const url = it.sourceUrl || it.url;
+    startNavidromeJob(url, pl.lib, { playlistId: pl.id, key: mediaKey(url) });
+  }
+  return { total: profile.items.length, queued: fresh.length, exhausted };
 }
 
 async function runWatchCycle(reason) {
@@ -2339,6 +2384,9 @@ async function runWatchCycle(reason) {
         const r = await checkPlaylistForNew(pl);
         updatePlaylist(pl.id, { lastChecked: Date.now(), lastQueued: r.queued, lastError: null });
         if (r.queued) console.log(`playlist watch: "${pl.name}" queued ${r.queued} new track(s)`);
+        // Never silent: a track dropped for repeated failures is still counted
+        // out loud, so a shrinking playlist has a visible reason.
+        if (r.exhausted) console.log(`playlist watch: "${pl.name}" skipped ${r.exhausted} track(s) that failed ${MAX_WATCH_FAILURES}x`);
       } catch (e) {
         updatePlaylist(pl.id, { lastChecked: Date.now(), lastError: String(e.message || e) });
         console.warn(`playlist watch: "${pl.name}" failed:`, String(e.message || e));
@@ -3154,7 +3202,9 @@ const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file 
 // The view sent to clients: drops server-only fields (absolute paths, the raw
 // start params kept for retries).
 function publicJob(j) {
-  const { finalPath, deliverTemp, params, ...pub } = j;
+  // `watch` is watcher bookkeeping (playlist id + registry key), like params:
+  // internal, and nothing the UI renders.
+  const { finalPath, deliverTemp, params, watch, ...pub } = j;
   return pub;
 }
 function snapshotJobs() {
@@ -3201,6 +3251,7 @@ function finishJob(job, patch) {
   if (job.saved && job.sourceUrl) {
     markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null);
   }
+  if (job.watch) clearWatchFailure(job.watch.playlistId, job.watch.key);
   if (job.deliverTemp && job.finalPath) {
     const p = job.finalPath;
     const t = setTimeout(() => fs.rm(p, { force: true }, () => {}), DELIVER_TTL_MS);
@@ -3240,6 +3291,9 @@ function recordJobHistory(meta, params, channelLabel, filename, imported) {
 function failJob(job, message) {
   const error = String(message || 'Download failed');
   setJob(job, { status: 'error', phase: null, error });
+  // Watcher-queued tracks count their failures so a permanently broken one
+  // stops coming back every cycle.
+  if (job.watch) recordWatchFailure(job.watch.playlistId, job.watch.key);
   recordHistory({
     creator: job.creator || null,
     title: job.title || null,
@@ -4221,7 +4275,10 @@ async function downloadDirect(job, dest, opts = {}) {
   let upstream;
   for (const url of urls) {
     armIdle();
-    upstream = await fetch(url, { headers: job.headers || {}, signal: ctrl.signal });
+    // safeFetch re-checks every redirect hop: the media URL comes from the
+    // page the extractor read, and a redirect is the way past a check that
+    // only saw the address the user submitted.
+    upstream = await safeFetch(url, { headers: job.headers || {}, signal: ctrl.signal });
     if (upstream.ok && upstream.body) break;
     // Drop the unconsumed body of a failed candidate so its socket is freed.
     if (upstream.body) upstream.body.cancel().catch(() => {});

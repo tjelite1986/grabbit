@@ -810,6 +810,7 @@ environment variables:
 | `DATA_DIR` | State directory: job history, `scheduled.json`, cookie files. |
 | `MAX_ACTIVE_JOBS` | Max downloads running concurrently (default `2`). |
 | `WATCH_INTERVAL_MINUTES` | How often watched playlists are polled. |
+| `MAX_WATCH_FAILURES` | How many times a watched track may fail before the watcher stops re-queuing it (default `3`). A track only counts as downloaded once it saves, so without a limit a deleted or geo-blocked video comes back every cycle forever. The count resets if it later succeeds. |
 
 ### Destinations
 
@@ -843,6 +844,7 @@ environment variables:
 | -------- | ----------- |
 | `GRABBIT_PASSWORD` | Shared password gating the web UI (auth off when unset). |
 | `GRABBIT_SECRET` | Optional separate secret for signing the auth cookie. |
+| `ALLOW_PRIVATE_ADDRESSES` | Set to `true` to allow downloads from hosts that resolve to private, loopback, link-local or otherwise non-public addresses. Defaults to `false`, which is what stops a submitted URL — or a redirect from a public one — being used to reach services on your own network. Only enable it if grabbing from an internal host is deliberate. |
 | `GRABBIT_INTERNAL_TOKEN` | Token internal (co-hosted) callers must send in `X-Grabbit-Token`. |
 
 ## Auth

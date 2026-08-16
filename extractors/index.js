@@ -24,6 +24,8 @@
 const fs = require('fs');
 const path = require('path');
 
+const { assertPublicUrl } = require('../url-guard');
+
 const generic = require('./generic');
 
 // Load every *.js file in this directory except the registry and the fallback.
@@ -66,6 +68,9 @@ function withMediaId(job, url) {
 }
 
 async function resolve(url) {
+  // The single gate every submitted URL passes before anything reaches the
+  // network — extractors fetch the page, and yt-dlp runs on the same URL.
+  await assertPublicUrl(url);
   const extractor = pick(url);
   const job = await extractor.resolve(url);
   return { extractor: extractor.name, ...withMediaId(job, url) };
@@ -79,6 +84,7 @@ function isProfile(url) {
 
 // Resolve every clip on a profile. Throws if the site has no profile support.
 async function resolveProfile(url) {
+  await assertPublicUrl(url);
   const extractor = pick(url);
   if (typeof extractor.resolveProfile !== 'function') {
     throw new Error('This site does not support whole-profile downloads');
