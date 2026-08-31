@@ -630,7 +630,7 @@
         </div>
         <div class="modebar" id="modeBar">
           <button class="mode active" type="button" data-mode="">Grabbit</button>
-          <button class="mode" type="button" data-mode="elite">Elitev2</button>
+          <button class="mode" type="button" data-mode="elite">Shorts</button>
           <button class="mode" type="button" data-mode="music">Music</button>
           <button class="mode" type="button" data-mode="audiobooks">Audiobook</button>
         </div>
@@ -758,7 +758,7 @@
           <div class="setrow">
             <div class="label"><div class="t">Save to</div><div class="d">Where new downloads go by default</div></div>
             <select id="setDest">
-              <option value="">Elite-v2 shorts</option>
+              <option value="">Shorts</option>
               <option value="server">Server library</option>
               <option value="navidrome">Navidrome (music)</option>
               <option value="audiobooks">Audiobooks / stories</option>
@@ -772,7 +772,7 @@
             </select>
           </div>
           <div class="setrow" id="setChannelRow">
-            <div class="label"><div class="t">Channel</div><div class="d">Shorts channel for new clips</div></div>
+            <div class="label"><div class="t">Channel</div><div class="d">main goes to Tikshortis, 18+ to Elite-v2</div></div>
             <select id="setChannel">
               <option value="main">main</option>
               <option value="18plus">18+</option>
@@ -1051,7 +1051,7 @@
         <div class="field" id="shDestField">
           <label>Save to</label>
           <div class="seg wrap" id="shDest">
-            <button type="button" data-v="" class="on">Elite-v2 shorts</button>
+            <button type="button" data-v="" class="on">Shorts</button>
             <button type="button" data-v="server">Server library</button>
             <button type="button" data-v="navidrome">Navidrome</button>
             <button type="button" data-v="audiobooks">Audiobooks</button>
@@ -2072,10 +2072,15 @@
         }
       }
 
+      // Which app serves each shorts channel: the main library moved out of
+      // elite-v2 into Tikshortis on 2026-08-31, the 18+ one stayed behind.
+      const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Elite-v2' };
+      const channelLibrary = (ch) => CHANNEL_LIBRARY[ch] || CHANNEL_LIBRARY.main;
+
       function importStatusLabel(imported, isImg, channel) {
         if (!imported) return '';
         const st = isImg ? imported.main : imported[channel];
-        if (st === 'imported') return isImg ? 'in library' : 'in elite-v2';
+        if (st === 'imported') return isImg ? 'in library' : 'in ' + channelLibrary(channel);
         if (st === 'pending') return 'queued';
         return '';
       }
@@ -2442,7 +2447,7 @@
           // library and the posts import folder), so it also shows for server.
           if (imp && (!isServer || isImage)) {
             const st = isImage ? imp.main : imp[channel];
-            if (st === 'imported') msg = isImage ? 'Already in the photos library.' : 'Already in elite-v2 (' + channel + ') — it will not be re-imported.';
+            if (st === 'imported') msg = isImage ? 'Already in the photos library.' : 'Already in ' + channelLibrary(channel) + ' (' + channel + ') — it will not be re-imported.';
             else if (st === 'pending') msg = isImage ? 'Already queued in the posts import folder.' : 'Already queued in the ' + channel + ' import folder.';
           }
         }

@@ -1,6 +1,6 @@
 // grabbit - plugin-based media grabber.
 // Resolve a pasted URL, embed source + hashtags into the file metadata, name it
-// for the elite-v2 shorts importer, save it into the chosen channel's _import
+// for the shorts importer, save it into the chosen channel's _import
 // folder (with a .md caption sidecar) and stream the result to the browser.
 
 const express = require('express');
@@ -23,10 +23,18 @@ const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_BIN || 'ffprobe';
-// Root of the elite-v2 shorts store (a host folder bind-mounted here). Files
-// land in <root>/<channel>/_import/ where the elite-v2 timer auto-imports them.
+// Roots of the shorts stores (host folders bind-mounted here). A clip lands in
+// <root>/<channel>/_import/ where that library's importer files it minutes
+// later. The main channel moved out of elite-v2 into its own app (tikshortis)
+// on 2026-08-31 and the 18+ library stayed behind, so the two channels no
+// longer share a root. TIKSHORTIS_ROOT unset falls back to the elite-v2 tree,
+// which is where main used to live.
 const ELITE_ROOT = process.env.ELITE_ROOT || '/elitev2-shorts';
+const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || ELITE_ROOT;
 const CHANNELS = { main: 'main', '18plus': '18plus' };
+const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT };
+// The app serving each channel, for the messages a user reads.
+const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'elite-v2' };
 // Root of the elite-v2 posts store (a host folder bind-mounted here). Images
 // saved with dest=elite land in <root>/_import/<creator>/ where elite-v2's posts
 // importer turns each drop folder into that creator's posts.
@@ -1263,9 +1271,19 @@ function validUrl(u) {
   }
 }
 
-function channelDir(channel) {
+// The channel's own library folder, and the drop folder inside it.
+function channelRoot(channel) {
   const ch = CHANNELS[channel] || 'main';
-  return path.join(ELITE_ROOT, ch, '_import');
+  return path.join(CHANNEL_ROOTS[ch] || ELITE_ROOT, ch);
+}
+
+function channelDir(channel) {
+  return path.join(channelRoot(channel), '_import');
+}
+
+// The app that will show a clip saved to this channel.
+function channelLibrary(channel) {
+  return CHANNEL_LIBRARY[CHANNELS[channel] || 'main'];
 }
 
 // Mirror lib/shorts-storage.ts profileSlug() so we can find a creator's folder.
@@ -1284,8 +1302,7 @@ function profileSlug(name) {
 //   'pending'  -> still waiting in _import
 //   null       -> not present
 function importedStatus(channel, creator, stem) {
-  const ch = CHANNELS[channel] || 'main';
-  const root = path.join(ELITE_ROOT, ch);
+  const root = channelRoot(channel);
   try {
     const profDir = path.join(root, profileSlug(safeCreator(creator)));
     if (fs.existsSync(profDir)) {
@@ -1577,7 +1594,8 @@ app.get('/api/resolve', async (req, res) => {
       tooLongForShorts: !isImage && tooLongForShorts(job),
       filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
       kind: job.kind,
-      // Whether this clip is already in elite-v2, per channel (for a UI warning).
+      // Whether this clip is already in the library serving each channel (for a
+      // UI warning).
       imported: {
         main: isImage ? imageStatus(job.creator, stem) : importedStatus('main', job.creator, stem),
         '18plus': isImage ? null : importedStatus('18plus', job.creator, stem),
@@ -2941,7 +2959,7 @@ app.get('/api/download', async (req, res) => {
         channel,
         message:
           status === 'imported'
-            ? 'Already in elite-v2 — not re-imported.'
+            ? `Already in ${channelLibrary(channel)} — not re-imported.`
             : 'Already queued in the import folder.',
       });
     }
@@ -3403,7 +3421,10 @@ async function produceEliteVideo(job, meta, params, onProgress) {
   if (skipImport && !params.device) {
     return finishJob(job, {
       saved: false, channel: params.channel, filename: outName,
-      message: status === 'imported' ? 'Already in elite-v2 — not re-imported.' : 'Already queued for import.',
+      message:
+        status === 'imported'
+          ? `Already in ${channelLibrary(params.channel)} — not re-imported.`
+          : 'Already queued for import.',
     });
   }
   const destDir = channelDir(params.channel);
@@ -3424,7 +3445,9 @@ async function produceEliteVideo(job, meta, params, onProgress) {
     finishJob(job, {
       saved: !skipImport, channel: params.channel, dir: params.channel, filename: outName, mime: 'video/mp4',
       deliverable: !!params.device, finalPath: params.device ? finalPath : null, deliverTemp: skipImport,
-      message: skipImport ? 'Already in elite-v2 — device copy only.' : 'Saved to ' + params.channel + ' — importing within ~5 min.',
+      message: skipImport
+        ? `Already in ${channelLibrary(params.channel)} — device copy only.`
+        : 'Saved to ' + params.channel + ' — importing within ~5 min.',
     });
   } finally {
     fs.rm(tmpPath, { force: true }, () => {});
@@ -4923,6 +4946,8 @@ for (const dir of [VIDEOS_DIR, AUDIO_DIR, ADULTS_DIR, PHOTOS_DIR]) {
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`grabbit listening on :${PORT}, elite-v2 root ${ELITE_ROOT}`);
+  console.log(
+    `grabbit listening on :${PORT}, shorts roots main=${CHANNEL_ROOTS.main} 18plus=${CHANNEL_ROOTS['18plus']}`
+  );
   countYtdlpExtractors();
 });

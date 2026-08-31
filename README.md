@@ -355,7 +355,8 @@ up only once the destination is Navidrome); that's noted per setting.
 
 - **Save to** — the destination new downloads go to. This choice also decides
   which of the rows below are shown.
-  - *Elite-v2 shorts* — the short-clip library of the co-hosted elite-v2 app.
+  - *Shorts* — the short-clip library of a co-hosted app. Each channel has its
+    own root, so *main* and *18+* can be served by different apps.
   - *Server library* — a plain folder library on the server.
   - *Navidrome (music)* — a tagged music library: audio only, filed by
     artist/album (see the naming scheme above).
@@ -365,8 +366,9 @@ up only once the destination is Navidrome); that's noted per setting.
 - **Music library** — *shown only when Save to = Navidrome.* Which music library
   the audio lands in: *My music* or *Kids* (a separate library/instance).
 
-- **Channel** — *shown only when Save to = Elite-v2 shorts.* Which shorts channel
-  new clips post to: *main* or *18+*.
+- **Channel** — *shown only when Save to = Shorts.* Which shorts channel new
+  clips post to: *main* or *18+*. The two can live in separate libraries — see
+  `ELITE_ROOT` / `TIKSHORTIS_ROOT`.
 
 - **Library folder** — *shown only when Save to = Server library.* The subfolder
   inside the server library that video downloads are filed under.
@@ -428,11 +430,11 @@ once. Each entry below says when it appears.
 
 **Where it goes**
 
-- **Save to** — the destination for this download: *Elite-v2 shorts*, *Server
+- **Save to** — the destination for this download: *Shorts*, *Server
   library*, *Navidrome* or *Audiobooks*. This choice drives which fields below
   appear.
 - **Music library** — *Navidrome only.* *My music* or *Kids*.
-- **Channel** — *Elite-v2 shorts only.* *main* or *18+*.
+- **Channel** — *Shorts only.* *main* or *18+*.
 - **Library folder** — *server-library video only.* Pick an existing subfolder,
   or choose *New folder* to reveal…
 - **New folder name** — *shown when Library folder = New folder.* Names the
@@ -570,7 +572,7 @@ of match conditions and the settings to apply when they're met.
 `/regex/`), media type (video/image), and a duration range in seconds (only
 applies to links whose length is known).
 
-**What you can set (Then):** destination (Elite-v2 shorts / server library /
+**What you can set (Then):** destination (shorts / server library /
 Navidrome music), channel (main / 18+), music library (mine / kids), a library
 subfolder, quality, audio format + bitrate, video container, SponsorBlock
 (remove or mark), save-to-this-device, a profile name to file it under, and an
@@ -670,7 +672,7 @@ A resolve problem shows up right on the card; a download problem shows in the
 | `Video unavailable` (YouTube) | Often just an intermittent YouTube flake; sometimes a genuine removal. | Grabbit **re-probes once** after a short pause before giving up. A real removal still fails after the retry. |
 | `not available in your country` / `blocked in your country` | Geo-restriction. | Can't be bypassed from here — it needs cookies or a network from an allowed region. |
 | `HTTP Error 403` / `429 Too Many Requests` / `timed out` / `Connection reset` / `ETIMEDOUT` … | A temporary network or rate-limit failure — common when a big batch hammers one site at once. | Grabbit **retries automatically**, up to 3 attempts, waiting longer each time (the queue shows `Retrying (1/2)…`). The queue also caps how many downloads run at once to ease the pressure. |
-| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the Elite-v2 *shorts* destination. | Grabbit routes it to the **server library** instead (a notice tells you). In a batch, clips already known to be too long are skipped. |
+| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the *shorts* destination. | Grabbit routes it to the **server library** instead (a notice tells you). In a batch, clips already known to be too long are skipped. |
 | `Cutting needs a yt-dlp-handled site (this one uses a direct downloader)` | You asked to cut or split a site that Grabbit downloads directly, not through yt-dlp. | Cutting/splitting only works on yt-dlp sites — download the file whole instead. |
 | `yt-dlp produced no output (no matching sections/chapters?)` | Your cut ranges matched nothing, or the video has no chapters to split. | Double-check the timestamps, or that the video actually has chapters. |
 | `Bad cut section "…" — use start-end like 1:30-2:45` / `Too many cut sections (max 20)` | The **Cut sections** field is malformed. | Give `start-end` ranges, comma-separated, up to 20. |
@@ -707,7 +709,7 @@ flowchart LR
   S -->|SSE progress| B
   S --> L[/server library/]
   S -.->|"device=1: file pull"| B
-  S -.->|optional| EV2[elite-v2 shorts]
+  S -.->|optional| EV2[shorts library]
 ```
 
 1. `GET /api/resolve?url=...` picks the matching extractor and returns metadata
@@ -821,7 +823,8 @@ environment variables:
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
 | `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |
-| `ELITE_ROOT` | elite-v2 shorts storage root — enables the elite destination. |
+| `ELITE_ROOT` | Shorts storage root — enables the shorts destination. Clips are dropped in `<root>/<channel>/_import/`. |
+| `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. |
 | `ELITE_POSTS_ROOT` | elite-v2 posts storage root. Images saved to the elite destination are dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and import as that creator's posts; without it, point `ELITE_POSTS_IMPORT_DIR` straight at the drop folder. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 
