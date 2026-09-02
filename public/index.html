@@ -1798,8 +1798,11 @@
         profileSelection = new Set([...profileSelection].filter((id) => ids.has(id)));
         const head = document.createElement('div');
         head.style.cssText = 'margin:2px 2px 8px;font-size:13px;color:var(--muted)';
-        const plName = pd.title && pd.title !== pd.creator ? pd.title + ' · ' : '';
-        head.textContent = plName + '@' + (pd.creator || '?') + ' — ' + pd.count + ' items';
+        // A many-author listing (a subreddit) names itself instead of an
+        // uploader, so there is no '@name' to show for it.
+        const plName = pd.title && pd.title !== pd.creator ? pd.title : '';
+        const who = pd.creator ? '@' + pd.creator : '';
+        head.textContent = [plName, who].filter(Boolean).join(' · ') + ' — ' + pd.count + ' items';
         cardsEl.appendChild(head);
 
         // Playlist actions: subscribe (save) + audio-download whatever is new.
@@ -2208,7 +2211,10 @@
         openSheetCommon();
         const n = sheetSelectedIds ? sheetSelectedIds.length : profileItems.length;
         $('shTitle').textContent = sheetSelectedIds ? 'Download selected' : 'Download all';
-        $('shSub').textContent = '@' + (profileData.creator || '?') + ' — ' + n + ' item' + (n === 1 ? '' : 's');
+        const who = profileData.creator ? '@' + profileData.creator : profileData.title || 'profile';
+        $('shSub').textContent = who + ' — ' + n + ' item' + (n === 1 ? '' : 's');
+        // Left blank for a many-author listing: every clip then keeps the
+        // profile name the site credits it to, instead of one shared name.
         $('shCreator').value = profileData.creator || '';
         $('shTitleInput').value = '';
         applySheetRuleUi();
