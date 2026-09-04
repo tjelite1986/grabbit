@@ -1775,19 +1775,44 @@ async function fetchThumb(url) {
   throw err;
 }
 
+// Store a picture grabbit produced itself (a frame from a video). It has no
+// source URL to key on, so the bytes are the key; the id is what a history
+// entry points at.
+function storeLocalThumb(buf, ext) {
+  const id = 'local-' + crypto.createHash('sha1').update(buf).digest('hex');
+  const file = path.join(THUMB_DIR, `${id}.${THUMB_EXTS.includes(ext) ? ext : 'jpg'}`);
+  try {
+    if (!fs.existsSync(file)) fs.writeFileSync(file, buf);
+    return id;
+  } catch (e) {
+    console.warn('thumb cache write failed:', e.message);
+    return null;
+  }
+}
+
 // GET /api/thumb?url=... -> the picture, cached.
 app.get('/api/thumb', async (req, res) => {
-  const url = req.query.url;
-  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
-  const key = thumbKey(url);
-  const hit = cachedThumb(key);
-  // A thumbnail URL names one immutable picture, so a hit needs no revalidation
-  // — but the cache is per-session-holder, so keep it out of shared caches.
+  // A thumbnail names one immutable picture, so a hit needs no revalidation —
+  // but the cache is per-session-holder, so keep it out of shared caches.
   const send = (file, ext) => {
     res.setHeader('Cache-Control', 'private, max-age=604800');
     res.type(imageMime(ext));
     res.sendFile(file);
   };
+  // A picture grabbit produced itself has no source URL to fetch — it is only
+  // ever served from the cache, by its id. The shape is checked before the id
+  // reaches path.join: it names a file inside the cache directory.
+  const id = String(req.query.id || '');
+  if (id) {
+    if (!/^local-[0-9a-f]{40}$/.test(id)) return res.status(400).json({ ok: false, error: 'Invalid id' });
+    const local = cachedThumb(id);
+    if (!local) return res.status(404).json({ ok: false, error: 'No such thumbnail' });
+    return send(local.file, local.ext);
+  }
+  const url = req.query.url;
+  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  const key = thumbKey(url);
+  const hit = cachedThumb(key);
   if (hit) return send(hit.file, hit.ext);
   try {
     const { buf, ext } = await fetchThumb(url);
@@ -3689,6 +3714,12 @@ async function produceServerVideo(job, meta, params, onProgress) {
       setJob(job, { phase: 'processing', percent: 100 });
       await embedMetadata(tmpPath, libPath, meta, false);
     }
+    // Cover art yt-dlp already embedded on the advanced path is left alone; the
+    // sidecar picture and the history thumbnail still apply. Setting it on meta
+    // is what puts a generated frame on the queue row and in the history for a
+    // site that handed over no thumbnail of its own.
+    const posterUrl = await attachPoster(meta, libPath, { embed: !(advanced && params.embedThumb) });
+    if (posterUrl && !meta.thumbnail) meta.thumbnail = posterUrl;
     recordJobHistory(meta, params, `server/${path.basename(dir)}`, outName, false);
     finishJob(job, {
       saved: true, dest: 'server', dir: path.basename(dir), filename: outName, mime,
@@ -4836,6 +4867,9 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     if (job.kind === 'direct') await downloadDirect(job, tmpPath);
     else await downloadYtdlp(job, tmpPath, { quality });
     await embedMetadata(tmpPath, finalPath, job, false);
+    // Only a real library save gets a poster: with `already`, finalPath is a
+    // throwaway temp for the device copy and the library file has one already.
+    const histThumb = already ? job.thumbnail || null : await attachPoster(job, finalPath);
 
     const histEntry = {
       creator: job.creator || null,
@@ -4843,7 +4877,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
       channel: `server/${path.basename(dir)}`,
       filename: outName,
       sourceUrl: job.sourceUrl || url,
-      thumbnail: job.thumbnail || null,
+      thumbnail: histThumb,
       extractor: job.extractor || null,
       imported: false,
     };
@@ -5059,6 +5093,121 @@ async function downloadImage(res, job, url, device, dest) {
 }
 
 // Probe the source's video codec (lowercase), '' on failure.
+// ---------------------------------------------------------------------------
+// Video posters.
+//
+// Three things want a picture for a saved video: a <name>.jpg beside the file
+// so a file browser (or Plex) shows a preview, cover art inside the mp4 for
+// players that read it, and a thumbnail in grabbit's own download history for
+// the sites that hand over none. All three want the same picture, so it is
+// produced once: the site's own thumbnail when there is one, otherwise a frame
+// from the file itself.
+
+// A frame from the video as JPEG bytes, or null. Taken a fifth of the way in
+// rather than at 0:00 — a clip routinely opens on a black fade-in, and a black
+// poster is worse than no poster.
+function frameFromVideo(src, duration) {
+  return new Promise((resolve) => {
+    const at = Number.isFinite(duration) && duration > 2 ? Math.min(duration * 0.2, 10) : 1;
+    const p = spawn(FFMPEG, [
+      '-y', '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-ss', String(at), '-i', src, '-frames:v', '1',
+      '-vf', "scale='min(640,iw)':-2", '-q:v', '4', '-f', 'mjpeg', 'pipe:1',
+    ]);
+    const chunks = [];
+    p.stdout.on('data', (d) => chunks.push(d));
+    // Unread stderr fills its pipe and deadlocks ffmpeg on a chatty input.
+    p.stderr.resume();
+    p.on('error', () => resolve(null));
+    p.on('close', () => {
+      const buf = Buffer.concat(chunks);
+      // A JPEG of a real frame is kilobytes; anything tiny is ffmpeg giving up
+      // (a seek past the end, an unreadable stream).
+      resolve(buf.length > 1000 ? buf : null);
+    });
+  });
+}
+
+// The picture for a saved video: the site's thumbnail (through the same cache
+// the UI loads it from) or a frame from the file. { buf, ext } or null.
+async function posterFor(job, videoPath) {
+  if (job && job.thumbnail && /^https?:\/\//i.test(job.thumbnail)) {
+    try {
+      const key = thumbKey(job.thumbnail);
+      const hit = cachedThumb(key);
+      if (hit) return { buf: fs.readFileSync(hit.file), ext: hit.ext };
+      const got = await fetchThumb(job.thumbnail);
+      // Keep it for the UI too — a card is about to ask for the same picture.
+      try {
+        fs.writeFileSync(path.join(THUMB_DIR, `${key}.${got.ext}`), got.buf);
+      } catch {
+        /* an unwritable cache costs nothing here */
+      }
+      return got;
+    } catch {
+      // The site's picture is gone or refused: fall through to the video.
+    }
+  }
+  const buf = await frameFromVideo(videoPath, job && job.duration);
+  return buf ? { buf, ext: 'jpg' } : null;
+}
+
+// Mux the poster into an .mp4 as cover art: a stream copy plus one attached
+// picture, never a re-encode, so a failure costs nothing and the file is left
+// exactly as it was.
+function embedCoverArt(file, poster) {
+  return new Promise((resolve) => {
+    if (!/\.mp4$/i.test(file)) return resolve(false);
+    const out = `${file}.cover.mp4`;
+    const done = (ok) => {
+      if (!ok) fs.rm(out, { force: true }, () => {});
+      resolve(ok);
+    };
+    const p = spawn(FFMPEG, [
+      '-y', '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-i', file, '-i', poster,
+      '-map', '0', '-map', '1', '-c', 'copy',
+      '-disposition:v:1', 'attached_pic', '-movflags', '+faststart', out,
+    ]);
+    p.stderr.resume();
+    p.on('error', () => done(false));
+    p.on('close', (code) => {
+      if (code !== 0 || !fs.existsSync(out) || fs.statSync(out).size === 0) return done(false);
+      try {
+        fs.renameSync(out, file);
+        resolve(true);
+      } catch {
+        done(false);
+      }
+    });
+  });
+}
+
+// Give a finished library video its poster. Best effort throughout: a video is
+// a successful download with or without a picture, so nothing here throws.
+// Returns the thumbnail URL the history entry should carry — the site's own
+// when it had one, otherwise a local id for the frame that was just taken.
+async function attachPoster(job, libPath, opts = {}) {
+  const fromSite = job && job.thumbnail ? job.thumbnail : null;
+  try {
+    const poster = await posterFor(job, libPath);
+    if (!poster) return fromSite;
+    const side = libPath.replace(/\.[^./]+$/, '') + '.' + poster.ext;
+    try {
+      fs.writeFileSync(side, poster.buf);
+      if (opts.embed !== false) await embedCoverArt(libPath, side);
+    } catch (e) {
+      console.warn('poster sidecar failed:', e.message);
+    }
+    if (fromSite) return fromSite;
+    const id = storeLocalThumb(poster.buf, poster.ext);
+    return id ? `/api/thumb?id=${id}` : null;
+  } catch (e) {
+    console.warn('poster failed:', e.message);
+    return fromSite;
+  }
+}
+
 function videoCodec(src) {
   try {
     const out = execFileSync(
