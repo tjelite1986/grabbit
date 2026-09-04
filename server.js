@@ -1627,6 +1627,196 @@ app.get('/api/sites', (_req, res) => {
 });
 
 // GET /api/folders -> server-library subfolders (for the folder picker).
+// ---------------------------------------------------------------------------
+// Thumbnail proxy.
+//
+// Site thumbnails are served from hotlink-protected CDNs. redgifs' CDN77
+// answers 403 to any request whose Referer is not redgifs' own — which is
+// exactly what a browser sends for an <img> served by grabbit — so every
+// redgifs card rendered as a grey box although the URL itself was fine.
+// Fetching the picture here lets grabbit send the Referer the CDN wants, and
+// the browser only ever loads a same-origin image.
+//
+// Cached on disk under the URL's hash: a profile listing is hundreds of
+// pictures, and re-opening it must not re-fetch every one of them. The endpoint
+// sits behind the same auth middleware as the rest of /api, which an <img> tag
+// satisfies on its own — the session is a cookie, and a same-origin image
+// request carries it (an Authorization header would not have been sent).
+const THUMB_DIR = path.join(DATA_DIR, 'thumbs');
+// Content types worth caching as a thumbnail, and the extension each is stored
+// under. Anything else is refused rather than guessed at.
+const THUMB_TYPES = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/avif': 'avif',
+};
+const THUMB_EXTS = [...new Set(Object.values(THUMB_TYPES))];
+const THUMB_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0 Safari/537.36';
+const THUMB_MAX_BYTES = 10 * 1024 * 1024;
+// Roughly a few hundred MB of pictures at the sizes sites serve. Trimmed back
+// to 80% when exceeded, oldest first.
+const THUMB_MAX_FILES = 5000;
+let thumbStores = 0;
+
+try {
+  fs.mkdirSync(THUMB_DIR, { recursive: true });
+} catch {
+  /* best effort; the endpoint reports the failure per request */
+}
+
+function thumbKey(url) {
+  return crypto.createHash('sha1').update(String(url)).digest('hex');
+}
+
+// The cached file for a URL, or null. The extension is part of the name (it
+// carries the content type), so the few candidates are probed directly rather
+// than listing the directory on every request.
+function cachedThumb(key) {
+  for (const ext of THUMB_EXTS) {
+    const file = path.join(THUMB_DIR, `${key}.${ext}`);
+    if (fs.existsSync(file)) return { file, ext };
+  }
+  return null;
+}
+
+// The Referer a hotlink check expects: the site the picture belongs to, not the
+// CDN subdomain serving it (media.redgifs.com -> https://www.redgifs.com/).
+function thumbReferer(url) {
+  try {
+    const host = new URL(url).hostname.split('.').slice(-2).join('.');
+    return host ? `https://www.${host}/` : null;
+  } catch {
+    return null;
+  }
+}
+
+// Keep the cache from growing without bound. Runs on boot and every 200 stores
+// — a directory listing per picture would cost more than the pictures do.
+function pruneThumbs() {
+  let names;
+  try {
+    names = fs.readdirSync(THUMB_DIR);
+  } catch {
+    return;
+  }
+  if (names.length <= THUMB_MAX_FILES) return;
+  const files = [];
+  for (const name of names) {
+    try {
+      files.push({ name, at: fs.statSync(path.join(THUMB_DIR, name)).mtimeMs });
+    } catch {
+      /* vanished between the listing and the stat */
+    }
+  }
+  files.sort((a, b) => a.at - b.at);
+  for (const f of files.slice(0, files.length - Math.floor(THUMB_MAX_FILES * 0.8))) {
+    try {
+      fs.unlinkSync(path.join(THUMB_DIR, f.name));
+    } catch {
+      /* already gone */
+    }
+  }
+}
+pruneThumbs();
+
+// Fetch one picture, sending the Referer its CDN expects. A CDN that instead
+// refuses every foreign Referer (rather than requiring its own) answers 403, so
+// the second attempt sends none at all — between them the two cover both kinds
+// of hotlink check.
+async function fetchThumb(url) {
+  const referer = thumbReferer(url);
+  for (const headers of referer ? [{ Referer: referer }, {}] : [{}]) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    let res;
+    try {
+      res = await safeFetch(url, {
+        headers: { 'User-Agent': THUMB_UA, Accept: 'image/*,*/*;q=0.8', ...headers },
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (res.status === 403 && referer && Object.keys(headers).length) {
+      if (res.body) res.body.cancel().catch(() => {});
+      continue;
+    }
+    if (!res.ok) {
+      if (res.body) res.body.cancel().catch(() => {});
+      const err = new Error(`upstream HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    const type = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const ext = THUMB_TYPES[type];
+    if (!ext) {
+      if (res.body) res.body.cancel().catch(() => {});
+      // A login wall or an error page arrives as a 200 full of HTML; storing it
+      // would cache the failure under the picture's name.
+      const err = new Error(`not an image (${type || 'no content-type'})`);
+      err.status = 415;
+      throw err;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length || buf.length > THUMB_MAX_BYTES) {
+      const err = new Error('image too large or empty');
+      err.status = 502;
+      throw err;
+    }
+    return { buf, ext };
+  }
+  const err = new Error('upstream HTTP 403');
+  err.status = 403;
+  throw err;
+}
+
+// GET /api/thumb?url=... -> the picture, cached.
+app.get('/api/thumb', async (req, res) => {
+  const url = req.query.url;
+  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  const key = thumbKey(url);
+  const hit = cachedThumb(key);
+  // A thumbnail URL names one immutable picture, so a hit needs no revalidation
+  // — but the cache is per-session-holder, so keep it out of shared caches.
+  const send = (file, ext) => {
+    res.setHeader('Cache-Control', 'private, max-age=604800');
+    res.type(imageMime(ext));
+    res.sendFile(file);
+  };
+  if (hit) return send(hit.file, hit.ext);
+  try {
+    const { buf, ext } = await fetchThumb(url);
+    const file = path.join(THUMB_DIR, `${key}.${ext}`);
+    // Write via a per-call temp name: two cards can ask for the same picture at
+    // once, and a shared temp name would leave one of them reading a file the
+    // other had already renamed away.
+    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
+    try {
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, file);
+      if (++thumbStores % 200 === 0) pruneThumbs();
+    } catch (e) {
+      // An unwritable cache must not cost the user the picture.
+      console.warn('thumb cache write failed:', e.message);
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* never created */
+      }
+      res.setHeader('Cache-Control', 'private, max-age=604800');
+      return res.type(imageMime(ext)).send(buf);
+    }
+    send(file, ext);
+  } catch (e) {
+    res.status(e.status === 404 ? 404 : 502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });
 });

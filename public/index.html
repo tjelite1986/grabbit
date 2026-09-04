@@ -1303,6 +1303,14 @@
       const cssUrl = (u) => 'url("' + String(u == null ? '' : u).replace(/[\\"]/g, '\\$&').replace(/[\r\n]/g, '') + '")';
       // Only http(s) links are safe to render as clickable (blocks javascript:/data:).
       const safeHref = (u) => /^https?:\/\//i.test(String(u || '')) ? String(u) : '';
+      // Every site thumbnail goes through grabbit's own proxy. The CDNs serving
+      // them are hotlink-protected — redgifs' answers 403 to any Referer that
+      // isn't its own, which is what the browser sends here — so loading one
+      // straight from the site leaves a grey card. The proxy sends the Referer
+      // the CDN wants and caches the picture, so a re-opened profile costs
+      // nothing. Non-http values (there are none today) pass through untouched.
+      const thumbSrc = (u) =>
+        /^https?:\/\//i.test(String(u || '')) ? '/api/thumb?url=' + encodeURIComponent(u) : String(u || '');
       // Already in a Navidrome library as the same song (artist + title), even
       // though it came from another upload. A title-only ("weak") match is only
       // shown as a warning — never used to skip a download.
@@ -1719,7 +1727,7 @@
         const card = document.createElement('div');
         card.className = 'mcard' + (thumbnail ? ' has-img' : '');
         let inner = '';
-        if (thumbnail) inner += '<div class="bg" data-media-bg="1" style="' + esc('background-image:' + cssUrl(thumbnail)) + '"></div>';
+        if (thumbnail) inner += '<div class="bg" data-media-bg="1" style="' + esc('background-image:' + cssUrl(thumbSrc(thumbnail))) + '"></div>';
         if (status) inner += '<span class="pill-status">' + esc(status) + '</span>';
         inner += '<div class="top"><div class="mtitle">' + esc(title) + '</div>' + (sub ? '<div class="msub">' + esc(sub) + '</div>' : '');
         if (caption && caption.trim()) inner += '<div class="mdesc">' + esc(caption.trim()) + '</div>';
@@ -1742,11 +1750,11 @@
               const blur = document.createElement('div');
               blur.className = 'bg-blur';
               blur.dataset.mediaBg = '1';
-              blur.style.backgroundImage = cssUrl(thumbnail);
+              blur.style.backgroundImage = cssUrl(thumbSrc(thumbnail));
               card.insertBefore(blur, card.firstChild);
             }
           };
-          probe.src = thumbnail;
+          probe.src = thumbSrc(thumbnail);
         }
         return card;
       }
@@ -3021,7 +3029,7 @@
         }
         queueEmpty.classList.add('hidden');
         queueList.innerHTML = rows.map((r) => {
-          const thumb = r.thumbnail ? '<img class="q-thumb" src="' + esc(r.thumbnail) + '" alt="" loading="lazy" />' : '<div class="q-thumb"></div>';
+          const thumb = r.thumbnail ? '<img class="q-thumb" src="' + esc(thumbSrc(r.thumbnail)) + '" alt="" loading="lazy" />' : '<div class="q-thumb"></div>';
           const cls = (r.status === 'done' || r.status === 'saved') ? 'saved'
             : (r.status === 'skipped' || r.status === 'scheduled' || r.status === 'cancelled') ? 'skipped'
             : (r.status === 'failed' || r.status === 'error') ? 'failed' : 'busy';
@@ -3318,7 +3326,7 @@
           const icon = kind === 'audio' ? ICON.audio : kind === 'image' ? ICON.image : ICON.video;
           const hasImg = !!it.thumbnail;
           return '<div class="hcard' + (hasImg ? ' has-img' : '') + (it.error ? ' failed' : '') + '">' +
-            (hasImg ? '<div class="bg" data-media-bg="1" style="' + esc('background-image:' + cssUrl(it.thumbnail)) + '"></div>' : '') +
+            (hasImg ? '<div class="bg" data-media-bg="1" style="' + esc('background-image:' + cssUrl(thumbSrc(it.thumbnail))) + '"></div>' : '') +
             '<div class="h-main">' +
               '<div class="h-title">' + link + '</div>' +
               '<div class="h-row">' +
