@@ -215,6 +215,10 @@ function jobFromGif(gif) {
     // The site's own claim about an audio track. Advisory only — see the note
     // at the top: it under-reports, so the download never branches on it.
     hasAudio: !!gif.hasAudio,
+    // The lighter copy the card plays as a moving preview (~6 MB against the
+    // hd file's ~35 MB for the same clip). Only for a video: for an image post
+    // `sd` is just a smaller JPEG, which is not something to play.
+    preview: !isImage && urls.sd && urls.sd !== downloadUrl ? urls.sd : undefined,
     sourceUrl,
     filename: `${creator}-${id}.${ext}`,
     downloadUrl,

@@ -191,6 +191,24 @@
         backdrop-filter: blur(6px); transition: background .12s;
       }
       .mcard .act:active { background: var(--primary); color: var(--on-primary); }
+      /* A card can play a lighter copy of the clip in place of its poster. The
+         element sits directly after .bg so the card's own gradient still paints
+         over it and the title stays readable, and it carries data-media-bg so
+         the privacy blur treats it exactly like a still thumbnail. */
+      .mcard video.preview {
+        position: absolute; inset: 0; width: 100%; height: 100%;
+        object-fit: cover; background: #000;
+      }
+      .mcard.portrait video.preview { object-fit: contain; }
+      /* Top-LEFT: the status pill already owns the top-right corner. */
+      .mcard .playbtn {
+        position: absolute; top: 12px; left: 12px; z-index: 3;
+        width: 40px; height: 40px; padding: 0; border-radius: 50%;
+        display: grid; place-items: center;
+        background: rgba(0,0,0,.55); color: #fff; backdrop-filter: blur(6px);
+      }
+      .mcard .playbtn:active { background: var(--primary); color: var(--on-primary); }
+      .mcard .playbtn .ic { width: 20px; height: 20px; }
       .pill-status {
         position: absolute; top: 14px; right: 14px; z-index: 3;
         font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
@@ -1409,6 +1427,8 @@
       let currentTab = 'home';
       function renderTab(tab) {
         currentTab = tab;
+        // A preview left playing in a hidden view keeps streaming through the Pi.
+        stopPreview();
         document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + tab));
         nav.querySelectorAll('.navitem').forEach((n) => n.classList.toggle('active', n.dataset.tab === tab));
         $('fab').classList.toggle('show', tab === 'home' && profileMode && profileItems.length > 0);
@@ -1505,6 +1525,8 @@
       const ICON = {
         audio: '<svg class="ic" viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>',
         video: '<svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2.5" /><path d="M16 10l5-3v10l-5-3" /></svg>',
+        play: '<svg class="ic fill" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" /></svg>',
+        stop: '<svg class="ic fill" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2" /></svg>',
         image: '<svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8.5" cy="8.5" r="1.6" /><path d="M21 15l-5-5L5 21" /></svg>',
         check: '<svg class="ic" viewBox="0 0 24 24"><path d="M4 12l6 6L20 6" /></svg>',
         uncheck: '<svg class="ic" viewBox="0 0 24 24"><path d="M4 12l6 6L20 6" /><path d="M4 4l16 16" /></svg>',
@@ -1566,7 +1588,7 @@
         // The search box lives in the global top bar — results render on Home.
         if (currentTab !== 'home') showTab('home');
         homeError.classList.add('hidden');
-        cardsEl.innerHTML = '';
+        stopPreview(); cardsEl.innerHTML = '';
         homeEmpty.classList.add('hidden');
         singleData = null; profileMode = false; profileItems = []; profileData = null;
         $('fab').classList.remove('show');
@@ -1693,6 +1715,7 @@
                 (d.tooLongForShorts ? ' · server only' : '')
               : 'No metadata — download may still work',
             thumbnail: it.thumbnail,
+            preview: d && d.preview,
             caption: it.description,
             status,
             onActions(actions) {
@@ -1723,12 +1746,68 @@
         for (let i = 0; i < Math.min(MULTI_LOOKUPS, urls.length); i++) worker();
       }
 
-      function mediaCard({ title, sub, thumbnail, kind, status, caption, onActions }) {
+      // Only one preview plays at a time: a grid of cards each streaming a clip
+      // through the Pi would saturate it, and the point is to watch one.
+      let playingPreview = null;
+
+      function stopPreview() {
+        if (!playingPreview) return;
+        const { card, video, btn } = playingPreview;
+        playingPreview = null;
+        try { video.pause(); } catch { /* already gone */ }
+        // Drop the source before removing the element: otherwise the browser
+        // keeps the range request open and the proxy keeps streaming into
+        // nothing until the socket times out.
+        video.removeAttribute('src');
+        try { video.load(); } catch { /* nothing loaded yet */ }
+        video.remove();
+        btn.innerHTML = ICON.play;
+        btn.title = 'Preview';
+        card.classList.remove('previewing');
+      }
+
+      // Play the site's lighter copy of the clip inside the card. It goes
+      // through /api/media because the CDN serving it refuses a foreign
+      // Referer, exactly like the poster does.
+      function wirePreview(card, btn, src) {
+        btn.innerHTML = ICON.play;
+        btn.title = 'Preview';
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (playingPreview && playingPreview.card === card) return stopPreview();
+          stopPreview();
+          const video = document.createElement('video');
+          video.className = 'preview';
+          // Blurred by the privacy switch like any other thumbnail.
+          video.dataset.mediaBg = '1';
+          // Muted is what lets it start at all — an unmuted autoplay is refused
+          // by the browser — and a preview that suddenly makes noise is not
+          // what anyone wants on a phone. A tap on the picture unmutes it.
+          video.muted = true;
+          video.loop = true;
+          video.playsInline = true;
+          video.preload = 'auto';
+          video.src = '/api/media?url=' + encodeURIComponent(src);
+          video.addEventListener('click', (ev) => { ev.stopPropagation(); video.muted = !video.muted; });
+          const bg = card.querySelector('.bg');
+          if (bg) bg.insertAdjacentElement('afterend', video);
+          else card.insertBefore(video, card.firstChild);
+          card.classList.add('previewing');
+          btn.innerHTML = ICON.stop;
+          btn.title = 'Stop preview';
+          playingPreview = { card, video, btn };
+          video.play().catch(() => { /* refused: the poster is still there */ });
+        });
+      }
+
+      function mediaCard({ title, sub, thumbnail, preview, kind, status, caption, onActions }) {
         const card = document.createElement('div');
         card.className = 'mcard' + (thumbnail ? ' has-img' : '');
         let inner = '';
         if (thumbnail) inner += '<div class="bg" data-media-bg="1" style="' + esc('background-image:' + cssUrl(thumbSrc(thumbnail))) + '"></div>';
         if (status) inner += '<span class="pill-status">' + esc(status) + '</span>';
+        // Only a card that has a poster to replace gets the button.
+        if (thumbnail && preview) inner += '<button class="playbtn" type="button"></button>';
         inner += '<div class="top"><div class="mtitle">' + esc(title) + '</div>' + (sub ? '<div class="msub">' + esc(sub) + '</div>' : '');
         if (caption && caption.trim()) inner += '<div class="mdesc">' + esc(caption.trim()) + '</div>';
         inner += '</div>';
@@ -1736,6 +1815,8 @@
         card.innerHTML = inner;
         const mdesc = card.querySelector('.mdesc');
         if (mdesc) mdesc.addEventListener('click', () => mdesc.classList.toggle('expanded'));
+        const playbtn = card.querySelector('.playbtn');
+        if (playbtn) wirePreview(card, playbtn, preview);
         const actions = card.querySelector('.actions');
         // Optional: a placeholder card (one still waiting for its lookup) has
         // nothing to act on yet.
@@ -1766,6 +1847,7 @@
           title: d.title || d.filename,
           sub: (d.duration ? fmtClock(d.duration) + ' · ' : '') + d.extractor,
           thumbnail: d.thumbnail,
+          preview: d.preview,
           caption: d.description,
           status,
           onActions(actions) {
@@ -1902,6 +1984,7 @@
               title: it.title || it.filename,
               sub: (it.duration ? fmtClock(it.duration) + ' · ' : '') + (isImg ? 'image' : 'video') + (it.tooLongForShorts ? ' · server only' : ''),
               thumbnail: it.thumbnail,
+              preview: it.preview,
               caption: it.description,
               status,
               onActions(actions) {
@@ -2010,7 +2093,7 @@
           const d = await fetchJson('/api/playlists/save?url=' + encodeURIComponent(currentUrl) + '&name=' + encodeURIComponent(name), { method: 'POST' });
           savedPlaylists = d.playlists || [];
           renderPlaylistRows();
-          if (profileMode && profileData) { cardsEl.innerHTML = ''; renderProfile(profileData); }
+          if (profileMode && profileData) { stopPreview(); cardsEl.innerHTML = ''; renderProfile(profileData); }
           toast('Playlist saved', 'good');
         } catch (err) { toast(err.message, 'bad'); }
       }
@@ -2019,7 +2102,7 @@
           const d = await fetchJson('/api/playlists/delete?id=' + encodeURIComponent(id), { method: 'POST' });
           savedPlaylists = d.playlists || [];
           renderPlaylistRows();
-          if (profileMode && profileData) { cardsEl.innerHTML = ''; renderProfile(profileData); }
+          if (profileMode && profileData) { stopPreview(); cardsEl.innerHTML = ''; renderProfile(profileData); }
         } catch (err) { toast(err.message, 'bad'); }
       }
 
@@ -2077,7 +2160,7 @@
           if (!d.ok) throw new Error(d.error || 'failed');
           it.downloaded = !it.downloaded;
           toast(it.downloaded ? 'Marked as downloaded' : 'Mark removed', 'good');
-          if (profileMode && profileData) { cardsEl.innerHTML = ''; renderProfile(profileData); }
+          if (profileMode && profileData) { stopPreview(); cardsEl.innerHTML = ''; renderProfile(profileData); }
         } catch {
           toast('Could not update the downloaded mark', 'bad');
         }

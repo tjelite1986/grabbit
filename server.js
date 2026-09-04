@@ -1571,6 +1571,10 @@ app.get('/api/resolve', async (req, res) => {
       thumbnail: job.thumbnail || null,
       duration: durationKnown(job) ? Number(job.duration) : null,
       mediaType: isImage ? 'image' : 'video',
+      // A lighter copy of the video the card can play in place as a moving
+      // preview. Only sites that offer one set it; everywhere else the card
+      // stays a still picture.
+      preview: job.preview || null,
       // The full description often carries the real song title/artist for
       // reposted music — shown collapsed under the result card.
       description: job.description || null,
@@ -1839,6 +1843,52 @@ app.get('/api/thumb', async (req, res) => {
     send(file, ext);
   } catch (e) {
     res.status(e.status === 404 ? 404 : 502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// GET /api/media?url=... -> the video, streamed.
+//
+// The clip a card plays as a preview sits on the same hotlink-protected CDN as
+// its poster, so the browser cannot fetch it directly (see /api/thumb). This
+// forwards the request with the Referer the CDN expects — Range included, which
+// is what lets a <video> start playing before the whole file has arrived — and
+// streams the answer straight back. Nothing is cached on disk: a preview is
+// megabytes, and the browser's own media cache already covers a replay.
+app.get('/api/media', async (req, res) => {
+  const url = req.query.url;
+  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
+  const headers = { 'User-Agent': THUMB_UA };
+  const referer = thumbReferer(url);
+  if (referer) headers.Referer = referer;
+  if (req.headers.range) headers.Range = req.headers.range;
+  let upstream;
+  try {
+    upstream = await safeFetch(url, { headers });
+    if (!upstream.ok || !upstream.body) {
+      if (upstream.body) upstream.body.cancel().catch(() => {});
+      return res.status(upstream.status === 404 ? 404 : 502).end();
+    }
+    const type = String(upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    // Media only. An error page or a login wall arrives as 200 HTML, which must
+    // not reach a <video> — and it keeps this from being a general-purpose
+    // proxy for anything the CDN happens to serve.
+    if (!/^(video|audio)\//.test(type)) {
+      upstream.body.cancel().catch(() => {});
+      return res.status(415).end();
+    }
+    // 206 and its Content-Range have to survive intact, or seeking breaks.
+    res.status(upstream.status);
+    for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+      const v = upstream.headers.get(h);
+      if (v) res.setHeader(h, v);
+    }
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    await pipeline(Readable.fromWeb(upstream.body), res);
+  } catch (e) {
+    // Stopping a preview aborts the response mid-stream, which lands here as a
+    // premature-close error; there is nothing to report about it.
+    if (!res.headersSent) res.status(502).end();
+    else res.destroy();
   }
 });
 
@@ -3267,6 +3317,7 @@ app.get('/api/profile', async (req, res) => {
         mediaType: isImage ? 'image' : 'video',
         filename: isImage ? `${stem}.${safeExt(job.ext, 'jpg')}` : `${stem}.mp4`,
         thumbnail: job.thumbnail || null,
+        preview: job.preview || null,
         duration: durationKnown(job) ? Number(job.duration) : null,
         sourceUrl: job.sourceUrl || job.url || null,
         // Marked in playlist views; "download new" skips these. Check by the
