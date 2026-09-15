@@ -790,7 +790,7 @@
             </select>
           </div>
           <div class="setrow" id="setChannelRow">
-            <div class="label"><div class="t">Channel</div><div class="d">main goes to Tikshortis, 18+ to Elite-v2</div></div>
+            <div class="label"><div class="t">Channel</div><div class="d">main goes to Tikshortis, 18+ to Adshortis</div></div>
             <select id="setChannel">
               <option value="main">main</option>
               <option value="18plus">18+</option>
@@ -2166,9 +2166,10 @@
         }
       }
 
-      // Which app serves each shorts channel: the main library moved out of
-      // elite-v2 into Tikshortis on 2026-08-31, the 18+ one stayed behind.
-      const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Elite-v2' };
+      // Which app serves each shorts channel. Both left elite-v2 for an app of
+      // their own: main to Tikshortis on 2026-08-31, 18+ to Adshortis on
+      // 2026-09-15.
+      const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis' };
       const channelLibrary = (ch) => CHANNEL_LIBRARY[ch] || CHANNEL_LIBRARY.main;
 
       function importStatusLabel(imported, isImg, channel) {
@@ -2509,7 +2510,7 @@
         $('shXargsField').classList.toggle('hidden', isImage);
         // Scheduling works for job-based downloads (not the download-all batch).
         $('shAtField').classList.toggle('hidden', sheetAll);
-        // Web format only applies to an elite-v2 video save.
+        // Web format only applies to a shorts-library video save.
         $('shWebRow').classList.toggle('hidden', !(isVideo && dest === ''));
         // No "to this device" toggle for a batch (download all).
         $('shDeviceRow').classList.toggle('hidden', sheetAll);
@@ -3387,7 +3388,7 @@
       function renderHistory() {
         historyEmpty.querySelector('p').textContent = 'No downloads yet';
         let items = historyItems.slice();
-        // Mode view: Elitev2/Music/Audiobook narrow the list to that target.
+        // Mode view: Shorts/Music/Audiobook narrow the list to that target.
         if (mode && MODE_CHANNEL[mode]) items = items.filter((it) => MODE_CHANNEL[mode](String(it.channel || '')));
         // Failures are their own filter; the type filters only list real saves.
         if (hFilter === 'failed') items = items.filter((it) => it.error);
@@ -3889,7 +3890,7 @@
           '<h4>Then</h4>' +
           '<div class="rgrid">' +
           '<div class="field"><label>Save to</label><select id="ruDest">' +
-            ruleOpt('-', "Don't change", dest) + ruleOpt('', 'Elite-v2 shorts', dest) + ruleOpt('server', 'Server library', dest) + ruleOpt('navidrome', 'Navidrome (music)', dest) + ruleOpt('audiobooks', 'Audiobooks / stories', dest) +
+            ruleOpt('-', "Don't change", dest) + ruleOpt('', 'Shorts libraries', dest) + ruleOpt('server', 'Server library', dest) + ruleOpt('navidrome', 'Navidrome (music)', dest) + ruleOpt('audiobooks', 'Audiobooks / stories', dest) +
           '</select></div>' +
           '<div class="field"><label>Channel</label><select id="ruChannel">' +
             ruleOpt('-', "Don't change", channel) + ruleOpt('main', 'main', channel) + ruleOpt('18plus', '18+', channel) +

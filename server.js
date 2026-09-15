@@ -25,16 +25,17 @@ const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_BIN || 'ffprobe';
 // Roots of the shorts stores (host folders bind-mounted here). A clip lands in
 // <root>/<channel>/_import/ where that library's importer files it minutes
-// later. The main channel moved out of elite-v2 into its own app (tikshortis)
-// on 2026-08-31 and the 18+ library stayed behind, so the two channels no
-// longer share a root. TIKSHORTIS_ROOT unset falls back to the elite-v2 tree,
-// which is where main used to live.
+// later. Both channels used to live in elite-v2 and each moved out into an app
+// of its own: main to tikshortis on 2026-08-31, 18+ to adshortis on
+// 2026-09-15. elite-v2 serves neither any more. The variable names still say
+// ELITE because they are the compose keys; only the bind mount behind
+// ELITE_ROOT was repointed at the adshortis tree.
 const ELITE_ROOT = process.env.ELITE_ROOT || '/elitev2-shorts';
 const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || ELITE_ROOT;
 const CHANNELS = { main: 'main', '18plus': '18plus' };
 const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT };
 // The app serving each channel, for the messages a user reads.
-const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'elite-v2' };
+const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis' };
 // Root of the elite-v2 posts store (a host folder bind-mounted here). Images
 // saved with dest=elite land in <root>/_import/<creator>/ where elite-v2's posts
 // importer turns each drop folder into that creator's posts.
