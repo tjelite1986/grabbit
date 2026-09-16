@@ -36,9 +36,11 @@ const CHANNELS = { main: 'main', '18plus': '18plus' };
 const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT };
 // The app serving each channel, for the messages a user reads.
 const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis' };
-// Root of the elite-v2 posts store (a host folder bind-mounted here). Images
-// saved with dest=elite land in <root>/_import/<creator>/ where elite-v2's posts
-// importer turns each drop folder into that creator's posts.
+// Root of the photo-posts store (a host folder bind-mounted here). Images saved
+// with dest=elite land in <root>/_import/<creator>/, where that app's posts
+// importer turns each drop folder into that creator's posts. The library left
+// elite-v2 for Elitogram on 2026-09-16; the mount was repointed and the
+// destination name kept, so a saved job still means what it did.
 const POSTS_ROOT = process.env.ELITE_POSTS_ROOT || '/elitev2-posts';
 const POSTS_IMPORT_DIR = process.env.ELITE_POSTS_IMPORT_DIR || path.join(POSTS_ROOT, '_import');
 // Audio extraction targets (yt-dlp --audio-format). 'best' keeps the source codec.
@@ -3182,7 +3184,7 @@ app.get('/api/download', async (req, res) => {
   }
 
   // Images don't fit the video pipeline: with dest=elite they are dropped into
-  // elite-v2's posts import, otherwise into the plain photos library.
+  // the posts import, otherwise into the plain photos library.
   if (job.mediaType === 'image') return downloadImage(res, job, url, device, dest);
 
   // Audio-only: for the elite destination it's streamed (audio doesn't fit the
@@ -4983,7 +4985,7 @@ function serverHas(folder, stem) {
 
 // --- Images ---------------------------------------------------------------
 // Images don't belong in a video pipeline, so they get their own two targets:
-// dest=elite drops them into elite-v2's posts import (they become posts), any
+// dest=elite drops them into the posts import (they become posts), any
 // other destination saves them in the plain photos library (extension
 // preserved). Used for mixed albums like erome, where the videos go to shorts
 // and the pictures to posts.
@@ -5052,7 +5054,7 @@ function postsPending(creator, stem) {
 
 // Where an image goes for a given destination, and whether it is already there.
 // 'imported' means the photos library has it (nothing consumes that folder);
-// 'pending' means it is still queued for elite-v2's posts importer.
+// 'pending' means it is still queued for the posts importer.
 function imageStatus(creator, stem) {
   if (postsPending(creator, stem)) return 'pending';
   return photoHas(stem) ? 'imported' : null;
@@ -5068,7 +5070,7 @@ async function saveImageToLibrary(job) {
   return finalPath;
 }
 
-// Download an image into elite-v2's posts import, under the creator's own drop
+// Download an image into the posts import, under the creator's own drop
 // folder, next to the JSON sidecar the posts importer reads: `description` is
 // the caption (its #tags become the post's hashtags) and `post_shortcode`
 // groups everything from one album into a single carousel post instead of one
