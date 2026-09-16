@@ -201,7 +201,7 @@ async function resolve(url) {
     tags = Array.isArray(info.tags) && info.tags.length ? info.tags : hashtagsFrom(info.description, info.title);
     title = cleanTitle(stripSocialTitleNoise(info.title, info.uploader));
     // A placeholder title (or none) means the caption is the real title.
-    if (!title || PLACEHOLDER_TITLE.test(title)) title = titleFrom(description, tags, info.id);
+    if (!title || PLACEHOLDER_TITLE.test(title)) title = titleFrom(description, tags, info.id, info.upload_date);
     thumbnail = info.thumbnail;
     duration = Number.isFinite(info.duration) ? info.duration : null;
     const ext = info.ext || 'mp4';

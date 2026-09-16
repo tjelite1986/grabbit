@@ -30,9 +30,17 @@ function cleanDescription(text) {
     .trim();
 }
 
+// yt-dlp's `upload_date` is YYYYMMDD; render it as YYYY-MM-DD for a filename.
+// Anything else (missing, or a shape we do not recognise) yields '' so callers
+// simply fall back to their id-only naming.
+function uploadDateLabel(date) {
+  const m = /^(\d{4})(\d{2})(\d{2})$/.exec(String(date || '').trim());
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
+}
+
 // Pick the best human title: the real caption, else the hashtags (more readable
-// than a cryptic id), else the id as a last resort.
-function titleFrom(desc, tags, id) {
+// than a cryptic id), else the upload date, else the id as a last resort.
+function titleFrom(desc, tags, id, date) {
   const t = cleanTitle(desc);
   if (t) return t; // real caption (assumed unique per clip)
   // No caption: use the hashtags, but keep the id so clips that share the same
@@ -40,7 +48,12 @@ function titleFrom(desc, tags, id) {
   if (Array.isArray(tags) && tags.length) {
     return tags.map((x) => String(x).replace(/^#/, '')).join(' ') + ' ' + id;
   }
-  return id;
+  // Neither caption nor tags — a bare numeric id reads as a broken download.
+  // Lead with the upload date so the name says something and sorts, but keep
+  // the id: one page can post several captionless clips on the same day, and
+  // the date alone would give them all the same filename.
+  const day = uploadDateLabel(date);
+  return day ? `${day} ${id}` : id;
 }
 
 // Words a music upload hangs off its title that are not part of the song name.
