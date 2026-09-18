@@ -1551,6 +1551,50 @@
       });
       reflectMode();
 
+      // ----------------------------------------------- server capabilities
+      // The shorts and posts libraries are bind mounts of other apps, so a
+      // deploy can legitimately have neither. /api/config says which of them
+      // exist and the controls for the rest are hidden — offering a
+      // destination with nowhere to write to only produces a failed job.
+      // Optimistic until the answer arrives, so the usual install where
+      // everything is mounted never flickers.
+      let config = { shorts: true, posts: true, elite: true, channels: ['main', '18plus'] };
+      function applyConfig() {
+        const pill = document.querySelector('#modeBar .mode[data-mode="elite"]');
+        if (pill) pill.classList.toggle('hidden', !config.elite);
+        const eliteBtn = $('shDest').querySelector('[data-v=""]');
+        if (eliteBtn) eliteBtn.classList.toggle('hidden', !config.elite);
+        $('shChannel').querySelectorAll('button').forEach((b) =>
+          b.classList.toggle('hidden', !config.channels.includes(b.dataset.v))
+        );
+        if (!config.elite && settings.dest === '') { settings.dest = 'server'; saveSettings(); }
+        if (!config.channels.includes(settings.channel)) {
+          settings.channel = config.channels[0] || 'main';
+          saveSettings();
+        }
+        if (!config.elite && mode === 'elite') {
+          mode = '';
+          try { localStorage.setItem(MODE_KEY, mode); } catch { /* session-only then */ }
+          reflectMode();
+          renderHistory();
+          renderQueue();
+        }
+      }
+      async function loadConfig() {
+        try {
+          const d = await (await fetch('/api/config')).json();
+          if (d && d.ok) {
+            config = {
+              shorts: !!d.shorts,
+              posts: !!d.posts,
+              elite: !!d.elite,
+              channels: Array.isArray(d.channels) ? d.channels : [],
+            };
+          }
+        } catch { /* keep the optimistic default */ }
+        applyConfig();
+      }
+
       // ----------------------------------------------------------------- icons
       const ICON = {
         audio: '<svg class="ic" viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="16" cy="16" r="3" /></svg>',
@@ -2471,6 +2515,13 @@
         const sheetTarget = sheetSingle || sheetItem;
         const tooLong = isVideo && !isAudioLib && !sheetAll && !!(sheetTarget && sheetTarget.tooLongForShorts);
         const eliteBtn = $('shDest').querySelector('[data-v=""]');
+        // A saved rule, a template or an old localStorage value can still ask
+        // for a library this deploy does not have. One choke point: it lands on
+        // the server library instead.
+        if (!config.elite && segValue($('shDest')) === '') segSet($('shDest'), 'server');
+        if (!config.channels.includes(segValue($('shChannel')))) {
+          segSet($('shChannel'), config.channels[0] || 'main');
+        }
         if (tooLong) segSet($('shDest'), 'server');
         eliteBtn.style.pointerEvents = tooLong ? 'none' : '';
         eliteBtn.style.opacity = tooLong ? '0.4' : '';
@@ -3946,10 +3997,10 @@
           '<h4>Then</h4>' +
           '<div class="rgrid">' +
           '<div class="field"><label>Save to</label><select id="ruDest">' +
-            ruleOpt('-', "Don't change", dest) + ruleOpt('', 'Shorts libraries', dest) + ruleOpt('server', 'Server library', dest) + ruleOpt('navidrome', 'Navidrome (music)', dest) + ruleOpt('audiobooks', 'Audiobooks / stories', dest) +
+            ruleOpt('-', "Don't change", dest) + (config.elite ? ruleOpt('', 'Shorts libraries', dest) : '') + ruleOpt('server', 'Server library', dest) + ruleOpt('navidrome', 'Navidrome (music)', dest) + ruleOpt('audiobooks', 'Audiobooks / stories', dest) +
           '</select></div>' +
           '<div class="field"><label>Channel</label><select id="ruChannel">' +
-            ruleOpt('-', "Don't change", channel) + ruleOpt('main', 'main', channel) + ruleOpt('18plus', '18+', channel) +
+            ruleOpt('-', "Don't change", channel) + config.channels.map((c) => ruleOpt(c, c === '18plus' ? '18+' : c, channel)).join('') +
           '</select></div>' +
           '<div class="field"><label>Music library</label><select id="ruLib">' +
             ruleOpt('-', "Don't change", 'lib' in a ? a.lib : '-') + ruleOpt('main', 'My music', 'lib' in a ? a.lib : '-') + ruleOpt('kids', 'Kids', 'lib' in a ? a.lib : '-') +
@@ -4234,6 +4285,7 @@
       });
 
       // ----------------------------------------------------------------- init
+      loadConfig();
       loadHistory();
       loadFolders();
       loadPlaylists();

@@ -368,7 +368,8 @@ up only once the destination is Navidrome); that's noted per setting.
 
 - **Channel** — *shown only when Save to = Shorts.* Which shorts channel new
   clips post to: *main* or *18+*. The two can live in separate libraries — see
-  `ELITE_ROOT` / `TIKSHORTIS_ROOT`.
+  `ELITE_ROOT` / `TIKSHORTIS_ROOT`. Only the channels whose root is configured
+  are shown, and with neither set the *Shorts* destination is hidden entirely.
 
 - **Library folder** — *shown only when Save to = Server library.* The subfolder
   inside the server library that video downloads are filed under.
@@ -823,9 +824,9 @@ environment variables:
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
 | `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |
-| `ELITE_ROOT` | Shorts storage root — enables the shorts destination. Clips are dropped in `<root>/<channel>/_import/`. |
-| `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. |
-| `ELITE_POSTS_ROOT` | elite-v2 posts storage root. Images saved to the elite destination are dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and import as that creator's posts; without it, point `ELITE_POSTS_IMPORT_DIR` straight at the drop folder. |
+| `ELITE_ROOT` | Shorts storage root — enables the shorts destination. Clips are dropped in `<root>/<channel>/_import/`. Unset (the default) there is no shorts destination at all: the *Shorts* option and the *Shorts* mode disappear from the UI and new downloads default to the server library. |
+| `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. Set one of the two and only that channel is offered. |
+| `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 
 ### Notifications (optional)
@@ -849,18 +850,30 @@ environment variables:
 | `GRABBIT_AUTH_DISABLED` | Set to `1` to run with no login at all. Only then is an empty `GRABBIT_PASSWORD` accepted. |
 | `GRABBIT_SECRET` | Optional separate secret for signing the auth cookie. |
 | `ALLOW_PRIVATE_ADDRESSES` | Set to `true` to allow downloads from hosts that resolve to private, loopback, link-local or otherwise non-public addresses. Defaults to `false`, which is what stops a submitted URL — or a redirect from a public one — being used to reach services on your own network. Only enable it if grabbing from an internal host is deliberate. |
-| `GRABBIT_INTERNAL_TOKEN` | Token internal (co-hosted) callers must send in `X-Grabbit-Token`. |
+| `GRABBIT_INTERNAL_TOKEN` | Token internal (co-hosted) callers must send in `X-Grabbit-Token`. Without it there is no internal bypass at all: every request is gated. |
 
 ## Auth
 
 Set `GRABBIT_PASSWORD` to gate the web UI behind a single shared password
 (HMAC-signed cookie; `GRABBIT_SECRET` optionally signs it separately). Only
-external traffic — requests carrying an `X-Forwarded-Host` header from the
-reverse proxy — is gated, so a co-hosted app can call the API directly over the
-docker network. Because header absence alone doesn't identify the caller, set
-`GRABBIT_INTERNAL_TOKEN` to require internal callers to also send the value in
-an `X-Grabbit-Token` header; when unset, any header-less request counts as
-internal.
+external traffic is gated, so a co-hosted app can call the API directly over
+the docker network. A caller counts as internal only when it sends
+`GRABBIT_INTERNAL_TOKEN` in an `X-Grabbit-Token` header *and* carries no
+`X-Forwarded-Host` — leave the token unset and there is no bypass at all.
+
+That is deliberate. A missing `X-Forwarded-Host` proves nothing: the header is
+absent only because the reverse proxy is what adds it, so anything reaching a
+published container port directly arrives without it too. A compose file that
+publishes port 3000 — including the one below, before you add the token — would
+otherwise let every request in off the internet with `GRABBIT_PASSWORD` set and
+nothing in the log to say so. The boot line names the mode the gate ended up in.
+
+API requests the browser labels as cross-site are refused with `403` regardless
+of the session, because `/api/download`, `/api/download-all` and
+`/api/jobs/start` are GETs with side effects and the login cookie is
+`SameSite=Lax`. Requests from another origin's page cannot queue a job as you.
+Server-to-server callers send no `Origin` or `Sec-Fetch-Site`, so they are
+unaffected.
 
 Running without a login has to be asked for: an empty `GRABBIT_PASSWORD` makes
 grabbit exit at boot with a message naming the variable, because a missing
@@ -948,6 +961,8 @@ GRABBIT_PASSWORD=change-me-to-something-strong
 # Optional extra secret that signs the login cookie (any random string).
 GRABBIT_SECRET=another-random-string
 # Only needed if another app on the same docker network calls grabbit's API.
+# Leave it empty and there is no internal bypass: everything goes through the
+# password gate, which is what you want for a published port.
 GRABBIT_INTERNAL_TOKEN=
 
 # Web-push, for "notify when a download finishes". Generate a key pair with:
@@ -1070,7 +1085,8 @@ it at the container's port 3000.
 Grabbit's API directly over the docker network (not through the proxy), set
 `GRABBIT_INTERNAL_TOKEN` here and have that app send the same value in an
 `X-Grabbit-Token` header. Internal calls then skip the password gate while
-external ones stay protected. See [Auth](#auth) for the full logic.
+external ones stay protected. Until you set it, nothing skips the gate. See
+[Auth](#auth) for the full logic.
 
 **A second (e.g. kids) music library.** Add a `NAVIDROME_KIDS_DIR=/music-kids`
 env var and a `./music-kids:/music-kids` volume, pointed at a second music

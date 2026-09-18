@@ -75,10 +75,19 @@ function guardChild(child, label) {
 // 2026-09-15. elite-v2 serves neither any more. The variable names still say
 // ELITE because they are the compose keys; only the bind mount behind
 // ELITE_ROOT was repointed at the adshortis tree.
-const ELITE_ROOT = process.env.ELITE_ROOT || '/elitev2-shorts';
+//
+// Both are opt-in. They are bind mounts of another app's library, so a deploy
+// that runs neither app has nowhere for a shorts save to go, and defaulting
+// them to this author's container paths only ever produced a dead folder
+// inside the container that no importer was watching. Unset means the channel
+// does not exist: see shortsUnavailable(), parseDest() and /api/config.
+const ELITE_ROOT = process.env.ELITE_ROOT || null;
 const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || ELITE_ROOT;
 const CHANNELS = { main: 'main', '18plus': '18plus' };
 const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT };
+// The env var that would configure each channel, for the message a user reads.
+const CHANNEL_ROOT_VARS = { main: 'TIKSHORTIS_ROOT', '18plus': 'ELITE_ROOT' };
+const SHORTS_ENABLED = !!(CHANNEL_ROOTS.main || CHANNEL_ROOTS['18plus']);
 // The app serving each channel, for the messages a user reads.
 const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis' };
 // Root of the photo-posts store (a host folder bind-mounted here). Images saved
@@ -86,8 +95,13 @@ const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis' };
 // importer turns each drop folder into that creator's posts. The library left
 // elite-v2 for Elitogram on 2026-09-16; the mount was repointed and the
 // destination name kept, so a saved job still means what it did.
-const POSTS_ROOT = process.env.ELITE_POSTS_ROOT || '/elitev2-posts';
-const POSTS_IMPORT_DIR = process.env.ELITE_POSTS_IMPORT_DIR || path.join(POSTS_ROOT, '_import');
+// Opt-in for the same reason the shorts roots are.
+const POSTS_ROOT = process.env.ELITE_POSTS_ROOT || null;
+const POSTS_IMPORT_DIR =
+  process.env.ELITE_POSTS_IMPORT_DIR || (POSTS_ROOT ? path.join(POSTS_ROOT, '_import') : null);
+const POSTS_ENABLED = !!POSTS_IMPORT_DIR;
+// Whether dest=elite means anything at all on this deploy.
+const ELITE_ENABLED = SHORTS_ENABLED || POSTS_ENABLED;
 // Audio extraction targets (yt-dlp --audio-format). 'best' keeps the source codec.
 const AUDIO_FORMATS = ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'];
 // Output containers for a server-library video save (yt-dlp --merge-output-format).
@@ -117,7 +131,32 @@ const AUDIOBOOKS_DIR = process.env.AUDIOBOOKS_DIR || path.join(DOWNLOAD_DIR, 'au
 // navidrome (music library) or audiobooks (book/story library). The last two
 // are audio-only and force audio extraction.
 function parseDest(v) {
-  return v === 'server' || v === 'navidrome' || v === 'audiobooks' ? v : 'elite';
+  if (v === 'server' || v === 'navidrome' || v === 'audiobooks') return v;
+  // 'elite' is the historical default, but only where it can be written to.
+  return ELITE_ENABLED ? 'elite' : 'server';
+}
+
+// The two destinations the batch and retry paths pick between, under the same
+// rule: with no import root configured the server library is the only answer.
+function parseImportDest(v) {
+  return v === 'server' || !ELITE_ENABLED ? 'server' : 'elite';
+}
+
+// Why a shorts save into this channel cannot happen, or null when it can.
+function shortsUnavailable(channel) {
+  const ch = CHANNELS[channel] || 'main';
+  if (CHANNEL_ROOTS[ch]) return null;
+  return (
+    `No shorts library is configured for the ${ch} channel — set ` +
+    `${CHANNEL_ROOT_VARS[ch]} to a bind-mounted host path, or save to the server library instead.`
+  );
+}
+
+// Same, for the photo-posts import.
+function postsUnavailable() {
+  return POSTS_ENABLED
+    ? null
+    : 'No posts library is configured — set ELITE_POSTS_ROOT to a bind-mounted host path, or save to the server library instead.';
 }
 
 // The audio-library destinations: extracted audio, tagged, filed into a tree.
@@ -1157,10 +1196,47 @@ function parseCookies(header) {
   return out;
 }
 
+// A missing X-Forwarded-Host used to be enough to count as internal. But that
+// header is absent only because Traefik is the thing that adds it, so a request
+// that reaches a published container port directly arrives without it too — and
+// publishing the port is exactly what the deploy guide's own compose file does.
+// Every such deploy ran wide open with GRABBIT_PASSWORD set and no sign of it.
+// So the bypass now has to be asked for: without GRABBIT_INTERNAL_TOKEN there is
+// no way to tell a neighbouring container from the internet, and therefore no
+// internal traffic either.
 const isInternal = (req) =>
+  !!INTERNAL_TOKEN &&
   !req.headers['x-forwarded-host'] &&
-  (!INTERNAL_TOKEN || req.headers['x-grabbit-token'] === INTERNAL_TOKEN);
+  req.headers['x-grabbit-token'] === INTERNAL_TOKEN;
 const isAuthed = (req) => parseCookies(req.headers.cookie)[AUTH_COOKIE] === AUTH_TOKEN;
+
+// Three endpoints below are GETs with side effects (/api/download,
+// /api/download-all, /api/jobs/start) and the session cookie is SameSite=Lax,
+// which still rides along on a cross-site top-level navigation. A link, a
+// redirect or a window.open from any page on the internet could therefore queue
+// a job as the signed-in user. Turning those three into POSTs would break the
+// apps that call them synchronously, so the gate refuses what the browser
+// itself labels as cross-site instead.
+//
+// Server-to-server callers send neither header, so the apps on the docker
+// network are unaffected. Sec-Fetch-Site covers every current browser; the
+// Origin comparison catches a request that carries one without the other.
+function isCrossSite(req) {
+  if (req.headers['sec-fetch-site'] === 'cross-site') return true;
+  const origin = req.headers.origin;
+  if (!origin || origin === 'null') return false;
+  const expected = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  let actual;
+  try {
+    actual = new URL(origin).host.toLowerCase();
+  } catch {
+    return true; // an Origin no first-party page would send
+  }
+  return !expected || actual !== expected;
+}
 
 function loginPage(error) {
   return `<!doctype html><html><head><meta charset="utf-8">
@@ -1234,6 +1310,11 @@ const PUBLIC_ASSETS = new Set([
 // 401 JSON; page/asset requests are redirected to the login form.
 app.use((req, res, next) => {
   if (PUBLIC_ASSETS.has(req.path)) return next();
+  // Refused before the session is consulted: a cross-site caller must not be
+  // able to act as the signed-in user just because the cookie came along.
+  if (req.path.startsWith('/api/') && isCrossSite(req)) {
+    return res.status(403).json({ ok: false, error: 'Cross-site request blocked' });
+  }
   if (!GRABBIT_PASSWORD || isInternal(req) || isAuthed(req)) return next();
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -1487,7 +1568,11 @@ function validUrl(u) {
 // The channel's own library folder, and the drop folder inside it.
 function channelRoot(channel) {
   const ch = CHANNELS[channel] || 'main';
-  return path.join(CHANNEL_ROOTS[ch] || ELITE_ROOT, ch);
+  // Callers guard with shortsUnavailable() first; this is the backstop that
+  // names the missing variable instead of failing inside path.join(null).
+  const unavailable = shortsUnavailable(ch);
+  if (unavailable) throw new Error(unavailable);
+  return path.join(CHANNEL_ROOTS[ch], ch);
 }
 
 function channelDir(channel) {
@@ -2104,6 +2189,18 @@ app.get('/api/media', async (req, res) => {
     else res.destroy();
   }
 });
+
+// GET /api/config -> which destinations this deploy can actually write to, so
+// the UI does not offer a library that is not mounted. Read once at boot.
+app.get('/api/config', (_req, res) =>
+  res.json({
+    ok: true,
+    shorts: SHORTS_ENABLED,
+    posts: POSTS_ENABLED,
+    elite: ELITE_ENABLED,
+    channels: Object.keys(CHANNELS).filter((ch) => !!CHANNEL_ROOTS[ch]),
+  })
+);
 
 app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });
@@ -3237,8 +3334,37 @@ app.post('/api/music/edit', express.json(), async (req, res) => {
     return res.status(409).json({ ok: false, error: 'Another track is already filed under that name.' });
   }
 
+  // A track that stays put is retagged in place. A track that moves is built as
+  // a fresh copy under its new name and the old one is unlinked last.
+  //
+  // The two music libraries are separate mounts, so renaming across them fails
+  // with EXDEV — every single main<->kids move did. And because the file was
+  // retagged first, the failure left the new tags on a file still sitting in the
+  // old library, with a log row that described the old ones. Copying, then
+  // tagging the copy, then renaming it into place means a failure at any step
+  // leaves the original exactly as it was and only a .part file to remove.
+  const moving = newPath !== oldPath;
+  const workPath = moving ? path.join(target.dir, `.${target.filename}.part`) : oldPath;
+  const dropWork = () => {
+    if (!moving) return;
+    try { fs.rmSync(workPath, { force: true }); } catch { /* nothing else to do */ }
+    // The artist/album folders were created for a move that is not happening;
+    // left behind they show up in the library as a phantom empty release.
+    pruneEmptyDirs(target.dir, toRoot);
+  };
+
+  if (moving) {
+    try {
+      fs.mkdirSync(target.dir, { recursive: true });
+      fs.copyFileSync(oldPath, workPath);
+    } catch (e) {
+      dropWork();
+      return res.status(500).json({ ok: false, error: 'Could not move the file: ' + String(e.message || e) });
+    }
+  }
+
   try {
-    await tagAudio(oldPath, {
+    await tagAudio(workPath, {
       title,
       artist: artists,
       albumartist: artists[0],
@@ -3253,15 +3379,24 @@ app.post('/api/music/edit', express.json(), async (req, res) => {
       purl: '',
     });
   } catch (e) {
+    dropWork();
     return res.status(422).json({ ok: false, error: 'Tagging failed: ' + String(e.message || e) });
   }
 
-  if (newPath !== oldPath) {
+  if (moving) {
     try {
-      fs.mkdirSync(target.dir, { recursive: true });
-      fs.renameSync(oldPath, newPath);
+      // Same directory, so this one is a rename in every case.
+      fs.renameSync(workPath, newPath);
     } catch (e) {
+      dropWork();
       return res.status(500).json({ ok: false, error: 'Could not move the file: ' + String(e.message || e) });
+    }
+    try {
+      fs.unlinkSync(oldPath);
+    } catch (e) {
+      // The track is complete at its new path; the stale copy is the lesser
+      // problem, and a scan will report it rather than it going unnoticed.
+      console.warn('music edit: filed', newPath, 'but could not remove', oldPath + ':', e.message);
     }
     pruneEmptyDirs(path.dirname(oldPath), fromRoot);
     // The downloaded registry shows the file name it saved; keep it truthful
@@ -3304,7 +3439,7 @@ app.post('/api/music/edit', express.json(), async (req, res) => {
   writeMusic(tracks);
   fs.rm(staleCover, { force: true }, () => {});
   console.log(`music edit: ${row.file}`);
-  res.json({ ok: true, track: row, moved: newPath !== oldPath });
+  res.json({ ok: true, track: row, moved: moving });
 });
 
 // Drop the directories a moved track left behind, up to (but never including)
@@ -3393,7 +3528,11 @@ app.get('/api/download', async (req, res) => {
 
   // Images don't fit the video pipeline: with dest=elite they are dropped into
   // the posts import, otherwise into the plain photos library.
-  if (job.mediaType === 'image') return downloadImage(res, job, url, device, dest);
+  if (job.mediaType === 'image') {
+    const unavailable = dest === 'elite' ? postsUnavailable() : null;
+    if (unavailable) return res.status(400).json({ ok: false, error: unavailable });
+    return downloadImage(res, job, url, device, dest);
+  }
 
   // Audio-only: for the elite destination it's streamed (audio doesn't fit the
   // shorts pipeline); for the server library it's saved into the mp3 folder,
@@ -3402,6 +3541,10 @@ app.get('/api/download', async (req, res) => {
 
   // Server library: save the video into the chosen folder (videos/adults/photos).
   if (dest === 'server') return downloadServerVideo(res, job, url, { folder, quality, device });
+
+  // Everything below writes into the shorts library, so it needs one.
+  const noShorts = shortsUnavailable(channel);
+  if (noShorts) return res.status(400).json({ ok: false, error: noShorts });
 
   // Long videos don't belong in the shorts library — reject so the caller routes
   // them to the server library instead.
@@ -3495,7 +3638,7 @@ app.get('/api/download', async (req, res) => {
     // Save-only failure whose file isn't published yet -> park it for retry.
     if (!device && job.mediaType !== 'image' && isRetryableError(e, error)) {
       enqueueRetry({
-        url: job.sourceUrl || url, dest: dest === 'server' ? 'server' : 'elite',
+        url: job.sourceUrl || url, dest: parseImportDest(dest),
         channel, folder, web, quality, creator: req.query.creator ? String(req.query.creator) : job.creator,
         title: job.title, thumbnail: job.thumbnail, reason: error,
       });
@@ -3575,12 +3718,14 @@ app.get('/api/profile', async (req, res) => {
 // the channel's _import folder (skipping clips already in elite-v2).
 app.get('/api/download-all', async (req, res) => {
   const url = req.query.url;
-  const dest = req.query.dest === 'server' ? 'server' : 'elite';
+  const dest = parseImportDest(req.query.dest);
   const channel = CHANNELS[req.query.channel] || 'main';
   const folder = req.query.folder; // server-library target folder (videos/adults/photos)
   const web = req.query.web === '1'; // transcode each clip to a web-optimized .web.mp4
   const quality = parseQuality(req.query.quality); // resolution cap, or null
   if (!validUrl(url)) return res.status(400).end();
+  const noShorts = dest === 'elite' ? shortsUnavailable(channel) : null;
+  if (noShorts) return res.status(400).json({ ok: false, error: noShorts });
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -3885,6 +4030,14 @@ async function runJob(job, params) {
     // survives being shared as a different URL.
     site: meta.site || null, mediaId: meta.mediaId || null,
   });
+
+  // Refuse a save into a library this deploy has not been given. Audio-only is
+  // exempt: with dest=elite it is streamed, never filed.
+  if (params.dest === 'elite' && !params.audio) {
+    const unavailable =
+      mediaType === 'image' ? postsUnavailable() : shortsUnavailable(params.channel);
+    if (unavailable) return failJob(job, unavailable);
+  }
 
   if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
     return failJob(job, shortsTooLongError(meta));
@@ -4589,7 +4742,7 @@ function enqueueRetry(entry) {
   const rec = {
     id: `retry-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
     url: entry.url,
-    dest: entry.dest === 'server' ? 'server' : 'elite',
+    dest: parseImportDest(entry.dest),
     channel: entry.channel || 'main',
     folder: entry.folder || null,
     web: !!entry.web,
@@ -4673,7 +4826,7 @@ app.post('/api/retry/add', (req, res) => {
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
   const rec = enqueueRetry({
     url,
-    dest: req.query.dest === 'server' ? 'server' : 'elite',
+    dest: parseImportDest(req.query.dest),
     channel: CHANNELS[req.query.channel] || 'main',
     folder: req.query.folder || null,
     web: req.query.web === '1',
@@ -5016,9 +5169,12 @@ app.get('/api/health', async (_req, res) => {
     memoryMb: Math.round(process.memoryUsage().rss / 1048576),
     tools: await toolVersions(),
     dests: await Promise.all([
-      dirHealth('shorts main (tikshortis)', channelDir('main'), true),
-      dirHealth('shorts 18+ (adshortis)', channelDir('18plus'), true),
-      dirHealth('posts (elitogram)', POSTS_IMPORT_DIR, true),
+      // Skipped entirely when unconfigured — an absent destination is not an
+      // unhealthy one, and a red row for a library this deploy does not have
+      // would be noise in the one panel that must only show real problems.
+      ...(CHANNEL_ROOTS.main ? [dirHealth('shorts main (tikshortis)', channelDir('main'), true)] : []),
+      ...(CHANNEL_ROOTS['18plus'] ? [dirHealth('shorts 18+ (adshortis)', channelDir('18plus'), true)] : []),
+      ...(POSTS_ENABLED ? [dirHealth('posts (elitogram)', POSTS_IMPORT_DIR, true)] : []),
       dirHealth('server videos', VIDEOS_DIR, true),
       dirHealth('server mp3', AUDIO_DIR, true),
       dirHealth('server adults', ADULTS_DIR, true),
@@ -5614,6 +5770,8 @@ function postsCreator(name) {
 }
 
 function postsImportDir(creator) {
+  const unavailable = postsUnavailable();
+  if (unavailable) throw new Error(unavailable);
   return path.join(POSTS_IMPORT_DIR, postsCreator(creator));
 }
 
@@ -5934,13 +6092,14 @@ for (const dir of [VIDEOS_DIR, AUDIO_DIR, ADULTS_DIR, PHOTOS_DIR]) {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(
-    `grabbit listening on :${PORT}, shorts roots main=${CHANNEL_ROOTS.main} 18plus=${CHANNEL_ROOTS['18plus']}`
+    `grabbit listening on :${PORT}, shorts roots main=${CHANNEL_ROOTS.main || '(unset)'} ` +
+      `18plus=${CHANNEL_ROOTS['18plus'] || '(unset)'} posts=${POSTS_IMPORT_DIR || '(unset)'}`
   );
   // Which mode the gate ended up in, so a wide-open service is visible in the
   // log rather than only in a request that should have been refused.
   console.log(
     GRABBIT_PASSWORD
-      ? `auth: password gate ON, internal bypass ${INTERNAL_TOKEN ? 'requires X-Grabbit-Token' : 'is header-based only (set GRABBIT_INTERNAL_TOKEN)'}`
+      ? `auth: password gate ON, internal bypass ${INTERNAL_TOKEN ? 'requires X-Grabbit-Token' : 'OFF — set GRABBIT_INTERNAL_TOKEN to let co-hosted callers through'}`
       : 'auth: OFF (GRABBIT_AUTH_DISABLED=1) — every request is allowed'
   );
   countYtdlpExtractors();
