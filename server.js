@@ -1115,7 +1115,23 @@ app.use(express.json());
 // network every neighbouring container would get the internal bypass. Set
 // GRABBIT_INTERNAL_TOKEN to require internal callers to also present it in an
 // X-Grabbit-Token header; unset keeps the plain header-based split.
+//
+// "No password" and "password lost on the way in" look identical to the gate,
+// and this service is published. So the open mode has to be asked for: an
+// empty GRABBIT_PASSWORD without GRABBIT_AUTH_DISABLED=1 is a misconfigured
+// deploy, not a decision, and refusing to start is the only answer that cannot
+// be missed. A .env that failed to load, a typo in the key, a compose file
+// built from the wrong directory — all of them used to come up wide open.
 const GRABBIT_PASSWORD = process.env.GRABBIT_PASSWORD || '';
+const AUTH_DISABLED = process.env.GRABBIT_AUTH_DISABLED === '1';
+if (!GRABBIT_PASSWORD && !AUTH_DISABLED) {
+  console.error(
+    'grabbit: GRABBIT_PASSWORD is empty — refusing to start an ungated service.\n' +
+      '  Set GRABBIT_PASSWORD (compose/grabbit/.env), or set GRABBIT_AUTH_DISABLED=1\n' +
+      '  to run without a login on purpose.'
+  );
+  process.exit(1);
+}
 const INTERNAL_TOKEN = process.env.GRABBIT_INTERNAL_TOKEN || '';
 const AUTH_SECRET = process.env.GRABBIT_SECRET || GRABBIT_PASSWORD || 'grabbit-dev';
 const AUTH_COOKIE = 'grabbit_auth';
@@ -3406,8 +3422,12 @@ app.get('/api/download', async (req, res) => {
   const finalPath = skipImport
     ? path.join(os.tmpdir(), `grabbit-${process.pid}-${Date.now()}.out.mp4`)
     : path.join(destDir, outName);
-  const cleanup = [tmpPath];
-  if (skipImport) cleanup.push(finalPath);
+  // Built under .<name>.part and renamed into place once the sidecar is
+  // written, so the importer polling _import never reads a half-written clip.
+  const buildPath = skipImport ? finalPath : dropPartPath(destDir, outName);
+  // Either way this is the file that must not survive a failure; after a
+  // successful import the rename has already moved it.
+  const cleanup = [tmpPath, buildPath];
 
   try {
     // Nothing to do: already imported and the user doesn't want a local copy.
@@ -3434,11 +3454,13 @@ app.get('/api/download', async (req, res) => {
     }
 
     // 2. Remux/transcode with embedded metadata (plain copy if ffmpeg fails).
-    await embedMetadata(tmpPath, finalPath, job, web);
+    await embedMetadata(tmpPath, buildPath, job, web, 'mp4');
 
-    // 3. Write the .md caption sidecar elite-v2 reads on import.
+    // 3. Write the .md caption sidecar elite-v2 reads on import, then publish
+    //    the clip itself with the rename.
     if (!skipImport) {
       fs.writeFileSync(path.join(destDir, `${stem}.md`), buildCaption(job));
+      fs.renameSync(buildPath, finalPath);
       // Register the save so playlist views and "download new" recognise the
       // clip as fetched — the jobs/batch paths do this via finishJob.
       markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
@@ -3903,6 +3925,14 @@ async function runJob(job, params) {
   }
 }
 
+// A clip appearing under its final name in a drop folder is the signal the
+// importer on the other side polls for, so it must not appear there before it
+// is complete. Build it under this name instead and rename as the last step:
+// `.part` is in no importer's video-extension set (import-shorts.mjs skips it
+// on the extension test) and the leading dot keeps it out of listings, while a
+// rename within one directory is atomic on NFS too.
+const dropPartPath = (dir, name) => path.join(dir, `.${name}.part`);
+
 async function produceEliteVideo(job, meta, params, onProgress) {
   const stem = `${safeCreator(meta.creator)}_-_${safeTitle(meta.title)}`;
   const outName = `${stem}${params.web ? '.web.mp4' : '.mp4'}`;
@@ -3931,13 +3961,19 @@ async function produceEliteVideo(job, meta, params, onProgress) {
   const finalPath = skipImport
     ? path.join(os.tmpdir(), `grabbit-${process.pid}-${job.id}.out.mp4`)
     : path.join(destDir, outName);
+  // A device-only remux lands in tmp, where nothing is watching it; a real
+  // import is built beside its destination and renamed into place last.
+  const buildPath = skipImport ? finalPath : dropPartPath(destDir, outName);
   try {
     if (!skipImport) fs.mkdirSync(destDir, { recursive: true });
     if (meta.kind === 'direct') await downloadDirect(meta, tmpPath, { onProgress });
     else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress, extraArgs: params.extraArgs });
     setJob(job, { phase: 'processing', percent: 100 });
-    await embedMetadata(tmpPath, finalPath, meta, params.web);
-    if (!skipImport) fs.writeFileSync(path.join(destDir, `${stem}.md`), buildCaption(meta));
+    await embedMetadata(tmpPath, buildPath, meta, params.web, 'mp4');
+    if (!skipImport) {
+      fs.writeFileSync(path.join(destDir, `${stem}.md`), buildCaption(meta));
+      fs.renameSync(buildPath, finalPath);
+    }
     recordJobHistory(meta, params, params.channel, outName, !skipImport);
     finishJob(job, {
       saved: !skipImport, channel: params.channel, dir: params.channel, filename: outName, mime: 'video/mp4',
@@ -3948,6 +3984,9 @@ async function produceEliteVideo(job, meta, params, onProgress) {
     });
   } finally {
     fs.rm(tmpPath, { force: true }, () => {});
+    // A no-op once the rename above moved it; what this clears is the leftover
+    // of a download or remux that failed half way.
+    if (buildPath !== finalPath) fs.rm(buildPath, { force: true }, () => {});
   }
 }
 
@@ -5000,17 +5039,21 @@ async function saveJobToImport(job, channel, web, quality) {
   }
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const destDir = channelDir(channel);
-  const finalPath = path.join(destDir, `${stem}${web ? '.web.mp4' : '.mp4'}`);
+  const outName = `${stem}${web ? '.web.mp4' : '.mp4'}`;
+  const finalPath = path.join(destDir, outName);
+  const buildPath = dropPartPath(destDir, outName);
   const tmpPath = path.join(os.tmpdir(), `grabbit-${process.pid}-${Date.now()}-${stem.slice(0, 8)}.src`);
   try {
     fs.mkdirSync(destDir, { recursive: true });
     if (job.kind === 'direct') await downloadDirect(job, tmpPath);
     else await downloadYtdlp(job, tmpPath, { quality });
-    await embedMetadata(tmpPath, finalPath, job, web);
+    await embedMetadata(tmpPath, buildPath, job, web, 'mp4');
     fs.writeFileSync(path.join(destDir, `${stem}.md`), buildCaption(job));
+    fs.renameSync(buildPath, finalPath);
     return finalPath;
   } finally {
     fs.rm(tmpPath, { force: true }, () => {});
+    fs.rm(buildPath, { force: true }, () => {});
   }
 }
 
@@ -5748,7 +5791,12 @@ function videoCodec(src) {
 // stream-copy, anything else is fully re-encoded to H.264/AAC capped at 1080p —
 // so the clip lands "ready" and the transcoder skips it. On any ffmpeg failure,
 // fall back to a plain file copy.
-function embedMetadata(src, dest, job, web) {
+// `dest` may be a .part file being built in place, and ffmpeg picks its muxer
+// from the output extension — an unknown one makes it refuse to start, and the
+// fallback copy below would then quietly ship a clip with no metadata, no
+// faststart and, for a web file, no transcode. So the container is stated
+// outright whenever the name does not carry it.
+function embedMetadata(src, dest, job, web, format) {
   return new Promise((resolve) => {
     const caption = buildCaption(job);
     const tags = (job.tags || []).map((t) => (t.startsWith('#') ? t : '#' + t)).join(' ');
@@ -5773,7 +5821,7 @@ function embedMetadata(src, dest, job, web) {
       : ['-map', '0', '-c', 'copy', '-movflags', '+faststart'];
     const args = [
       '-y', '-hide_banner', '-loglevel', 'error', '-nostdin', '-progress', 'pipe:1', '-i', src,
-      ...codecArgs, ...meta, dest,
+      ...codecArgs, ...meta, ...(format ? ['-f', format] : []), dest,
     ];
     const p = spawn(FFMPEG, args);
     const timedOut = guardChild(p, 'ffmpeg');
@@ -5809,6 +5857,13 @@ for (const dir of [VIDEOS_DIR, AUDIO_DIR, ADULTS_DIR, PHOTOS_DIR]) {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(
     `grabbit listening on :${PORT}, shorts roots main=${CHANNEL_ROOTS.main} 18plus=${CHANNEL_ROOTS['18plus']}`
+  );
+  // Which mode the gate ended up in, so a wide-open service is visible in the
+  // log rather than only in a request that should have been refused.
+  console.log(
+    GRABBIT_PASSWORD
+      ? `auth: password gate ON, internal bypass ${INTERNAL_TOKEN ? 'requires X-Grabbit-Token' : 'is header-based only (set GRABBIT_INTERNAL_TOKEN)'}`
+      : 'auth: OFF (GRABBIT_AUTH_DISABLED=1) — every request is allowed'
   );
   countYtdlpExtractors();
 });

@@ -845,7 +845,8 @@ environment variables:
 
 | Variable | Description |
 | -------- | ----------- |
-| `GRABBIT_PASSWORD` | Shared password gating the web UI (auth off when unset). |
+| `GRABBIT_PASSWORD` | Shared password gating the web UI. Required: grabbit refuses to start without it unless `GRABBIT_AUTH_DISABLED=1` is also set. |
+| `GRABBIT_AUTH_DISABLED` | Set to `1` to run with no login at all. Only then is an empty `GRABBIT_PASSWORD` accepted. |
 | `GRABBIT_SECRET` | Optional separate secret for signing the auth cookie. |
 | `ALLOW_PRIVATE_ADDRESSES` | Set to `true` to allow downloads from hosts that resolve to private, loopback, link-local or otherwise non-public addresses. Defaults to `false`, which is what stops a submitted URL — or a redirect from a public one — being used to reach services on your own network. Only enable it if grabbing from an internal host is deliberate. |
 | `GRABBIT_INTERNAL_TOKEN` | Token internal (co-hosted) callers must send in `X-Grabbit-Token`. |
@@ -859,7 +860,14 @@ reverse proxy — is gated, so a co-hosted app can call the API directly over th
 docker network. Because header absence alone doesn't identify the caller, set
 `GRABBIT_INTERNAL_TOKEN` to require internal callers to also send the value in
 an `X-Grabbit-Token` header; when unset, any header-less request counts as
-internal. With no `GRABBIT_PASSWORD` at all, auth is off entirely.
+internal.
+
+Running without a login has to be asked for: an empty `GRABBIT_PASSWORD` makes
+grabbit exit at boot with a message naming the variable, because a missing
+password and a password that failed to reach the process look the same to the
+gate and the second one used to come up wide open. Set `GRABBIT_AUTH_DISABLED=1`
+alongside it to run ungated on purpose. Either way the boot log states which
+mode the gate is in.
 
 ## Deploy with Docker
 
@@ -934,7 +942,8 @@ only what you use. Leave it out entirely to run with **no password and no
 notifications**.
 
 ```dotenv
-# Password gate for the web UI. Leave blank/absent to run with NO auth at all.
+# Password gate for the web UI. Required: grabbit refuses to start with this
+# empty unless GRABBIT_AUTH_DISABLED=1 is set alongside it.
 GRABBIT_PASSWORD=change-me-to-something-strong
 # Optional extra secret that signs the login cookie (any random string).
 GRABBIT_SECRET=another-random-string

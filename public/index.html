@@ -1462,6 +1462,10 @@
         if (tab === 'downloads') loadHistory();
         if (tab === 'more') { loadMusicStats(); loadHealth(); }
         if (tab === 'playlists') loadPlaylists();
+        // The job stream keeps jobMap current whatever tab is open, but only
+        // paints while Queue is the current one — so opening Queue shows
+        // whatever was last painted until the next event arrives. Repaint now.
+        if (tab === 'queue') renderQueue();
       }
 
       // Device Back support: a non-home tab holds exactly ONE extra history
