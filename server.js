@@ -327,6 +327,159 @@ for (const level of ['log', 'warn', 'error']) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// State files. Everything Grabbit remembers between restarts is a JSON file in
+// DATA_DIR, rewritten whole every time it changes. Two rules keep that safe:
+//
+//  1. Write through a sibling temp file and rename. A plain writeFileSync
+//     truncates the real file before it writes, so a crash, a `docker kill` or
+//     a full disk in that window leaves half a file on disk. rename(2) is
+//     atomic within a directory: a reader sees either the old file or the new
+//     one, never a fragment.
+//  2. Never quietly start over. A file that exists but does not parse is
+//     damage, not a fresh install. It is set aside as `<name>.corrupt-<stamp>`
+//     and restored from the newest daily snapshot when there is one. The dedup
+//     registry is the one that really matters — rebuilt empty, every clip ever
+//     downloaded looks new again and a watched playlist re-fetches all of it.
+const STATE_BACKUP_DIR = path.join(DATA_DIR, 'backups');
+// Daily snapshots of the state files, kept this many days. 0 turns them off.
+const STATE_BACKUP_DAYS = (() => {
+  const n = parseInt(process.env.STATE_BACKUP_DAYS, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 7;
+})();
+// Snapshotted and reported by /api/health. A file not listed here still gets
+// atomic writes; it just isn't worth a snapshot.
+const STATE_FILES = [
+  'downloaded.json',
+  'music.json',
+  'history.json',
+  'playlists.json',
+  'rules.json',
+  'templates.json',
+  'scheduled.json',
+  'retry-queue.json',
+  'genres.json',
+  'push-subscriptions.json',
+];
+
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(value));
+      // rename(2) orders the directory entry, not the data behind it. Without
+      // this the file can be in place while its contents are still only in the
+      // page cache — which is exactly the state a power cut turns into zeros.
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw e;
+  }
+}
+
+// The newest daily snapshot of one state file, or null when none exists.
+function newestSnapshot(name) {
+  try {
+    const days = fs
+      .readdirSync(STATE_BACKUP_DIR)
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      .sort()
+      .reverse();
+    for (const day of days) {
+      const file = path.join(STATE_BACKUP_DIR, day, name);
+      try {
+        if (fs.statSync(file).size > 0) return file;
+      } catch { /* that day didn't hold this file */ }
+    }
+  } catch { /* no snapshots yet */ }
+  return null;
+}
+
+// Read a state file. A missing file is a fresh install and returns `fallback`
+// silently; a file that exists and does not parse is kept, reported loudly and
+// recovered from a snapshot when possible.
+function readJsonState(file, fallback) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return fallback;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    const name = path.basename(file);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const kept = `${file}.corrupt-${stamp}`;
+    try {
+      fs.renameSync(file, kept);
+    } catch {
+      // Could not move it aside — leave it alone rather than risk deleting the
+      // only copy. It will be reported again on the next read.
+    }
+    console.error(
+      `${name} did not parse (${e.message}). The damaged file is kept as ${path.basename(kept)}.`
+    );
+    const snap = newestSnapshot(name);
+    if (snap) {
+      try {
+        const restored = JSON.parse(fs.readFileSync(snap, 'utf8'));
+        writeJsonAtomic(file, restored);
+        console.error(`${name} restored from the snapshot of ${path.basename(path.dirname(snap))}.`);
+        return restored;
+      } catch {
+        console.error(`${name}: the newest snapshot is damaged too.`);
+      }
+    }
+    console.error(`${name}: no usable snapshot — starting empty. Repair the kept file by hand to recover it.`);
+    return fallback;
+  }
+}
+
+// One snapshot directory per day, so a file damaged today can be recovered from
+// yesterday. Copies are cheap (the whole state is a couple of megabytes) and a
+// day that already ran is skipped, so a container recreated hourly costs nothing.
+function snapshotState() {
+  if (!STATE_BACKUP_DAYS) return null;
+  const day = new Date().toISOString().slice(0, 10);
+  const dir = path.join(STATE_BACKUP_DIR, day);
+  try {
+    if (fs.existsSync(dir)) return dir;
+    fs.mkdirSync(dir, { recursive: true });
+    for (const name of STATE_FILES) {
+      const src = path.join(DATA_DIR, name);
+      if (!fs.existsSync(src)) continue;
+      const dst = path.join(dir, name);
+      fs.copyFileSync(src, `${dst}.part`);
+      fs.renameSync(`${dst}.part`, dst);
+    }
+    // Prune whole days past the retention window.
+    const days = fs
+      .readdirSync(STATE_BACKUP_DIR)
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      .sort()
+      .reverse();
+    for (const old of days.slice(STATE_BACKUP_DAYS)) {
+      fs.rmSync(path.join(STATE_BACKUP_DIR, old), { recursive: true, force: true });
+    }
+    console.log(`state snapshot written to backups/${day}`);
+    return dir;
+  } catch (e) {
+    console.warn('state snapshot failed:', e.message);
+    return null;
+  }
+}
+
+// One shortly after boot (a container recreated daily would otherwise never
+// snapshot) and one a day after that.
+setTimeout(snapshotState, 60 * 1000).unref();
+setInterval(snapshotState, 24 * 60 * 60 * 1000).unref();
+
 let historySeq = 0;
 
 // Number of sites yt-dlp can handle (its --list-extractors count). Filled once
@@ -345,13 +498,10 @@ function countYtdlpExtractors() {
 }
 
 function readHistory() {
-  try {
-    const list = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
-    // Backfill ids for any legacy entries so every row is deletable.
-    return list.map((e, i) => (e.id ? e : { ...e, id: `legacy-${e.time || 0}-${i}` }));
-  } catch {
-    return [];
-  }
+  const list = readJsonState(HISTORY_FILE, []);
+  if (!Array.isArray(list)) return [];
+  // Backfill ids for any legacy entries so every row is deletable.
+  return list.map((e, i) => (e.id ? e : { ...e, id: `legacy-${e.time || 0}-${i}` }));
 }
 
 // Prepend an entry and keep the log bounded.
@@ -360,7 +510,7 @@ function recordHistory(entry) {
     const list = readHistory();
     const id = `${Date.now()}-${historySeq++}`;
     list.unshift({ id, time: Date.now(), ...entry });
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(list.slice(0, HISTORY_MAX)));
+    writeJsonAtomic(HISTORY_FILE, list.slice(0, HISTORY_MAX));
   } catch (e) {
     console.warn('history write failed:', e.message);
   }
@@ -369,7 +519,7 @@ function recordHistory(entry) {
 // Remove one entry by id, or all when id is omitted. Returns the new count.
 function deleteHistory(id) {
   const list = id ? readHistory().filter((e) => e.id !== id) : [];
-  fs.writeFileSync(HISTORY_FILE, JSON.stringify(list));
+  writeJsonAtomic(HISTORY_FILE, list);
   return list.length;
 }
 
@@ -400,19 +550,23 @@ function mediaKey(url) {
 
 function readDownloaded() {
   if (!downloadedCache) {
+    const stored = readJsonState(DOWNLOADED_FILE, null);
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+      downloadedCache = stored;
+      return downloadedCache;
+    }
+    // Nothing on disk (or nothing recoverable): seed from the history log so a
+    // first run still counts earlier downloads. History is capped at
+    // HISTORY_MAX, so this is a floor, not the real registry — readJsonState
+    // has already kept any damaged file, which is the copy worth repairing.
+    downloadedCache = {};
+    for (const e of readHistory()) {
+      if (e.sourceUrl) downloadedCache[mediaKey(e.sourceUrl)] = { filename: e.filename || null, at: e.time || Date.now() };
+    }
     try {
-      downloadedCache = JSON.parse(fs.readFileSync(DOWNLOADED_FILE, 'utf8'));
+      writeJsonAtomic(DOWNLOADED_FILE, downloadedCache);
     } catch {
-      // First run: seed from the history log so earlier downloads count too.
-      downloadedCache = {};
-      for (const e of readHistory()) {
-        if (e.sourceUrl) downloadedCache[mediaKey(e.sourceUrl)] = { filename: e.filename || null, at: e.time || Date.now() };
-      }
-      try {
-        fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(downloadedCache));
-      } catch {
-        /* best effort */
-      }
+      /* best effort */
     }
   }
   return downloadedCache;
@@ -433,7 +587,7 @@ function markDownloaded(sourceUrl, filename, site, mediaId, channel) {
   const key = idKey(site, mediaId);
   if (key) map[key] = entry;
   try {
-    fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(map));
+    writeJsonAtomic(DOWNLOADED_FILE, map);
   } catch (e) {
     console.warn('downloaded registry write failed:', e.message);
   }
@@ -492,13 +646,9 @@ let musicVersion = 0;
 
 function readMusic() {
   if (!musicCache) {
-    try {
-      const data = JSON.parse(fs.readFileSync(MUSIC_FILE, 'utf8'));
-      musicCache = Array.isArray(data.tracks) ? data.tracks : [];
-      musicLastScan = Number(data.lastScan) || 0;
-    } catch {
-      musicCache = [];
-    }
+    const data = readJsonState(MUSIC_FILE, null) || {};
+    musicCache = Array.isArray(data.tracks) ? data.tracks : [];
+    musicLastScan = Number(data.lastScan) || 0;
   }
   return musicCache;
 }
@@ -508,7 +658,7 @@ function writeMusic(tracks) {
   // Invalidates the artist/title index built for library lookups.
   musicVersion++;
   try {
-    fs.writeFileSync(MUSIC_FILE, JSON.stringify({ lastScan: musicLastScan, tracks }));
+    writeJsonAtomic(MUSIC_FILE, { lastScan: musicLastScan, tracks });
   } catch (e) {
     console.warn('music log write failed:', e.message);
   }
@@ -888,14 +1038,11 @@ setTimeout(() => {
 // Saved playlists: subscriptions the user re-opens to check for new tracks.
 const PLAYLISTS_FILE = path.join(DATA_DIR, 'playlists.json');
 function readPlaylists() {
-  try {
-    return JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8'));
-  } catch {
-    return [];
-  }
+  const list = readJsonState(PLAYLISTS_FILE, []);
+  return Array.isArray(list) ? list : [];
 }
 function writePlaylists(list) {
-  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list));
+  writeJsonAtomic(PLAYLISTS_FILE, list);
 }
 
 const app = express();
@@ -1071,16 +1218,12 @@ if (pushEnabled) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIV
 
 const PUSH_SUBS_FILE = path.join(DATA_DIR, 'push-subscriptions.json');
 function loadPushSubs() {
-  try {
-    const list = JSON.parse(fs.readFileSync(PUSH_SUBS_FILE, 'utf8'));
-    return Array.isArray(list) ? list : [];
-  } catch {
-    return [];
-  }
+  const list = readJsonState(PUSH_SUBS_FILE, []);
+  return Array.isArray(list) ? list : [];
 }
 function savePushSubs() {
   try {
-    fs.writeFileSync(PUSH_SUBS_FILE, JSON.stringify(pushSubs));
+    writeJsonAtomic(PUSH_SUBS_FILE, pushSubs);
   } catch { /* non-fatal; resubscribe survives restarts anyway */ }
 }
 let pushSubs = loadPushSubs();
@@ -1140,12 +1283,8 @@ const RULE_QUALITIES = ['best', '2160', '1440', '1080', '720', '480', '360'];
 const RULE_BITRATES = ['best', '320', '256', '192', '160', '128', '96'];
 
 function readRules() {
-  try {
-    const list = JSON.parse(fs.readFileSync(RULES_FILE, 'utf8'));
-    return Array.isArray(list) ? list : [];
-  } catch {
-    return [];
-  }
+  const list = readJsonState(RULES_FILE, []);
+  return Array.isArray(list) ? list : [];
 }
 
 function cleanRuleStr(v, max) {
@@ -1258,7 +1397,7 @@ app.post('/api/rules', (req, res) => {
   const rules = sanitizeRules(req.body && req.body.rules);
   if (!rules) return res.status(400).json({ ok: false, error: 'Invalid rules payload' });
   try {
-    fs.writeFileSync(RULES_FILE, JSON.stringify(rules));
+    writeJsonAtomic(RULES_FILE, rules);
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
@@ -1934,11 +2073,8 @@ app.post('/api/cookies/delete', (req, res) => {
 // Named sets of extra yt-dlp flags the sheet's template picker offers.
 const TEMPLATES_FILE = path.join(DATA_DIR, 'templates.json');
 function readTemplates() {
-  try {
-    return JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf8'));
-  } catch {
-    return [];
-  }
+  const list = readJsonState(TEMPLATES_FILE, []);
+  return Array.isArray(list) ? list : [];
 }
 
 // GET /api/templates -> saved extra-args templates.
@@ -1958,14 +2094,14 @@ app.post('/api/templates/save', (req, res) => {
   const existing = list.find((t) => t.name === name);
   if (existing) existing.args = args;
   else list.push({ id: `${Date.now()}`, name, args });
-  fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(list));
+  writeJsonAtomic(TEMPLATES_FILE, list);
   res.json({ ok: true, templates: list });
 });
 
 // POST /api/templates/delete?id=...
 app.post('/api/templates/delete', (req, res) => {
   const list = readTemplates().filter((t) => t.id !== String(req.query.id));
-  fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(list));
+  writeJsonAtomic(TEMPLATES_FILE, list);
   res.json({ ok: true, templates: list });
 });
 
@@ -2076,12 +2212,8 @@ let typedGenresCache = null;
 
 function readTypedGenres() {
   if (!typedGenresCache) {
-    try {
-      const list = JSON.parse(fs.readFileSync(GENRES_FILE, 'utf8'));
-      typedGenresCache = Array.isArray(list) ? list.filter((g) => typeof g === 'string') : [];
-    } catch {
-      typedGenresCache = [];
-    }
+    const list = readJsonState(GENRES_FILE, []);
+    typedGenresCache = Array.isArray(list) ? list.filter((g) => typeof g === 'string') : [];
   }
   return typedGenresCache;
 }
@@ -2097,7 +2229,7 @@ function rememberGenres(genres) {
   }
   if (!added) return;
   try {
-    fs.writeFileSync(GENRES_FILE, JSON.stringify(list));
+    writeJsonAtomic(GENRES_FILE, list);
   } catch (e) {
     console.warn('genre list write failed:', e.message);
   }
@@ -2741,7 +2873,7 @@ app.post('/api/downloaded/unmark', (req, res) => {
   const map = readDownloaded();
   delete map[mediaKey(url)];
   try {
-    fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(map));
+    writeJsonAtomic(DOWNLOADED_FILE, map);
   } catch (e) {
     console.warn('downloaded registry write failed:', e.message);
   }
@@ -3068,7 +3200,7 @@ app.post('/api/music/edit', express.json(), async (req, res) => {
     }
     if (touched) {
       try {
-        fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(map));
+        writeJsonAtomic(DOWNLOADED_FILE, map);
       } catch (e) {
         console.warn('downloaded registry write failed:', e.message);
       }
@@ -4233,15 +4365,12 @@ app.get('/api/jobs/start', (req, res) => {
 // due, survive restarts via a DATA_DIR file, and can be cancelled.
 const SCHEDULED_FILE = path.join(DATA_DIR, 'scheduled.json');
 function readScheduled() {
-  try {
-    return JSON.parse(fs.readFileSync(SCHEDULED_FILE, 'utf8'));
-  } catch {
-    return [];
-  }
+  const list = readJsonState(SCHEDULED_FILE, []);
+  return Array.isArray(list) ? list : [];
 }
 function writeScheduled(list) {
   try {
-    fs.writeFileSync(SCHEDULED_FILE, JSON.stringify(list));
+    writeJsonAtomic(SCHEDULED_FILE, list);
   } catch (e) {
     console.warn('scheduled write failed:', e.message);
   }
@@ -4291,10 +4420,11 @@ const RETRY_MAX_AGE_MS = 72 * 60 * 60 * 1000; // give a slow upstream up to 3 da
 const RETRY_BACKOFF_MIN = [20, 40, 60, 120, 180, 240, 360]; // minutes; last repeats
 
 function readRetryQueue() {
-  try { return JSON.parse(fs.readFileSync(RETRY_FILE, 'utf8')); } catch { return []; }
+  const list = readJsonState(RETRY_FILE, []);
+  return Array.isArray(list) ? list : [];
 }
 function writeRetryQueue(list) {
-  try { fs.writeFileSync(RETRY_FILE, JSON.stringify(list)); }
+  try { writeJsonAtomic(RETRY_FILE, list); }
   catch (e) { console.warn('retry-queue write failed:', e.message); }
 }
 // Dedup on the exact URL (not mediaKey, which drops the query string — xfree
