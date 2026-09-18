@@ -4134,11 +4134,18 @@
         for (const x of d.dests || []) {
           let state = '';
           let note;
-          if (x.unreachable) { state = 'bad'; note = 'unreachable (mount hung)'; }
-          else if (!x.exists) { state = 'bad'; note = 'missing'; }
-          else if (x.mounted === false) { state = 'bad'; note = 'not mounted'; }
+          // What it is actually sitting on, when the server could tell. Docker
+          // silently creates a missing bind source on its own root disk, so
+          // "mounted" alone was never the interesting part — the filesystem is.
+          const on = x.fstype ? x.fstype + (x.source ? ' ' + x.source : '') : null;
+          if (x.mounted === false) {
+            state = 'bad';
+            note = on ? 'wrong filesystem — on ' + on : 'not mounted';
+          }
+          else if (x.unreachable) { state = 'bad'; note = 'unreachable (mount hung)' + (on ? ' · ' + on : ''); }
+          else if (!x.exists) { state = 'bad'; note = 'missing' + (on ? ' · on ' + on : ''); }
           else if (!x.writable) { state = 'bad'; note = 'read-only'; }
-          else note = (x.entries === null ? '' : x.entries + ' items · ') + fmtBytes(x.free) + ' free';
+          else note = (x.fstype ? x.fstype + ' · ' : '') + (x.entries === null ? '' : x.entries + ' items · ') + fmtBytes(x.free) + ' free';
           out.push(hrow(state, x.label, note));
         }
         out.push('</div>');

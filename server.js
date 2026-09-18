@@ -4808,16 +4808,74 @@ async function toolVersions() {
   return tools;
 }
 
-// The device the container's own filesystem is on. A bind mount lands on a
-// different one, so a destination sharing this device is a plain directory in
-// the image — i.e. a mount that did not happen.
-const ROOT_DEV = (() => {
+// Which filesystem is actually behind a destination. The question is not
+// whether a mount happened — comparing st_dev against the container root only
+// ever answered that — but whether it landed where compose asked. When a bind
+// source is missing at container start, Docker CREATES it as an empty
+// directory on its own root disk and mounts that instead, and to st_dev the
+// stand-in is indistinguishable from the real thing: /mnt/4tb is an automount
+// over a USB bridge that loses the race at boot often enough, and /mnt/apps
+// comes over NFS from a host that may not be up yet. The clip then lands on
+// the Pi's nvme, unread by anything, while the panel reports a healthy mount.
+//
+// So read the mount table instead, and judge the mount by its source.
+function readMounts() {
+  // mountinfo escapes space, tab, newline and backslash in octal.
+  const unesc = (v) => String(v || '').replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+  let raw;
   try {
-    return fs.statSync('/').dev;
+    raw = fs.readFileSync('/proc/self/mountinfo', 'utf8');
   } catch {
-    return null;
+    return []; // not Linux, or /proc not mounted: every verdict below stays null
   }
+  const out = [];
+  for (const line of raw.split('\n')) {
+    // Optional fields sit between the mount point and a lone '-', so the
+    // filesystem type and source have to be found from that separator.
+    const sep = line.indexOf(' - ');
+    if (sep < 0) continue;
+    const left = line.slice(0, sep).split(' ');
+    const right = line.slice(sep + 3).split(' ');
+    out.push({ majmin: left[2], root: unesc(left[3]), point: unesc(left[4]), fstype: right[0] || '', source: unesc(right[1]) });
+  }
+  return out;
+}
+
+// The set of mounts cannot change under a running container, so read it once.
+const MOUNTS = readMounts();
+
+// The mount a path sits on: the longest mount point that is the path or a
+// parent of it. A drop folder is a subdirectory INSIDE its mount (channelDir
+// returns <root>/<channel>/_import), so an exact match would find nothing.
+// Later lines win ties — a mount stacked on the same point shadows the earlier.
+function mountFor(dir) {
+  let best = null;
+  for (const m of MOUNTS) {
+    const under = dir === m.point || dir.startsWith(m.point === '/' ? '/' : m.point + '/');
+    if (under && (!best || m.point.length >= best.point.length)) best = m;
+  }
+  return best;
+}
+
+// Docker bind-mounts /etc/hosts into every container from its own directory on
+// the host's root filesystem — which makes that device the signature of the
+// fallback directory Docker auto-creates there. A destination backed by the
+// same device is on the Pi's root disk, not on the 4 TB disk or the NFS export
+// it was supposed to reach. Outside Docker there is no such mount and this
+// resolves to the root filesystem, which is the honest answer there too.
+const HOST_ROOT_MAJMIN = (() => {
+  const m = mountFor('/etc/hosts');
+  return m ? m.majmin : null;
 })();
+
+// true = on the filesystem it was meant to be on, false = a mount that did not
+// happen or fell back to the host's root disk, null = cannot tell.
+function mountedVerdict(mnt) {
+  if (!MOUNTS.length) return null;
+  if (!mnt || mnt.point === '/') return false; // no mount of its own: a plain directory in the image
+  if (HOST_ROOT_MAJMIN == null) return null;
+  return mnt.majmin !== HOST_ROOT_MAJMIN;
+}
 
 // Everything here is async and on a timer on purpose: an NFS server that stops
 // answering makes every call against its mount block until it comes back, and a
@@ -4836,11 +4894,31 @@ function withTimeout(promise, ms) {
 }
 
 async function dirHealth(label, dir, external) {
-  const row = { label, path: dir, exists: false, writable: false, mounted: null, free: null, size: null, entries: null, unreachable: false };
+  const row = {
+    label, path: dir, exists: false, writable: false, mounted: null,
+    fstype: null, mountPoint: null, source: null,
+    free: null, size: null, entries: null, unreachable: false,
+  };
+  if (external) {
+    // Reading the mount table is string work against /proc, so this answer
+    // survives what the probe below cannot: a mount that is present but hung
+    // still reports which filesystem it is, and a drop folder that does not
+    // exist yet still reports what it would be written to.
+    const mnt = mountFor(dir);
+    row.mounted = mountedVerdict(mnt);
+    if (mnt) {
+      row.fstype = mnt.fstype;
+      row.mountPoint = mnt.point;
+      // The device or export, plus the path within it. Together these name the
+      // fallback when one happened: a bind that should read
+      // "/dev/sdb1 /downloads/grabbit" reads "/dev/nvme0n1p2
+      // /mnt/4tb/downloads/grabbit" once the automount lost the boot race.
+      row.source = [mnt.source, mnt.root !== '/' ? mnt.root : null].filter(Boolean).join(' ') || null;
+    }
+  }
   const probe = async () => {
     const st = await fs.promises.stat(dir);
     row.exists = st.isDirectory();
-    if (external) row.mounted = ROOT_DEV == null ? null : st.dev !== ROOT_DEV;
     await fs.promises.access(dir, fs.constants.W_OK).then(
       () => { row.writable = true; },
       () => { /* read-only or not ours */ }
