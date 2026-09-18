@@ -387,6 +387,19 @@
       .site .dot.limited { background: var(--warn); }
       .site small { color: var(--faint); font-size: 11px; }
 
+      /* ---- health panel ---- */
+      .hgroup { padding: 2px 16px 10px; }
+      .hgroup h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin: 10px 0 6px; font-weight: 600; }
+      .hrow { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 13px; border-bottom: 1px solid var(--line); }
+      .hrow:last-child { border-bottom: 0; }
+      .hrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: 0 0 auto; align-self: center; }
+      .hrow .dot.warn { background: var(--warn); }
+      .hrow .dot.bad { background: var(--bad); }
+      .hrow .k { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .hrow .v { color: var(--muted); font-size: 12px; white-space: nowrap; }
+      .hrow .v.bad { color: var(--bad); }
+      .hrow .v.warn { color: var(--warn); }
+
       /* ---- FAB (Download all) ---- */
       .fab {
         position: fixed; right: max(16px, calc(50% - 320px + 16px)); bottom: calc(var(--nav-h) + 18px); z-index: 30;
@@ -933,6 +946,19 @@
         </div>
 
         <div class="section">
+          <h2>Health</h2>
+          <p style="margin:0;padding:0 16px 4px;color:var(--muted);font-size:13px">
+            The libraries live on ubu-desk and are mounted over NFS. A mount that
+            is not there does not fail a download — it writes into an empty
+            folder nothing imports, which is what this panel is for.
+          </p>
+          <div id="healthBody"></div>
+          <div style="padding:4px 16px 16px">
+            <button type="button" id="healthRefresh" style="padding:9px 16px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);color:var(--text);font-size:13px">Refresh</button>
+          </div>
+        </div>
+
+        <div class="section">
           <h2>Supported sites</h2>
           <div class="sites" id="sitesList"></div>
         </div>
@@ -1434,7 +1460,7 @@
         $('fab').classList.toggle('show', tab === 'home' && profileMode && profileItems.length > 0);
         window.scrollTo(0, 0);
         if (tab === 'downloads') loadHistory();
-        if (tab === 'more') loadMusicStats();
+        if (tab === 'more') { loadMusicStats(); loadHealth(); }
         if (tab === 'playlists') loadPlaylists();
       }
 
@@ -3148,7 +3174,9 @@
 
       // Persistent stream of server-job updates.
       let jobStream = null;
+      let jobStreamRetry = null;
       function connectJobStream() {
+        clearTimeout(jobStreamRetry);
         if (jobStream) return;
         jobStream = new EventSource('/api/jobs/stream');
         jobStream.onmessage = (ev) => {
@@ -3168,7 +3196,17 @@
           if (currentTab === 'queue') renderQueue();
           updateBadge();
         };
-        // EventSource reconnects automatically on error.
+        // EventSource retries a dropped connection by itself, but a fatal one
+        // closes the stream for good — that is what a container restart looks
+        // like from here, since Traefik answers 502 while the app is down.
+        // Without this the handle stays non-null, connectJobStream() returns
+        // early forever and the queue silently stops updating until reload.
+        jobStream.onerror = () => {
+          if (jobStream && jobStream.readyState !== EventSource.CLOSED) return;
+          jobStream = null;
+          clearTimeout(jobStreamRetry);
+          jobStreamRetry = setTimeout(connectJobStream, 5000);
+        };
       }
 
       // Start a single download as a background job and watch it in the Queue.
@@ -3439,7 +3477,7 @@
       // Navidrome library — the download history above holds only the last 200
       // downloads of any kind, so music scrolls out of it within days.
       let musicItems = [], musicTotal = 0, musicLib = '', musicQuery = '', musicTimer = null;
-      let musicStatus = '', musicDone = 0, musicEdited = 0;
+      let musicStatus = '', musicDone = 0, musicEdited = 0, musicMissing = 0;
 
       function reflectMusicMode() {
         const on = hFilter === 'music';
@@ -3447,6 +3485,20 @@
         $('musicNote').classList.toggle('hidden', !on);
         // "Clear all" wipes the download history — meaningless for the library.
         $('dlClear').classList.toggle('hidden', on);
+      }
+
+      // The one line under the music bar. `missing` only appears when there is
+      // something to report — a library with every file in place should not
+      // carry a permanent "0 missing".
+      function reflectMusicNote(lastScan) {
+        const scanned = lastScan ? 'last scan ' + relTime(lastScan) : 'not scanned yet';
+        $('musicNote').textContent =
+          musicTotal + ' track' + (musicTotal === 1 ? '' : 's') +
+          (musicItems.length < musicTotal ? ' (showing ' + musicItems.length + ')' : '') +
+          ' · ' + musicDone + ' ticked off · ' + musicEdited + ' edited' +
+          (musicMissing ? ' · ' + musicMissing + ' missing' : '') +
+          ' · ' + scanned;
+        reflectMusicStatusChip();
       }
 
       // Serialize responses: while typing, a slow response for an old query
@@ -3466,11 +3518,8 @@
           musicTotal = d.total || 0;
           musicDone = d.done || 0;
           musicEdited = d.edited || 0;
-          const scanned = d.lastScan ? 'last scan ' + relTime(d.lastScan) : 'not scanned yet';
-          $('musicNote').textContent =
-            musicTotal + ' track' + (musicTotal === 1 ? '' : 's') +
-            (musicItems.length < musicTotal ? ' (showing ' + musicItems.length + ')' : '') +
-            ' · ' + musicDone + ' ticked off · ' + musicEdited + ' edited · ' + scanned;
+          musicMissing = d.missing || 0;
+          reflectMusicNote(d.lastScan);
           renderMusic();
         } catch {
           if (token === musicLoadToken) toast('Could not load the music log', 'bad');
@@ -3490,11 +3539,8 @@
           if (token !== musicLoadToken) return;
           musicDone = d.done || 0;
           musicEdited = d.edited || 0;
-          const scanned = d.lastScan ? 'last scan ' + relTime(d.lastScan) : 'not scanned yet';
-          $('musicNote').textContent =
-            musicTotal + ' track' + (musicTotal === 1 ? '' : 's') +
-            (musicItems.length < musicTotal ? ' (showing ' + musicItems.length + ')' : '') +
-            ' · ' + musicDone + ' ticked off · ' + musicEdited + ' edited · ' + scanned;
+          musicMissing = d.missing || 0;
+          reflectMusicNote(d.lastScan);
         } catch { /* leave the line as it was */ }
       }
 
@@ -3512,15 +3558,21 @@
         btn.classList.toggle('active', !!next);
         loadMusic();
       });
-      $('musicStatus').addEventListener('click', () => {
-        // Cycles All -> still to do -> ticked off -> edited here.
-        const next = { '': 'todo', todo: 'done', done: 'edited', edited: '' }[musicStatus];
-        musicStatus = next;
+      // The chip label carries the missing count: that step is the only one
+      // whose number is news, and it is what sends you to the rows.
+      function reflectMusicStatusChip() {
         const btn = $('musicStatus');
-        btn.textContent = next === 'todo' ? 'Needs a look'
-          : next === 'done' ? 'Ticked off'
-          : next === 'edited' ? 'Edited here' : 'All tracks';
-        btn.classList.toggle('active', !!next);
+        btn.textContent = musicStatus === 'todo' ? 'Needs a look'
+          : musicStatus === 'done' ? 'Ticked off'
+          : musicStatus === 'edited' ? 'Edited here'
+          : musicStatus === 'missing' ? 'Missing (' + musicMissing + ')'
+          : 'All tracks';
+        btn.classList.toggle('active', !!musicStatus);
+      }
+      $('musicStatus').addEventListener('click', () => {
+        // Cycles All -> still to do -> ticked off -> edited here -> file gone.
+        musicStatus = { '': 'todo', todo: 'done', done: 'edited', edited: 'missing', missing: '' }[musicStatus];
+        reflectMusicStatusChip();
         loadMusic();
       });
 
@@ -4045,6 +4097,103 @@
         renderRules();
       });
 
+      // ----------------------------------------------------------------- health
+      function fmtBytes(n) {
+        if (!Number.isFinite(n)) return '—';
+        const u = ['B', 'kB', 'MB', 'GB', 'TB'];
+        let i = 0;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return (i === 0 || n >= 100 ? Math.round(n) : n.toFixed(1)) + ' ' + u[i];
+      }
+      function fmtAgo(ts) {
+        if (!ts) return 'never';
+        const m = Math.round((Date.now() - ts) / 60000);
+        if (m < 1) return 'just now';
+        if (m < 60) return m + ' min ago';
+        const h = Math.round(m / 60);
+        return h < 48 ? h + ' h ago' : Math.round(h / 24) + ' d ago';
+      }
+      function fmtIn(ts) {
+        const d = Math.round((ts - Date.now()) / 86400000);
+        if (d < 0) return 'expired';
+        return d < 1 ? 'expires today' : 'expires in ' + d + ' d';
+      }
+      // One row: a dot that carries the verdict, a name, and the detail.
+      function hrow(state, key, value) {
+        return '<div class="hrow"><span class="dot' + (state ? ' ' + state : '') + '"></span>' +
+          '<span class="k">' + esc(key) + '</span>' +
+          '<span class="v' + (state ? ' ' + state : '') + '">' + esc(value) + '</span></div>';
+      }
+      function renderHealth(d) {
+        const out = [];
+        out.push('<div class="hgroup"><h3>Destinations</h3>');
+        for (const x of d.dests || []) {
+          let state = '';
+          let note;
+          if (x.unreachable) { state = 'bad'; note = 'unreachable (mount hung)'; }
+          else if (!x.exists) { state = 'bad'; note = 'missing'; }
+          else if (x.mounted === false) { state = 'bad'; note = 'not mounted'; }
+          else if (!x.writable) { state = 'bad'; note = 'read-only'; }
+          else note = (x.entries === null ? '' : x.entries + ' items · ') + fmtBytes(x.free) + ' free';
+          out.push(hrow(state, x.label, note));
+        }
+        out.push('</div>');
+
+        out.push('<div class="hgroup"><h3>Tools</h3>');
+        for (const t of d.tools || []) {
+          // gallery-dl only serves the imagefap extractor: missing is a warning,
+          // not a failure. Everything else here is load-bearing.
+          const state = t.version ? '' : (t.name === 'gallery-dl' ? 'warn' : 'bad');
+          out.push(hrow(state, t.name, t.version || 'not installed'));
+        }
+        out.push('</div>');
+
+        out.push('<div class="hgroup"><h3>State files</h3>');
+        for (const f of d.state || []) {
+          if (f.corrupt) { out.push(hrow('bad', f.name, 'does not parse')); continue; }
+          if (f.bytes === null) { out.push(hrow('', f.name, 'not written yet')); continue; }
+          const rows = f.rows === null ? '' : f.rows + ' rows · ';
+          const snap = f.snapshot ? ' · backup ' + f.snapshot : ' · no backup';
+          out.push(hrow(f.snapshot ? '' : 'warn', f.name, rows + fmtBytes(f.bytes) + snap));
+        }
+        const b = d.backups || {};
+        out.push(hrow(b.days ? (b.latest ? '' : 'warn') : 'warn', 'daily snapshots',
+          b.days ? 'keep ' + b.days + ' days · latest ' + (b.latest || 'none yet') : 'off'));
+        out.push('</div>');
+
+        out.push('<div class="hgroup"><h3>Cookies</h3>');
+        if (!(d.cookies || []).length) out.push(hrow('', 'no cookie files', 'private content needs one'));
+        for (const c of d.cookies || []) {
+          const state = c.expired ? 'bad' : c.expiresAt && c.expiresAt - Date.now() < 7 * 86400000 ? 'warn' : '';
+          const when = c.expiresAt ? fmtIn(c.expiresAt) : 'session cookies only';
+          out.push(hrow(state, c.name, c.cookies + (c.cookies === 1 ? ' cookie · ' : ' cookies · ') + when));
+        }
+        out.push('</div>');
+
+        const j = d.jobs || {}, r = d.retry || {}, m = d.music || {}, p = d.push || {};
+        out.push('<div class="hgroup"><h3>Service</h3>');
+        out.push(hrow('', 'uptime', fmtAgo(d.startedAt).replace(' ago', '') + ' · ' + d.memoryMb + ' MB'));
+        out.push(hrow(j.active >= j.max ? 'warn' : '', 'jobs', j.active + ' of ' + j.max + ' running · ' + j.waiting + ' waiting'));
+        out.push(hrow('', 'retry queue', r.queued + ' queued · ' + r.due + ' due'));
+        out.push(hrow('', 'music scan', m.scanning ? 'running now' : fmtAgo(m.lastScan)));
+        out.push(hrow(p.enabled ? '' : 'warn', 'push', p.enabled ? p.subscriptions + ' devices' : 'no VAPID keys'));
+        out.push(hrow('', 'stall watchdog', Math.round((d.watchdog || {}).idleSec / 60) + ' min idle · ' +
+          Math.round((d.watchdog || {}).maxSec / 3600) + ' h max'));
+        out.push('</div>');
+        return out.join('');
+      }
+      async function loadHealth() {
+        const el = $('healthBody');
+        if (!el) return;
+        el.innerHTML = '<div class="hgroup">' + hrow('', 'checking…', '') + '</div>';
+        try {
+          el.innerHTML = renderHealth(await fetchJson('/api/health'));
+        } catch (e) {
+          el.innerHTML = '<div class="hgroup">' + hrow('bad', 'health check failed', e.message) + '</div>';
+        }
+      }
+      $('healthRefresh').addEventListener('click', loadHealth);
+
       // ----------------------------------------------------------------- supported sites
       (async function loadSites() {
         try {
@@ -4064,6 +4213,7 @@
       window.addEventListener('pagehide', () => {
         if (activeSource) { activeSource.close(); activeSource = null; }
         if (jobStream) { jobStream.close(); jobStream = null; }
+        clearTimeout(jobStreamRetry);
       });
       // Reopen the job stream when the page comes back (bfcache restore, app
       // switch) — otherwise the queue silently stops updating.

@@ -15,7 +15,7 @@ const { pipeline } = require('stream/promises');
 
 const extractors = require('./extractors');
 const { cleanDescription, parseTrackTitle } = require('./extractors/util');
-const { cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
+const { COOKIES_DIR, cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
 const { safeFetch } = require('./url-guard');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 
@@ -23,6 +23,51 @@ const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_BIN || 'ffprobe';
+// A child that stops making progress is indistinguishable from a working one:
+// nothing here polls it, so it keeps its MAX_ACTIVE_JOBS slot until the
+// container restarts — two of them deadlock the whole queue. Every
+// long-running child gets a watchdog instead: SIGKILL after CHILD_IDLE_MS
+// without a byte of output, and after CHILD_MAX_MS whatever it is doing. The
+// reason reads as a timeout on purpose, so isTransientDownloadError() lets the
+// job try again rather than giving up on a dead TCP connection.
+const CHILD_IDLE_MS = Math.max(60, Number(process.env.CHILD_IDLE_SEC) || 600) * 1000;
+const CHILD_MAX_MS = Math.max(300, Number(process.env.CHILD_MAX_SEC) || 6 * 3600) * 1000;
+
+// Returns a reason-getter: non-null once the watchdog killed the child, so the
+// close handler can report the timeout instead of a bare "exited null".
+function guardChild(child, label) {
+  let reason = null;
+  const kill = (why) => {
+    if (reason) return;
+    reason = why;
+    console.warn(`watchdog: ${why} — killing pid ${child.pid}`);
+    try {
+      child.kill('SIGKILL');
+    } catch { /* already gone */ }
+  };
+  const mins = (ms) => Math.round(ms / 60000);
+  const hard = setTimeout(() => kill(`${label} timed out after ${mins(CHILD_MAX_MS)} min`), CHILD_MAX_MS);
+  if (hard.unref) hard.unref();
+  let idle = null;
+  const arm = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => kill(`${label} timed out (no output for ${mins(CHILD_IDLE_MS)} min)`), CHILD_IDLE_MS);
+    if (idle.unref) idle.unref();
+  };
+  arm();
+  // Also the only reader of a `-progress pipe:1` stream: leaving it unread
+  // would fill the pipe buffer and stall the very process being watched.
+  if (child.stdout) child.stdout.on('data', arm);
+  if (child.stderr) child.stderr.on('data', arm);
+  const stop = () => {
+    clearTimeout(idle);
+    clearTimeout(hard);
+  };
+  child.on('close', stop);
+  child.on('error', stop);
+  return () => reason;
+}
+
 // Roots of the shorts stores (host folders bind-mounted here). A clip lands in
 // <root>/<channel>/_import/ where that library's importer files it minutes
 // later. Both channels used to live in elite-v2 and each moved out into an app
@@ -1011,7 +1056,17 @@ async function scanMusicLibraries() {
     }
     let gone = 0;
     for (const t of tracks) {
-      const missing = !seen.has(musicKey(t.lib, t.file));
+      let missing = !seen.has(musicKey(t.lib, t.file));
+      // The walk is a snapshot. A track downloaded while it ran (or while the
+      // tag reader worked through the new files) is absent from `seen` even
+      // though its file is there — and a row flagged missing is skipped by the
+      // library duplicate check, so the same song downloads again. One stat per
+      // apparently-missing row settles it.
+      if (missing && NAV_LIBS[t.lib]) {
+        try {
+          missing = !fs.existsSync(path.join(NAV_LIBS[t.lib], t.file));
+        } catch { /* unreadable root: trust the walk */ }
+      }
       if (missing !== !!t.missing) t.missing = missing;
       if (missing) gone++;
     }
@@ -2902,7 +2957,9 @@ app.get('/api/music', (req, res) => {
   const offset = Math.max(0, Number(req.query.offset) || 0);
   // Where a track stands in a tidy-up pass: done = ticked off (an edit ticks
   // it off too), todo = still to look at, edited = the tags were changed here.
-  const status = ['done', 'todo', 'edited'].includes(req.query.status) ? req.query.status : null;
+  // missing = the row is in the log but the file is gone from the library --
+  // the scan flags it, and this is how you get to see which ones.
+  const status = ['done', 'todo', 'edited', 'missing'].includes(req.query.status) ? req.query.status : null;
   let items = readMusic();
   if (lib) items = items.filter((t) => t.lib === lib);
   if (q) {
@@ -2915,14 +2972,17 @@ app.get('/api/music', (req, res) => {
   // Counted before the status filter, so the UI can say "N of M done".
   const done = items.filter((t) => t.done).length;
   const edited = items.filter((t) => t.editedAt).length;
+  const missing = items.filter((t) => t.missing).length;
   if (status === 'done') items = items.filter((t) => t.done);
   else if (status === 'todo') items = items.filter((t) => !t.done);
   else if (status === 'edited') items = items.filter((t) => t.editedAt);
+  else if (status === 'missing') items = items.filter((t) => t.missing);
   res.json({
     ok: true,
     total: items.length,
     done,
     edited,
+    missing,
     scanning: musicScanRunning,
     lastScan: musicLastScan || null,
     items: items.slice(offset, offset + limit),
@@ -3623,7 +3683,7 @@ const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file 
 function publicJob(j) {
   // `watch` is watcher bookkeeping (playlist id + registry key), like params:
   // internal, and nothing the UI renders.
-  const { finalPath, deliverTemp, params, watch, ...pub } = j;
+  const { finalPath, deliverTemp, params, watch, fromSchedule, ...pub } = j;
   return pub;
 }
 function snapshotJobs() {
@@ -3676,6 +3736,7 @@ function finishJob(job, patch) {
     const t = setTimeout(() => fs.rm(p, { force: true }, () => {}), DELIVER_TTL_MS);
     if (t.unref) t.unref();
   }
+  if (job.fromSchedule) removeScheduled(job.id);
   pruneJobs();
 }
 const FINISHED = new Set(['done', 'error', 'cancelled']);
@@ -3725,6 +3786,10 @@ function failJob(job, message) {
     device: false,
     error,
   });
+  if (job.fromSchedule) removeScheduled(job.id);
+  // A run of failures grows jobsMap without bound otherwise: pruning only from
+  // finishJob means the JOB_KEEP_DONE cap never applies to a failing workload.
+  pruneJobs();
 }
 
 // Some failures are the server saying "not right now" rather than "no":
@@ -3732,12 +3797,42 @@ function failJob(job, message) {
 // (and 429) when several jobs run at once. Those deserve another attempt; a
 // deleted video or an unsupported site does not.
 function isTransientDownloadError(e) {
-  return /HTTP Error (403|408|429|5\d\d)|Forbidden|Too Many Requests|timed? ?out|Connection reset|Temporary failure|EAI_AGAIN|ECONNRESET|ETIMEDOUT/i.test(
+  // The direct-file path classifies the upstream status itself (err.retryable);
+  // its message never matches the pattern below, so a 404 on a not-yet-encoded
+  // CDN file used to fail at once under text that promised a retry.
+  if (e && e.retryable === true) return true;
+  if (e && e.retryable === false) return false;
+  return /HTTP Error (403|408|429|5\d\d)|Forbidden|Too Many Requests|timed? ?out|Connection reset|Temporary failure|stalled|EAI_AGAIN|ECONNRESET|ETIMEDOUT/i.test(
     String((e && e.message) || e || '')
   );
 }
 const DOWNLOAD_ATTEMPTS = 3;
 const RETRY_BASE_MS = 5000;
+
+// A few seconds of in-job retries do not help a file the CDN has not encoded
+// yet. Park those in the retry queue instead, the same one the synchronous save
+// paths use. That queue re-runs a save into the shorts or server library, so
+// only those two destinations qualify — an audio, cut or device job would come
+// back as the wrong kind of download.
+function queueJobRetry(job, params, err) {
+  const error = String((err && err.message) || err);
+  if (!isRetryableError(err, error)) return false;
+  if (job.mediaType === 'image' || params.device || params.audio) return false;
+  if ((params.sections && params.sections.length) || params.splitChapters) return false;
+  if (params.dest !== 'elite' && params.dest !== 'server') return false;
+  return !!enqueueRetry({
+    url: job.sourceUrl || params.url,
+    dest: params.dest,
+    channel: params.channel,
+    folder: params.folder,
+    web: params.web,
+    quality: params.quality,
+    creator: job.creator,
+    title: job.title,
+    thumbnail: job.thumbnail,
+    reason: error,
+  });
+}
 
 // Resolve, enforce the shorts length cap, then dispatch to the right producer.
 async function runJob(job, params) {
@@ -3794,7 +3889,8 @@ async function runJob(job, params) {
       // an unexpected TypeError is undebuggable without it.
       console.error(`job ${job.id} attempt ${attempt}/${DOWNLOAD_ATTEMPTS} failed:`, e && e.stack ? e.stack : e);
       if (attempt === DOWNLOAD_ATTEMPTS || !isTransientDownloadError(e)) {
-        return failJob(job, String(e.message || e));
+        const queued = queueJobRetry(job, params, e);
+        return failJob(job, String(e.message || e) + (queued ? ' (queued for a later attempt)' : ''));
       }
       // Back off a little further each time — the rate limiter that answered
       // 403 is usually busy with the other jobs in the batch.
@@ -4265,6 +4361,7 @@ function ytdlpCut(job, tmpDir, stem, opts = {}) {
       '--', job.url,
     ];
     const p = spawn(YTDLP, args);
+    const timedOut = guardChild(p, 'yt-dlp');
     let err = '';
     const onLine = (line) => {
       if (line.startsWith('GRABBIT|')) {
@@ -4285,7 +4382,7 @@ function ytdlpCut(job, tmpDir, stem, opts = {}) {
     p.on('close', (code) => {
       ck.cleanup();
       if (code === 0) return resolve();
-      reject(new Error(err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
+      reject(new Error(timedOut() || err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
     });
   });
 }
@@ -4395,13 +4492,18 @@ for (const s of readScheduled()) {
 setInterval(() => {
   const due = readScheduled().filter((s) => s.at <= Date.now());
   for (const s of due) {
-    removeScheduled(s.id);
     let job = jobsMap.get(s.id);
     if (job && job.status !== 'scheduled') continue; // cancelled or already run
     if (!job) {
       job = newJob({ id: s.id, dest: s.dest, channel: s.channel, device: s.device });
       job.params = s.params;
     }
+    // The entry stays on disk until the job ends (finishJob/failJob/cancel).
+    // Jobs live in memory only: dropping it here would lose the download
+    // without a trace if the container restarted between firing and finishing.
+    // Re-firing is guarded by the status check above, and by the boot loop
+    // recreating the entry as 'scheduled'.
+    job.fromSchedule = true;
     setJob(job, { status: 'queued', at: null });
     scheduleJob(job, s.params || job.params);
   }
@@ -4436,7 +4538,9 @@ function retryDelayMs(attempts) {
 function isRetryableError(err, msg) {
   if (err && err.retryable === true) return true;
   if (err && err.retryable === false) return false;
-  return /HTTP (403|404|408|425|429|5\d\d)|not published|timeout|timed out|ECONNRESET|network|EAI_AGAIN/i.test(String(msg || ''));
+  // 'stalled' is the stall guard's own wording (a dead-but-open TCP connection):
+  // the textbook "try again later", and it used to match neither classifier.
+  return /HTTP (403|404|408|425|429|5\d\d)|not published|timeout|timed out|stalled|ECONNRESET|network|EAI_AGAIN/i.test(String(msg || ''));
 }
 function enqueueRetry(entry) {
   if (!validUrl(entry.url)) return null;
@@ -4602,6 +4706,233 @@ function scheduleJob(job, params) {
 
 // GET /api/jobs -> snapshot of current jobs (newest first).
 app.get('/api/jobs', (_req, res) => res.json({ ok: true, jobs: snapshotJobs() }));
+// ---------------------------------------------------------------------------
+// Health: the one page that answers "is anything quietly broken?". Three of the
+// destinations below are NFS mounts from ubu-desk (the libraries moved off the
+// Pi on 2026-09-18), and a mount that is not there does not fail a download --
+// it writes into an empty directory inside the container that nothing ever
+// reads. That is the failure this panel exists to make visible.
+
+// Versions of the external tools. Each costs a process spawn (python's startup
+// is most of it), so they are probed at most once per TOOL_TTL_MS — a panel
+// that is reopened all day must not pay for it every time.
+const TOOL_TTL_MS = 10 * 60 * 1000;
+let toolCache = { at: 0, tools: null };
+
+function probeTool(cmd, args, parse) {
+  return new Promise((resolve) => {
+    let out = '';
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    let p;
+    try {
+      p = spawn(cmd, args);
+    } catch {
+      return finish(null);
+    }
+    const timer = setTimeout(() => {
+      try { p.kill('SIGKILL'); } catch { /* already gone */ }
+      finish(null);
+    }, 8000);
+    if (timer.unref) timer.unref();
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (out += d));
+    p.on('error', () => finish(null));
+    p.on('close', (code) => finish(code === 0 ? parse(out.trim()) || null : null));
+  });
+}
+
+async function toolVersions() {
+  if (toolCache.tools && Date.now() - toolCache.at < TOOL_TTL_MS) return toolCache.tools;
+  const firstLine = (s) => s.split('\n')[0].trim();
+  const [ytdlp, ffmpeg, ffprobe, gallerydl, mutagen] = await Promise.all([
+    probeTool(YTDLP, ['--version'], firstLine),
+    probeTool(FFMPEG, ['-version'], (s) => (firstLine(s).match(/ffmpeg version (\S+)/) || [])[1]),
+    probeTool(FFPROBE, ['-version'], (s) => (firstLine(s).match(/ffprobe version (\S+)/) || [])[1]),
+    probeTool(process.env.GALLERY_DL_BIN || 'gallery-dl', ['--version'], firstLine),
+    probeTool('python3', ['-c', 'import mutagen; print(mutagen.version_string)'], firstLine),
+  ]);
+  const tools = [
+    { name: 'yt-dlp', version: ytdlp },
+    { name: 'ffmpeg', version: ffmpeg },
+    { name: 'ffprobe', version: ffprobe },
+    { name: 'gallery-dl', version: gallerydl },
+    { name: 'mutagen', version: mutagen },
+    { name: 'node', version: process.version.replace(/^v/, '') },
+  ];
+  toolCache = { at: Date.now(), tools };
+  return tools;
+}
+
+// The device the container's own filesystem is on. A bind mount lands on a
+// different one, so a destination sharing this device is a plain directory in
+// the image — i.e. a mount that did not happen.
+const ROOT_DEV = (() => {
+  try {
+    return fs.statSync('/').dev;
+  } catch {
+    return null;
+  }
+})();
+
+// Everything here is async and on a timer on purpose: an NFS server that stops
+// answering makes every call against its mount block until it comes back, and a
+// sync one would take the whole event loop with it — opening this panel would
+// freeze grabbit exactly when a mount is broken.
+const DIR_PROBE_MS = 3000;
+function withTimeout(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise.then((v) => { clearTimeout(timer); return v; }, (e) => { clearTimeout(timer); throw e; }),
+    new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error('timeout')), ms);
+      if (timer.unref) timer.unref();
+    }),
+  ]);
+}
+
+async function dirHealth(label, dir, external) {
+  const row = { label, path: dir, exists: false, writable: false, mounted: null, free: null, size: null, entries: null, unreachable: false };
+  const probe = async () => {
+    const st = await fs.promises.stat(dir);
+    row.exists = st.isDirectory();
+    if (external) row.mounted = ROOT_DEV == null ? null : st.dev !== ROOT_DEV;
+    await fs.promises.access(dir, fs.constants.W_OK).then(
+      () => { row.writable = true; },
+      () => { /* read-only or not ours */ }
+    );
+    await fs.promises.statfs(dir).then(
+      (fsx) => {
+        row.free = Number(fsx.bavail) * Number(fsx.bsize);
+        row.size = Number(fsx.blocks) * Number(fsx.bsize);
+      },
+      () => { /* not every filesystem reports it */ }
+    );
+    await fs.promises.readdir(dir).then(
+      (list) => { row.entries = list.length; },
+      () => { /* unreadable: the flags above already say so */ }
+    );
+  };
+  try {
+    await withTimeout(probe(), DIR_PROBE_MS);
+  } catch (e) {
+    // ENOENT is the ordinary "not there" answer and row.exists already says so;
+    // a timeout is the mount that is there but hung, which reads differently.
+    if (String(e.message) === 'timeout') row.unreachable = true;
+  }
+  return row;
+}
+
+// Rows in a state file, for the ones whose shape we know. A number here is the
+// quickest "did something reset it" check there is.
+function stateRows(name, value) {
+  if (Array.isArray(value)) return value.length;
+  if (!value || typeof value !== 'object') return null;
+  if (Array.isArray(value.tracks)) return value.tracks.length;
+  if (Array.isArray(value.items)) return value.items.length;
+  return Object.keys(value).length;
+}
+
+function stateHealth() {
+  return STATE_FILES.map((name) => {
+    const file = path.join(DATA_DIR, name);
+    const row = { name, bytes: null, rows: null, updatedAt: null, snapshot: null, corrupt: false };
+    try {
+      const st = fs.statSync(file);
+      row.bytes = st.size;
+      row.updatedAt = st.mtimeMs;
+      try {
+        row.rows = stateRows(name, JSON.parse(fs.readFileSync(file, 'utf8')));
+      } catch {
+        // Readable but not parseable: readJsonState quarantines it on the next
+        // read, and until then this is the only place that says so.
+        row.corrupt = true;
+      }
+    } catch { /* never written yet */ }
+    const snap = newestSnapshot(name);
+    if (snap) row.snapshot = path.basename(path.dirname(snap));
+    return row;
+  });
+}
+
+// A Netscape cookies.txt carries the expiry as field 5 (epoch seconds); 0 means
+// a session cookie. The earliest real expiry is what kills the file, so that is
+// the one worth showing — an expired cookie file is a login wall tomorrow.
+function cookieHealth() {
+  return listCookieFiles().map((c) => {
+    const row = { ...c, expiresAt: null, expired: false, cookies: 0 };
+    try {
+      const text = fs.readFileSync(path.join(COOKIES_DIR, `${c.name}.txt`), 'utf8');
+      let earliest = null;
+      for (const line of text.split('\n')) {
+        if (!line.trim() || line.startsWith('#')) continue;
+        const f = line.split('\t');
+        if (f.length < 7) continue;
+        row.cookies++;
+        const exp = Number(f[4]);
+        if (!Number.isFinite(exp) || exp <= 0) continue; // session cookie
+        if (earliest == null || exp < earliest) earliest = exp;
+      }
+      if (earliest != null) {
+        row.expiresAt = earliest * 1000;
+        row.expired = row.expiresAt < Date.now();
+      }
+    } catch { /* unreadable: the list entry still shows it exists */ }
+    return row;
+  });
+}
+
+// GET /api/health -> tool versions, destination mounts, state files, cookies.
+app.get('/api/health', async (_req, res) => {
+  const retries = readRetryQueue();
+  const now = Date.now();
+  res.json({
+    ok: true,
+    now,
+    uptimeSec: Math.round(process.uptime()),
+    startedAt: now - Math.round(process.uptime() * 1000),
+    memoryMb: Math.round(process.memoryUsage().rss / 1048576),
+    tools: await toolVersions(),
+    dests: await Promise.all([
+      dirHealth('shorts main (tikshortis)', channelDir('main'), true),
+      dirHealth('shorts 18+ (adshortis)', channelDir('18plus'), true),
+      dirHealth('posts (elitogram)', POSTS_IMPORT_DIR, true),
+      dirHealth('server videos', VIDEOS_DIR, true),
+      dirHealth('server mp3', AUDIO_DIR, true),
+      dirHealth('server adults', ADULTS_DIR, true),
+      dirHealth('server photos', PHOTOS_DIR, true),
+      dirHealth('navidrome music', NAVIDROME_DIR, true),
+      dirHealth('navidrome kids', NAVIDROME_KIDS_DIR, true),
+      dirHealth('audiobooks', AUDIOBOOKS_DIR, true),
+      dirHealth('data', DATA_DIR, true),
+    ]),
+    state: stateHealth(),
+    backups: {
+      days: STATE_BACKUP_DAYS,
+      dir: STATE_BACKUP_DIR,
+      latest: (() => {
+        try {
+          return fs.readdirSync(STATE_BACKUP_DIR).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort().pop() || null;
+        } catch {
+          return null;
+        }
+      })(),
+    },
+    cookies: cookieHealth(),
+    push: { enabled: pushEnabled, subscriptions: pushSubs.length },
+    jobs: { active: activeJobs, waiting: pendingJobs.length, max: MAX_ACTIVE_JOBS, tracked: jobsMap.size },
+    retry: { queued: retries.length, due: retries.filter((r) => r.nextAt <= now).length },
+    music: { lastScan: musicLastScan || null, scanning: musicScanRunning },
+    auth: { password: !!GRABBIT_PASSWORD, internalToken: !!INTERNAL_TOKEN },
+    watchdog: { idleSec: Math.round(CHILD_IDLE_MS / 1000), maxSec: Math.round(CHILD_MAX_MS / 1000) },
+  });
+});
+
 
 // GET /api/jobs/stream -> SSE feed of job updates (snapshot first, then deltas).
 app.get('/api/jobs/stream', (req, res) => {
@@ -4808,6 +5139,7 @@ function downloadYtdlpRaw(job, dest, opts = {}) {
       job.url,
     ];
     const p = spawn(YTDLP, args);
+    const timedOut = guardChild(p, 'yt-dlp');
     let err = '';
     // yt-dlp prints progress on stderr; pick out our templated lines and let the
     // rest accumulate as the error tail.
@@ -4843,7 +5175,7 @@ function downloadYtdlpRaw(job, dest, opts = {}) {
         }
         if (fs.existsSync(dest)) return resolve();
       }
-      reject(new Error(err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
+      reject(new Error(timedOut() || err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
     });
   });
 }
@@ -4868,6 +5200,7 @@ function downloadYtdlpAudioRaw(job, destNoExt, afmt, opts = {}) {
       '-o', `${destNoExt}.%(ext)s`, '--', job.url,
     ];
     const p = spawn(YTDLP, args);
+    const timedOut = guardChild(p, 'yt-dlp');
     let err = '';
     p.stderr.on('data', (d) => (err += d));
     p.on('error', (e) => {
@@ -4896,7 +5229,7 @@ function downloadYtdlpAudioRaw(job, destNoExt, afmt, opts = {}) {
         const match = siblings.find((f) => !isImage(f) && !/\.(part|src|ytdl|temp)$/i.test(f));
         if (match) return resolve(path.join(dir, match));
       }
-      reject(new Error(err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
+      reject(new Error(timedOut() || err.trim().split('\n').pop() || `yt-dlp exited ${code}`));
     });
   });
 }
@@ -4949,14 +5282,18 @@ function extractAudio(src, dest, afmt, aq) {
       : afmt === 'wav' ? ['-c:a', 'pcm_s16le']
       : afmt === 'alac' ? ['-c:a', 'alac']
       : ['-c:a', 'aac', '-b:a', br || '192k']; // aac / m4a / aac / best fallback
-    const args = ['-y', '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', src, '-vn', ...codec, dest];
+    // -progress writes a keyframe block a second to stdout: nothing here parses
+    // it, it is there so the watchdog can tell a slow transcode from a hung one.
+    const args = ['-y', '-hide_banner', '-loglevel', 'error', '-nostdin', '-progress', 'pipe:1',
+      '-i', src, '-vn', ...codec, dest];
     const p = spawn(FFMPEG, args);
+    const timedOut = guardChild(p, 'ffmpeg');
     let err = '';
     p.stderr.on('data', (d) => (err += d));
     p.on('error', reject);
     p.on('close', (code) => {
       if (code === 0 && fs.existsSync(dest) && fs.statSync(dest).size > 0) return resolve();
-      reject(new Error(err.trim().split('\n').pop() || 'audio extract failed'));
+      reject(new Error(timedOut() || err.trim().split('\n').pop() || 'audio extract failed'));
     });
   });
 }
@@ -5435,16 +5772,17 @@ function embedMetadata(src, dest, job, web) {
         ]
       : ['-map', '0', '-c', 'copy', '-movflags', '+faststart'];
     const args = [
-      '-y', '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', src,
+      '-y', '-hide_banner', '-loglevel', 'error', '-nostdin', '-progress', 'pipe:1', '-i', src,
       ...codecArgs, ...meta, dest,
     ];
     const p = spawn(FFMPEG, args);
+    const timedOut = guardChild(p, 'ffmpeg');
     let err = '';
     p.stderr.on('data', (d) => (err += d));
     p.on('error', () => fallbackCopy());
     p.on('close', (code) => {
       if (code === 0 && fs.existsSync(dest) && fs.statSync(dest).size > 0) return resolve();
-      console.warn('ffmpeg metadata failed, copying raw:', err.trim().split('\n').pop());
+      console.warn('ffmpeg metadata failed, copying raw:', timedOut() || err.trim().split('\n').pop());
       fallbackCopy();
     });
     function fallbackCopy() {
