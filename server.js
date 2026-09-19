@@ -15,7 +15,7 @@ const { pipeline } = require('stream/promises');
 
 const extractors = require('./extractors');
 const { cleanDescription, parseTrackTitle } = require('./extractors/util');
-const { COOKIES_DIR, cookieArgs, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
+const { COOKIES_DIR, cookieArgs, cookieFileFor, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
 const { safeFetch } = require('./url-guard');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 
@@ -1143,6 +1143,21 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+// Behind a proxy the socket peer is the proxy, so req.ip carries the same value
+// for every visitor unless Express is told which hops to skip. The login
+// throttle below keys on req.ip, and getting this wrong is worse than having no
+// throttle: too trusting and a forged X-Forwarded-For picks its own key, not
+// trusting enough and ten typos from one stranger lock out everybody at once.
+// The correct value is deployment-specific — here the Traefik docker network
+// plus Cloudflare's ranges, set in compose — so it is configured, never guessed.
+// Unset means "no proxy", which is the right answer for a directly exposed port
+// and leaves req.ip as the socket peer.
+const TRUST_PROXY = (process.env.GRABBIT_TRUST_PROXY || '')
+  .split(',')
+  .map((v) => v.trim())
+  .filter(Boolean);
+if (TRUST_PROXY.length) app.set('trust proxy', TRUST_PROXY);
+
 // --- Auth -----------------------------------------------------------------
 // A single shared password gates the public web UI. Only EXTERNAL traffic (via
 // Traefik, which sets X-Forwarded-Host) is gated; elite-v2 reaches grabbit
@@ -1271,14 +1286,78 @@ app.get('/login', (req, res) => {
   res.type('html').send(loginPage(null));
 });
 
-app.post('/login', (req, res) => {
+// Password guessing had nothing in its way: unlimited attempts, no delay, and
+// no trace in the log that anyone had ever tried. The compare itself is already
+// constant-time, so the gap here is rate, not timing.
+//
+// Counted per client (see the trust proxy note above), never globally: a global
+// counter would hand any stranger a standing denial of service against the
+// owner's own service for the price of ten wrong passwords. A correct password
+// clears the window, so someone who fumbles twice and then gets it right keeps
+// a clean slate — but it does NOT bypass the cap: the window is checked first,
+// so once it is full every attempt is refused, right password included, until
+// the window expires. Verified 2026-09-19 against the live container.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILS = 10;
+const LOGIN_MAX_KEYS = 5000;
+const LOGIN_MAX_DELAYED = 8;
+const loginFails = new Map();
+let loginDelayed = 0;
+
+// Keys arrive from the network, so the Map is pruned on every write instead of
+// being left to grow: expired windows go first, and a hard cap drops the oldest
+// if a flood still outruns that.
+function pruneLoginFails(now) {
+  for (const [key, rec] of loginFails) if (now - rec.first > LOGIN_WINDOW_MS) loginFails.delete(key);
+  while (loginFails.size > LOGIN_MAX_KEYS) loginFails.delete(loginFails.keys().next().value);
+}
+
+function loginWindow(key) {
+  const now = Date.now();
+  const rec = loginFails.get(key);
+  if (rec && now - rec.first <= LOGIN_WINDOW_MS) return rec;
+  const fresh = { first: now, fails: 0 };
+  loginFails.set(key, fresh);
+  return fresh;
+}
+
+// Each failure waits a little longer, which costs a guesser far more than it
+// costs a human who mistyped. The cap on concurrently delayed responses is the
+// point of the counter: without it an attacker could park the event loop full
+// of sleeping handlers, a cheaper attack than the one being prevented.
+function delayFailedLogin(fails) {
+  if (loginDelayed >= LOGIN_MAX_DELAYED) return Promise.resolve();
+  loginDelayed++;
+  return new Promise((resolve) =>
+    setTimeout(() => {
+      loginDelayed--;
+      resolve();
+    }, Math.min(2000, fails * 250))
+  );
+}
+
+app.post('/login', async (req, res) => {
   if (!GRABBIT_PASSWORD) return res.redirect('/');
+  const key = req.ip || 'unknown';
+  const win = loginWindow(key);
+  if (win.fails >= LOGIN_MAX_FAILS) {
+    const left = Math.max(1, Math.ceil((LOGIN_WINDOW_MS - (Date.now() - win.first)) / 1000));
+    res.set('Retry-After', String(left));
+    return res.status(429).type('html').send(loginPage('Too many attempts. Try again later.'));
+  }
   // Compare byte lengths, not string lengths — timingSafeEqual throws on a
   // byte-length mismatch, which multibyte input could otherwise trigger.
   const attempt = typeof req.body.password === 'string' ? Buffer.from(req.body.password) : null;
   const expected = Buffer.from(GRABBIT_PASSWORD);
   const ok = attempt && attempt.length === expected.length && crypto.timingSafeEqual(attempt, expected);
-  if (!ok) return res.status(401).type('html').send(loginPage('Wrong password.'));
+  if (!ok) {
+    win.fails++;
+    pruneLoginFails(Date.now());
+    console.warn(`login: wrong password from ${key} (${win.fails}/${LOGIN_MAX_FAILS} this window)`);
+    await delayFailedLogin(win.fails);
+    return res.status(401).type('html').send(loginPage('Wrong password.'));
+  }
+  loginFails.delete(key);
   res.cookie(AUTH_COOKIE, AUTH_TOKEN, {
     httpOnly: true,
     sameSite: 'lax',
@@ -3907,6 +3986,9 @@ function finishJob(job, patch) {
   pruneJobs();
 }
 const FINISHED = new Set(['done', 'error', 'cancelled']);
+// Names the UI control that stores cookie files; doubles as the marker that says
+// a message has already been through cookieHintFor().
+const COOKIE_HINT_MARK = 'More → Cookies';
 function pruneJobs() {
   const done = [...jobsMap.values()]
     .filter((j) => FINISHED.has(j.status))
@@ -3932,11 +4014,39 @@ function recordJobHistory(meta, params, channelLabel, filename, imported) {
   });
 }
 
+// yt-dlp answers a login wall with command-line advice ("Use --cookies ..."),
+// which is dead text in a web UI — nobody here is going to run yt-dlp by hand.
+// Point at the control that does the same job instead. Both the probe and the
+// download already run with whatever file is stored (cookieArgs), so a login
+// wall past an existing file means the export is stale, not missing.
+//
+// Safe to call twice: runJob appends its own "(queued for a later attempt)"
+// after the hint, so it hints first and lets failJob pass the result through.
+function cookieHintFor(job, error) {
+  if (error.includes(COOKIE_HINT_MARK)) return error;
+  // The word boundaries matter: without them "log in" matches inside "blog in"
+  // and "sign in" inside "design in", which would staple a cookie hint onto
+  // unrelated failures.
+  if (!/--cookies|\blog ?in\b|\bsign[- ]?in\b|authentication/i.test(error)) return error;
+  const url = job.sourceUrl || job.url || null;
+  const stored = cookieFileFor(url);
+  if (stored) {
+    return `${error} — the stored "${path.basename(stored, '.txt')}" cookie file did not get past it; re-export it under ${COOKIE_HINT_MARK}`;
+  }
+  let host = '';
+  try {
+    host = new URL(String(url)).hostname.replace(/^www\./, '');
+  } catch {
+    /* an unreadable URL just leaves the site name out of the sentence */
+  }
+  return `${error} — no cookie file stored${host ? ` for ${host}` : ''}; add one under ${COOKIE_HINT_MARK}`;
+}
+
 // Mark a job as failed AND write the failure to the persistent history, so the
 // reason survives a restart — the job list itself is in-memory only. Failures
 // are never marked as downloaded, so a playlist still offers them next time.
 function failJob(job, message) {
-  const error = String(message || 'Download failed');
+  const error = cookieHintFor(job, String(message || 'Download failed'));
   setJob(job, { status: 'error', phase: null, error });
   // Watcher-queued tracks count their failures so a permanently broken one
   // stops coming back every cycle.
@@ -4065,7 +4175,8 @@ async function runJob(job, params) {
       console.error(`job ${job.id} attempt ${attempt}/${DOWNLOAD_ATTEMPTS} failed:`, e && e.stack ? e.stack : e);
       if (attempt === DOWNLOAD_ATTEMPTS || !isTransientDownloadError(e)) {
         const queued = queueJobRetry(job, params, e);
-        return failJob(job, String(e.message || e) + (queued ? ' (queued for a later attempt)' : ''));
+        const failure = cookieHintFor(job, String(e.message || e));
+        return failJob(job, failure + (queued ? ' (queued for a later attempt)' : ''));
       }
       // Back off a little further each time — the rate limiter that answered
       // 403 is usually busy with the other jobs in the batch.

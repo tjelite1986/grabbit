@@ -3140,13 +3140,18 @@
           toast('Could not clear the queue', 'bad');
           return;
         }
-        for (const [id, j] of jobMap) if (j.status === 'done' || j.status === 'error') jobMap.delete(id);
+        for (const [id, j] of jobMap) if (FINISHED.has(j.status)) jobMap.delete(id);
         queueRows = queueRows.filter((r) => r.status === 'busy' || r.status === 'queued');
         if (!activeSource) qSummary.classList.remove('show');
         renderQueue();
       });
 
       const RUNNING = new Set(['queued', 'running', 'busy', 'scheduled']);
+      // Mirrors FINISHED in server.js: POST /api/jobs/clear drops exactly these
+      // server-side. A status missing here survives the clear as a row the
+      // server has already forgotten, whose Retry button then answers "Job not
+      // found" until the page is reloaded.
+      const FINISHED = new Set(['done', 'error', 'cancelled']);
       function fmtClock(sec) {
         const s = Math.max(0, Math.round(Number(sec) || 0));
         const m = Math.floor(s / 60);
