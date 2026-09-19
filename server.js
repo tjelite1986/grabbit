@@ -2614,10 +2614,11 @@ function knownGenres() {
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
-// Song metadata candidates from public music databases (iTunes Search +
-// Deezer, both keyless). Candidates: {source, title, artists[], album, date,
-// genres[], cover}. Used by the /api/music-meta endpoint (UI auto-fill) and
-// by the download-time genre auto-fill.
+// Song metadata candidates from public music databases (iTunes Search and
+// Deezer over keyless HTTP, SoundCloud through yt-dlp). Candidates:
+// {source, title, artists[], album, date, genres[], cover}. Used by the
+// /api/music-meta endpoint (UI auto-fill) and by the download-time genre
+// auto-fill.
 async function musicApiFetch(u) {
   // accept-language pins Deezer's localized genre names to English.
   const r = await fetch(u, {
@@ -2636,7 +2637,10 @@ function itunesCandidate(r) {
     artists: splitArtists(r.artistName),
     album: r.collectionName || null,
     date: r.releaseDate ? String(r.releaseDate).slice(0, 10) : null,
-    genres: r.primaryGenreName ? [r.primaryGenreName] : [],
+    // Normalised at the source like the SoundCloud arm, so the three arms
+    // agree about the same genre and iTunes' "Hip-Hop/Rap" cannot reach the
+    // field, the tag and the library raw on the path that skips lookupGenres.
+    genres: normalizeGenres(r.primaryGenreName ? [r.primaryGenreName] : []),
     cover: r.artworkUrl100 || null,
   };
 }
@@ -2669,21 +2673,398 @@ async function artistCatalogue(name) {
     .map(itunesCandidate);
 }
 
-async function musicMetaCandidates(q) {
-  const out = [];
-  const seen = new Set();
-  const push = (c) => {
-    const key = (c.artists.join(',') + '|' + c.title).toLowerCase();
-    if (c.title && c.artists.length && !seen.has(key)) {
-      seen.add(key);
-      out.push(c);
+/**
+ * How long the SoundCloud arm may cost.
+ *
+ * Two bounds, not one. SOUNDCLOUD_TIMEOUT_MS is what a SINGLE search may take
+ * — a process start plus yt-dlp's own request, where the two HTTP arms get 8s
+ * each. SOUNDCLOUD_BUDGET_MS is what a whole lookup may spend on SoundCloud,
+ * however many searches it runs, and it exists because musicMetaLookup tries
+ * up to three terms in series: with a per-search bound only, three hung
+ * searches stacked into a measured 36.8s for one /api/music-meta call, and
+ * the same call sits in front of every audio download that needs a genre.
+ * 12s for the lot, because that is about as long as a person watches a
+ * "Searching…" select before deciding the page is broken, and a search that
+ * has not answered in 12s has already lost to iTunes and Deezer, which
+ * answered in two. A hit costs ~1.8s and never comes near either bound.
+ */
+const SOUNDCLOUD_TIMEOUT_MS = 12000;
+const SOUNDCLOUD_BUDGET_MS = 12000;
+
+// Every search is a Python process, and this host has four cores that also
+// run the download jobs — 12 parallel lookups spawned 15 yt-dlps at once.
+// Searches queue instead: two at a time, and one still queued when its budget
+// has run out never spawns at all.
+const SOUNDCLOUD_MAX_PARALLEL = 2;
+let scActive = 0;
+const scWaiting = [];
+function scAcquire() {
+  if (scActive < SOUNDCLOUD_MAX_PARALLEL) {
+    scActive++;
+    return Promise.resolve();
+  }
+  return new Promise((r) => scWaiting.push(r));
+}
+function scRelease() {
+  // The slot is handed straight to the next waiter rather than counted down
+  // and up again, so a burst cannot slip past the cap between two ticks.
+  const next = scWaiting.shift();
+  if (next) next();
+  else scActive--;
+}
+
+// Answers by search term, for the few minutes one track's worth of clicking
+// takes. The same term genuinely recurs: a lookup asks up to three of them
+// and the next lookup for the same track asks the same three, the "Search
+// again" button re-asks them, and the download-time genre fill asks once
+// more. Only a real answer is cached — a kill or a parse failure is a fact
+// about this second, not about the term.
+const SOUNDCLOUD_CACHE_TTL_MS = 5 * 60 * 1000;
+const SOUNDCLOUD_CACHE_MAX = 120;
+const scCache = new Map();      // `${count}:${term}` -> {at, rows}
+const scInFlight = new Map();   // same key -> Promise, so two callers share one process
+
+/**
+ * One SoundCloud search row in the shape the picker and the matcher expect.
+ *
+ * Two surfaces, kept apart on purpose:
+ *   artists[]     what may be WRITTEN. index.html's applyMusicCandidate joins
+ *                 this into the artist field, the field is sent back on
+ *                 download and splitList turns it into the file's artist tag
+ *                 and the music log — so only real performers belong in it.
+ *   matchNames[]  the act's other spellings, read ONLY by candidateMatch()'s
+ *                 artist gate. A SoundCloud display name is as often as not
+ *                 typeset in small capitals ("ɢɪᴀɴɴᴏᴛᴛɪ ᴍᴜꜱɪᴄ" is U+0262
+ *                 U+026A U+1D00 …), and carrying that spelling is what lets a
+ *                 row the artist uploaded himself satisfy the gate. Carrying
+ *                 it in artists[] instead is what put "Giannotti, ɢɪᴀɴɴᴏᴛᴛɪ
+ *                 ᴍᴜꜱɪᴄ" in a Navidrome file's artist tag: two artists, one
+ *                 of whom does not exist. iTunes and Deezer rows have no
+ *                 matchNames at all, and the gate is unchanged for them.
+ *
+ * parseTrackTitle answers for a title with no separator too, by falling back
+ * on the uploader as the artist and stripping the channel prefix off the track
+ * ("GNT247 Alone" -> Alone) — the same answer this function would have to
+ * reach on its own, so the two cases need no telling apart.
+ */
+function soundcloudCandidate(e) {
+  const uploader = String(e.uploader || '').trim();
+  const raw = String(e.title || e.track || '').trim();
+  // yt-dlp's own artists[] for the row. On a flat search row it is usually
+  // nothing but the uploader's display name again, which is why it is not
+  // trusted as a co-artist below.
+  const credited = Array.isArray(e.artists) ? e.artists.map((a) => String(a || '').trim()).filter(Boolean) : [];
+  let parsed = parseTrackTitle(raw, uploader);
+  // Plenty of uploads lead with the SONG and credit the act after the dash
+  // ("OUTTA CONTROL - AXEL ALATRISTE, DXSKO, ZORK", uploaded by Axel
+  // Alatriste), which parseTrackTitle reads as an artist called OUTTA CONTROL
+  // and a song called AXEL ALATRISTE, DXSKO, ZORK. Whichever side names the
+  // uploader is the credit line, so the two are swapped when the RIGHT side
+  // names them and the left does not. When neither side does there is no
+  // evidence either way and nothing is swapped.
+  if (parsed && parsed.artist && parsed.track) {
+    const known = [uploader, ...credited].map(foldName).filter(Boolean);
+    const names = (s) => {
+      const f = foldName(s);
+      return Boolean(f) && known.some((k) => ` ${f} `.includes(` ${k} `));
+    };
+    if (!names(parsed.artist) && names(parsed.track)) parsed = { artist: parsed.track, track: parsed.artist };
+  }
+  const title = (parsed && parsed.track) || raw || null;
+  // The credit line, split the way iTunes (splitArtists(r.artistName)) and
+  // Deezer already split theirs — without it "SoDown, Oblivinatti, TwinnFlame"
+  // travels as ONE artist and comes back out of splitList as three anyway,
+  // with SoDown in the tag twice.
+  const artists = [];
+  const addArtists = (s) => {
+    for (const part of splitArtists(s)) {
+      const f = foldName(part);
+      // Folds to nothing: an account literally named "." is punctuation, not
+      // an artist, and it was reaching the tag as one.
+      if (!f || artists.some((a) => foldName(a) === f)) continue;
+      // Written as the letters it is drawn as. On a row whose title has no
+      // separator the uploader's display name IS the credit line, and that is
+      // how small capitals reached the tag; matchNames below still carries
+      // the name as the uploader typed it.
+      artists.push(plainName(part));
     }
   };
+  addArtists(parsed && parsed.artist);
+  const uploaderFold = foldName(uploader);
+  for (const name of credited) {
+    // The uploader's own name again (yt-dlp fills artists[] with it when the
+    // upload carries no metadata of its own) — a re-upload channel, not a
+    // second performer.
+    if (uploaderFold && foldName(name) === uploaderFold) continue;
+    addArtists(name);
+  }
+  // Nothing but the uploader to go on: then the display name IS the credit
+  // line. A row that still has no artist is dropped by the caller.
+  if (!artists.length) addArtists(uploader);
+  const matchNames = [];
+  for (const name of [uploader, ...credited]) {
+    const f = foldName(name);
+    if (!f || artists.some((a) => foldName(a) === f) || matchNames.some((m) => foldName(m) === f)) continue;
+    // Kept whole, unsplit: the gate asks whether one name holds the other as
+    // whole words, so a full credit line answers for every name in it.
+    matchNames.push(name);
+  }
+  // yt-dlp hands SoundCloud's upload date over as YYYYMMDD or, on a flat
+  // search row, as nothing but the unix `timestamp` — itunesCandidate's
+  // YYYY-MM-DD is what the rest of the pipeline reads.
+  let date = null;
+  const stamped = String(e.release_date || e.upload_date || '').trim();
+  if (/^\d{8}$/.test(stamped)) date = `${stamped.slice(0, 4)}-${stamped.slice(4, 6)}-${stamped.slice(6, 8)}`;
+  else if (/^\d{4}-\d{2}-\d{2}/.test(stamped)) date = stamped.slice(0, 10);
+  else if (Number.isFinite(e.timestamp)) {
+    // Number.isFinite does not bound the Date range: a timestamp of
+    // 99999999999999 threw RangeError out of toISOString, and one just under
+    // the limit returned an expanded-year string whose first ten characters
+    // are "+010000-01". Same 1900..now+1 window the download path uses.
+    const d = new Date(e.timestamp * 1000);
+    const y = d.getUTCFullYear();
+    if (Number.isFinite(y) && y >= 1900 && y <= new Date().getUTCFullYear() + 1) date = d.toISOString().slice(0, 10);
+  }
+  const thumbs = Array.isArray(e.thumbnails) ? e.thumbnails : [];
+  // SoundCloud serves one artwork at a ladder of fixed names. t500x500 before
+  // original, because "original" is whatever the uploader dragged in — a 3000
+  // pixel JPEG, or a banner that is not square at all.
+  const pick =
+    thumbs.find((t) => t && t.id === 't500x500') ||
+    thumbs.find((t) => t && t.id === 'original') ||
+    thumbs[thumbs.length - 1] ||
+    null;
+  return {
+    source: 'soundcloud',
+    title,
+    artists,
+    matchNames,
+    // A flat search row never carries an album, and the field is coerced like
+    // every other one because a row is JSON from the internet: an object here
+    // rendered as " · [object Object]" in the picker.
+    album: typeof e.album === 'string' ? e.album.trim() || null : null,
+    date,
+    // SoundCloud's genre is free text the uploader typed, where iTunes and
+    // Deezer hand out controlled vocabularies. It is normalised HERE, at the
+    // source, and not in lookupGenres: the picker writes this string straight
+    // into the genre field and the download sends that field on to the tag, so
+    // a raw "Hip Hop" never passes lookupGenres at all and would file itself
+    // beside the "Hip-Hop" GENRE_VOCABULARY already calls canonical.
+    genres: normalizeGenres((Array.isArray(e.genres) ? e.genres : []).map((g) => String(g || '').trim()).filter(Boolean)),
+    cover: (pick && pick.url) || e.thumbnail || null,
+  };
+}
+
+// One scsearch, start to finish: the semaphore slot, the subprocess, and the
+// rows. Resolves {rows, cacheable} — cacheable false whenever the emptiness
+// is this second's fault (killed, crashed, no binary) rather than the term's.
+function scSearch(term, count, deadline) {
+  return scAcquire().then(
+    () =>
+      new Promise((resolve) => {
+        // What is left of the lookup's whole SoundCloud budget, never more
+        // than one search's share of it. Queued time counts against it.
+        const budget = deadline ? Math.min(SOUNDCLOUD_TIMEOUT_MS, deadline - Date.now()) : SOUNDCLOUD_TIMEOUT_MS;
+        if (budget <= 0) {
+          // An earlier search already spent the budget. Starting one now only
+          // buys the caller a wait for an answer it has no time to use.
+          scRelease();
+          resolve({ rows: [], cacheable: false });
+          return;
+        }
+        let p;
+        try {
+          p = spawn(YTDLP, ['--flat-playlist', '-J', '--no-warnings', '--', `scsearch${count}:${term}`]);
+        } catch {
+          // spawn only throws synchronously on a malformed argument list, and
+          // every argument here is a literal. A MISSING yt-dlp does not come
+          // through here at all — it arrives on the error event below.
+          scRelease();
+          resolve({ rows: [], cacheable: false });
+          return;
+        }
+        let out = '';
+        let done = false;
+        let timer = null;
+        const finish = (rows, cacheable) => {
+          if (done) return;
+          done = true;
+          if (timer) clearTimeout(timer);
+          scRelease();
+          resolve({ rows, cacheable });
+        };
+        timer = setTimeout(() => {
+          p.kill('SIGKILL');
+          finish([], false);
+        }, budget);
+        // Without an encoding every chunk is stringified on its own, and a
+        // character split across the boundary becomes U+FFFD. This arm is the
+        // one that cannot afford it: the names it exists to read are three
+        // bytes per letter, and a corrupted one folds wrong and fails the
+        // artist gate silently.
+        p.stdout.setEncoding('utf8');
+        p.stdout.on('data', (d) => (out += d));
+        // Drained and thrown away: an unread stderr pipe is what makes a chatty
+        // child stop rather than exit.
+        p.stderr.on('data', () => {});
+        p.on('error', () => finish([], false));   // no yt-dlp binary on PATH
+        p.on('close', () => {
+          let data;
+          try {
+            // A non-zero exit, a kill mid-write and "no results" all land here
+            // as something that is not a JSON document, and all mean the same
+            // thing.
+            data = JSON.parse(out);
+          } catch {
+            finish([], false);
+            return;
+          }
+          const rows = [];
+          for (const entry of (data && data.entries) || []) {
+            if (!entry) continue;
+            // Per row, because one row used to take the others with it: a
+            // nonsense timestamp threw out of .map() and the catch below
+            // returned [] for the whole search.
+            try {
+              const c = soundcloudCandidate(entry);
+              if (c.title && c.artists.length) rows.push(c);
+            } catch {
+              // One unusable row is not an unusable search.
+            }
+          }
+          finish(rows, true);
+        });
+      })
+  );
+}
+
+/**
+ * SoundCloud search results, by way of yt-dlp's scsearch.
+ *
+ * The third catalogue earns its place on the tracks the first two have never
+ * heard of: iTunes answers "Giannotti Eyes Dem Open" with JayBlem and Harry
+ * Styles, because the song was never released to a label — the artist put it
+ * on SoundCloud himself and tagged it Drum & Bass. That is also the only
+ * place the genre exists to be read.
+ *
+ * yt-dlp is the client on purpose: keeping a working client_id for
+ * api-v2.soundcloud.com is a problem it already solves and re-solves.
+ *
+ * --flat-playlist is enough because a SEARCH row is rich — title, uploader,
+ * genres, timestamp and the whole thumbnail ladder come back in the one JSON
+ * document, so a hit costs one subprocess and never one resolve per result.
+ *
+ * `deadline` is an absolute Date.now() the WHOLE lookup shares, so three
+ * attempts cost one budget between them rather than one each.
+ *
+ * Never rejects. It runs beside two fetches in a Promise.allSettled, and an
+ * install with no yt-dlp on PATH must lose the SoundCloud arm, not the lookup.
+ */
+async function soundcloudCandidates(q, n = 4, deadline = 0) {
+  const term = String(q || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const count = Math.min(10, Math.max(1, parseInt(n, 10) || 4));
+  if (!term) return [];
+  const key = `${count}:${term}`;
+  const hit = scCache.get(key);
+  if (hit && Date.now() - hit.at < SOUNDCLOUD_CACHE_TTL_MS) return hit.rows.slice();
+  if (hit) scCache.delete(key);
+  // Already running: wait on that one instead of spawning a second copy of
+  // the same question — the three attempts of two parallel lookups for the
+  // same track overlap exactly here.
+  const flying = scInFlight.get(key);
+  if (flying) return (await flying).slice();
+  const run = scSearch(term, count, deadline).then(
+    (res) => {
+      scInFlight.delete(key);
+      if (res.cacheable) {
+        scCache.set(key, { at: Date.now(), rows: res.rows });
+        // A Map iterates in insertion order, so the oldest entry is first.
+        while (scCache.size > SOUNDCLOUD_CACHE_MAX) scCache.delete(scCache.keys().next().value);
+      }
+      return res.rows;
+    },
+    () => {
+      scInFlight.delete(key);
+      return [];
+    }
+  );
+  scInFlight.set(key, run);
+  return (await run).slice();
+}
+
+/**
+ * The identity of a candidate row, for dropping the same song twice.
+ *
+ * The ARTIST is folded, because that is where the sources disagree:
+ * SoundCloud's "ɢɪᴀɴɴᴏᴛᴛɪ ᴍᴜꜱɪᴄ" and iTunes' "GIANNOTTI MUSIC" are one act,
+ * and only the first name counts because a song credited to three artists on
+ * one site is credited to one on the next. The TITLE is only lowercased and
+ * stripped of punctuation, never folded — foldName drops "(AG Remix)", and a
+ * remix is a different song the picker must still be able to offer.
+ */
+function candidateKey(c) {
+  const artist = foldName(((c && c.artists) || [])[0] || '');
+  const title = String((c && c.title) || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+  return `${artist}|${title}`;
+}
+
+/**
+ * The same song, arrived twice: keep the first row, but not at the cost of
+ * what only the second one knew.
+ *
+ * Dropping a duplicate SoundCloud row also drops its matchNames, and those
+ * are one of two places a re-upload channel's name is written down — a lookup
+ * for artist=HEYZ title="Ocean Eyes" is answered by a row credited to Billie
+ * Eilish precisely because the SoundCloud row knew HEYZ uploaded it. Merging
+ * them onto the surviving row keeps the better metadata AND the match.
+ *
+ * The dropped row's artists[] carries the same weight and was not read at
+ * all: the first row for a key is as often as not the one credited to the
+ * bare account handle, so "The Neighbourhood" was thrown away and the row it
+ * lost fell from a full match to a partial one. Both lists land in
+ * matchNames — this is the match surface. The kept row's own credit line is
+ * what may be written into a tag, and that is left exactly as it was.
+ *
+ * Returns a NEW row, never a mutated one: candidate objects are shared with
+ * the search cache and with whatever the last lookup handed the picker.
+ */
+function mergeMatchNames(kept, extra) {
+  const add = [];
+  for (const name of [...((extra && extra.matchNames) || []), ...((extra && extra.artists) || [])]) {
+    const f = foldName(name);
+    if (!f) continue;
+    const known = [...(kept.artists || []), ...(kept.matchNames || []), ...add];
+    if (known.some((k) => foldName(k) === f)) continue;
+    add.push(name);
+  }
+  if (!add.length) return null;
+  return { ...kept, matchNames: [...(kept.matchNames || []), ...add] };
+}
+
+async function musicMetaCandidates(q, deadline = 0) {
+  const out = [];
+  const seen = new Map();   // candidateKey -> index in out
+  const push = (c) => {
+    if (!c.title || !c.artists.length) return;
+    const key = candidateKey(c);
+    const at = seen.get(key);
+    if (at !== undefined) {
+      const merged = mergeMatchNames(out[at], c);
+      if (merged) out[at] = merged;
+      return;
+    }
+    seen.set(key, out.length);
+    out.push(c);
+  };
   const jfetch = musicApiFetch;
-  // Both lookups run in parallel; either one failing alone is fine.
-  const [itunes, deezer] = await Promise.allSettled([
+  // All three lookups run in parallel; any one failing alone is fine.
+  const [itunes, deezer, soundcloud] = await Promise.allSettled([
     jfetch(`https://itunes.apple.com/search?media=music&entity=song&limit=6&term=${encodeURIComponent(q)}`),
     jfetch(`https://api.deezer.com/search?limit=4&q=${encodeURIComponent(q)}`),
+    soundcloudCandidates(q, 4, deadline),
   ]);
   if (itunes.status === 'fulfilled') {
     for (const r of itunes.value.results || []) push(itunesCandidate(r));
@@ -2702,27 +3083,176 @@ async function musicMetaCandidates(q) {
         artists: splitArtists(r.artist && r.artist.name),
         album: (r.album && r.album.title) || null,
         date: (alb && alb.release_date) || null,
-        genres: alb && alb.genres && Array.isArray(alb.genres.data) ? alb.genres.data.map((g) => g.name).filter(Boolean) : [],
+        genres: normalizeGenres(alb && alb.genres && Array.isArray(alb.genres.data) ? alb.genres.data.map((g) => g.name).filter(Boolean) : []),
         cover: (r.album && r.album.cover_medium) || null,
       });
     });
   }
-  return out.slice(0, 10);
+  // Pushed LAST, deliberately. `push` keeps the FIRST row for a candidateKey,
+  // and where two catalogues carry the same song the commercial row is the one
+  // worth keeping: it has an album, a real release date and label artwork,
+  // where SoundCloud has a re-upload's own spelling of each. That only works
+  // because the key folds the artist and ignores punctuation — while the key
+  // was the raw artists.join(',') it could not collide across sources at all,
+  // and /api/music-meta?artist=SoDown&title=Supernova answered with nine rows
+  // covering five songs. A remix keeps its own key, because the suffix is part
+  // of the title and "Supernova (AG Remix)" is not "Supernova".
+  if (soundcloud.status === 'fulfilled') {
+    for (const c of soundcloud.value) push(c);
+  }
+  // 6 iTunes + 4 Deezer already fill the old cap of 10, so an arm pushed last
+  // would be sliced away whole — including the one full match, on exactly the
+  // queries SoundCloud was added to answer. The picker still sees 10: that cut
+  // happens in musicMetaLookup, AFTER the rows are ranked by match, which is
+  // the only place where dropping a candidate is a decision and not an
+  // accident of arrival order.
+  return out.slice(0, 14);
 }
+
+/**
+ * Decorative letterforms, flattened onto the ASCII letter they are drawn as.
+ *
+ * SoundCloud display names are full of these: "ɢɪᴀɴɴᴏᴛᴛɪ ᴍᴜꜱɪᴄ" is
+ * U+0262 U+026A U+1D00 … , not a single ASCII letter in it. Every one of them
+ * is \p{L}, so foldName keeps them, and the artist gate in candidateMatch()
+ * then compares "ɢɪᴀɴɴᴏᴛᴛɪ" against "giannotti" and says no — the SoundCloud
+ * arm would be dead weight for precisely the artists it was added for.
+ *
+ * NFKD is not enough, which is why this table exists: the mathematical,
+ * fullwidth, circled and superscript alphabets DO carry a compatibility
+ * decomposition and fold for free, but the small-capital and phonetic
+ * extension blocks carry none at all — U+0262 normalises to U+0262 under both
+ * NFKD and NFKC. Checked codepoint by codepoint, not from memory.
+ *
+ * Two of these are real letters somewhere else: ǫ (o with ogonek) and ı
+ * (dotless i). A fancy-text generator uses them for Q and I because Unicode
+ * has no small-capital of either, and that is how they turn up in an uploader
+ * name. Folding them the other way costs nothing here: foldName runs on BOTH
+ * sides of every comparison, so a genuine ǫ still equals itself.
+ */
+const NAME_LOOKALIKES = {
+  '\u1D00': 'a', '\u0299': 'b', '\u1D04': 'c', '\u1D05': 'd', '\u1D07': 'e',
+  '\uA730': 'f', '\u0262': 'g', '\u029C': 'h', '\u026A': 'i', '\uA7AE': 'i',
+  '\u0131': 'i', '\u1D0A': 'j', '\u1D0B': 'k', '\u029F': 'l', '\u1D0D': 'm',
+  '\u026F': 'm', '\u0274': 'n', '\u1D0E': 'n', '\u1D0F': 'o', '\u1D18': 'p',
+  '\uA7AF': 'q', '\u01EB': 'q', '\u0280': 'r', '\uA731': 's', '\u1D1B': 't',
+  '\u1D1C': 'u', '\u1D20': 'v', '\u1D21': 'w', '\u028F': 'y', '\u1D22': 'z',
+};
+const NAME_LOOKALIKE_RE = new RegExp(`[${Object.keys(NAME_LOOKALIKES).join('')}]`, 'g');
 
 // Compare names the way a listener would: case, punctuation and the version
 // suffix a video title carries are not what makes two songs the same.
 function foldName(s) {
   return String(s || '')
+    // Lowercase FIRST, so the table sees the uppercase forms too. It did not,
+    // and three entries were one-way: Ǫ (U+01EA) skipped the table, NFKD
+    // decomposed it to o + ogonek and it folded to a plausible, wrong "o"
+    // while ǫ folded to "q"; Ɯ and Ʀ survived as non-ASCII letters. Every
+    // value in the table is an ASCII lowercase letter, so lowercasing first
+    // costs the table nothing.
     .toLowerCase()
+    // Still before NFKD: ǫ decomposes to o + combining ogonek, and the table
+    // means it as a Q.
+    .replace(NAME_LOOKALIKE_RE, (c) => NAME_LOOKALIKES[c])
+    .normalize('NFKD')
+    // NFKD splits é into e + U+0301, and the letters/digits rule below turns
+    // a leftover combining mark into a SPACE — "café" would fold to "caf e"
+    // and stop matching "cafe". Dropping the marks is also the accent fold.
+    //
+    // Only U+0300–U+036F, the Latin diacriticals this fold is for. Dropping
+    // every \p{M} also dropped the kana voicing mark NFKD exposes (U+3099),
+    // and "ガラ" and "カラ" folded to the same string — a 'full' verdict on a
+    // different song. Vietnamese tone marks live in this block beside the
+    // accents and do still fold away ("Mà" and "Mã" both give "ma"): they
+    // cannot be told from a French accent without knowing the language, and
+    // the accent fold is what makes Björk's "Jóga" match at all.
+    .replace(/[\u0300-\u036F]+/g, '')
     .replace(/\(.*?\)|\[.*?\]/g, ' ')
     .replace(/\b(feat\.?|ft\.?|featuring|with)\b.*$/i, ' ')
     // An apostrophe closes up rather than splitting: typed without one,
     // "Monsters" must still fold to the same thing as "Monster's".
     .replace(/['’´`]/g, '')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    // \p{M} is kept here so a mark NFKD left in place stays glued to its
+    // letter instead of becoming a space: "ガラ" is one word, not two.
+    .replace(/[^\p{L}\p{N}\p{M}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * A decorative name rewritten as the letters it is drawn as.
+ *
+ * foldName answers "are these two the same act?" and its output is never
+ * written anywhere. This answers "what do we write down?", and it exists
+ * because a SoundCloud row whose title carries no " - " has nothing but the
+ * uploader to credit: "ɢɪᴀɴɴᴏᴛᴛɪ ᴍᴜꜱɪᴄ" reached artists[] on those rows, and
+ * from there the artist tag, the albumartist and the library folder.
+ *
+ * Only decoration is touched, and one small class of it is held to a higher
+ * bar. A compatibility form is never anything but decoration — nobody spells
+ * a name with a fullwidth Ｇ by accident — and neither is a small capital or
+ * a phonetic-extension letter, so those are always rewritten, even where a
+ * single one sits in an otherwise ordinary word. Exactly two entries in the
+ * lookalike table are real letters somewhere else: ǫ is Old Norse and ı is
+ * Turkish. Those two only win a word whose letters are MOSTLY decorative, so
+ * "Hǫsvaldr" and "Kılıç" survive unchanged while "ǫᴜᴇᴇɴ" does not. Ordinary
+ * accents are never stripped — Björk stays Björk, because a letter with a
+ * combining mark is not a compatibility form.
+ *
+ * The gate is unaffected either way — foldName flattens both spellings to the
+ * same string, so a row credited to the plain reading still matches the
+ * decorative one and vice versa.
+ */
+// The lookalike entries that are also real letters in a real orthography:
+// ǫ (o with ogonek, Old Norse) and ı (dotless i, Turkish). A fancy-text
+// generator reaches for them because Unicode has no small-capital Q or I.
+const NAME_AMBIGUOUS = new Set(['\u01EB', '\u0131']);
+
+function plainName(s) {
+  const src = String(s || '');
+  if (!src) return src;
+  let touched = false;
+  const out = src.split(/(\s+)/).map((word) => {
+    if (!word || /^\s+$/.test(word)) return word;
+    let letters = 0;
+    let drawn = 0;
+    let sure = 0;
+    let built = '';
+    for (const ch of word) {
+      if (/\p{L}/u.test(ch)) letters += 1;
+      const lower = ch.toLowerCase();
+      if (NAME_LOOKALIKES[lower]) {
+        built += NAME_LOOKALIKES[lower];
+        drawn += 1;
+        if (!NAME_AMBIGUOUS.has(lower)) sure += 1;
+        continue;
+      }
+      // A compatibility form whose decomposition is plain ASCII: fullwidth
+      // Ｇ, mathematical 𝐆, the ﬁ ligature. An accented letter decomposes to
+      // a letter PLUS a combining mark and fails this test, which is the
+      // point.
+      const nfkd = ch.normalize('NFKD');
+      if (nfkd !== ch && /^[\x20-\x7E]+$/.test(nfkd)) {
+        built += nfkd;
+        sure += 1;
+        continue;
+      }
+      built += ch;
+    }
+    // A letter that can only be decoration settles it on its own. The two
+    // that can be a real letter need the rest of the word behind them, which
+    // is what keeps "Hǫsvaldr" spelled the way his mother spells it.
+    const drawnWins = drawn * 2 > letters;
+    if (!sure && !drawnWins) return word;
+    touched = true;
+    // A word drawn in small capitals carries no case of its own — they are
+    // drawn as capitals whatever letter they stand for — so it is written the
+    // way a name is written rather than shouted. A ligature or a fullwidth
+    // letter does carry case, and keeps it.
+    if (drawnWins && built === built.toLowerCase()) built = built.replace(/^(\p{L})/u, (c) => c.toUpperCase());
+    return built;
+  });
+  return touched ? out.join('').replace(/\s+/g, ' ').trim() : src;
 }
 
 /**
@@ -2778,7 +3308,11 @@ function candidateMatch(candidate, want) {
   const wantArtist = foldName(want.artist);
   const wantTitle = foldName(want.title);
   const cTitle = foldName(candidate.title);
-  const cArtists = (candidate.artists || []).map(foldName).filter(Boolean);
+  // artists[] is what may be written into a tag; matchNames[] is the extra
+  // spellings the SoundCloud arm carries for this gate alone (the uploader's
+  // small-capital display name, a whole credit line). iTunes and Deezer rows
+  // have no matchNames, so the gate is exactly what it was for them.
+  const cArtists = [...(candidate.artists || []), ...(candidate.matchNames || [])].map(foldName).filter(Boolean);
   // Whole words only: "control" sits inside "zero control" as a substring but
   // never as the same song.
   const holds = (a, b) => Boolean(a && b && ` ${a} `.includes(` ${b} `));
@@ -2833,23 +3367,37 @@ async function musicMetaLookup({ artist, title, channel }) {
   if (!attempts.length) add(artist || channel);
 
   const out = [];
-  const seen = new Set();
+  const seen = new Map();   // candidateKey -> index in out
   const take = (candidates, keepOnlyMatches) => {
     for (const c of candidates) {
-      const key = ((c.artists || []).join(',') + '|' + c.title).toLowerCase();
-      if (seen.has(key)) continue;
+      const key = candidateKey(c);
+      const at = seen.get(key);
+      if (at !== undefined) {
+        // Already have this song, from another catalogue or another attempt.
+        // Take the spellings it brought and read the verdict again — a row
+        // that was 'none' under the name we asked with can become 'full'
+        // once the duplicate hands over the uploader it was credited to.
+        const merged = mergeMatchNames(out[at], c);
+        if (merged) out[at] = { ...merged, match: candidateMatch(merged, want) };
+        continue;
+      }
       const match = candidateMatch(c, want);
       // A catalogue is 200 songs long — only the ones that answer the question
       // belong in a picker, or one artist would bury every other candidate.
       if (keepOnlyMatches && match !== 'full' && match !== 'close') continue;
-      seen.add(key);
+      seen.set(key, out.length);
       out.push({ ...c, match });
     }
   };
   const settled = () => out.some((c) => c.match === 'full' || c.match === 'close');
 
+  // ONE SoundCloud budget for the attempts between them. Each attempt used to
+  // start its own 12s timer, so three hung searches cost 36s on a request a
+  // person is watching; now the second and third attempt get what the first
+  // one left, and none at all once it is spent.
+  const soundcloudDeadline = Date.now() + SOUNDCLOUD_BUDGET_MS;
   for (const term of attempts) {
-    take(await musicMetaCandidates(term));
+    take(await musicMetaCandidates(term, soundcloudDeadline));
     if (settled()) break;
   }
   // Still nothing: the search may simply not rank the artist's own track.
@@ -2892,8 +3440,9 @@ app.get('/api/music-meta', async (req, res) => {
 });
 
 // The music library keeps every genre in English with one spelling: iTunes
-// and Deezer disagree on names ("Hip-Hop/Rap" vs "Rap/Hip Hop") and Deezer
-// sometimes localizes them (Swedish seen in the wild).
+// and Deezer disagree on names ("Hip-Hop/Rap" vs "Rap/Hip Hop"), Deezer
+// sometimes localizes them (Swedish seen in the wild), and SoundCloud has a
+// dropdown of its own that pairs genres up with an ampersand.
 const GENRE_NORMALIZE = {
   'hårdrock': 'Hard Rock',
   'alternativmusik': 'Alternative',
@@ -2907,17 +3456,75 @@ const GENRE_NORMALIZE = {
   'modern dancehall': 'Dancehall',
   'hip-hop/rap': 'Hip-Hop',
   'rap/hip hop': 'Hip-Hop',
+  // Seen live on a SoundCloud row (Nujabes / Feather), a third arrangement of
+  // the same three words.
+  'hip hop/rap': 'Hip-Hop',
   'hiphop': 'Hip-Hop',
   'rap': 'Hip-Hop',
   'indie rock': 'Indie Rock',
   'indie rock/rock pop': 'Indie Rock',
   'electronica': 'Electronic',
+  // SoundCloud's own dropdown. Every one of these already exists in the
+  // library under a shorter name, and an unmapped "Jazz & Blues" would file
+  // itself BESIDE Jazz rather than in it. Only the halves the library already
+  // spells — nothing new is invented here. 'Drum & Bass' is absent on purpose:
+  // SoundCloud happens to spell it the way the library does.
+  'hip-hop & rap': 'Hip-Hop',
+  'r&b & soul': 'R&B',
+  'jazz & blues': 'Jazz',
+  'folk & singer-songwriter': 'Folk',
+  'alternative rock': 'Alternative',
+  // The umbrella SoundCloud files every four-to-the-floor upload under. EDM
+  // over Dance because both are in the vocabulary and EDM is the one already
+  // used as a tag.
+  'dance & edm': 'EDM',
+  // Not a Reggae variant however it reads — the library files it under Latin.
+  'reggaeton': 'Latin',
+  // Spellings the substring reading used to get right before it was taken out
+  // for getting "Indie Pop" wrong. Named one by one, which is the difference:
+  // each of these really is another way of writing a genre the library
+  // already has, where "Glam Rock" is a genre of its own.
+  'drum&bass': 'Drum & Bass',
+  "jungle/drum'n'bass": 'Drum & Bass',
+  'latin music': 'Latin',
+  // Seen live on SoundCloud rows, where the genre is free text the uploader
+  // typed. "Triphop", "chillbeats" and "TEXCORE" are left as typed on
+  // purpose: a name nobody can map is better in the tag than a wrong guess.
+  'lofi': 'Lo-Fi',
+  'lo fi': 'Lo-Fi',
 };
 
+/**
+ * Genre strings in the library's own spelling.
+ *
+ * Three readings, in order of how sure they are: the exact string a catalogue
+ * is known to hand out (GENRE_NORMALIZE), the same genre under another
+ * spelling (GENRE_VOCABULARY's alias, which is where "Hip Hop" -> "Hip-Hop"
+ * is already written down), and failing both, the longest known genre sitting
+ * inside a free-text one. That last one is only worth having because
+ * SoundCloud's genre is a box the uploader types into: "Lofi Alernative Hip
+ * Hop", typo included, is a real value this returned.
+ *
+ * What none of the three recognise is kept as typed rather than dropped.
+ * SoundCloud is the only place a self-released track's genre exists at all,
+ * and a rip filed under "Uptempo" beats a rip filed under nothing.
+ */
 function normalizeGenres(genres) {
   const out = [];
   for (const g of genres || []) {
-    const n = GENRE_NORMALIZE[String(g).trim().toLowerCase()] || String(g).trim();
+    const raw = String(g).trim();
+    if (!raw) continue;
+    // An exact answer or the name as typed. A genre name is NOT read for the
+    // longest known genre inside it here: "Indie Pop" is a genre in its own
+    // right, not a way of writing Indie, and reading it that way rewrote
+    // "R&B/Soul" to Soul, "Glam Rock" to Rock, "J-Pop" to Pop and "Baile
+    // Funk" to Funk — filing a new rip BESIDE the tracks the library already
+    // holds under those names, which is the failure the table exists to
+    // prevent, in the other direction. Nothing tells "Glam Rock" from
+    // "Modern Dancehall" by shape, so the collapsing ones are named in
+    // GENRE_NORMALIZE by hand. Free text that really is a tag line is read
+    // that way by genresFromTags, which is what it is for.
+    const n = GENRE_NORMALIZE[raw.toLowerCase()] || GENRE_CANONICAL.get(genreFold(raw)) || raw;
     if (n && !out.includes(n)) out.push(n);
   }
   return out;
@@ -2941,6 +3548,24 @@ const GENRE_VOCABULARY = [
   ['Dance'],
 ];
 
+// Genre names compared the way a listener reads them: case, punctuation and
+// the ampersand in "Drum & Bass" are not what makes two spellings differ.
+const genreFold = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+// Two views of the same table, built once because it is a constant and these
+// are read per candidate row. GENRE_CANONICAL answers "what does the library
+// call this?" for every name in the vocabulary; GENRE_ALIASES holds only the
+// entries that RENAME something ("Hip Hop" -> "Hip-Hop"), which is what
+// genresFromTags needs when it wants the library's own spelling to win.
+const GENRE_CANONICAL = new Map();
+const GENRE_ALIASES = new Map();
+for (const [alias, label] of GENRE_VOCABULARY) {
+  const key = genreFold(alias);
+  if (!key) continue;
+  if (!GENRE_CANONICAL.has(key)) GENRE_CANONICAL.set(key, label || alias);
+  if (label && !GENRE_ALIASES.has(key)) GENRE_ALIASES.set(key, label);
+}
+
 /**
  * Genres read off the video's own tags.
  *
@@ -2953,11 +3578,8 @@ const GENRE_VOCABULARY = [
  */
 function genresFromTags(tags) {
   if (!Array.isArray(tags) || !tags.length) return [];
-  const fold = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-  const canonical = new Map();
-  for (const [alias, label] of GENRE_VOCABULARY) {
-    if (label) canonical.set(fold(alias), label);
-  }
+  const fold = genreFold;
+  const canonical = GENRE_ALIASES;
   const vocabulary = new Map();
   // The library's own genres first, so its spelling wins the key — except
   // where the library itself files a synonym ("dnb"), which resolves to the
@@ -4580,16 +5202,22 @@ async function produceAudio(job, meta, params, onProgress) {
         // sites hand out nonsense release years ("1674") often enough.
         const yearNum = Number(String(date || '').slice(0, 4));
         const year = yearNum >= 1900 && yearNum <= new Date().getFullYear() + 1 ? String(yearNum) : null;
-        let genres = params.genres ? splitGenres(params.genres) : m.genre ? [m.genre] : [];
-        // No genre from the UI or the site: look one up (iTunes/Deezer) so
-        // the library doesn't end up genre-less — the norm for YouTube rips.
+        // Normalised whichever way it arrived — typed in the UI, picked from
+        // a candidate row or read off the site — so this path and the
+        // lookupGenres path below file the same track under the same name.
+        // Only an exact table hit renames anything; free text is kept as
+        // typed.
+        let genres = normalizeGenres(params.genres ? splitGenres(params.genres) : m.genre ? [m.genre] : []);
+        // No genre from the UI or the site: look one up (iTunes, Deezer,
+        // SoundCloud) so the library doesn't end up genre-less — the norm for
+        // YouTube rips.
         // The video's own tags are the last resort, and the only source for a
         // self-released track no catalogue carries.
         if (!genres.length) {
           genres = await lookupGenres(artists[0], songTitle, meta.tags).catch(() => []);
         }
         // Anything typed by hand joins the picker's list right away.
-        if (params.genres) rememberGenres(splitGenres(params.genres));
+        if (params.genres) rememberGenres(normalizeGenres(splitGenres(params.genres)));
         try {
           await tagAudio(outPath, {
             title: songTitle,

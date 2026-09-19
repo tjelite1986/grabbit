@@ -1146,7 +1146,7 @@
              ([Artist]/[Album (Year)]/[Title].ext). -->
         <div class="hidden" id="shMusicFields">
           <div class="field">
-            <label>Metadata lookup (iTunes + Deezer)</label>
+            <label>Metadata lookup (iTunes + Deezer + SoundCloud)</label>
             <div class="row2">
               <select id="shMusicPick" style="flex:1;min-width:0"><option value="">…</option></select>
               <button type="button" id="shMusicSearch" title="Search again"
@@ -2444,8 +2444,8 @@
         $('shMusicAlbum').value = release === 'single' ? '' : track.album || '';
         $('shMusicDate').value = track.year || '';
         $('shMusicGenres').value = (track.genres || []).join(', ');
-        // Fields come from the file's own tags; the iTunes/Deezer lookup stays
-        // available and only fills what is still empty.
+        // Fields come from the file's own tags; the music-database lookup
+        // stays available and only fills what is still empty.
         musicFilledSeq = sheetSeq;
         musicCandidates = [];
         loadTrackDescription(track, sheetSeq);
@@ -2762,8 +2762,10 @@
       // ------------------------------------------------------------ music tags
       // Navidrome tag fields: pre-filled from the site's own metadata (yt-dlp
       // artist/track/album when present), then a music-database lookup
-      // (/api/music-meta: iTunes + Deezer) fills the remaining gaps. Picking a
-      // candidate from the select overwrites all fields.
+      // (/api/music-meta: iTunes + Deezer + SoundCloud) fills the remaining
+      // gaps. SoundCloud is the one of the three that carries a self-released
+      // track, so it is usually the source behind a hit on a small artist.
+      // Picking a candidate from the select overwrites all fields.
       let musicCandidates = [];
       let musicFilledSeq = -1;   // sheetSeq the fields were last prefilled for
       let musicLookupToken = 0;
