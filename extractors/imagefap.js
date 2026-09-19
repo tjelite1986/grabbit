@@ -1,4 +1,4 @@
-// imagefap.com extractor — photo galleries at /pictures/<gid>/<name>.
+// imagefap.com extractor — photo galleries at /pictures/<gid>/<name> and /gallery/<gid>.
 //
 // imagefap's full-image URLs are signed and spread across paginated photo pages,
 // so we enumerate them with gallery-dl (`-g`), which yields one signed full-image
@@ -30,11 +30,37 @@ function isProfile(url) {
   return match(url);
 }
 
-// "/pictures/<gid>/<Name>" -> "Name" (spaces restored) as the album creator.
-function creatorFromUrl(url) {
+// "/pictures/<gid>/<Name>" -> "Name" (spaces restored). This is the gallery's
+// own name, not its uploader, and /gallery/<id> — the other form match()
+// accepts — carries no slug at all. Only used as a last resort now.
+function nameFromUrl(url) {
   const m = url.match(/\/pictures\/\d+\/([^/?#]+)/i);
-  if (m) return decodeURIComponent(m[1]).replace(/[_+]+/g, ' ').trim() || 'imagefap';
-  return 'imagefap';
+  if (m) return decodeURIComponent(m[1]).replace(/[_+]+/g, ' ').trim() || null;
+  return null;
+}
+
+// Both accepted URL forms serve the same page, and it names the uploader twice:
+// once as text under the gallery title, once as a link to their profile. Read
+// it from there so /gallery/<id> and /pictures/<gid>/<name> agree.
+function creatorFromHtml(html) {
+  const text = html.match(/Uploaded by\s*([^<\n]+)/i);
+  if (text && text[1].trim()) return text[1].trim();
+  const link = html.match(/profile\.php\?user=([^"'&<>\s]+)/i);
+  if (link) {
+    try {
+      return decodeURIComponent(link[1]).trim() || null;
+    } catch {
+      return link[1].trim() || null;
+    }
+  }
+  return null;
+}
+
+// The page title is the gallery's name. It is not the creator, so it rides
+// along as the description instead — that is what reaches the .md sidecar.
+function titleFromHtml(html) {
+  const m = html.match(/<title>([\s\S]*?)<\/title>/i);
+  return m ? m[1].replace(/\s+/g, ' ').trim() || null : null;
 }
 
 // The gallery id, carried on every item so a whole gallery saved to the posts
@@ -76,10 +102,14 @@ function galleryUrls(url) {
   });
 }
 
-// Map image id -> thumb URL by walking the gallery pages (cheap, ~24/page).
-async function thumbMap(url) {
+// Map image id -> thumb URL by walking the gallery pages (cheap, ~24/page), and
+// take the uploader and gallery name off the first page while it is already in
+// hand — no page is fetched for them that was not fetched anyway.
+async function galleryPages(url) {
   const base = url.split('?')[0];
   const map = {};
+  let creator = null;
+  let title = null;
   for (let page = 0; page < 60; page++) {
     let html;
     try {
@@ -88,6 +118,10 @@ async function thumbMap(url) {
       html = await r.text();
     } catch {
       break;
+    }
+    if (page === 0) {
+      creator = creatorFromHtml(html);
+      title = titleFromHtml(html);
     }
     const thumbs = html.match(/https?:\/\/[a-z0-9]*\.imagefap\.com\/images\/thumb\/[^"'\s]+/gi) || [];
     let added = 0;
@@ -100,12 +134,19 @@ async function thumbMap(url) {
     }
     if (added === 0) break; // no new images -> past the last page
   }
-  return map;
+  return { thumbs: map, creator, title };
 }
 
 async function resolveProfile(url) {
-  const [urls, thumbs] = await Promise.all([galleryUrls(url), thumbMap(url).catch(() => ({}))]);
-  const creator = creatorFromUrl(url);
+  const [urls, page] = await Promise.all([
+    galleryUrls(url),
+    galleryPages(url).catch(() => ({ thumbs: {}, creator: null, title: null })),
+  ]);
+  const thumbs = page.thumbs || {};
+  // The page is the only source that answers for both URL forms; the slug is
+  // the gallery's name and exists on one of them, so it is the fallback.
+  const creator = page.creator || nameFromUrl(url) || 'imagefap';
+  const description = page.title || nameFromUrl(url) || null;
   const albumId = albumIdFromUrl(url);
   const items = urls.map((u) => {
     const id = idFromUrl(u);
@@ -118,6 +159,7 @@ async function resolveProfile(url) {
       title: id,
       thumbnail: thumbs[id] || u,
       creator,
+      description,
       sourceUrl: url,
       albumId,
       ext: extFromUrl(u, 'jpg'),

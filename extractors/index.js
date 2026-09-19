@@ -10,13 +10,26 @@
 //     kind: 'direct' | 'ytdlp',
 //     filename: 'creator-id.mp4',   // suggested download filename (sanitized later)
 //     title?: string,
+//     creator?: string,             // shown in the UI and used in output names
 //     thumbnail?: string,
+//     sourceUrl?: string,           // canonical page URL; the key the download
+//                                   // registry and playlist watcher dedupe on
+//     id?: string,                  // site-native id; the UI's selection key
+//     mediaType?: 'video' | 'image' // default 'video'
+//     ext?: string,                 // image jobs only: the file extension
+//     duration?: number | null,     // SECONDS. null/absent means unknown, and
+//                                   // the shorts length cap then never fires
+//     tags?: string[],              // '#lowercase' strings, carried into imports
 //     // for kind 'direct':
 //     downloadUrl?: string,
 //     headers?: { [k]: string },    // request headers (e.g. Referer) for the upstream fetch
 //     // for kind 'ytdlp': nothing extra, the server runs yt-dlp on the original url
 //     url?: string,
 //   }
+//
+// resolveProfile(url) returns { creator, items: [ ...the same shape... ] }, so a
+// field left out of a profile listing is a field the batch path does not get —
+// duration in particular, because the length cap is enforced per item.
 //
 // To add a new site, drop a file in this folder that exports the interface above.
 // The generic yt-dlp fallback is always tried last.
@@ -97,6 +110,10 @@ async function resolveProfile(url) {
 // Some extractors can lazily enrich a resolved job (e.g. fetch a profile clip's
 // own post page for its tags) at download time. A no-op for jobs whose owning
 // extractor has no enrich() or that carry no pageUrl.
+//
+// Returns the job — callers must use the return value, not rely on mutation.
+// enrich() fills fields in; it must not change the identity fields (title,
+// creator, id), because the caller has already built its output name from them.
 async function enrichJob(job) {
   try {
     if (!job || !job.pageUrl) return job;

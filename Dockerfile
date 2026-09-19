@@ -18,13 +18,17 @@ RUN printf -- "--js-runtimes node\n" > /etc/yt-dlp.conf
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV SAVE_DIR=/data
+# The image's own paths for the two volumes. server.js defaults both to a
+# repo-relative directory so a plain `npm start` works for a normal user; these
+# are what make the container use /data and /downloads instead.
+ENV DATA_DIR=/data
+ENV DOWNLOAD_DIR=/downloads
 
 COPY package.json ./
 RUN npm install --omit=dev
 
 COPY . .
 
-RUN mkdir -p /data
+RUN mkdir -p /data /downloads
 EXPOSE 3000
 CMD ["node", "server.js"]

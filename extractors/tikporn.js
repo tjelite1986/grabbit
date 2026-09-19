@@ -134,6 +134,10 @@ function jobFromApiVideo(v, creator, creatorName) {
     tags,
     sourceUrl: `https://tik.porn/video/${id}`,
     thumbnail: v.poster_url || v.medium_thumb || null,
+    // Seconds, and only for clips the encoder has measured — the field is
+    // present but null on most of a listing. null means "unknown", which the
+    // server treats as "do not apply the length cap", the same as before.
+    duration: Number.isFinite(v.duration) ? v.duration : null,
     filename: `${creator}-${id}.mp4`,
     downloadUrl: v.download_url || v.mp4_url,
     headers: { 'User-Agent': UA, Referer: REFERER },
@@ -280,6 +284,7 @@ async function resolve(url) {
       action_name: found.action_name || (found.action && found.action.name) || '',
       keywords: found.keywords || [],
       poster_url: found.poster_url || found.poster || null,
+      duration: found.duration,
       download_url: found.download_url || found.downloadLink || (found.source && found.source.src),
       video_text: found.video_text,
     },

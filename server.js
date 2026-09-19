@@ -23,6 +23,10 @@ const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_BIN || 'ffprobe';
+// The interpreter that runs the mutagen snippets: every audio tag Grabbit reads
+// or writes goes through one. PYTHON_BIN was documented but never read, so an
+// install whose python3 is not on PATH silently lost the whole music feature.
+const PYTHON = process.env.PYTHON_BIN || 'python3';
 // A child that stops making progress is indistinguishable from a working one:
 // nothing here polls it, so it keeps its MAX_ACTIVE_JOBS slot until the
 // container restarts — two of them deadlock the whole queue. Every
@@ -106,11 +110,14 @@ const ELITE_ENABLED = SHORTS_ENABLED || POSTS_ENABLED;
 const AUDIO_FORMATS = ['best', 'm4a', 'mp3', 'opus', 'flac', 'wav', 'vorbis', 'aac', 'alac'];
 // Output containers for a server-library video save (yt-dlp --merge-output-format).
 const VIDEO_CONTAINERS = ['mp4', 'mkv', 'webm'];
-const DATA_DIR = process.env.DATA_DIR || '/data';
+// Where the state files live. The container sets DATA_DIR (see the Dockerfile);
+// outside Docker the default is repo-relative, because a plain `npm start` as a
+// normal user cannot create /data and the README promises it needs no config.
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 
 // Plain server download library (alternative to the elite-v2 import). Files are
 // auto-routed by type; PHOTOS_DIR takes the images that are not sent to posts.
-const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/downloads';
+const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, 'downloads');
 const VIDEOS_DIR = process.env.VIDEOS_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'videos');
 const AUDIO_DIR = process.env.AUDIO_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'mp3');
 const ADULTS_DIR = process.env.ADULTS_DOWNLOAD_DIR || path.join(DOWNLOAD_DIR, 'adults');
@@ -381,10 +388,17 @@ function shortsTooLongError(job) {
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const HISTORY_MAX = 200;
 
+// Nothing works without it: every state file, the log and the thumbnail cache
+// live here. Swallowing the failure left the process up and failing one write
+// at a time, with the first symptom somewhere else entirely.
 try {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-} catch {
-  /* ignore */
+} catch (e) {
+  console.error(
+    `Cannot create the data directory ${DATA_DIR}: ${e.message}\n` +
+      'Set DATA_DIR to a writable path (in Docker it is the /data volume).'
+  );
+  process.exit(1);
 }
 
 // Mirror the console to a file on the data volume. Docker's own log is wiped
@@ -964,7 +978,7 @@ const READ_DESC_SCRIPT = [
 // description into it unless Grabbit cleared it), newest tag first.
 function readFileDescription(file) {
   return new Promise((resolve) => {
-    const p = spawn('python3', ['-c', READ_DESC_SCRIPT, file]);
+    const p = spawn(PYTHON, ['-c', READ_DESC_SCRIPT, file]);
     let out = '';
     p.stdout.on('data', (d) => (out += d));
     p.on('error', () => resolve([]));
@@ -982,7 +996,7 @@ function readFileDescription(file) {
 function readTags(paths) {
   return new Promise((resolve) => {
     if (!paths.length) return resolve(new Map());
-    const p = spawn('python3', ['-c', READ_TAGS_SCRIPT]);
+    const p = spawn(PYTHON, ['-c', READ_TAGS_SCRIPT]);
     let out = '';
     let err = '';
     p.stdout.on('data', (d) => (out += d));
@@ -1522,22 +1536,85 @@ function cleanRuleStr(v, max) {
   return typeof v === 'string' ? v.trim().slice(0, max) : '';
 }
 
-// A pattern is a case-insensitive substring, or /…/ for a regex.
-function validRulePattern(p) {
-  if (p.length > 2 && p.startsWith('/') && p.endsWith('/')) {
-    try {
-      new RegExp(p.slice(1, -1), 'i');
-    } catch {
-      return false;
+// A rule's regex runs on the main thread on every resolve, and a RegExp cannot
+// be timed out in-process. One catastrophically backtracking pattern therefore
+// hangs the whole server until it is restarted. Two guards, because neither is
+// complete on its own: refuse the shapes that backtrack exponentially, and cap
+// the input so a shape that slips through has nothing long to chew on.
+const RULE_VALUE_MAX = 500;
+
+// True when a quantified group's body itself quantifies or alternates — (a+)+,
+// (a|a)*, (\d?){3}. That nesting is what turns a failed match into 2^n work.
+// Walked rather than pattern-matched so escapes, character classes and the
+// (?:  (?=  (?<name>  prefixes are not mistaken for the real thing.
+function hasNestedQuantifier(re) {
+  const bodyRepeats = []; // one flag per open group
+  let inClass = false;
+  for (let i = 0; i < re.length; i++) {
+    const c = re[i];
+    if (c === '\\') { i++; continue; } // escaped: never syntax
+    if (inClass) { if (c === ']') inClass = false; continue; }
+    if (c === '[') { inClass = true; continue; }
+    if (c === '(') {
+      bodyRepeats.push(false);
+      // Skip the group prefix so its '?' is not read as a quantifier.
+      if (re[i + 1] === '?') {
+        const k = re[i + 2];
+        if (k === ':' || k === '=' || k === '!') i += 2;
+        else if (k === '<' && (re[i + 3] === '=' || re[i + 3] === '!')) i += 3;
+        else if (k === '<') { const end = re.indexOf('>', i + 3); i = end === -1 ? re.length : end; }
+      }
+      continue;
+    }
+    if (c === '*' || c === '+' || c === '?' || c === '{' || c === '|') {
+      if (bodyRepeats.length) bodyRepeats[bodyRepeats.length - 1] = true;
+      continue;
+    }
+    if (c === ')') {
+      const repeats = bodyRepeats.pop();
+      const next = re[i + 1];
+      const quantified = next === '*' || next === '+' || next === '{';
+      if (repeats && quantified) return true;
+      // To its parent, a quantified group is itself a repetition.
+      if (bodyRepeats.length && (quantified || next === '?')) {
+        bodyRepeats[bodyRepeats.length - 1] = true;
+      }
     }
   }
-  return true;
+  return false;
+}
+
+// A pattern is a case-insensitive substring, or /…/ for a regex. Returns the
+// reason it cannot be used, or null when it is fine — the save path shows that
+// reason instead of dropping the field, because a dropped condition silently
+// turns the rule into a catch-all.
+function rulePatternError(p) {
+  if (!(p.length > 2 && p.startsWith('/') && p.endsWith('/'))) return null; // substring
+  const body = p.slice(1, -1);
+  try {
+    new RegExp(body, 'i');
+  } catch (e) {
+    return `not a valid regular expression: ${e.message}`;
+  }
+  if (hasNestedQuantifier(body)) {
+    return 'a repeated group that itself repeats or alternates (e.g. "(a+)+") can hang the server on a near-miss; rewrite it or use a plain substring';
+  }
+  return null;
+}
+
+function validRulePattern(p) {
+  return !rulePatternError(p);
 }
 
 function ruleTextMatch(pattern, value) {
-  const v = String(value || '');
+  // Titles are the long field here, and only their first few hundred
+  // characters can plausibly carry a rule's condition.
+  const v = String(value || '').slice(0, RULE_VALUE_MAX);
   const p = String(pattern);
   if (p.length > 2 && p.startsWith('/') && p.endsWith('/')) {
+    // Checked again at match time, not just at save time: rules.json is a file
+    // on disk, and one written before this check (or by hand) still runs here.
+    if (!validRulePattern(p)) return false;
     try {
       return new RegExp(p.slice(1, -1), 'i').test(v);
     } catch {
@@ -1552,14 +1629,19 @@ function ruleTextMatch(pattern, value) {
 function sanitizeRules(input) {
   if (!Array.isArray(input)) return null;
   const out = [];
+  const errors = [];
   for (const r of input.slice(0, 100)) {
     if (!r || typeof r !== 'object') continue;
     const match = r.match && typeof r.match === 'object' ? r.match : {};
     const apply = r.apply && typeof r.apply === 'object' ? r.apply : {};
     const m = {};
+    const label = cleanRuleStr(r.name, 60) || 'Rule';
     for (const k of ['site', 'creator', 'title']) {
       const v = cleanRuleStr(match[k], 200);
-      if (v && validRulePattern(v)) m[k] = v;
+      if (!v) continue;
+      const bad = rulePatternError(v);
+      if (bad) errors.push(`"${label}" ${k}: ${bad}`);
+      else m[k] = v;
     }
     if (match.mediaType === 'video' || match.mediaType === 'image') m.mediaType = match.mediaType;
     for (const k of ['minDuration', 'maxDuration']) {
@@ -1591,7 +1673,7 @@ function sanitizeRules(input) {
       apply: a,
     });
   }
-  return out;
+  return { rules: out, errors };
 }
 
 function matchRule(ctx) {
@@ -1625,8 +1707,12 @@ app.get('/api/rules', (_req, res) => res.json({ ok: true, rules: readRules() }))
 
 // Whole-list save: the UI owns ordering, so it always posts the full array.
 app.post('/api/rules', (req, res) => {
-  const rules = sanitizeRules(req.body && req.body.rules);
-  if (!rules) return res.status(400).json({ ok: false, error: 'Invalid rules payload' });
+  const parsed = sanitizeRules(req.body && req.body.rules);
+  if (!parsed) return res.status(400).json({ ok: false, error: 'Invalid rules payload' });
+  // A refused pattern is reported, never quietly dropped: a rule that loses its
+  // only condition matches every link instead of none.
+  if (parsed.errors.length) return res.status(400).json({ ok: false, error: parsed.errors.join('; ') });
+  const rules = parsed.rules;
   try {
     writeJsonAtomic(RULES_FILE, rules);
   } catch (e) {
@@ -1898,15 +1984,35 @@ const TAG_SCRIPT = [
   '        pass',
   'f.save()',
 ].join('\n');
+// A missing interpreter or a missing mutagen is a setup problem, and python's
+// own wording for it ("No module named 'mutagen'", ENOENT) does not say which
+// knob fixes it. Name the dependency and the variable instead; anything else is
+// a real tagging failure and passes through as it is.
+function tagDependencyError(text) {
+  if (/No module named ['"]?mutagen/i.test(text)) {
+    return `mutagen is not installed for ${PYTHON} — install it with \`pip install mutagen\` (or set PYTHON_BIN to an interpreter that has it)`;
+  }
+  return null;
+}
+
 function tagAudio(src, tags) {
   return new Promise((resolve, reject) => {
-    const p = spawn('python3', ['-c', TAG_SCRIPT, src, JSON.stringify(tags)]);
+    const p = spawn(PYTHON, ['-c', TAG_SCRIPT, src, JSON.stringify(tags)]);
     let err = '';
     p.stderr.on('data', (d) => (err += d));
-    p.on('error', reject);
+    p.on('error', (e) =>
+      reject(
+        new Error(
+          e.code === 'ENOENT'
+            ? `python3 not found (tried "${PYTHON}") — it and mutagen are required for audio tagging; set PYTHON_BIN to its path`
+            : String(e.message || e)
+        )
+      )
+    );
     p.on('close', (code) => {
       if (code === 0) return resolve();
-      reject(new Error(err.trim().split('\n').pop() || 'tagging failed'));
+      const last = err.trim().split('\n').pop() || '';
+      reject(new Error(tagDependencyError(err) || last || 'tagging failed'));
     });
   });
 }
@@ -2902,7 +3008,7 @@ async function lookupGenres(artist, title, tags) {
 }
 
 // GET /api/playlists -> saved playlists (subscriptions for new-track checks).
-app.get('/api/playlists', (_req, res) => res.json({ ok: true, playlists: readPlaylists() }));
+app.get('/api/playlists', (_req, res) => res.json({ ok: true, playlists: playlistPayload(readPlaylists()) }));
 
 // POST /api/playlists/save?url=...&name=... -> add (or rename) a saved playlist.
 app.post('/api/playlists/save', (req, res) => {
@@ -2918,7 +3024,7 @@ app.post('/api/playlists/save', (req, res) => {
     if ('lib' in req.query) existing.lib = lib;
   } else list.push({ id: `${Date.now()}`, url, name, lib, addedAt: Date.now() });
   writePlaylists(list);
-  res.json({ ok: true, playlists: list });
+  res.json({ ok: true, playlists: playlistPayload(list) });
 });
 
 // ---------------------------------------------------------------------------
@@ -2998,6 +3104,18 @@ function recordWatchFailure(playlistId, key) {
   }
 }
 
+// How many of this playlist's tracks the watcher has retired. Without it the
+// cap is invisible: a track simply stops being offered, with nothing in the UI
+// saying so or able to undo it.
+function exhaustedCount(pl) {
+  return Object.values((pl && pl.failures) || {}).filter((n) => n >= MAX_WATCH_FAILURES).length;
+}
+
+// Playlists as the API reports them: the stored row plus its derived counts.
+function playlistPayload(list) {
+  return list.map((p) => ({ ...p, exhausted: exhaustedCount(p) }));
+}
+
 // A track that eventually succeeds should not carry its earlier failures.
 function clearWatchFailure(playlistId, key) {
   if (!playlistId || !key) return;
@@ -3074,7 +3192,7 @@ app.post('/api/playlists/watch', (req, res) => {
   if (!pl) return res.status(404).json({ ok: false, error: 'Playlist not found' });
   pl.watch = req.query.on === '1';
   writePlaylists(list);
-  res.json({ ok: true, playlists: list });
+  res.json({ ok: true, playlists: playlistPayload(list) });
 });
 
 // POST /api/playlists/lib?id=...&lib=main|kids -> switch which Navidrome
@@ -3085,7 +3203,7 @@ app.post('/api/playlists/lib', (req, res) => {
   if (!pl) return res.status(404).json({ ok: false, error: 'Playlist not found' });
   pl.lib = parseNavLib(req.query.lib);
   writePlaylists(list);
-  res.json({ ok: true, playlists: list });
+  res.json({ ok: true, playlists: playlistPayload(list) });
 });
 
 // POST /api/playlists/check?id=... -> probe one playlist right now and queue
@@ -3127,11 +3245,23 @@ app.post('/api/downloaded/unmark', (req, res) => {
   res.json({ ok: true });
 });
 
+// POST /api/playlists/failures/clear?id=... -> forget this playlist's failure
+// counters, so tracks the watcher gave up on are queued again next cycle.
+app.post('/api/playlists/failures/clear', (req, res) => {
+  const list = readPlaylists();
+  const pl = list.find((p) => p.id === String(req.query.id));
+  if (!pl) return res.status(404).json({ ok: false, error: 'Playlist not found' });
+  const cleared = exhaustedCount(pl);
+  pl.failures = {};
+  writePlaylists(list);
+  res.json({ ok: true, cleared, playlists: playlistPayload(list) });
+});
+
 // POST /api/playlists/delete?id=...
 app.post('/api/playlists/delete', (req, res) => {
   const list = readPlaylists().filter((p) => p.id !== String(req.query.id));
   writePlaylists(list);
-  res.json({ ok: true, playlists: list });
+  res.json({ ok: true, playlists: playlistPayload(list) });
 });
 
 // GET /api/history -> recent downloads, newest first.
@@ -3152,6 +3282,10 @@ app.get('/api/music', (req, res) => {
   // missing = the row is in the log but the file is gone from the library --
   // the scan flags it, and this is how you get to see which ones.
   const status = ['done', 'todo', 'edited', 'missing'].includes(req.query.status) ? req.query.status : null;
+  // sort=old flips the order here rather than in the browser: the response is a
+  // window of `limit` rows, so reversing it client-side would only ever show
+  // the oldest of the newest page, not the oldest in the library.
+  const oldestFirst = req.query.sort === 'old';
   let items = readMusic();
   if (lib) items = items.filter((t) => t.lib === lib);
   if (q) {
@@ -3169,6 +3303,8 @@ app.get('/api/music', (req, res) => {
   else if (status === 'todo') items = items.filter((t) => !t.done);
   else if (status === 'edited') items = items.filter((t) => t.editedAt);
   else if (status === 'missing') items = items.filter((t) => t.missing);
+  // The log is newest-first (recordMusic unshifts), so this is the whole flip.
+  if (oldestFirst) items = items.slice().reverse();
   res.json({
     ok: true,
     total: items.length,
@@ -3792,6 +3928,22 @@ app.get('/api/profile', async (req, res) => {
   }
 });
 
+// Profile items resolve from a listing that carries no tags; pull them from the
+// clip's own post page. This used to sit inside saveJobToImport, which meant it
+// ran on the shorts batch path and nowhere else — a whole-profile save to the
+// server library, the photo library or posts lost every tag. Call it once per
+// clip that is actually being saved, so a skipped clip never pays for the extra
+// page fetch, and use its return value: enrichJob may hand back a new object.
+async function enrichProfileItem(job) {
+  if (!job || !job.pageUrl) return job;
+  if (Array.isArray(job.tags) && job.tags.length) return job;
+  try {
+    return (await extractors.enrichJob(job)) || job;
+  } catch {
+    return job; // best effort — tags stay empty
+  }
+}
+
 // GET /api/download-all?url=...&channel=main|18plus
 // Streams Server-Sent Events with per-clip progress while saving each clip into
 // the channel's _import folder (skipping clips already in elite-v2).
@@ -3834,7 +3986,7 @@ app.get('/api/download-all', async (req, res) => {
   let skipped = 0;
   let failed = 0;
   for (let i = 0; i < items.length; i++) {
-    const job = items[i];
+    let job = items[i];
     const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
     const title = job.title || stem;
     const id = job.id || stem;
@@ -3857,6 +4009,9 @@ app.get('/api/download-all', async (req, res) => {
         send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'skipped', error: 'too long for shorts' });
         continue;
       }
+      // Past every skip: this clip is being saved, so it is worth the page
+      // fetch. Above the branch, so all four destinations get the tags.
+      job = await enrichProfileItem(job);
       if (isImage) {
         if (toPosts) await saveImageToPosts(job);
         else await saveImageToLibrary(job);
@@ -4045,12 +4200,17 @@ function cookieHintFor(job, error) {
 // Mark a job as failed AND write the failure to the persistent history, so the
 // reason survives a restart — the job list itself is in-memory only. Failures
 // are never marked as downloaded, so a playlist still offers them next time.
-function failJob(job, message) {
+function failJob(job, message, err) {
   const error = cookieHintFor(job, String(message || 'Download failed'));
   setJob(job, { status: 'error', phase: null, error });
   // Watcher-queued tracks count their failures so a permanently broken one
-  // stops coming back every cycle.
-  if (job.watch) recordWatchFailure(job.watch.playlistId, job.watch.key);
+  // stops coming back every cycle. Only a permanent failure counts: a track
+  // that met a rate limiter on three cycles is not broken, and counting those
+  // retires it from the playlist for good. Callers that hold the error object
+  // pass it, because its `retryable` flag classifies better than the text.
+  if (job.watch && !isTransientDownloadError(err === undefined ? error : err)) {
+    recordWatchFailure(job.watch.playlistId, job.watch.key);
+  }
   recordHistory({
     creator: job.creator || null,
     title: job.title || null,
@@ -4118,7 +4278,7 @@ async function runJob(job, params) {
   try {
     meta = await extractors.resolve(params.url);
   } catch (e) {
-    return failJob(job, 'Resolve failed: ' + String(e.message || e));
+    return failJob(job, 'Resolve failed: ' + String(e.message || e), e);
   }
   if (params.creatorOverride) meta.creator = params.creatorOverride;
   if (params.titleOverride) meta.title = params.titleOverride;
@@ -4176,7 +4336,7 @@ async function runJob(job, params) {
       if (attempt === DOWNLOAD_ATTEMPTS || !isTransientDownloadError(e)) {
         const queued = queueJobRetry(job, params, e);
         const failure = cookieHintFor(job, String(e.message || e));
-        return failJob(job, failure + (queued ? ' (queued for a later attempt)' : ''));
+        return failJob(job, failure + (queued ? ' (queued for a later attempt)' : ''), e);
       }
       // Back off a little further each time — the rate limiter that answered
       // 403 is usually busy with the other jobs in the batch.
@@ -4871,8 +5031,9 @@ function enqueueRetry(entry) {
 }
 
 async function attemptRetry(entry) {
-  const job = await extractors.resolve(entry.url);
+  let job = await extractors.resolve(entry.url);
   if (entry.creator) job.creator = entry.creator;
+  job = await enrichProfileItem(job);
   if (entry.dest === 'server') await saveJobToServer(job, entry.folder, entry.quality);
   else await saveJobToImport(job, entry.channel, entry.web, entry.quality);
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
@@ -4996,7 +5157,7 @@ function scheduleJob(job, params) {
     }
     activeJobs++;
     runJob(job, params)
-      .catch((e) => failJob(job, String(e.message || e)))
+      .catch((e) => failJob(job, String(e.message || e), e))
       .finally(() => {
         activeJobs--;
         const next = pendingJobs.shift();
@@ -5058,7 +5219,7 @@ async function toolVersions() {
     probeTool(FFMPEG, ['-version'], (s) => (firstLine(s).match(/ffmpeg version (\S+)/) || [])[1]),
     probeTool(FFPROBE, ['-version'], (s) => (firstLine(s).match(/ffprobe version (\S+)/) || [])[1]),
     probeTool(process.env.GALLERY_DL_BIN || 'gallery-dl', ['--version'], firstLine),
-    probeTool('python3', ['-c', 'import mutagen; print(mutagen.version_string)'], firstLine),
+    probeTool(PYTHON, ['-c', 'import mutagen; print(mutagen.version_string)'], firstLine),
   ]);
   const tools = [
     { name: 'yt-dlp', version: ytdlp },
@@ -5377,11 +5538,6 @@ app.post('/api/jobs/clear', (_req, res) => {
 // Download a job and write it (with metadata + .md sidecar) into the channel's
 // _import folder. Shared by the batch profile downloader.
 async function saveJobToImport(job, channel, web, quality) {
-  // Profile items resolve from a listing that carries no tags; pull them from
-  // the clip's own post page now, only for the clips actually being saved.
-  if (job.pageUrl && (!Array.isArray(job.tags) || !job.tags.length)) {
-    try { await extractors.enrichJob(job); } catch { /* best effort */ }
-  }
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const destDir = channelDir(channel);
   const outName = `${stem}${web ? '.web.mp4' : '.mp4'}`;

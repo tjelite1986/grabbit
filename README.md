@@ -114,6 +114,20 @@ Run it on your own machine, step by step. No prior experience needed.
   `yt-dlp --version`.
 - **ffmpeg** — merges/cuts media. `sudo apt install ffmpeg` on Debian/Ubuntu,
   `brew install ffmpeg` on macOS. Check with `ffmpeg -version`.
+- **Python 3 and mutagen** — every audio tag Grabbit reads or writes goes
+  through them, so the music and audiobook libraries do not work without them:
+  `sudo apt install python3 python3-pip` then `pip install mutagen`. Check with
+  `python3 -c "import mutagen; print(mutagen.version_string)"`. If `python3` is
+  not on your `PATH`, point `PYTHON_BIN` at it.
+- **gallery-dl and curl_cffi** (optional) — `pip install gallery-dl curl_cffi`.
+  gallery-dl enumerates image galleries (imagefap); curl_cffi lets yt-dlp
+  impersonate a browser on sites that check the TLS fingerprint. Without them
+  those sites fall back to plain yt-dlp, which works for most video links and
+  for none of the galleries.
+
+Only Node.js, yt-dlp and ffmpeg are needed to download a video. The rest add
+the music, audiobook and gallery destinations. The Docker image installs all of
+them, so this list is for running it outside Docker.
 
 Then, in a terminal:
 
@@ -140,9 +154,10 @@ npm start
 ```
 
 Open **http://localhost:3000**, paste a video link, press the arrow. That's it —
-no config file is required for a local try-out. Files land in the download
-folder (see [Configuration](#configuration) to choose where), and jobs/cookies
-state lives in `DATA_DIR`.
+no config file is required for a local try-out. Files land in `./downloads` and
+the state (job history, cookies, playlists) in `./data`, both next to
+`server.js`; see [Configuration](#configuration) to point `DOWNLOAD_DIR` and
+`DATA_DIR` somewhere else.
 
 To stop the server, press `Ctrl + C`. For running it permanently on a server,
 see [Deploy with Docker](#deploy-with-docker).
@@ -788,13 +803,25 @@ module.exports = {
       kind: 'direct',                 // or 'ytdlp'
       filename: 'creator-id.mp4',
       title: '...',
+      creator: '...',
       thumbnail: '...',
+      sourceUrl: 'https://example.com/v/123', // canonical page URL (dedupe key)
+      id: '123',                      // site-native id
+      mediaType: 'video',             // or 'image' (then also set `ext`)
+      duration: 42,                   // SECONDS, or null when unknown
+      tags: ['#tag'],                 // '#lowercase' strings
       downloadUrl: 'https://cdn.example.com/real.mp4',
       headers: { Referer: 'https://example.com/' }, // headers the CDN requires
     };
   },
 };
 ```
+
+Everything but `kind` and `filename` is optional, but leaving `duration` out
+means the shorts length cap never fires for that site — an unknown duration is
+treated as "no opinion", not as "too long". An extractor that also exports
+`resolveProfile(url)` returns `{ creator, items: [...] }` with the same shape
+per item, and the batch path only sees the fields the listing carries.
 
 See `extractors/nuditok.js` for a real example (SPA whose real URL only comes
 from a private API). The registry in `extractors/index.js` auto-loads every file
@@ -810,7 +837,7 @@ environment variables:
 | Variable | Description |
 | -------- | ----------- |
 | `PORT` | Listen port (default `3000`). |
-| `DATA_DIR` | State directory: job history, `scheduled.json`, cookie files. |
+| `DATA_DIR` | State directory: job history, `scheduled.json`, cookie files. Defaults to `./data` next to `server.js`; the Docker image sets it to `/data`. The server exits at boot if it cannot create it. |
 | `MAX_ACTIVE_JOBS` | Max downloads running concurrently (default `2`). |
 | `WATCH_INTERVAL_MINUTES` | How often watched playlists are polled. |
 | `MAX_WATCH_FAILURES` | How many times a watched track may fail before the watcher stops re-queuing it (default `3`). A track only counts as downloaded once it saves, so without a limit a deleted or geo-blocked video comes back every cycle forever. The count resets if it later succeeds. |
@@ -819,7 +846,7 @@ environment variables:
 
 | Variable | Description |
 | -------- | ----------- |
-| `DOWNLOAD_DIR` | Server-library root for saved copies. |
+| `DOWNLOAD_DIR` | Server-library root for saved copies. Defaults to `./downloads` next to `server.js`; the Docker image sets it to `/downloads`. |
 | `VIDEOS_DOWNLOAD_DIR` / `AUDIO_DOWNLOAD_DIR` / `PHOTOS_DOWNLOAD_DIR` / `ADULTS_DOWNLOAD_DIR` | Per-type overrides inside the library. |
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
@@ -840,7 +867,8 @@ environment variables:
 
 | Variable | Description |
 | -------- | ----------- |
-| `YTDLP_BIN` / `FFMPEG_BIN` / `FFPROBE_BIN` / `GALLERY_DL_BIN` / `PYTHON_BIN` | Paths to the external binaries, when they're not on `PATH`. |
+| `YTDLP_BIN` / `FFMPEG_BIN` / `FFPROBE_BIN` / `GALLERY_DL_BIN` | Paths to the external binaries, when they're not on `PATH`. |
+| `PYTHON_BIN` | Python 3 interpreter used for the mutagen tag reads/writes (default `python3`). It has to be the one mutagen is installed for — the music and audiobook destinations fail with a message naming it otherwise. |
 
 ### Auth
 

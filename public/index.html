@@ -630,6 +630,7 @@
       .plrow .del { flex: none; color: var(--muted); padding: 4px; }
       .plrow .watch { flex: none; color: var(--muted); padding: 4px; }
       .plrow .watch.on { color: var(--good); }
+      .plrow .plfail { flex: none; font-size: 11px; font-weight: 600; color: var(--bad); background: var(--surface-3); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; }
       .plrow .pllib { flex: none; font-size: 11px; font-weight: 600; letter-spacing: .3px; color: var(--muted); background: var(--surface-3); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; }
 
       /* Profile/playlist header buttons */
@@ -2128,13 +2129,21 @@
           const bell = p.watch
             ? '<svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 3a6 6 0 0 0-6 6v3.5L4 16h16l-2-3.5V9a6 6 0 0 0-6-6z"/><path d="M10 19a2 2 0 0 0 4 0z"/></svg>'
             : '<svg class="ic" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4 16h16l-2-3.5V9a6 6 0 0 0-6-6z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>';
+          // Tracks the watcher has given up on after repeated permanent
+          // failures. Shown only when there are any, and tapping it clears the
+          // counters so the next cycle offers them again.
+          const failed = p.exhausted
+            ? '<span class="plfail" title="' + p.exhausted + ' track(s) skipped after repeated failures — tap to try them again">' + p.exhausted + ' skipped</span>'
+            : '';
           row.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><path d="M4 6h12"/><path d="M4 12h12"/><path d="M4 18h8"/><circle cx="18" cy="16" r="3"/><path d="M21 16V8"/></svg><span class="nm"></span>' +
+            failed +
             '<span class="pllib" title="Target music library — tap to switch">' + (p.lib === 'kids' ? 'Kids' : 'Mine') + '</span>' +
             '<span class="watch' + (p.watch ? ' on' : '') + '" title="' + (p.watch ? 'Auto-download on — new tracks go to Navidrome' : 'Auto-download new tracks') + '">' + bell + '</span>' +
             '<span class="del"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></span>';
           row.querySelector('.nm').textContent = p.name;
           row.addEventListener('click', (e) => {
             if (e.target.closest('.del')) { deletePlaylist(p.id); return; }
+            if (e.target.closest('.plfail')) { clearPlaylistFailures(p); return; }
             if (e.target.closest('.pllib')) { togglePlaylistLib(p); return; }
             if (e.target.closest('.watch')) { toggleWatch(p); return; }
             urlInput.value = p.url;
@@ -2151,6 +2160,16 @@
           savedPlaylists = d.playlists || [];
           renderPlaylistRows();
           toast(next === 'kids' ? 'New tracks go to the kids library' : 'New tracks go to your library', 'good');
+        } catch (err) { toast(err.message, 'bad'); }
+      }
+      // Put the retired tracks back in play. The counters are per playlist, so
+      // clearing one says nothing about the others.
+      async function clearPlaylistFailures(p) {
+        try {
+          const d = await fetchJson('/api/playlists/failures/clear?id=' + encodeURIComponent(p.id), { method: 'POST' });
+          savedPlaylists = d.playlists || [];
+          renderPlaylistRows();
+          toast((d.cleared || 0) + ' skipped track(s) will be tried again', 'good');
         } catch (err) { toast(err.message, 'bad'); }
       }
       async function toggleWatch(p) {
@@ -2266,6 +2285,11 @@
       let sheetSelectedIds = null; // when set, the batch downloads only these ids
       let sheetMulti = false;    // multi-link paste mode (multiUrls)
       let sheetSeq = 0;          // bumped per sheet open (one-shot triggers key on it)
+      // The destination moves on its own: the mode preselects it, an image or a
+      // clip over the shorts cap forces the server library, a deploy without
+      // elite rewrites it. Only a click on the control is the user choosing a
+      // default, so only a click may overwrite the saved one.
+      let destTouched = false;
 
       function segValue(seg) { const on = seg.querySelector('.on'); return on ? on.dataset.v : ''; }
       function segSet(seg, v) { seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); }
@@ -2276,7 +2300,7 @@
         });
       }
 
-      bindSeg($('shDest'), () => syncSheet());
+      bindSeg($('shDest'), () => { destTouched = true; syncSheet(); });
       bindSeg($('shChannel'), () => syncSheet());
       bindSeg($('shNavLib'), () => syncSheet());
       $('shFolder').addEventListener('change', syncSheet);
@@ -2287,6 +2311,7 @@
 
       function openSheetCommon() {
         sheetSeq++;
+        destTouched = false;
         // Apply current defaults to the sheet controls. The active mode wins
         // over the saved default destination; Grabbit mode uses the setting.
         segSet($('shDest'), modeDest());
@@ -3035,7 +3060,7 @@
       $('shConfirm').addEventListener('click', async () => {
         if (sheetEdit) return saveTrackEdit();
         // Persist sheet choices as the new defaults.
-        settings.dest = segValue($('shDest'));
+        if (destTouched) settings.dest = segValue($('shDest'));
         settings.channel = segValue($('shChannel'));
         // Persist the resolved folder (a new-folder name, or the picked one).
         settings.folder = $('shFolder').value === '__new__'
@@ -3567,6 +3592,10 @@
       async function loadMusic() {
         const token = ++musicLoadToken;
         const params = new URLSearchParams({ limit: '500' });
+        // The "Date added" chip is shared with the history view; the music log
+        // is paged server-side, so the order has to be asked for, not reversed
+        // after the fact.
+        if (hSort === 'old') params.set('sort', 'old');
         if (musicQuery) params.set('q', musicQuery);
         if (musicLib) params.set('lib', musicLib);
         if (musicStatus) params.set('status', musicStatus);
