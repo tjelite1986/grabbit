@@ -848,6 +848,7 @@ environment variables:
 | -------- | ----------- |
 | `DOWNLOAD_DIR` | Server-library root for saved copies. Defaults to `./downloads` next to `server.js`; the Docker image sets it to `/downloads`. |
 | `VIDEOS_DOWNLOAD_DIR` / `AUDIO_DOWNLOAD_DIR` / `PHOTOS_DOWNLOAD_DIR` / `ADULTS_DOWNLOAD_DIR` | Per-type overrides inside the library. |
+| `ADULTS_BY_UPLOADER` | `1` files saves to the adults folder in a subfolder per uploader (`adults/<uploader>/`); an existing folder that differs only in case is reused. Off by default. |
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
 | `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |

@@ -202,6 +202,43 @@ function serverVideoDir(folder) {
   return path.join(DOWNLOAD_DIR, sanitizeFolder(folder));
 }
 
+// With ADULTS_BY_UPLOADER=1, saves to the adults folder are filed one level
+// deeper, in a subfolder named after the uploader (adults/<uploader>/), the
+// per-site layout a film library such as Jellyfin or Stash browses by.
+const ADULTS_BY_UPLOADER = process.env.ADULTS_BY_UPLOADER === '1';
+
+// Uploader subfolder name inside `dir`. An existing folder that differs only in
+// case is reused, so "pervmom" lands beside the "PervMom" already there.
+function uploaderFolder(dir, creator) {
+  // safeCreator keeps dots, so strip leading ones: "." or ".." must never
+  // become a path segment, and a dot folder would be hidden from scanners.
+  const name = safeCreator(creator).replace(/^[. ]+|[. ]+$/g, '') || 'unknown';
+  try {
+    const want = name.toLowerCase();
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (d.isDirectory() && d.name.toLowerCase() === want) return d.name;
+    }
+  } catch {
+    /* dir may not exist yet */
+  }
+  return name;
+}
+
+// Directory a video save actually lands in: the chosen folder, or its uploader
+// subfolder when that folder is filed by uploader.
+function serverSaveDir(folder, creator) {
+  const dir = serverVideoDir(folder);
+  if (!ADULTS_BY_UPLOADER || dir !== ADULTS_DIR) return dir;
+  return path.join(dir, uploaderFolder(dir, creator));
+}
+
+// Display name of a save location for history and messages: "videos", or
+// "adults/<uploader>" for an uploader subfolder.
+function serverShelf(folder, dir) {
+  const base = serverVideoDir(folder);
+  return dir === base ? path.basename(base) : `${path.basename(base)}/${path.basename(dir)}`;
+}
+
 // List the server-library subfolders (built-ins always included).
 function listServerFolders() {
   const set = new Set(['videos', 'adults', 'photos']);
@@ -4618,7 +4655,7 @@ app.get('/api/download-all', async (req, res) => {
       const exists = isImage
         ? (toPosts ? postsPending(job.creator, stem) : photoHas(stem))
         : dest === 'server'
-        ? serverHas(folder, stem)
+        ? serverHas(folder, job.creator, stem)
         : importedStatus(channel, job.creator, stem);
       if (exists) {
         skipped++;
@@ -4645,7 +4682,7 @@ app.get('/api/download-all', async (req, res) => {
         channel: isImage
           ? (toPosts ? 'elite/posts' : 'server/photos')
           : dest === 'server'
-          ? `server/${path.basename(serverVideoDir(folder))}`
+          ? `server/${serverShelf(folder, serverSaveDir(folder, job.creator))}`
           : channel,
         filename: isImage
           ? `${stem}.${safeExt(job.ext, 'jpg')}`
@@ -5038,7 +5075,8 @@ async function produceEliteVideo(job, meta, params, onProgress) {
 
 async function produceServerVideo(job, meta, params, onProgress) {
   const stem = `${safeCreator(meta.creator)}_-_${safeTitle(meta.title)}`;
-  const dir = serverVideoDir(params.folder);
+  const dir = serverSaveDir(params.folder, meta.creator);
+  const shelf = serverShelf(params.folder, dir);
   const container = parseContainer(params.container);
   // "Advanced" = a non-mp4 container or any embed/sponsorblock extra: let yt-dlp
   // mux + embed the final file and skip the mp4-only ffmpeg remux. Direct
@@ -5051,12 +5089,12 @@ async function produceServerVideo(job, meta, params, onProgress) {
   const already = fs.existsSync(libPath);
   const mime = videoMime(ext);
   if (already && !params.device) {
-    return finishJob(job, { saved: false, dest: 'server', dir: path.basename(dir), filename: outName, message: 'Already in the library.' });
+    return finishJob(job, { saved: false, dest: 'server', dir: shelf, filename: outName, message: 'Already in the library.' });
   }
   if (already && params.device) {
-    recordJobHistory(meta, params, `server/${path.basename(dir)}`, outName, false);
+    recordJobHistory(meta, params, `server/${shelf}`, outName, false);
     return finishJob(job, {
-      saved: false, dest: 'server', dir: path.basename(dir), filename: outName, mime,
+      saved: false, dest: 'server', dir: shelf, filename: outName, mime,
       deliverable: true, finalPath: libPath, deliverTemp: false, message: 'Already in the library.',
     });
   }
@@ -5087,11 +5125,11 @@ async function produceServerVideo(job, meta, params, onProgress) {
     // site that handed over no thumbnail of its own.
     const posterUrl = await attachPoster(meta, libPath, { embed: !(advanced && params.embedThumb) });
     if (posterUrl && !meta.thumbnail) meta.thumbnail = posterUrl;
-    recordJobHistory(meta, params, `server/${path.basename(dir)}`, outName, false);
+    recordJobHistory(meta, params, `server/${shelf}`, outName, false);
     finishJob(job, {
-      saved: true, dest: 'server', dir: path.basename(dir), filename: outName, mime,
+      saved: true, dest: 'server', dir: shelf, filename: outName, mime,
       deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
-      message: 'Saved to library/' + path.basename(dir) + '.',
+      message: 'Saved to library/' + shelf + '.',
     });
   } finally {
     fs.rm(tmpPath, { force: true }, () => {});
@@ -5316,7 +5354,7 @@ async function produceCut(job, meta, params, onProgress) {
     ? audiobookDir(AUDIOBOOKS_DIR, book.author, book.book)
     : audio
       ? AUDIO_DIR
-      : serverVideoDir(params.folder);
+      : serverSaveDir(params.folder, meta.creator);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-cut-'));
   try {
     await ytdlpCut(meta, tmpDir, stem, {
@@ -5380,14 +5418,14 @@ async function produceCut(job, meta, params, onProgress) {
     }
     recordJobHistory(
       meta, params,
-      toBook ? `audiobooks/${book.author}` : `server/${path.basename(dir)}`,
+      toBook ? `audiobooks/${book.author}` : `server/${serverShelf(params.folder, dir)}`,
       savedNames[0], false
     );
     const single = savedNames.length === 1 ? path.join(dir, savedNames[0]) : null;
     finishJob(job, {
       saved: true,
       dest: toBook ? 'audiobooks' : 'server',
-      dir: toBook ? book.book : path.basename(dir),
+      dir: toBook ? book.book : serverShelf(params.folder, dir),
       filename: savedNames[0],
       mime: single ? (audio ? audioMime(safeExt(path.extname(single).slice(1), 'm4a')) : videoMime(safeExt(path.extname(single).slice(1), 'mp4'))) : null,
       deliverable: !!params.device && !!single,
@@ -5395,7 +5433,7 @@ async function produceCut(job, meta, params, onProgress) {
       deliverTemp: false,
       message: toBook
         ? `Saved ${savedNames.length} part(s) to audiobooks/${book.author}/${book.book}.`
-        : `Saved ${savedNames.length} cut file(s) to library/${path.basename(dir)}.`,
+        : `Saved ${savedNames.length} cut file(s) to library/${serverShelf(params.folder, dir)}.`,
     });
   } finally {
     fs.rm(tmpDir, { recursive: true, force: true }, () => {});
@@ -5669,7 +5707,7 @@ async function attemptRetry(entry) {
     creator: job.creator || null,
     title: job.title || null,
     channel: entry.dest === 'server'
-      ? `server/${path.basename(serverVideoDir(entry.folder))}`
+      ? `server/${serverShelf(entry.folder, serverSaveDir(entry.folder, job.creator))}`
       : entry.channel,
     filename: `${stem}${entry.dest === 'elite' && entry.web ? '.web.mp4' : '.mp4'}`,
     sourceUrl: job.sourceUrl || entry.url,
@@ -6543,7 +6581,8 @@ async function downloadAudio(res, job, url, afmt, dest) {
 // embedded metadata. Optionally also streams the file to the browser.
 async function downloadServerVideo(res, job, url, { folder, quality, device }) {
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
-  const dir = serverVideoDir(folder);
+  const dir = serverSaveDir(folder, job.creator);
+  const shelf = serverShelf(folder, dir);
   const outName = `${stem}.mp4`;
   const libPath = path.join(dir, outName);
   const already = fs.existsSync(libPath);
@@ -6554,7 +6593,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
   if (already) cleanup.push(finalPath);
   try {
     if (already && !device) {
-      return res.json({ ok: true, saved: false, dest: 'server', dir: path.basename(dir), message: 'Already in the library.' });
+      return res.json({ ok: true, saved: false, dest: 'server', dir: shelf, message: 'Already in the library.' });
     }
     fs.mkdirSync(dir, { recursive: true });
     if (job.kind === 'direct') await downloadDirect(job, tmpPath);
@@ -6567,7 +6606,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     const histEntry = {
       creator: job.creator || null,
       title: job.title || null,
-      channel: `server/${path.basename(dir)}`,
+      channel: `server/${shelf}`,
       filename: outName,
       sourceUrl: job.sourceUrl || url,
       thumbnail: histThumb,
@@ -6579,7 +6618,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     if (!already) markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
     if (!device) {
       recordHistory({ ...histEntry, device: false });
-      return res.json({ ok: true, saved: !already, dest: 'server', dir: path.basename(dir), filename: outName });
+      return res.json({ ok: true, saved: !already, dest: 'server', dir: shelf, filename: outName });
     }
     res.setHeader('Content-Disposition', contentDisposition(outName));
     res.setHeader('Content-Type', 'video/mp4');
@@ -6599,7 +6638,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
 // batch profile downloader for dest='server'.
 async function saveJobToServer(job, folder, quality) {
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
-  const dir = serverVideoDir(folder);
+  const dir = serverSaveDir(folder, job.creator);
   const finalPath = path.join(dir, `${stem}.mp4`);
   const tmpPath = path.join(os.tmpdir(), `grabbit-${process.pid}-${Date.now()}-${stem.slice(0, 8)}.src`);
   try {
@@ -6614,9 +6653,9 @@ async function saveJobToServer(job, folder, quality) {
 }
 
 // Is this clip already in the chosen server-library folder?
-function serverHas(folder, stem) {
+function serverHas(folder, creator, stem) {
   try {
-    return fs.existsSync(path.join(serverVideoDir(folder), `${stem}.mp4`));
+    return fs.existsSync(path.join(serverSaveDir(folder, creator), `${stem}.mp4`));
   } catch {
     return false;
   }
