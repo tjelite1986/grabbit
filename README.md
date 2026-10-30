@@ -854,6 +854,7 @@ environment variables:
 | `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |
 | `ELITE_ROOT` | Shorts storage root — enables the shorts destination. Clips are dropped in `<root>/<channel>/_import/`. Unset (the default) there is no shorts destination at all: the *Shorts* option and the *Shorts* mode disappear from the UI and new downloads default to the server library. |
 | `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. Set one of the two and only that channel is offered. |
+| `DROP_FORMAT_MAIN` / `DROP_FORMAT_18PLUS` | How a clip dropped into that channel's `_import/` is named. `legacy` (default): `<creator>_-_<title>.mp4` plus a `.md` caption. `brackets`: `<title> [@<creator>] [id=<media id>].mp4` plus a yt-dlp style `.json` sidecar (title, description, tags, uploader, webpage_url). |
 | `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 
