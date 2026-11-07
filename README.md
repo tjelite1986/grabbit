@@ -194,21 +194,36 @@ it against the app (`audience.js`). The check runs when the save starts and
 again right before the file lands.
 
 - **Adult wins.** An item is adult when the save goes to Adshortis, when it was
-  recorded as adult before, when it comes from an 18+ site, or when its creator
-  matches an 18+ profile. Once adult, an item stays adult.
-- **General must be earned.** An item is general only when its creator matches
-  a general profile that was created by hand in the hub, or whose alias was
-  already delivered to a general app (Tikshortis or Platform). A save to the
-  plain server library does not count as a classification.
-- **Unknown is not general.** A creator no profile knows, or an item with no
-  creator, is refused by every general app (Tikshortis, Platform, the posts
-  import). Create a general profile for the creator in the hub to allow it, or
-  save to Adshortis or the server library.
+  recorded as adult before, when it comes from an 18+ site, when the site
+  itself flags it 18+ (yt-dlp's `age_limit`), or when its creator matches a
+  profile that is 18+ or was classified 18+. Once adult, an item stays adult.
+- **General is a decision by hand.** An item is general only when its creator
+  matches a general profile that was created by hand or classified general on
+  the hub's *Review* page, or when the item itself was classified general
+  there. Having been delivered to a general app before is not a
+  classification, and neither is a save to the plain server library.
+- **Unknown is not general.** A creator no one has classified, or an item with
+  no creator, is refused by every general app (Tikshortis, Platform, the posts
+  import). Classify it on the *Review* page, or save to Adshortis or the
+  server library.
+- **18+ is final.** An 18+ creator or item is never classified general again,
+  and 18+ and other profiles are never merged.
 - **A job can tighten, never loosen.** Saving to Adshortis makes the item
   adult. Renaming the creator (`creator=`) cannot borrow another creator's
   general profile: both the site's name and the new name are checked, and the
   stricter answer wins.
 - Adshortis takes videos only.
+
+**Review page.** The hub's *Review* page lists unclassified creators (most
+files first) and the items a general app refused (latest refusal first). Tick
+creators or items and classify them general or 18+, or classify every
+unclassified creator that matches a filter at once; that bulk action states
+the count you saw, and is refused if the list changed meanwhile.
+
+**Kids library.** A child-safety rule for the Navidrome kids library
+(`kidsRefusal()` in `audience.js`: only items classified general, never
+unknown or 18+) is written and tested but not switched on; the kids library
+works as before.
 
 Items and deliveries are recorded in `items.db` (SQLite, WAL) in the data
 directory. The database refuses on its own any general delivery of an item that
