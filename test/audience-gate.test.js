@@ -310,5 +310,5 @@ test('boot imports the registry without touching downloaded.json or profiles.jso
   assert.equal(reg, JSON.stringify(registry));
   assert.equal(JSON.parse(prof).profiles.length, 0);
   const { rows } = s.items();
-  assert.deepEqual(rows.map((r) => `${r.key}=${r.audience}`), ['id:example:1=general', 'id:example:2=adult']);
+  assert.deepEqual(rows.map((r) => `${r.key}=${r.audience}`), ['id:example:1=unknown', 'id:example:2=adult']);
 });

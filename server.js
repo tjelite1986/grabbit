@@ -2768,10 +2768,9 @@ const creatorKey = (name) => safeCreator(name);
 function classifyJob(destination, job) {
   const prior = ITEM_STORE && itemKeyOf(job) ? ITEM_STORE.get(itemKeyOf(job)) : null;
   let store = null;
-  let stats = null;
   let storeProblem = null;
   try {
-    ({ store, stats } = readProfiles());
+    ({ store } = readProfiles());
   } catch (e) {
     storeProblem = `the profile store could not be read (${e.message})`;
   }
@@ -2787,7 +2786,6 @@ function classifyJob(destination, job) {
         prior: prior ? prior.audience : null,
       },
       store,
-      stats,
       { keyOf: creatorKey }
     );
   // The creator as the job names it, and as the site named it when the job

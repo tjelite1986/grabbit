@@ -13,10 +13,11 @@
 //   general signals say.
 // - A job may tighten the audience to adult, never lower it. An item once
 //   recorded adult stays adult.
-// - General evidence is a profile the owner created by hand, or a creator
-//   alias that was already delivered to a general app. A save to the plain
-//   server library is not a classification: the registry records it with no
-//   channel, and that says nothing about the audience.
+// - General evidence is a profile the owner created by hand, and nothing
+//   else. A delivery is not a classification: that an alias reached a general
+//   app before (or was saved to the plain server library) says nothing about
+//   its audience. Profiles the registry sync created stay unknown until the
+//   owner classifies them.
 // - Adshortis (the 18+ destination) takes videos only. Every other
 //   destination is general.
 
@@ -29,9 +30,6 @@ const DESTINATIONS = {
   posts: { id: 'posts', app: 'the posts library', audience: 'general' },
   '18plus': { id: '18plus', app: 'Adshortis', audience: 'adult' },
 };
-
-// Registry channels that count as a delivery to a general app.
-const GENERAL_APP_CHANNELS = new Set(['main', 'platform']);
 
 // Sites that only host adult content. A clip from one of these is adult no
 // matter which profile its creator name matches.
@@ -128,25 +126,15 @@ function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
   return out;
 }
 
-// Was any alias of this profile already delivered to a general app?
-function deliveredToGeneralApp(p, stats) {
-  if (!stats) return false;
-  for (const a of p.aliases || []) {
-    const s = stats.get(`${p.audience}:${norm(a.name)}`);
-    if (s && s.channels && [...s.channels].some((c) => GENERAL_APP_CHANNELS.has(c))) return true;
-  }
-  return false;
-}
-
 // keyOf turns a name into its file-name spelling (the server passes
 // safeCreator), so "Jane Doe" and the alias "Jane_Doe" compare equal.
-// classify({ creatorKey, handle, site, extractor, sourceUrl, requested, prior }, store, stats)
+// classify({ creatorKey, handle, site, extractor, sourceUrl, requested, prior }, store)
 //   creatorKey: the job's creator; '' or 'unknown' for none
 //   handle:     the creator as the site spells it, lowercased (for accounts)
 //   requested:  'adult' when the job tightens the audience, else anything
 //   prior:      the audience this item was recorded with before, or null
 // -> { audience, reasons: [string], profileId: number|null }
-function classify(input, store, stats, { keyOf = norm } = {}) {
+function classify(input, store, { keyOf = norm } = {}) {
   const i = input || {};
   const ck = norm(i.creatorKey ? keyOf(i.creatorKey) : '');
   const creatorKey = ck === 'unknown' ? '' : ck;
@@ -164,16 +152,17 @@ function classify(input, store, stats, { keyOf = norm } = {}) {
     return { audience: 'adult', reasons, profileId: adultProfile ? adultProfile.profile.id : null };
   }
 
-  const general = matches.find(
-    (m) => m.profile.audience === 'general' && (m.profile.origin === 'manual' || deliveredToGeneralApp(m.profile, stats))
-  );
+  const general = matches.find((m) => m.profile.audience === 'general' && m.profile.origin === 'manual');
   if (general) {
-    const how = general.profile.origin === 'manual' ? 'classified by hand' : 'already delivered to a general app';
-    return { audience: 'general', reasons: [`the creator matches the general profile #${general.profile.id} (${how})`], profileId: general.profile.id };
+    return {
+      audience: 'general',
+      reasons: [`the creator matches the general profile #${general.profile.id} (classified by hand)`],
+      profileId: general.profile.id,
+    };
   }
 
   if (!creatorKey && !handle) reasons.push('the item has no creator');
-  else if (matches.length) reasons.push('the matching general profile has never been delivered to a general app and was not created by hand');
+  else if (matches.length) reasons.push('the matching profile was not classified by hand');
   else reasons.push('no profile matches the creator');
   return { audience: 'unknown', reasons, profileId: null };
 }
@@ -227,7 +216,6 @@ function storedAudience(prior, next) {
 module.exports = {
   AUDIENCES,
   DESTINATIONS,
-  GENERAL_APP_CHANNELS,
   ADULT_SITE_DOMAINS,
   isAdultSite,
   platformOfSite,

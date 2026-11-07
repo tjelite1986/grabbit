@@ -135,12 +135,11 @@ function migrate(db, migrations, file, existed, now) {
   return backup;
 }
 
-// The registry's audience for a channel: only the two general app channels
-// and the 18+ channel say anything; the plain server library says nothing.
+// The registry's audience for a channel. Only the 18+ channel says anything:
+// a save into a general app is a delivery, not a classification, so every
+// other channel (and the plain server library) leaves the item unknown.
 function audienceOfRegistryChannel(channel) {
-  if (channel === '18plus') return 'adult';
-  if (channel === 'main' || channel === 'platform') return 'general';
-  return 'unknown';
+  return channel === '18plus' ? 'adult' : 'unknown';
 }
 
 // The item key for a registry key: the site-native id key when there is one

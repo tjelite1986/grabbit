@@ -86,7 +86,8 @@ test('the registry import is read-only, additive and maps one entry to one item'
   const r = s.importRegistry(registry);
   assert.equal(JSON.stringify(registry), before, 'the registry object is not changed');
   assert.deepEqual(r, { registryItems: 4, added: 4, tightened: 0 });
-  assert.equal(s.get('id:example:1').audience, 'general');
+  // A save into a general app is a delivery, not a classification.
+  assert.equal(s.get('id:example:1').audience, 'unknown');
   assert.equal(s.get('id:example:2').audience, 'adult');
   assert.equal(s.get('example.com/v/3').audience, 'unknown');
   assert.equal(s.get('yt:abc').audience, 'unknown');

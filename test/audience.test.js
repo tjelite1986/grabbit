@@ -29,7 +29,8 @@ function synced(entries) {
   return { store: profiles.sync(profiles.emptyStore(), stats, NOW).store, stats };
 }
 
-const classify = (input, store, stats) => audience.classify(input, store, stats, { keyOf });
+// A third argument (old call sites passed registry stats) is ignored on purpose.
+const classify = (input, store) => audience.classify(input, store, { keyOf });
 
 test('a creator no profile knows is unknown, and no general app takes it', () => {
   const c = classify({ creatorKey: 'nobody' }, profiles.emptyStore(), new Map());
@@ -63,18 +64,23 @@ test('an account on the same platform matches; the same handle elsewhere does no
   assert.equal(classify({ creatorKey: 'other', handle: 'janed', site: 'instagram' }, store, new Map()).audience, 'unknown');
 });
 
-test('a registry alias counts as general only when it reached a general app', () => {
-  const app = synced([['alice', 'main']]);
-  assert.equal(classify({ creatorKey: 'alice' }, app.store, app.stats).audience, 'general');
-  const plat = synced([['carol', 'platform']]);
-  assert.equal(classify({ creatorKey: 'carol' }, plat.store, plat.stats).audience, 'general');
-  // A save to the plain server library makes a "general" registry profile,
-  // but that is not a classification.
-  const lib = synced([['bob', null]]);
-  assert.equal(lib.store.profiles[0].audience, 'general');
-  const c = classify({ creatorKey: 'bob' }, lib.store, lib.stats);
-  assert.equal(c.audience, 'unknown');
-  assert.match(audience.refusal(c, 'main'), /not classified/);
+test('a delivery is not a classification: registry profiles stay unknown wherever they were saved', () => {
+  for (const channel of ['main', 'platform', null]) {
+    const reg = synced([['alice', channel]]);
+    assert.equal(reg.store.profiles[0].audience, 'general', 'the sync files the alias under general');
+    assert.notEqual(reg.store.profiles[0].origin, 'manual');
+    const c = classify({ creatorKey: 'alice' }, reg.store);
+    assert.equal(c.audience, 'unknown', String(channel));
+    assert.match(c.reasons.join(';'), /not classified by hand/);
+    for (const dest of ['main', 'platform', 'posts']) assert.match(audience.refusal(c, dest), /not classified/, dest);
+  }
+});
+
+test('only a profile created by hand makes a creator general', () => {
+  const c = classify({ creatorKey: 'alice' }, storeWith([{ name: 'alice', audience: 'general' }]));
+  assert.equal(c.audience, 'general');
+  assert.match(c.reasons[0], /classified by hand/);
+  assert.equal(audience.refusal(c, 'main'), null);
 });
 
 test('every adult signal wins over a general profile', () => {
