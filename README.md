@@ -186,6 +186,44 @@ Adshortis is a destination of its own, never mixed with the general apps:
 - A save to it is refused up front when it is not available, and an 18+ image
   is refused instead of going to the general posts import.
 
+### The audience gate
+
+Every item has an audience: `general`, `adult` or `unknown`. Before anything is
+written into an app's folder, Grabbit works out the item's audience and checks
+it against the app (`audience.js`). The check runs when the save starts and
+again right before the file lands.
+
+- **Adult wins.** An item is adult when the save goes to Adshortis, when it was
+  recorded as adult before, when it comes from an 18+ site, or when its creator
+  matches an 18+ profile. Once adult, an item stays adult.
+- **General must be earned.** An item is general only when its creator matches
+  a general profile that was created by hand in the hub, or whose alias was
+  already delivered to a general app (Tikshortis or Platform). A save to the
+  plain server library does not count as a classification.
+- **Unknown is not general.** A creator no profile knows, or an item with no
+  creator, is refused by every general app (Tikshortis, Platform, the posts
+  import). Create a general profile for the creator in the hub to allow it, or
+  save to Adshortis or the server library.
+- **A job can tighten, never loosen.** Saving to Adshortis makes the item
+  adult. Renaming the creator (`creator=`) cannot borrow another creator's
+  general profile: both the site's name and the new name are checked, and the
+  stricter answer wins.
+- Adshortis takes videos only.
+
+Items and deliveries are recorded in `items.db` (SQLite, WAL) in the data
+directory. The database refuses on its own any general delivery of an item that
+is not general, and any lowering of an adult item. On boot, items are imported
+from `downloaded.json` (read only; nothing is added to or changed in the JSON
+files). Before a schema migration the existing database is copied to
+`items.db.pre-v<N>-<time>`, and a database newer than the code is refused. The
+daily state snapshot includes a consistent copy of `items.db`. If `items.db`
+cannot be opened, general apps receive nothing until it can; `/api/health`
+shows the reason under `items`.
+
+Content hashes (SHA-256) are recorded for each delivered file. A file with the
+same bytes as an earlier item is logged as a duplicate; nothing is refused on
+that yet.
+
 ### Creator profiles
 
 The hub's Profiles page manages one profile per creator, stored in

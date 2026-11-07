@@ -1,0 +1,214 @@
+'use strict';
+// Grabbit 2.0 audience gate: which audience an item belongs to, and whether a
+// destination may receive it. Pure functions; the server feeds them the
+// profile store, the item's earlier record and the job, and calls refusal()
+// before every write into an app's folder.
+//
+// Rules, each one a promise to the owner:
+// - Three audiences: general, adult, unknown. Unknown is never treated as
+//   general. A general app receives an item only when it is positively
+//   classified general.
+// - Adult wins. Any adult signal (the job, the item's earlier record, the
+//   source site, a matching adult profile) makes the item adult, whatever the
+//   general signals say.
+// - A job may tighten the audience to adult, never lower it. An item once
+//   recorded adult stays adult.
+// - General evidence is a profile the owner created by hand, or a creator
+//   alias that was already delivered to a general app. A save to the plain
+//   server library is not a classification: the registry records it with no
+//   channel, and that says nothing about the audience.
+// - Adshortis (the 18+ destination) takes videos only. Every other
+//   destination is general.
+
+const AUDIENCES = ['general', 'adult', 'unknown'];
+
+// Every app destination Grabbit writes into, and the audience it serves.
+const DESTINATIONS = {
+  main: { id: 'main', app: 'Tikshortis', audience: 'general' },
+  platform: { id: 'platform', app: 'Platform', audience: 'general' },
+  posts: { id: 'posts', app: 'the posts library', audience: 'general' },
+  '18plus': { id: '18plus', app: 'Adshortis', audience: 'adult' },
+};
+
+// Registry channels that count as a delivery to a general app.
+const GENERAL_APP_CHANNELS = new Set(['main', 'platform']);
+
+// Sites that only host adult content. A clip from one of these is adult no
+// matter which profile its creator name matches.
+const ADULT_SITE_DOMAINS = [
+  'erome.com',
+  'imagefap.com',
+  'nuditok.com',
+  'onlytik.com',
+  'redgifs.com',
+  'tik.porn',
+  'xfree.com',
+  'xxxfollow.com',
+];
+const ADULT_SITE_SLUGS = new Set(['erome', 'imagefap', 'nuditok', 'onlytik', 'redgifs', 'tikporn', 'xfree', 'xxxfollow']);
+
+// The site of a job is a hostname (`redgifs.com`), a slug yt-dlp gave itself
+// (`RedGifs`) or an extractor name. Any of them may name an adult site.
+function isAdultSite(...values) {
+  for (const v of values) {
+    const s = String(v || '').trim().toLowerCase();
+    if (!s) continue;
+    let host = s;
+    try {
+      if (/^[a-z][a-z0-9+.-]*:\/\//.test(s)) host = new URL(s).hostname;
+    } catch { /* not a URL */ }
+    host = host.replace(/^(www|m)\./, '');
+    if (ADULT_SITE_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) return true;
+    if (ADULT_SITE_SLUGS.has(s.replace(/[^a-z0-9]+/g, ''))) return true;
+  }
+  return false;
+}
+
+// The site of a job, as a profile account platform.
+const SITE_PLATFORMS = [
+  ['tiktok', 'tiktok'],
+  ['instagram', 'instagram'],
+  ['facebook', 'facebook'],
+  ['youtube', 'youtube'],
+  ['twitter', 'x'],
+  ['x.com', 'x'],
+  ['reddit', 'reddit'],
+  ['snapchat', 'snapchat'],
+  ['twitch', 'twitch'],
+];
+function platformOfSite(site) {
+  const s = String(site || '').toLowerCase();
+  if (s === 'x') return 'x';
+  for (const [needle, platform] of SITE_PLATFORMS) if (s.includes(needle)) return platform;
+  return null;
+}
+
+// Creator names are compared the way they appear in file names: the server's
+// safeCreator() output, case-insensitive. The caller passes that function so
+// this module and the file names can never disagree.
+const norm = (v) => String(v || '').trim().toLowerCase();
+
+// The profiles a job's creator matches: by alias, by profile name, or by a
+// linked account on the job's own platform.
+function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
+  const out = [];
+  if (!store || !Array.isArray(store.profiles)) return out;
+  for (const p of store.profiles) {
+    const byAlias = creatorKey && (p.aliases || []).some((a) => norm(keyOf(a.name)) === creatorKey);
+    const byName = creatorKey && p.origin === 'manual' && norm(keyOf(p.name)) === creatorKey;
+    const byAccount =
+      handle && platform && (p.accounts || []).some((a) => a.platform === platform && norm(a.handle) === handle);
+    if (byAlias || byName || byAccount) out.push({ profile: p, byAlias, byName, byAccount });
+  }
+  return out;
+}
+
+// Was any alias of this profile already delivered to a general app?
+function deliveredToGeneralApp(p, stats) {
+  if (!stats) return false;
+  for (const a of p.aliases || []) {
+    const s = stats.get(`${p.audience}:${norm(a.name)}`);
+    if (s && s.channels && [...s.channels].some((c) => GENERAL_APP_CHANNELS.has(c))) return true;
+  }
+  return false;
+}
+
+// keyOf turns a name into its file-name spelling (the server passes
+// safeCreator), so "Jane Doe" and the alias "Jane_Doe" compare equal.
+// classify({ creatorKey, handle, site, extractor, sourceUrl, requested, prior }, store, stats)
+//   creatorKey: the job's creator; '' or 'unknown' for none
+//   handle:     the creator as the site spells it, lowercased (for accounts)
+//   requested:  'adult' when the job tightens the audience, else anything
+//   prior:      the audience this item was recorded with before, or null
+// -> { audience, reasons: [string], profileId: number|null }
+function classify(input, store, stats, { keyOf = norm } = {}) {
+  const i = input || {};
+  const ck = norm(i.creatorKey ? keyOf(i.creatorKey) : '');
+  const creatorKey = ck === 'unknown' ? '' : ck;
+  const handle = norm(i.handle);
+  const platform = platformOfSite(i.site);
+  const reasons = [];
+
+  if (i.requested === 'adult') reasons.push('the job saves it as 18+');
+  if (i.prior === 'adult') reasons.push('this item was recorded as 18+ before');
+  if (isAdultSite(i.site, i.extractor, i.sourceUrl)) reasons.push('the source site is an 18+ site');
+  const matches = matchProfiles(store, { creatorKey, handle, platform }, keyOf);
+  const adultProfile = matches.find((m) => m.profile.audience === 'adult');
+  if (adultProfile) reasons.push(`the creator matches the 18+ profile #${adultProfile.profile.id}`);
+  if (reasons.length) {
+    return { audience: 'adult', reasons, profileId: adultProfile ? adultProfile.profile.id : null };
+  }
+
+  const general = matches.find(
+    (m) => m.profile.audience === 'general' && (m.profile.origin === 'manual' || deliveredToGeneralApp(m.profile, stats))
+  );
+  if (general) {
+    const how = general.profile.origin === 'manual' ? 'classified by hand' : 'already delivered to a general app';
+    return { audience: 'general', reasons: [`the creator matches the general profile #${general.profile.id} (${how})`], profileId: general.profile.id };
+  }
+
+  if (!creatorKey && !handle) reasons.push('the item has no creator');
+  else if (matches.length) reasons.push('the matching general profile has never been delivered to a general app and was not created by hand');
+  else reasons.push('no profile matches the creator');
+  return { audience: 'unknown', reasons, profileId: null };
+}
+
+// Why this destination may not receive an item of this classification, or
+// null when it may. Fails closed on anything it does not recognise.
+function refusal(classification, destinationId, { mediaType, creator } = {}) {
+  const dest = DESTINATIONS[destinationId];
+  if (!dest) return `Unknown destination "${destinationId}"; nothing is written.`;
+  const audience = classification && AUDIENCES.includes(classification.audience) ? classification.audience : 'unknown';
+  if (dest.audience === 'adult') {
+    if (mediaType === 'image') {
+      return 'Adshortis takes videos only, and 18+ images are never filed into the general posts library. Save them to the server library instead.';
+    }
+    return null;
+  }
+  if (audience === 'general') return null;
+  const why = (classification && classification.reasons && classification.reasons.join('; ')) || 'no classification';
+  if (audience === 'adult') {
+    return `${dest.app} is a general app and this item is 18+ (${why}). 18+ material only goes to Adshortis or the server library.`;
+  }
+  const who = creator ? `"${creator}"` : 'this creator';
+  return (
+    `${dest.app} is a general app and the audience of ${who} is not classified (${why}). ` +
+    'Create a general profile for the creator in the hub, or save to the server library instead.'
+  );
+}
+
+// Two looks at one item (say the creator as the site named it and as the job
+// renamed it): adult if either is adult, general only if both are general.
+function stricter(a, b) {
+  if (!b) return a;
+  if (!a) return b;
+  if (a.audience === 'adult' || b.audience === 'adult') {
+    const adult = [a, b].filter((c) => c.audience === 'adult');
+    return { audience: 'adult', reasons: adult.flatMap((c) => c.reasons), profileId: adult[0].profileId };
+  }
+  if (a.audience === 'general' && b.audience === 'general') return a;
+  const unknown = [a, b].filter((c) => c.audience !== 'general');
+  return { audience: 'unknown', reasons: unknown.flatMap((c) => c.reasons), profileId: null };
+}
+
+// The audience an item is stored with: never lower than what it had.
+function storedAudience(prior, next) {
+  if (prior === 'adult' || next === 'adult') return 'adult';
+  if (next === 'general') return 'general';
+  if (prior === 'general') return 'general';
+  return 'unknown';
+}
+
+module.exports = {
+  AUDIENCES,
+  DESTINATIONS,
+  GENERAL_APP_CHANNELS,
+  ADULT_SITE_DOMAINS,
+  isAdultSite,
+  platformOfSite,
+  matchProfiles,
+  classify,
+  refusal,
+  stricter,
+  storedAudience,
+};

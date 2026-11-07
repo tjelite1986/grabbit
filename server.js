@@ -22,6 +22,8 @@ const gda = require('./gda');
 const platformDrop = require('./platform-drop');
 const hub = require('./hub');
 const profiles = require('./profiles');
+const audience = require('./audience');
+const itemStore = require('./item-store');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -634,6 +636,15 @@ function snapshotState() {
       const dst = path.join(dir, name);
       fs.copyFileSync(src, `${dst}.part`);
       fs.renameSync(`${dst}.part`, dst);
+    }
+    // items.db is live SQLite (WAL): a file copy could miss the -wal pages, so
+    // the snapshot is a consistent VACUUM INTO copy instead.
+    if (ITEM_STORE) {
+      try {
+        ITEM_STORE.snapshotTo(path.join(dir, 'items.db'));
+      } catch (e) {
+        console.warn('items.db snapshot failed:', e.message);
+      }
     }
     // Prune whole days past the retention window.
     const days = fs
@@ -1892,16 +1903,16 @@ function channelDir(channel) {
 }
 
 // Why this item cannot be saved into this channel for reasons of its own (not
-// the deploy's), or null. Only the platform channel has any.
+// the deploy's), or null. First the platform channel's own contract rules.
+// Then the audience gate (audience.js): a general app receives only items
+// classified general, and Adshortis takes videos only.
 function channelRefusal(channel, job) {
   const ch = CHANNELS[channel] || 'main';
-  if (ch === 'platform') return platformDrop.platformRefusal(job);
-  // With dest=elite an image is filed by the posts import, a general app. An
-  // 18+ image must never go there, and Adshortis takes clips only.
-  if (ch === '18plus' && job && job.mediaType === 'image') {
-    return 'Adshortis takes videos only, and 18+ images are never filed into the general posts library. Save them to the server library instead.';
+  if (ch === 'platform') {
+    const own = platformDrop.platformRefusal(job);
+    if (own) return own;
   }
-  return null;
+  return audienceRefusal(destinationOf(ch, job), job);
 }
 
 // The app that will show a clip saved to this channel.
@@ -2256,12 +2267,18 @@ function dropFiles(channel, job, web) {
 // sidecar beside it, in the order the channel's importer needs. The legacy
 // importers read the caption when the clip appears, so theirs goes first; the
 // platform importer treats the sidecar as the "complete" signal, so it goes last.
-function commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar) {
+// The audience gate runs again here, as the last step before anything lands
+// in the app's folder, so no caller can skip it.
+function commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar) {
+  const destination = destinationOf(channel, { ...job, mediaType: 'video' });
+  assertDeliverable(destination, job);
   if ((CHANNELS[channel] || 'main') === 'platform') {
-    return platformDrop.commitPlatformDrop(destDir, buildPath, finalPath, sidecarName, sidecar);
+    platformDrop.commitPlatformDrop(destDir, buildPath, finalPath, sidecarName, sidecar);
+  } else {
+    fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
+    fs.renameSync(buildPath, finalPath);
   }
-  fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
-  fs.renameSync(buildPath, finalPath);
+  recordDrop(destination, job, path.basename(finalPath), finalPath);
 }
 
 // GET /api/resolve?url=... -> metadata preview.
@@ -2693,6 +2710,176 @@ function changeProfiles(res, op) {
     });
   } catch (e) {
     profileError(res, e);
+  }
+}
+
+// --- Grabbit 2.0 items and the audience gate --------------------------------------
+// Every item Grabbit delivers into an app gets a row in items.db (SQLite, WAL)
+// with its audience, and every delivery gets a row of its own. The gate
+// (audience.js) runs before any byte is written into an app's folder, and the
+// database refuses a general delivery of an item that is not general on its
+// own, so a code path that forgets the gate still cannot record one.
+const ITEMS_DB_FILE = path.join(DATA_DIR, 'items.db');
+let ITEM_STORE = null;
+let ITEM_STORE_ERROR = null;
+try {
+  ITEM_STORE = itemStore.open(ITEMS_DB_FILE);
+  if (ITEM_STORE.migrationBackup) {
+    console.log(`items.db migrated to schema ${ITEM_STORE.SCHEMA_VERSION}; the old copy is ${path.basename(ITEM_STORE.migrationBackup)}`);
+  }
+  // Phase A: the registry is the source of truth until the index is proven
+  // against it. Read-only on downloaded.json; adds what is missing.
+  const r = ITEM_STORE.importRegistry(readDownloaded());
+  const c = ITEM_STORE.counts();
+  console.log(
+    `items.db: ${c.items} items (${c.general} general, ${c.adult} 18+, ${c.unknown} unclassified), ` +
+    `${c.deliveries} deliveries; registry has ${r.registryItems} items, ${r.added} added, ${r.tightened} tightened`
+  );
+} catch (e) {
+  ITEM_STORE = null;
+  ITEM_STORE_ERROR = e.message;
+  console.error(`[grabbit] items.db could not be opened (${e.message}). General apps receive nothing until it can.`);
+}
+
+// The app destination a save into this channel lands in. With dest=elite an
+// image in a non-platform channel goes to the posts import.
+function destinationOf(channel, job) {
+  const ch = CHANNELS[channel] || 'main';
+  if (ch === 'platform' || ch === '18plus') return ch;
+  return job && job.mediaType === 'image' ? 'posts' : 'main';
+}
+
+// The item key: the registry's site-native id key, else its URL key.
+function itemKeyOf(job) {
+  if (!job) return null;
+  return idKey(job.site, job.mediaId) || (job.sourceUrl ? mediaKey(job.sourceUrl) : null);
+}
+
+function itemKindOf(job) {
+  if (job && job.mediaType === 'image') return 'image';
+  return job && job.audioOnly ? 'audio' : 'video';
+}
+
+const creatorKey = (name) => safeCreator(name);
+
+// The audience of the item behind this job, for a save into `destination`.
+// A save into the 18+ app tightens it to adult; a job's own `audience: adult`
+// does too. Nothing a job says can make an item general.
+function classifyJob(destination, job) {
+  const prior = ITEM_STORE && itemKeyOf(job) ? ITEM_STORE.get(itemKeyOf(job)) : null;
+  let store = null;
+  let stats = null;
+  let storeProblem = null;
+  try {
+    ({ store, stats } = readProfiles());
+  } catch (e) {
+    storeProblem = `the profile store could not be read (${e.message})`;
+  }
+  const look = (creator) =>
+    audience.classify(
+      {
+        creatorKey: creator,
+        handle: creator,
+        site: job && job.site,
+        extractor: job && job.extractor,
+        sourceUrl: job && job.sourceUrl,
+        requested: destination === '18plus' || (job && job.audience === 'adult') ? 'adult' : null,
+        prior: prior ? prior.audience : null,
+      },
+      store,
+      stats,
+      { keyOf: creatorKey }
+    );
+  // The creator as the job names it, and as the site named it when the job
+  // renamed it: a rename never borrows another creator's general profile.
+  let c = look(job && job.creator);
+  if (job && job.sourceCreator !== undefined && job.sourceCreator !== job.creator) {
+    c = audience.stricter(c, look(job.sourceCreator));
+  }
+  if (storeProblem && c.audience === 'general') return { audience: 'unknown', reasons: [storeProblem], profileId: null };
+  if (storeProblem) c.reasons.push(storeProblem);
+  return c;
+}
+
+function recordItem(job, classification, filename) {
+  const key = itemKeyOf(job);
+  if (!ITEM_STORE || !key) return null;
+  return ITEM_STORE.upsert({
+    key,
+    site: job.site,
+    sourceId: job.mediaId,
+    sourceUrl: job.sourceUrl,
+    kind: itemKindOf(job),
+    audience: classification.audience,
+    reasons: classification.reasons,
+    profileId: classification.profileId,
+    creator: job.creator,
+    title: job.title,
+    filename,
+    origin: 'save',
+  });
+}
+
+// Why this job may not be delivered to this app destination, or null. Fails
+// closed: no item store, no key, or any error means a general app gets nothing.
+function audienceRefusal(destination, job) {
+  try {
+    const general = audience.DESTINATIONS[destination] && audience.DESTINATIONS[destination].audience === 'general';
+    if (general && !ITEM_STORE) {
+      return `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}), so nothing is delivered to a general app.`;
+    }
+    if (general && !itemKeyOf(job)) {
+      return 'This item has no source id or URL, so its audience cannot be recorded; nothing is delivered to a general app.';
+    }
+    const c = classifyJob(destination, job);
+    const why = audience.refusal(c, destination, { mediaType: job && job.mediaType, creator: job && job.creator });
+    if (why) {
+      const item = recordItem(job, c, null);
+      if (item) ITEM_STORE.recordDelivery(item.id, destination, 'refused', { detail: why });
+    }
+    return why;
+  } catch (e) {
+    console.error('audience gate:', e.message);
+    return `The audience check failed (${e.message}); nothing is delivered.`;
+  }
+}
+
+// The last check before bytes go into an app's folder. Throws on refusal.
+function assertDeliverable(destination, job) {
+  const why = audienceRefusal(destination, job);
+  if (why) throw new Error(why);
+}
+
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    let bytes = 0;
+    fs.createReadStream(file)
+      .on('data', (d) => { h.update(d); bytes += d.length; })
+      .on('error', reject)
+      .on('end', () => resolve({ sha256: h.digest('hex'), bytes }));
+  });
+}
+
+// Records a finished drop. The database trigger is the second lock: if this
+// item is not general, a general delivery cannot be recorded, and that is
+// logged loudly because the file is already in place.
+function recordDrop(destination, job, filename, filePath) {
+  if (!ITEM_STORE || !itemKeyOf(job)) return;
+  try {
+    const c = classifyJob(destination, job);
+    const item = recordItem(job, c, filename);
+    ITEM_STORE.recordDelivery(item.id, destination, 'dropped', { filename });
+    if (filePath) {
+      sha256File(filePath)
+        .then(({ sha256, bytes }) => {
+          const twin = ITEM_STORE.recordHash(item.id, sha256, bytes);
+          if (twin) console.warn(`duplicate content: ${filename} has the same bytes as item ${twin.key} (${twin.filename || 'no file name'})`);
+        })
+        .catch(() => { /* the importer may already have taken the file */ });
+    }
+  } catch (e) {
+    console.error(`[grabbit] delivery of ${filename} to ${destination} could not be recorded: ${e.message}`);
   }
 }
 
@@ -4702,7 +4889,9 @@ app.get('/api/download', async (req, res) => {
       .filter(Boolean);
   }
 
-  const refused = dest === 'elite' ? channelRefusal(channel, job) : null;
+  // Audio-only with dest=elite is streamed to the device, never filed into an
+  // app, so the audience gate has nothing to guard there.
+  const refused = dest === 'elite' && !audio ? channelRefusal(channel, job) : null;
   if (refused) return res.status(422).json({ ok: false, error: refused });
 
   // Images don't fit the video pipeline: with dest=elite they are dropped into
@@ -4781,7 +4970,7 @@ app.get('/api/download', async (req, res) => {
     // 3. Write the .md caption sidecar elite-v2 reads on import, then publish
     //    the clip itself with the rename.
     if (!skipImport) {
-      commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar);
+      commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar);
       // Register the save so playlist views and "download new" recognise the
       // clip as fetched — the jobs/batch paths do this via finishJob.
       markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
@@ -5367,7 +5556,7 @@ async function produceEliteVideo(job, meta, params, onProgress) {
     else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress, extraArgs: params.extraArgs });
     setJob(job, { phase: 'processing', percent: 100 });
     await embedMetadata(tmpPath, buildPath, meta, params.web, 'mp4');
-    if (!skipImport) commitDrop(params.channel, destDir, buildPath, finalPath, sidecarName, sidecar);
+    if (!skipImport) commitDrop(params.channel, meta, destDir, buildPath, finalPath, sidecarName, sidecar);
     recordJobHistory(meta, params, params.channel, outName, !skipImport);
     finishJob(job, {
       saved: !skipImport, channel: params.channel, dir: params.channel, filename: outName, mime: 'video/mp4',
@@ -6565,6 +6754,9 @@ app.get('/api/health', async (_req, res) => {
       dirHealth('data', DATA_DIR, true),
     ]),
     state: stateHealth(),
+    items: ITEM_STORE
+      ? { ok: true, file: path.basename(ITEMS_DB_FILE), schema: ITEM_STORE.SCHEMA_VERSION, ...ITEM_STORE.counts() }
+      : { ok: false, file: path.basename(ITEMS_DB_FILE), error: ITEM_STORE_ERROR },
     backups: {
       days: STATE_BACKUP_DAYS,
       dir: STATE_BACKUP_DIR,
@@ -6659,7 +6851,7 @@ async function saveJobToImport(job, channel, web, quality) {
     if (job.kind === 'direct') await downloadDirect(job, tmpPath);
     else await downloadYtdlp(job, tmpPath, { quality });
     await embedMetadata(tmpPath, buildPath, job, web, 'mp4');
-    commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar);
+    commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar);
     return finalPath;
   } finally {
     fs.rm(tmpPath, { force: true }, () => {});
@@ -7205,6 +7397,8 @@ async function saveImageToPosts(job) {
   const ext = safeExt(job.ext, 'jpg');
   const outName = `${stem}.${ext}`;
   const dir = postsImportDir(job.creator);
+  // The audience gate, as the last step before the posts folder is touched.
+  assertDeliverable('posts', job);
   makeDropDir(dir);
   const finalPath = path.join(dir, outName);
   const partPath = path.join(dir, `.${outName}.part`);
@@ -7219,6 +7413,7 @@ async function saveImageToPosts(job) {
     fs.rm(partPath, { force: true }, () => {});
     throw e;
   }
+  recordDrop('posts', job, outName, finalPath);
   return { path: finalPath, name: outName, creator: postsCreator(job.creator) };
 }
 

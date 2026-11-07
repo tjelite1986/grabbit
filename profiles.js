@@ -131,7 +131,9 @@ function check(store) {
   return problems;
 }
 
-// What the registry knows per alias: { 'general:name' -> { audience, name, files, sites, lastAt } }.
+// What the registry knows per alias: { 'general:name' -> { audience, name, files, sites, channels, lastAt } }.
+// `channels` holds the registry channels the alias was saved to (null for the
+// plain server library); the audience gate reads it, nothing displays it.
 // Files are counted once by filename, as in hub.summarize.
 function aliasStats(registry) {
   const out = new Map();
@@ -145,8 +147,9 @@ function aliasStats(registry) {
     const audience = audienceOfChannel(entry.channel);
     const k = aliasKey(audience, name);
     let s = out.get(k);
-    if (!s) out.set(k, (s = { audience, name, files: 0, sites: new Set(), lastAt: 0 }));
+    if (!s) out.set(k, (s = { audience, name, files: 0, sites: new Set(), channels: new Set(), lastAt: 0 }));
     s.files++;
+    s.channels.add(entry.channel || null);
     s.sites.add(hub.siteOf(key));
     s.lastAt = Math.max(s.lastAt, Number(entry.at) || 0);
   }
