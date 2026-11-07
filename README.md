@@ -162,6 +162,17 @@ the state (job history, cookies, playlists) in `./data`, both next to
 To stop the server, press `Ctrl + C`. For running it permanently on a server,
 see [Deploy with Docker](#deploy-with-docker).
 
+## Grabbit 2.0 hub (preview)
+
+`/hub/` is a second front end over the same API: a dashboard with counts from
+the downloaded registry, a paste-a-link box, the live job queue, the latest
+downloads, creators found in file names, app destinations and system status.
+Every number comes from the server. Parts that are not built yet (duplicate
+review, metadata editing, profile merge and split) are marked as planned
+instead of showing sample values. The classic interface at `/` keeps every
+feature and is linked from the hub's sidebar.
+
+
 ## Everyday use
 
 A few things the web UI does that aren't obvious at first glance.
@@ -856,6 +867,8 @@ environment variables:
 | `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. Set one of the two and only that channel is offered. |
 | `DROP_FORMAT_MAIN` / `DROP_FORMAT_18PLUS` | How a clip dropped into that channel's `_import/` is named. `legacy` (default): `<creator>_-_<title>.mp4` plus a `.md` caption. `brackets`: `<title> [@<creator>] [id=<media id>].mp4` plus a yt-dlp style `.json` sidecar (title, description, tags, uploader, webpage_url). |
 | `PLATFORM_IMPORT_ROOT` | Drop folder of a social app that imports clips as posts by per-creator profiles (channel `platform`, GDA target `platform.inbox`). Unlike the other shorts roots this IS the drop folder (no `<channel>/_import/`). Each save writes `<creator>_-_<title>.mp4` first, then `<creator>_-_<title>.json` (drop-zone contract v1: `version`, `file`, `source`, `sourceId`, `sourceUrl`, `creator{handle,name,profileUrl}`, `caption`, `tags`), both by an atomic rename from a dot-name. Videos only; a clip whose creator is unknown is refused. Unset (the default), the channel does not exist. |
+| `HUB_BRAND` | The line under the logo in the Grabbit 2.0 hub (`/hub/`). Default `Media hub`. |
+| `HUB_APP_LINKS` | The hub sidebar's list of connected apps: `Name\|https://app.example.com,Other\|https://other.example.com`. Only https links are shown. Unset, the list is hidden. |
 | `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 

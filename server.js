@@ -20,6 +20,7 @@ const { safeFetch } = require('./url-guard');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 const gda = require('./gda');
 const platformDrop = require('./platform-drop');
+const hub = require('./hub');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -1538,6 +1539,9 @@ const REVALIDATE = new Set([
   'icon-192.png',
   'icon-512.png',
   'icon-maskable-512.png',
+  // The hub's own shell (public/hub/), same reason.
+  'hub.js',
+  'hub.css',
 ]);
 
 app.use(
@@ -2569,6 +2573,39 @@ app.get('/api/config', (_req, res) =>
     channels: Object.keys(CHANNELS).filter((ch) => !!CHANNEL_ROOTS[ch]),
   })
 );
+
+// --- Grabbit 2.0 hub ----------------------------------------------------------
+// HUB_BRAND: the line under the logo. HUB_APP_LINKS: the sidebar's app list,
+// `Name|https://url,Name|https://url`. Both are deploy settings, not code, so
+// this public repo names no real app or domain. Non-https links are dropped.
+const HUB_BRAND = String(process.env.HUB_BRAND || 'Media hub').slice(0, 60);
+const HUB_APP_LINKS = hub.parseAppLinks(process.env.HUB_APP_LINKS);
+// Read-only numbers for the hub dashboard (public/hub/), counted from the
+// downloaded registry by hub.js. Nothing here is estimated: a count the
+// registry cannot answer is left out rather than guessed.
+app.get('/api/hub/summary', async (_req, res) => {
+  const summary = hub.summarize(readDownloaded());
+  let storage = null;
+  try {
+    const fsx = await fs.promises.statfs(DOWNLOAD_DIR);
+    storage = { path: 'downloads', size: fsx.blocks * fsx.bsize, free: fsx.bavail * fsx.bsize };
+  } catch {
+    /* not mounted or not reachable: the dashboard shows no storage row */
+  }
+  res.json({
+    ok: true,
+    ...summary,
+    storage,
+    channels: Object.keys(CHANNELS).filter((ch) => !!CHANNEL_ROOTS[ch]),
+    brand: HUB_BRAND,
+    apps: HUB_APP_LINKS,
+  });
+});
+
+// GET /api/hub/creators?q=&limit= -> creators seen in file names, most files first.
+app.get('/api/hub/creators', (req, res) => {
+  res.json({ ok: true, ...hub.creatorList(readDownloaded(), { q: req.query.q, limit: Number(req.query.limit) || 200 }) });
+});
 
 app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });
