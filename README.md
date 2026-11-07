@@ -912,6 +912,57 @@ gate and the second one used to come up wide open. Set `GRABBIT_AUTH_DISABLED=1`
 alongside it to run ungated on purpose. Either way the boot log states which
 mode the gate is in.
 
+### Per-app access (GDA v1)
+
+The shared password gives full access. Apps can instead get a password or a
+bearer token of their own, scoped to an audience (`general` or `adult`) and a
+list of **targets**: named destinations that the server maps to its own
+folders. A client never sends a path.
+
+| Target | Audience | Same as the legacy parameters |
+|---|---|---|
+| `legacy.tikshortis` | general | `dest=elite&channel=main` |
+| `adshortis.inbox` | adult | `dest=elite&channel=18plus` |
+| `server.downloads` | general | `dest=server` |
+| `library.adults` | adult | `dest=server&folder=adults` |
+| `library.music` | general | `dest=navidrome` |
+| `library.audiobooks` | general | `dest=audiobooks` |
+
+A `general` client can never be given an `adult` target, or the other way
+round. That rule is checked in code on every request, and a registry entry
+that breaks it is not loaded. Every job logs `gda: client=<id> target=<t>
+result=allow|deny`.
+
+Clients live in `DATA_DIR/gda-clients.json` and are managed with the CLI, run
+inside the container. Passwords and tokens are printed once and stored only as
+scrypt and SHA-256 hashes:
+
+```sh
+docker exec -it grabbit node gda-admin.js add my-app --audience general \
+    --targets legacy.tikshortis --main legacy.tikshortis --name "My app"
+docker exec -it grabbit node gda-admin.js password my-app   # for an installed app's settings
+docker exec -it grabbit node gda-admin.js token my-app      # for the v1 API
+docker exec -it grabbit node gda-admin.js list
+```
+
+An app password works with the existing `POST /login` + `GET /api/jobs/start`
+flow and the same `grabbit_auth` cookie, so an installed app only needs the new
+password in its settings. It reaches nothing else: no web UI and no other API
+(`403`). A request outside the app's scope gets `403 {"ok":false,"error":...}`.
+`--main` names where that app's `dest=elite&channel=main` requests go, so you
+can move an app to another library by editing one field, without rebuilding it.
+
+v1 endpoints take `Authorization: Bearer gda_<client>_<random>` and answer
+`{ "ok": true, "data": ... }` or
+`{ "ok": false, "error": { "code", "message", "retryable" } }`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/whoami` | client id, audience, allowed targets |
+| `GET /api/v1/targets` | targets this client may use |
+| `POST /api/v1/jobs` | `{ "url", "target" }`, optional `Idempotency-Key` header, returns `202` and `job_id` |
+| `GET /api/v1/jobs/:id` | `queued`, `fetching`, `stored`, `delivered`, `failed` or `cancelled` (only the client's own jobs) |
+
 ## Deploy with Docker
 
 The container is self-contained: the image bundles Node, yt-dlp, ffmpeg,

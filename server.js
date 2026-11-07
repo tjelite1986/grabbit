@@ -18,6 +18,7 @@ const { cleanDescription, parseTrackTitle } = require('./extractors/util');
 const { COOKIES_DIR, cookieArgs, cookieFileFor, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
 const { safeFetch } = require('./url-guard');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
+const gda = require('./gda');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -495,6 +496,7 @@ const STATE_FILES = [
   'retry-queue.json',
   'genres.json',
   'push-subscriptions.json',
+  'gda-clients.json',
 ];
 
 function writeJsonAtomic(file, value) {
@@ -1276,6 +1278,46 @@ const isInternal = (req) =>
   req.headers['x-grabbit-token'] === INTERNAL_TOKEN;
 const isAuthed = (req) => parseCookies(req.headers.cookie)[AUTH_COOKIE] === AUTH_TOKEN;
 
+// --- GDA v1 app clients (gda.js) --------------------------------------------
+// Apps may sign in with a password of their own (legacy /login, same cookie
+// name, so installed APKs need only a new password in their settings) or with a
+// bearer token. Either names a client in DATA_DIR/gda-clients.json, and the
+// client's audience and targets decide what it may save. The shared password
+// stays the `legacy-shared` client with today's full access.
+const gdaRegistry = gda.createRegistry({
+  file: path.join(DATA_DIR, 'gda-clients.json'),
+  sessionSecret: AUTH_SECRET,
+});
+const gdaIdempotency = gda.createIdempotency();
+
+function bearerToken(req) {
+  const m = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization || ''));
+  return m ? m[1] : null;
+}
+
+// Who a request acts as: a principal, { revoked: true } for a revoked token,
+// or null when it carries no valid credential.
+function principalOf(req) {
+  if (!GRABBIT_PASSWORD) return gda.LEGACY_SHARED; // auth switched off on purpose
+  if (isInternal(req)) return gda.INTERNAL;
+  if (isAuthed(req)) return gda.LEGACY_SHARED;
+  const token = bearerToken(req);
+  if (token) {
+    const found = gdaRegistry.clientForToken(token);
+    if (found && found.client) return gda.principalFor(found.client, 'token');
+    return found && found.revoked ? { revoked: true } : null;
+  }
+  const client = gdaRegistry.clientForSession(parseCookies(req.headers.cookie)[AUTH_COOKIE]);
+  return client ? gda.principalFor(client, 'password') : null;
+}
+
+// The only paths an app client reaches: sending a link the legacy way, and the
+// v1 API. The web UI, history, cookies, music editing and the rest stay with
+// the shared password.
+function isAppClientPath(req) {
+  return (req.method === 'GET' && req.path === '/api/jobs/start') || req.path.startsWith('/api/v1/');
+}
+
 // Three endpoints below are GETs with side effects (/api/download,
 // /api/download-all, /api/jobs/start) and the session cookie is SameSite=Lax,
 // which still rides along on a cross-site top-level navigation. A link, a
@@ -1401,7 +1443,11 @@ app.post('/login', async (req, res) => {
   const attempt = typeof req.body.password === 'string' ? Buffer.from(req.body.password) : null;
   const expected = Buffer.from(GRABBIT_PASSWORD);
   const ok = attempt && attempt.length === expected.length && crypto.timingSafeEqual(attempt, expected);
-  if (!ok) {
+  // Not the shared password: maybe an app's own (GDA client registry). Bounded
+  // length, because every client's scrypt runs on the attempt.
+  const client =
+    !ok && attempt && attempt.length <= 200 ? gdaRegistry.clientForPassword(req.body.password) : null;
+  if (!ok && !client) {
     win.fails++;
     pruneLoginFails(Date.now());
     console.warn(`login: wrong password from ${key} (${win.fails}/${LOGIN_MAX_FAILS} this window)`);
@@ -1409,7 +1455,8 @@ app.post('/login', async (req, res) => {
     return res.status(401).type('html').send(loginPage('Wrong password.'));
   }
   loginFails.delete(key);
-  res.cookie(AUTH_COOKIE, AUTH_TOKEN, {
+  if (client) console.log(`login: app client ${client.client_id} from ${key}`);
+  res.cookie(AUTH_COOKIE, client ? gdaRegistry.sessionValue(client) : AUTH_TOKEN, {
     httpOnly: true,
     sameSite: 'lax',
     secure: true,
@@ -1445,7 +1492,22 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/') && isCrossSite(req)) {
     return res.status(403).json({ ok: false, error: 'Cross-site request blocked' });
   }
-  if (!GRABBIT_PASSWORD || isInternal(req) || isAuthed(req)) return next();
+  const who = principalOf(req);
+  if (who && !who.revoked) {
+    req.principal = who;
+    if (who.audience === 'admin') return next();
+    if (isAppClientPath(req)) {
+      gdaRegistry.touch(who.id);
+      return next();
+    }
+    if (req.path.startsWith('/api/')) {
+      return res.status(403).json({ ok: false, error: 'This app password can only send links to Grabbit.' });
+    }
+    return res.status(403).type('text').send('This password belongs to an app. Sign in with the main password.');
+  }
+  if (req.path.startsWith('/api/v1/')) {
+    return res.status(401).json(new gda.GdaError(who && who.revoked ? 'token_revoked' : 'unauthorized').toJSON());
+  }
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }
@@ -5557,9 +5619,40 @@ function ytdlpCut(job, tmpDir, stem, opts = {}) {
 // (chapter splitting), xargs=<extra yt-dlp flags>, at=<epoch ms | ISO datetime>
 // (scheduled start).
 app.get('/api/jobs/start', (req, res) => {
+  const out = startJobFromQuery(req.query, req.principal || gda.LEGACY_SHARED, 'legacy');
+  if (out.gdaError) return res.status(out.gdaError.status).json({ ok: false, error: out.gdaError.message });
+  res.status(out.status).json(out.body);
+  if (out.run) out.run();
+});
+
+// The one place a job is created from request parameters, for both the legacy
+// GET and POST /api/v1/jobs. Returns { status, body, run? } or { gdaError };
+// `run` starts the download and is called after the response is sent, as
+// before. The scope check runs on the parsed dest/channel/folder, before
+// anything touches the filesystem.
+function startJobFromQuery(query, who, via) {
+  const req = { query };
   const url = req.query.url;
-  if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
-  const dest = parseDest(req.query.dest);
+  if (!validUrl(url)) return { status: 400, body: { ok: false, error: 'Invalid URL' } };
+  let dest = parseDest(req.query.dest);
+  // GDA: the target this request means, possibly redirected by the client's
+  // legacy_main_target (switching an app to another library is one registry
+  // field, not an APK). The target's own dest/channel/folder then apply.
+  let target = gda.targetForLegacy({ dest, channel: CHANNELS[req.query.channel] || 'main', folder: req.query.folder });
+  const main = who.client && who.client.legacy_main_target;
+  if (via === 'legacy' && target === 'legacy.tikshortis' && main && main !== target) {
+    target = main;
+    const l = gda.TARGETS[target].legacy;
+    req.query = { ...req.query, dest: l.dest, channel: l.channel, folder: l.folder };
+    dest = parseDest(req.query.dest);
+  }
+  try {
+    gda.authorize(who, target, 'job');
+  } catch (e) {
+    console.log(`gda: client=${who.id} target=${target} via=${via} result=deny code=${e.code}`);
+    return { gdaError: e };
+  }
+  console.log(`gda: client=${who.id} target=${target} via=${via} result=allow`);
   let params;
   try {
     params = {
@@ -5603,24 +5696,106 @@ app.get('/api/jobs/start', (req, res) => {
       genres: req.query.genres ? String(req.query.genres).slice(0, 200) : null,
     };
   } catch (e) {
-    return res.status(400).json({ ok: false, error: String(e.message || e) });
+    return { status: 400, body: { ok: false, error: String(e.message || e) } };
   }
   // Cut downloads produce several files at once: the server library takes them
   // as loose files, an audiobook takes them as numbered parts of one book. The
   // elite-v2 shorts import and Navidrome tagging are single-file only.
   if ((params.sections.length || params.splitChapters) && !['server', 'audiobooks'].includes(params.dest)) {
-    return res.status(400).json({ ok: false, error: 'Cutting/splitting is only supported for the server and audiobook libraries.' });
+    return { status: 400, body: { ok: false, error: 'Cutting/splitting is only supported for the server and audiobook libraries.' } };
   }
   const at = parseAt(req.query.at);
-  const job = newJob({ dest: params.dest, channel: params.channel, lib: params.navLib, device: params.device });
+  const job = newJob({ dest: params.dest, channel: params.channel, lib: params.navLib, device: params.device, clientId: who.id, target });
   job.params = params;
   if (at) {
     setJob(job, { status: 'scheduled', at });
-    addScheduled({ id: job.id, at, params, dest: params.dest, channel: params.channel, device: params.device });
+    addScheduled({ id: job.id, at, params, dest: params.dest, channel: params.channel, device: params.device, clientId: who.id, target });
   }
-  res.json({ ok: true, jobId: job.id, scheduled: !!at });
-  if (!at) scheduleJob(job, params);
+  return { status: 200, body: { ok: true, jobId: job.id, scheduled: !!at }, job, run: at ? null : () => scheduleJob(job, params) };
+}
+
+// ---------------------------------------------------------------------------
+// GDA v1 (gda.js). Envelope: { ok, data } or { ok:false, error:{ code, message,
+// retryable } }. The server picks every path; a client names a target only.
+function v1Send(res, status, data) {
+  res.status(status).json({ ok: true, data });
+}
+function v1Fail(res, err) {
+  const e = err instanceof gda.GdaError ? err : new gda.GdaError('invalid_request', String((err && err.message) || err));
+  res.status(e.status).json(e.toJSON());
+}
+function v1Principal(req) {
+  return req.principal || gda.LEGACY_SHARED;
+}
+
+app.get('/api/v1/whoami', (req, res) => {
+  const who = v1Principal(req);
+  v1Send(res, 200, {
+    client_id: who.id,
+    audience: who.audience,
+    auth: who.kind,
+    allowed_ops: who.client ? who.client.allowed_ops : gda.OPS,
+    allowed_targets: gda.targetsFor(who).map((t) => t.id),
+  });
 });
+
+app.get('/api/v1/targets', (req, res) => {
+  v1Send(res, 200, { targets: gda.targetsFor(v1Principal(req)) });
+});
+
+app.post('/api/v1/jobs', (req, res) => {
+  const who = v1Principal(req);
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const url = typeof body.url === 'string' ? body.url : '';
+  const target = typeof body.target === 'string' ? body.target : '';
+  try {
+    if (!gda.TARGETS[target]) throw new gda.GdaError('unknown_target');
+    gda.authorize(who, target, 'job');
+    if (!validUrl(url)) throw new gda.GdaError('invalid_request', 'Invalid URL');
+  } catch (e) {
+    console.log(`gda: client=${who.id} target=${target || '-'} via=v1 result=deny code=${e.code || 'invalid'}`);
+    return v1Fail(res, e);
+  }
+  const key = String(req.headers['idempotency-key'] || '').slice(0, 200);
+  if (key) {
+    const prior = gdaIdempotency.get(who.id, key);
+    if (prior && jobsMap.has(prior)) {
+      const j = jobsMap.get(prior);
+      return v1Send(res, 200, { job_id: j.id, status: gda.v1Status(j), target: j.target, replayed: true });
+    }
+  }
+  const l = gda.TARGETS[target].legacy;
+  const query = { url, dest: l.dest, channel: l.channel, folder: l.folder, device: '0' };
+  const out = startJobFromQuery(query, who, 'v1');
+  if (out.gdaError) return v1Fail(res, out.gdaError);
+  if (!out.body.ok) return v1Fail(res, new gda.GdaError('invalid_request', out.body.error));
+  if (key) gdaIdempotency.set(who.id, key, out.job.id);
+  v1Send(res, 202, { job_id: out.job.id, status: gda.v1Status(out.job), target });
+  if (out.run) out.run();
+});
+
+app.get('/api/v1/jobs/:id', (req, res) => {
+  const who = v1Principal(req);
+  const j = jobsMap.get(String(req.params.id));
+  // Another client's job does not exist for this one.
+  if (!j || (who.audience !== 'admin' && j.clientId !== who.id)) return v1Fail(res, new gda.GdaError('not_found'));
+  try {
+    if (who.client && !who.client.allowed_ops.includes('status')) throw new gda.GdaError('forbidden_op');
+  } catch (e) {
+    return v1Fail(res, e);
+  }
+  v1Send(res, 200, {
+    job_id: j.id,
+    status: gda.v1Status(j),
+    target: j.target || null,
+    title: j.title,
+    error: j.status === 'error' ? j.error : null,
+    created_at: new Date(j.createdAt).toISOString(),
+    done_at: j.doneAt ? new Date(j.doneAt).toISOString() : null,
+  });
+});
+
+app.use('/api/v1', (_req, res) => v1Fail(res, new gda.GdaError('not_found', 'No such endpoint.')));
 
 // ---------------------------------------------------------------------------
 // Scheduled downloads: jobs with a future start time wait in 'scheduled' until
@@ -5647,7 +5822,7 @@ function removeScheduled(id) {
 // Recreate 'scheduled' jobs from disk after a restart.
 for (const s of readScheduled()) {
   if (!jobsMap.has(s.id)) {
-    const job = newJob({ id: s.id, status: 'scheduled', at: s.at, dest: s.dest, channel: s.channel, device: s.device });
+    const job = newJob({ id: s.id, status: 'scheduled', at: s.at, dest: s.dest, channel: s.channel, device: s.device, clientId: s.clientId, target: s.target });
     job.params = s.params;
   }
 }
@@ -5660,7 +5835,7 @@ setInterval(() => {
     let job = jobsMap.get(s.id);
     if (job && job.status !== 'scheduled') continue; // cancelled or already run
     if (!job) {
-      job = newJob({ id: s.id, dest: s.dest, channel: s.channel, device: s.device });
+      job = newJob({ id: s.id, dest: s.dest, channel: s.channel, device: s.device, clientId: s.clientId, target: s.target });
       job.params = s.params;
     }
     // The entry stays on disk until the job ends (finishJob/failJob/cancel).
@@ -6079,6 +6254,7 @@ function stateRows(name, value) {
   if (!value || typeof value !== 'object') return null;
   if (Array.isArray(value.tracks)) return value.tracks.length;
   if (Array.isArray(value.items)) return value.items.length;
+  if (Array.isArray(value.clients)) return value.clients.length;
   return Object.keys(value).length;
 }
 
