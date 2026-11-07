@@ -387,7 +387,7 @@
         h('div', { class: 'col aside' },
           card('Profiles', 'profiles', { href: '#/profiles', label: 'Show all' },
             h('p', { style: 'margin:0' }, s ? `${num(s.creators)} creators named in file names` : 'Loading ...'),
-            h('p', { class: 'empty', style: 'padding-bottom:0' }, 'Linked accounts, merging and splitting come with the profile store.')),
+            h('p', { class: 'empty', style: 'padding-bottom:0' }, 'Link platform accounts, merge and split on the Profiles page.')),
           card('App routing', 'share', { href: '#/distribution', label: 'Details' }, h('ul', { class: 'rows' }, routeRows())),
           card('System status', 'pulse', { href: '#/settings', label: 'Details' }, h('ul', { class: 'rows' }, healthRows())))),
     ];
@@ -447,30 +447,180 @@
     ];
   }
 
+  // --- Profiles ------------------------------------------------------------
+  const jsonPost = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const audienceChip = (a) => h('span', { class: `chip ${a === 'adult' ? 'adult' : ''}` }, a === 'adult' ? '18+' : 'general');
+  const accountLabel = (a) => `${a.platform} @${a.handle}`;
+  const accountKey = (a) => `${a.platform}:${a.handle.toLowerCase()}`;
+
   function viewProfiles(params) {
+    if (params.get('id')) return viewProfile(params.get('id'));
     const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
-    const input = h('input', { class: 'field', type: 'search', placeholder: 'Filter creators', value: params.get('q') || '' });
+    const input = h('input', { class: 'field', type: 'search', placeholder: 'Filter by name, alias or handle', value: params.get('q') || '' });
+    const aud = h('select', { class: 'field' },
+      h('option', { value: '' }, 'All audiences'), h('option', { value: 'general' }, 'General'), h('option', { value: 'adult' }, '18+'));
+    const picked = new Map(); // id -> profile
+    const mergeBar = h('div', { class: 'mergebar', hidden: true });
     let timer;
+
+    function paintMergeBar() {
+      const list = [...picked.values()];
+      mergeBar.hidden = list.length < 2;
+      if (list.length < 2) return mergeBar.replaceChildren();
+      const mixed = new Set(list.map((p) => p.audience)).size > 1;
+      const target = h('select', { class: 'field' }, list.map((p) => h('option', { value: p.id }, `${p.name} (#${p.id})`)));
+      const go = h('button', { class: 'btn small', type: 'button', disabled: mixed, onclick: async () => {
+        const t = Number(target.value);
+        const sources = list.map((p) => p.id).filter((id) => id !== t);
+        if (!confirm(`Merge ${sources.length} profile(s) into "${picked.get(t).name}"? Their aliases and accounts move; nothing on disk changes. A merge can be undone with split.`)) return;
+        go.disabled = true;
+        try {
+          await jsonPost('/api/hub/profiles/merge', { target: t, sources });
+          toast('Merged');
+          picked.clear();
+          location.hash = `#/profiles?id=${t}`;
+        } catch (e) { toast(e.message); go.disabled = false; }
+      } }, 'Merge');
+      mergeBar.replaceChildren(
+        h('b', null, `${list.length} selected`),
+        mixed ? h('span', { class: 'bad-t' }, 'General and 18+ profiles are never merged.') : h('span', null, 'Merge into'),
+        mixed ? null : target, mixed ? null : go,
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => { picked.clear(); fill(); } }, 'Clear'));
+    }
+
     const fill = async () => {
       try {
-        const d = await api('/api/hub/creators?limit=300&q=' + encodeURIComponent(input.value));
+        const d = await api(`/api/hub/profiles?limit=300&audience=${aud.value}&q=${encodeURIComponent(input.value)}`);
         box.replaceChildren(
-          h('p', { class: 'empty' }, `${num(d.total)} creators${d.total > d.items.length ? `, showing the top ${d.items.length}` : ''}.`),
-          h('table', null,
-            h('thead', null, h('tr', null, h('th', null, 'Creator'), h('th', null, 'Sources'), h('th', { class: 'num' }, 'Files'), h('th', null, 'Latest'))),
-            h('tbody', null, d.items.map((c) => h('tr', null, h('td', null, c.name), h('td', null, c.sites.map((s) => h('span', { class: 'chip' }, s))), h('td', { class: 'num' }, num(c.files)), h('td', null, ago(c.lastAt)))))));
+          h('p', { class: 'empty' }, `${num(d.total)} profiles${d.total > d.items.length ? `, showing the top ${d.items.length}` : ''}. ${num(d.counts.general)} general, ${num(d.counts.adult)} 18+, ${num(d.counts.linked)} with linked accounts.`),
+          h('div', { class: 'scroll-x' }, h('table', null,
+            h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Profile'), h('th', null, 'Accounts'), h('th', { class: 'num' }, 'Aliases'), h('th', { class: 'num' }, 'Files'), h('th', null, 'Latest'))),
+            h('tbody', null, d.items.map((p) => h('tr', null,
+              h('td', null, h('input', { type: 'checkbox', 'aria-label': `Select ${p.name}`, checked: picked.has(p.id), onchange: (e) => { if (e.target.checked) picked.set(p.id, p); else picked.delete(p.id); paintMergeBar(); } })),
+              h('td', null, h('a', { href: `#/profiles?id=${p.id}` }, p.name), ' ', p.audience === 'adult' ? audienceChip('adult') : null),
+              h('td', null, p.accounts.length ? p.accounts.map((a) => h('span', { class: 'chip' }, accountLabel(a))) : h('span', { class: 'muted' }, p.sites.join(', '))),
+              h('td', { class: 'num' }, num(p.aliases.length)),
+              h('td', { class: 'num' }, num(p.files)),
+              h('td', null, ago(p.lastAt))))))));
+        paintMergeBar();
       } catch (e) {
         box.replaceChildren(h('p', { class: 'empty' }, e.message));
       }
     };
     input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(fill, 250); });
+    aud.addEventListener('change', fill);
     fill();
     return [
       h('h1', null, 'Profiles'),
-      h('p', { class: 'lead' }, 'Creators as they appear in downloaded file names.'),
-      h('p', { class: 'note' }, 'Read-only for now. Shared creator profiles with linked TikTok, Instagram and Facebook accounts, plus edit, merge and split, need a profile store that is not built yet.'),
-      h('div', { class: 'toolbar', style: 'margin-top:14px' }, input),
+      h('p', { class: 'lead' }, 'One profile per creator: linked platform accounts plus the creator names found in downloaded files.'),
+      h('p', { class: 'note' }, 'Every creator name in a file name belongs to exactly one profile. Merge and split only move names and accounts between profiles; no file is renamed or moved. General and 18+ profiles are kept apart.'),
+      h('div', { class: 'toolbar', style: 'margin-top:14px' }, input, aud),
+      h('div', { class: 'toolbar' }, newProfileForm()),
+      mergeBar,
       box,
+    ];
+  }
+
+  function newProfileForm() {
+    const name = h('input', { class: 'field', placeholder: 'New profile name', maxlength: 100 });
+    // No default audience: choosing one is a permission decision.
+    const aud = h('select', { class: 'field', 'aria-label': 'Audience' },
+      h('option', { value: '' }, 'Audience ...'), h('option', { value: 'general' }, 'General'), h('option', { value: 'adult' }, '18+'));
+    return h('form', { class: 'inline', onsubmit: async (e) => {
+      e.preventDefault();
+      if (!name.value.trim() || !aud.value) return toast('Give the profile a name and choose its audience');
+      try {
+        const d = await jsonPost('/api/hub/profiles', { name: name.value, audience: aud.value });
+        location.hash = `#/profiles?id=${d.profile.id}`;
+      } catch (err) { toast(err.message); }
+    } }, name, aud, h('button', { class: 'btn small ghost', type: 'submit' }, 'Create'));
+  }
+
+  function viewProfile(id) {
+    const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+    (async () => {
+      try {
+        const d = await api(`/api/hub/profiles/${encodeURIComponent(id)}`);
+        box.replaceChildren(...profileDetail(d.profile, d.platforms));
+      } catch (e) {
+        box.replaceChildren(h('p', { class: 'empty' }, e.message));
+      }
+    })();
+    return [h('p', null, h('a', { class: 'back', href: '#/profiles' }, '← All profiles')), box];
+  }
+
+  function profileDetail(p, platforms) {
+    const datalist = h('datalist', { id: 'platformList' }, platforms.map((x) => h('option', { value: x })));
+    const name = h('input', { class: 'field', value: p.name, maxlength: 100, 'aria-label': 'Name' });
+    const note = h('textarea', { class: 'field', rows: 3, maxlength: 1000, placeholder: 'Note (who this is, why profiles were merged ...)', 'aria-label': 'Note' }, p.note || '');
+    const rows = h('div', { class: 'acc-rows' });
+    const addRow = (a = {}) => {
+      const row = h('div', { class: 'acc-row' },
+        h('input', { class: 'field plat', list: 'platformList', placeholder: 'platform', value: a.platform || '', 'aria-label': 'Platform' }),
+        h('input', { class: 'field', placeholder: 'handle', value: a.handle || '', 'aria-label': 'Handle' }),
+        h('input', { class: 'field', type: 'url', placeholder: 'https://profile link (optional)', value: a.url || '', 'aria-label': 'Profile link' }),
+        a.source ? h('small', { class: 'muted', title: a.addedAt ? new Date(a.addedAt).toLocaleString() : '' }, a.source) : h('small', { class: 'muted' }, 'new'),
+        h('button', { class: 'btn small ghost', type: 'button', 'aria-label': 'Remove account', onclick: () => row.remove() }, 'Remove'));
+      rows.append(row);
+    };
+    p.accounts.forEach(addRow);
+    const save = h('button', { class: 'btn', type: 'submit' }, 'Save');
+    const form = h('form', { class: 'card', onsubmit: async (e) => {
+      e.preventDefault();
+      const accounts = [...rows.children].map((r) => {
+        const [plat, handle, url] = r.querySelectorAll('input');
+        return { platform: plat.value.trim(), handle: handle.value.trim(), url: url.value.trim() || null };
+      }).filter((a) => a.platform || a.handle || a.url);
+      save.disabled = true;
+      try {
+        const d = await jsonPost(`/api/hub/profiles/${p.id}`, { name: name.value, note: note.value, accounts });
+        toast('Saved');
+        $('#view').replaceChildren(h('p', null, h('a', { class: 'back', href: '#/profiles' }, '← All profiles')), ...profileDetail(d.profile, platforms));
+      } catch (err) { toast(err.message); save.disabled = false; }
+    } },
+      h('h2', null, icon('link'), 'Profile and linked accounts'),
+      h('label', { class: 'lbl' }, 'Name', name),
+      h('label', { class: 'lbl' }, 'Note', note),
+      h('div', { class: 'lbl' }, 'Accounts'),
+      rows,
+      datalist,
+      h('div', { class: 'toolbar', style: 'margin-top:10px' },
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => addRow() }, 'Add account'),
+        save));
+
+    // Split: pick aliases and accounts to move to a new profile.
+    const splitName = h('input', { class: 'field', placeholder: 'Name of the new profile', maxlength: 100 });
+    const aliasBoxes = p.aliases.map((a) => ({ a, box: h('input', { type: 'checkbox', 'aria-label': `Move ${a.name}` }) }));
+    const accBoxes = p.accounts.map((a) => ({ a, box: h('input', { type: 'checkbox', 'aria-label': `Move ${accountLabel(a)}` }) }));
+    const splitBtn = h('button', { class: 'btn small', type: 'button', onclick: async () => {
+      const aliases = aliasBoxes.filter((x) => x.box.checked).map((x) => x.a.name);
+      const accounts = accBoxes.filter((x) => x.box.checked).map((x) => accountKey(x.a));
+      if (!aliases.length && !accounts.length) return toast('Tick the names or accounts to move');
+      if (!splitName.value.trim()) return toast('Name the new profile');
+      splitBtn.disabled = true;
+      try {
+        const d = await jsonPost(`/api/hub/profiles/${p.id}/split`, { name: splitName.value, aliases, accounts });
+        toast(`Split into #${d.profile.id}`);
+        location.hash = `#/profiles?id=${d.profile.id}`;
+      } catch (err) { toast(err.message); splitBtn.disabled = false; }
+    } }, 'Split off');
+
+    return [
+      h('h1', null, p.name, ' ', audienceChip(p.audience)),
+      h('p', { class: 'lead' },
+        `#${p.id} · ${num(p.files)} files · ${p.sites.length ? p.sites.join(', ') : 'no files yet'}`,
+        p.lastAt ? ` · latest ${ago(p.lastAt)}` : '',
+        p.origin === 'registry' ? ' · created from file names' : p.origin === 'manual' ? ' · created by hand' : p.origin.startsWith('split:') ? ` · split from #${p.origin.slice(6)}` : '',
+        p.mergedFrom.length ? ` · merged from #${p.mergedFrom.join(', #')}` : ''),
+      h('div', { class: 'two' },
+        form,
+        card('Names in file names', 'profiles', null,
+          p.aliases.length
+            ? h('ul', { class: 'rows' }, aliasBoxes.map(({ a, box }) => h('li', null, h('label', { class: 'pick' }, box, a.name), h('span', { class: 'v' }, `${num(a.files)} files${a.lastAt ? ' · ' + ago(a.lastAt) : ''}`))))
+            : h('p', { class: 'empty' }, 'None. Merge a profile in to give this one its files.'),
+          accBoxes.length ? h('ul', { class: 'rows', style: 'margin-top:8px' }, accBoxes.map(({ a, box }) => h('li', null, h('label', { class: 'pick' }, box, accountLabel(a)), h('span', { class: 'v' }, a.source)))) : null,
+          h('p', { class: 'empty' }, 'Tick names or accounts that belong to someone else and split them into a new profile. At least one must stay here.'),
+          h('div', { class: 'toolbar' }, splitName, splitBtn))),
     ];
   }
 

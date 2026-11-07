@@ -104,8 +104,8 @@ function summarize(registry, now = Date.now()) {
 }
 
 // Creators with their file counts and sites, most files first. Derived from
-// the registry only: there is no profile store yet, so nothing here can be
-// edited, merged or split.
+// the registry only; the editable profiles (accounts, merge, split) live in
+// profiles.js.
 function creatorList(registry, { q = '', limit = 200 } = {}) {
   const byCreator = new Map();
   const seen = new Set();

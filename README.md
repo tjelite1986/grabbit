@@ -168,9 +168,45 @@ see [Deploy with Docker](#deploy-with-docker).
 the downloaded registry, a paste-a-link box, the live job queue, the latest
 downloads, creators found in file names, app destinations and system status.
 Every number comes from the server. Parts that are not built yet (duplicate
-review, metadata editing, profile merge and split) are marked as planned
-instead of showing sample values. The classic interface at `/` keeps every
-feature and is linked from the hub's sidebar.
+review, metadata editing) are marked as planned instead of showing sample
+values. The classic interface at `/` keeps every feature and is linked from the
+hub's sidebar.
+
+### Creator profiles
+
+The hub's Profiles page manages one profile per creator, stored in
+`profiles.json` in the data directory (snapshotted daily with the other state
+files). A profile holds:
+
+- **Linked accounts**: any number of platform accounts (`tiktok`, `instagram`,
+  `facebook`, ...), each with a handle, an optional profile link and where it
+  came from (`manual`, or the importer that added it).
+- **Aliases**: the creator names found in downloaded file names
+  (`<creator>_-_<title>`). Every creator in the downloaded registry gets a
+  profile of its own the first time the page is opened, and new creators are
+  added as they appear.
+
+Edit renames a profile and changes its accounts. Merge moves the aliases and
+accounts of other profiles into one and remembers the merged ids. Split moves
+chosen aliases or accounts out into a new profile. The rules:
+
+- Nothing on disk changes. Files are never renamed or moved, and the registry is
+  only read.
+- An alias is only ever moved, never deleted, so every file name's creator
+  always resolves to exactly one profile.
+- One platform account belongs to one profile. Adding it to a second profile is
+  refused with a hint to merge instead.
+- General and 18+ are kept apart. A file saved to the `18plus` channel makes its
+  creator an 18+ alias, so the same name in both channels becomes two profiles,
+  and merging across audiences is refused. A profile created by hand must be
+  given its audience explicitly.
+
+API (web session only; app passwords are refused):
+`GET /api/hub/profiles?q=&audience=general|adult`, `GET /api/hub/profiles/:id`,
+`POST /api/hub/profiles` (`{ name, audience, note?, accounts? }`),
+`POST /api/hub/profiles/:id` (`{ name?, note?, accounts? }`),
+`POST /api/hub/profiles/merge` (`{ target, sources: [id] }`),
+`POST /api/hub/profiles/:id/split` (`{ name, aliases: [name], accounts: ['platform:handle'] }`).
 
 
 ## Everyday use

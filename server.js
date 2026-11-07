@@ -21,6 +21,7 @@ const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = req
 const gda = require('./gda');
 const platformDrop = require('./platform-drop');
 const hub = require('./hub');
+const profiles = require('./profiles');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -504,6 +505,7 @@ const STATE_FILES = [
   'genres.json',
   'push-subscriptions.json',
   'gda-clients.json',
+  'profiles.json',
 ];
 
 function writeJsonAtomic(file, value) {
@@ -2606,6 +2608,79 @@ app.get('/api/hub/summary', async (_req, res) => {
 app.get('/api/hub/creators', (req, res) => {
   res.json({ ok: true, ...hub.creatorList(readDownloaded(), { q: req.query.q, limit: Number(req.query.limit) || 200 }) });
 });
+
+// --- Grabbit 2.0 profiles -------------------------------------------------------
+// One creator profile holds many platform accounts and the creator names seen in
+// file names (see profiles.js for the rules). The store is profiles.json; files on
+// disk and the downloaded registry are never touched. Only the admin session gets
+// here: app passwords are refused by the gate above.
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+let profilesCache = null;
+
+// The store, with every creator the registry knows given a profile. A file that
+// is readable JSON but breaks the invariants is refused rather than "repaired":
+// writing a reconstruction over it could drop links the owner made by hand.
+function readProfiles() {
+  if (!profilesCache) profilesCache = profiles.normalizeStore(readJsonState(PROFILES_FILE, null));
+  const stats = profiles.aliasStats(readDownloaded());
+  const synced = profiles.sync(profilesCache, stats, Date.now());
+  if (synced.added) saveProfiles(synced.store);
+  return { store: profilesCache, stats };
+}
+function saveProfiles(store) {
+  writeJsonAtomic(PROFILES_FILE, store);
+  profilesCache = store;
+}
+function profileError(res, e) {
+  if (e instanceof profiles.ProfileError) return res.status(e.status).json({ ok: false, error: e.message });
+  console.error('profiles:', e.message);
+  return res.status(500).json({ ok: false, error: 'The profile store could not be used. See the server log.' });
+}
+// Runs one store operation and saves its result.
+function changeProfiles(res, op) {
+  try {
+    const { store, stats } = readProfiles();
+    const r = op(store, Date.now());
+    saveProfiles(r.store);
+    res.json({
+      ok: true,
+      profile: r.profile ? profiles.view(r.profile, stats) : null,
+      from: r.from ? profiles.view(r.from, stats) : null,
+    });
+  } catch (e) {
+    profileError(res, e);
+  }
+}
+
+// GET /api/hub/profiles?q=&audience=general|adult&limit=
+app.get('/api/hub/profiles', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    const audience = profiles.AUDIENCES.includes(req.query.audience) ? req.query.audience : '';
+    res.json({ ok: true, platforms: profiles.PLATFORMS, ...profiles.list(store, stats, { q: req.query.q, audience, limit: Number(req.query.limit) || 200 }) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/profiles/:id
+app.get('/api/hub/profiles/:id', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    res.json({ ok: true, platforms: profiles.PLATFORMS, profile: profiles.view(profiles.findProfile(store, req.params.id), stats) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// POST /api/hub/profiles { name, audience, note?, accounts? } -> a manual profile.
+app.post('/api/hub/profiles', (req, res) => changeProfiles(res, (s, now) => profiles.create(s, req.body, now)));
+// POST /api/hub/profiles/merge { target, sources: [id] }
+app.post('/api/hub/profiles/merge', (req, res) =>
+  changeProfiles(res, (s, now) => profiles.merge(s, (req.body || {}).target, (req.body || {}).sources, now)));
+// POST /api/hub/profiles/:id { name?, note?, accounts? }
+app.post('/api/hub/profiles/:id', (req, res) => changeProfiles(res, (s, now) => profiles.update(s, req.params.id, req.body, now)));
+// POST /api/hub/profiles/:id/split { name, aliases: [name], accounts: ['platform:handle'] }
+app.post('/api/hub/profiles/:id/split', (req, res) =>
+  changeProfiles(res, (s, now) => profiles.split(s, req.params.id, req.body, now)));
 
 app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });
