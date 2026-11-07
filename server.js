@@ -1454,7 +1454,10 @@ app.post('/login', async (req, res) => {
     await delayFailedLogin(win.fails);
     return res.status(401).type('html').send(loginPage('Wrong password.'));
   }
-  loginFails.delete(key);
+  // Only the shared password clears the failure window. An app password must
+  // not: whoever holds one could otherwise reset the window between guesses
+  // at the shared password and guess without limit.
+  if (ok) loginFails.delete(key);
   if (client) console.log(`login: app client ${client.client_id} from ${key}`);
   res.cookie(AUTH_COOKIE, client ? gdaRegistry.sessionValue(client) : AUTH_TOKEN, {
     httpOnly: true,
@@ -5651,6 +5654,12 @@ function startJobFromQuery(query, who, via) {
   } catch (e) {
     console.log(`gda: client=${who.id} target=${target} via=${via} result=deny code=${e.code}`);
     return { gdaError: e };
+  }
+  // An app gets its target's own folder and none of the owner's power-user
+  // parameters: a free-form folder could name a directory the target check did
+  // not classify, and xargs reaches yt-dlp's argv.
+  if (who.audience !== 'admin') {
+    req.query = { ...req.query, folder: gda.TARGETS[target].legacy.folder, xargs: undefined };
   }
   console.log(`gda: client=${who.id} target=${target} via=${via} result=allow`);
   let params;

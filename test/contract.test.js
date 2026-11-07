@@ -280,6 +280,28 @@ test('v1: whoami, targets, jobs, status and scope', async () => {
   assert.equal((await noAuth.json()).error.code, 'unauthorized');
 });
 
+test('an app cannot pick its own folder or pass yt-dlp args', async () => {
+  const { cookie } = await appLogin(pw['grabbit-send']);
+  const q = new URLSearchParams({ url: 'https://example.com/f', dest: 'server', folder: 'private', xargs: '--no-mtime', device: '0', at: String(FUTURE) });
+  const r = await (await fetch(`${base}/api/jobs/start?${q}`, { headers: { Cookie: cookie } })).json();
+  assert.ok(r.ok);
+  const sched = JSON.parse(fs.readFileSync(path.join(dirs.data, 'scheduled.json'), 'utf8')).find((s) => s.id === r.jobId);
+  assert.equal(sched.params.folder, undefined);
+  assert.ok(!JSON.stringify(sched.params.extraArgs || []).includes('no-mtime'));
+});
+
+test('an app login does not clear the shared-password failure window', async () => {
+  const hdr = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Forwarded-For': '203.0.113.9' };
+  // Without trust proxy the key is the socket peer, the same for every call here.
+  let last;
+  for (let i = 0; i < 12; i++) {
+    await fetch(`${base}/login`, { method: 'POST', headers: hdr, body: 'password=wrong', redirect: 'manual' });
+    await appLogin(pw.elitebook);
+    last = await fetch(`${base}/login`, { method: 'POST', headers: hdr, body: 'password=wrong', redirect: 'manual' });
+  }
+  assert.equal(last.status, 429);
+});
+
 test('logs carry no password, token or session value', () => {
   for (const id of Object.keys(pw)) assert.ok(!logs.includes(pw[id]), `password of ${id} logged`);
   assert.ok(!logs.includes(token.token));
