@@ -11,6 +11,9 @@
 // - The audience of an item never drops from adult, and an item that is not
 //   general can never get a "dropped" delivery into a general app. Both rules
 //   are triggers, so they hold for any code path that reaches the database.
+// - Only the owner's hand makes an item general on its own: classifyItems()
+//   sets classified_by_hand, and the gate reads a general item as evidence only
+//   with that mark. An 18+ item is never classified general (the trigger).
 // - The registry import is additive and read-only: it inserts what is
 //   missing and never changes an item it already has, except to tighten its
 //   audience.
@@ -85,7 +88,14 @@ const MIGRATIONS = [
     SELECT RAISE(ABORT, 'the 18+ app takes videos only');
   END;
   `,
+  // v2: the owner's hand classification of a single item (review queue).
+  `
+  ALTER TABLE items ADD COLUMN classified_by_hand INTEGER NOT NULL DEFAULT 0 CHECK (classified_by_hand IN (0, 1));
+  CREATE INDEX items_audience ON items (audience, updated_at);
+  CREATE INDEX deliveries_refused ON deliveries (item_id, at) WHERE status = 'refused';
+  `,
 ];
+const CLASSIFY_MAX = 5000;
 const SCHEMA_VERSION = MIGRATIONS.length;
 
 class StoreError extends Error {}
@@ -204,7 +214,13 @@ function wrap(db, migrationBackup) {
         (SELECT COUNT(*) FROM items WHERE audience = 'adult') AS adult,
         (SELECT COUNT(*) FROM items WHERE audience = 'unknown') AS unknown,
         (SELECT COUNT(*) FROM deliveries) AS deliveries,
-        (SELECT COUNT(*) FROM deliveries WHERE status = 'refused') AS refused`),
+        (SELECT COUNT(*) FROM deliveries WHERE status = 'refused') AS refused,
+        (SELECT COUNT(DISTINCT item_id) FROM deliveries WHERE status = 'refused'
+           AND item_id IN (SELECT id FROM items WHERE audience = 'unknown')) AS refusedUnknown`),
+    classify: db.prepare(`
+      UPDATE items SET audience = @audience, classified_by_hand = 1,
+        audience_reasons = @reasons, updated_at = @at
+      WHERE id = @id`),
   };
 
   const tighter = (prior, next) => {
@@ -266,6 +282,61 @@ function wrap(db, migrationBackup) {
       return st.sameHash.get(sha256, itemId) || null;
     },
     counts: () => st.counts.get(),
+    // The owner's decision for many items at once. 18+ items are never made
+    // general (skipped with a reason; the trigger would refuse it anyway).
+    classifyItems(ids, audience, now = Date.now()) {
+      if (audience !== 'general' && audience !== 'adult') throw new StoreError('audience must be general or adult');
+      if (!Array.isArray(ids) || !ids.length) throw new StoreError('choose at least one item');
+      if (ids.length > CLASSIFY_MAX) throw new StoreError(`at most ${CLASSIFY_MAX} items at a time`);
+      const changed = [];
+      const skipped = [];
+      db.transaction(() => {
+        for (const id of [...new Set(ids.map(Number))]) {
+          const row = Number.isInteger(id) ? st.byId.get(id) : null;
+          if (!row) { skipped.push({ id, reason: 'no such item' }); continue; }
+          if (audience === 'general' && row.audience === 'adult') {
+            skipped.push({ id, reason: 'an 18+ item is never classified general' });
+            continue;
+          }
+          if (row.audience === audience && row.classified_by_hand) {
+            skipped.push({ id, reason: `already ${audience}` });
+            continue;
+          }
+          st.classify.run({ id, audience, reasons: JSON.stringify([`classified ${audience} by hand`]), at: now });
+          changed.push(id);
+        }
+      })();
+      return { changed, skipped };
+    },
+    // The review queue: items of one audience, the ones a general app refused
+    // first (latest refusal first), then the most recently touched.
+    listItems({ audience = 'unknown', refused = false, q = '', limit = 100, offset = 0 } = {}) {
+      const aud = ['general', 'adult', 'unknown'].includes(audience) ? audience : 'unknown';
+      const where = ['i.audience = @aud'];
+      const args = {
+        aud,
+        limit: Math.max(1, Math.min(1000, Number(limit) || 100)),
+        offset: Math.max(0, Number(offset) || 0),
+      };
+      if (refused) where.push("EXISTS (SELECT 1 FROM deliveries d WHERE d.item_id = i.id AND d.status = 'refused')");
+      const needle = String(q || '').trim();
+      if (needle) {
+        args.q = `%${needle.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+        where.push("(i.creator LIKE @q ESCAPE '\\' OR i.filename LIKE @q ESCAPE '\\' OR i.title LIKE @q ESCAPE '\\' OR i.key LIKE @q ESCAPE '\\')");
+      }
+      const w = where.join(' AND ');
+      const total = db.prepare(`SELECT COUNT(*) AS n FROM items i WHERE ${w}`).get(args).n;
+      const rows = db.prepare(`
+        SELECT i.*, r.refusals, r.last_refused_at,
+          (SELECT detail FROM deliveries d WHERE d.item_id = i.id AND d.status = 'refused' ORDER BY d.id DESC LIMIT 1) AS last_refusal
+        FROM items i
+        LEFT JOIN (SELECT item_id, COUNT(*) AS refusals, MAX(at) AS last_refused_at
+                   FROM deliveries WHERE status = 'refused' GROUP BY item_id) r ON r.item_id = i.id
+        WHERE ${w}
+        ORDER BY r.last_refused_at IS NULL, r.last_refused_at DESC, i.updated_at DESC, i.id DESC
+        LIMIT @limit OFFSET @offset`).all(args);
+      return { total, offset: args.offset, items: rows };
+    },
     // Phase A: every registry item that has no row yet gets one. Read-only on
     // the registry. Returns how many registry items there are and how many
     // rows were added, so the caller can compare them.
@@ -306,6 +377,7 @@ function wrap(db, migrationBackup) {
 
 module.exports = {
   SCHEMA_VERSION,
+  CLASSIFY_MAX,
   GENERAL_DESTINATIONS,
   ADULT_DESTINATIONS,
   StoreError,

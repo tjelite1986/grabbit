@@ -2784,6 +2784,7 @@ function classifyJob(destination, job) {
         sourceUrl: job && job.sourceUrl,
         requested: destination === '18plus' || (job && job.audience === 'adult') ? 'adult' : null,
         prior: prior ? prior.audience : null,
+        priorByHand: Boolean(prior && prior.classified_by_hand),
       },
       store,
       { keyOf: creatorKey }
@@ -2910,6 +2911,88 @@ app.post('/api/hub/profiles/:id', (req, res) => changeProfiles(res, (s, now) => 
 // POST /api/hub/profiles/:id/split { name, aliases: [name], accounts: ['platform:handle'] }
 app.post('/api/hub/profiles/:id/split', (req, res) =>
   changeProfiles(res, (s, now) => profiles.split(s, req.params.id, req.body, now)));
+
+// --- Review queue: the owner classifies creators and items by hand ----------------
+// Nothing here downgrades 18+: the profile store and the item store both refuse
+// to classify an 18+ creator or item general, and say so per id.
+const reviewAudience = (v) => (v === 'general' || v === 'adult' ? v : null);
+
+// GET /api/hub/review -> how much is waiting.
+app.get('/api/hub/review', (_req, res) => {
+  try {
+    const { store } = readProfiles();
+    const unclassified = store.profiles.filter((p) => profiles.effectiveAudience(p) === 'unknown').length;
+    res.json({ ok: true, creators: { unclassified }, items: ITEM_STORE ? ITEM_STORE.counts() : null, itemStoreError: ITEM_STORE ? null : ITEM_STORE_ERROR });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/review/creators?q=&limit=&offset= -> unclassified profiles, most files first.
+app.get('/api/hub/review/creators', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    res.json({ ok: true, ...profiles.list(store, stats, { q: req.query.q, status: 'unknown', limit: Number(req.query.limit) || 100, offset: req.query.offset }) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// POST /api/hub/review/creators { audience, ids: [id] } or { audience, all: true, q, expected }
+// `all` classifies every unclassified profile matching q; `expected` must be
+// the count the owner saw, so a list that changed meanwhile is not classified blind.
+app.post('/api/hub/review/creators', (req, res) => {
+  const b = req.body || {};
+  const aud = reviewAudience(b.audience);
+  if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+  try {
+    const { store } = readProfiles();
+    let ids = b.ids;
+    if (b.all === true) {
+      ids = profiles.matching(store, { q: b.q, status: 'unknown' }).map((p) => p.id);
+      if (Number(b.expected) !== ids.length) {
+        return res.status(409).json({ ok: false, error: `The list changed: ${ids.length} creators match now, not ${b.expected}. Reload and check again.` });
+      }
+    }
+    const r = profiles.classifyProfiles(store, ids, aud, Date.now());
+    if (r.changed.length) saveProfiles(r.store);
+    console.log(`review: ${r.changed.length} creator profile(s) classified ${aud} by hand, ${r.skipped.length} skipped`);
+    res.json({ ok: true, changed: r.changed, skipped: r.skipped });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/review/items?audience=unknown&refused=1&q=&limit=&offset=
+app.get('/api/hub/review/items', (req, res) => {
+  if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
+  try {
+    const r = ITEM_STORE.listItems({
+      audience: req.query.audience || 'unknown',
+      refused: req.query.refused === '1',
+      q: req.query.q,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('review items:', e.message);
+    res.status(500).json({ ok: false, error: 'The item store could not be read. See the server log.' });
+  }
+});
+// POST /api/hub/review/items { audience, ids: [id] }
+app.post('/api/hub/review/items', (req, res) => {
+  const b = req.body || {};
+  const aud = reviewAudience(b.audience);
+  if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+  if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
+  try {
+    const r = ITEM_STORE.classifyItems(b.ids, aud);
+    console.log(`review: ${r.changed.length} item(s) classified ${aud} by hand, ${r.skipped.length} skipped`);
+    res.json({ ok: true, changed: r.changed, skipped: r.skipped });
+  } catch (e) {
+    if (e instanceof itemStore.StoreError) return res.status(400).json({ ok: false, error: e.message });
+    console.error('review items:', e.message);
+    res.status(500).json({ ok: false, error: 'The item store could not be changed. See the server log.' });
+  }
+});
 
 app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });

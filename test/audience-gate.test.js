@@ -338,3 +338,66 @@ test('boot imports the registry without touching downloaded.json or profiles.jso
   const { rows } = s.items();
   assert.deepEqual(rows.map((r) => `${r.key}=${r.audience}`), ['id:example:1=unknown', 'id:example:2=adult']);
 });
+
+test('review queue: a creator once delivered is refused until classified by hand, and 18+ never goes back', async (t) => {
+  const registry = {
+    'id:tiktok:old1': { filename: 'Jane Doe_-_old clip old1.mp4', at: 1, channel: 'main' },
+    'id:tiktok:old2': { filename: 'Max_-_old clip old2.mp4', at: 2, channel: 'platform' },
+  };
+  const s = await boot(t, { registry });
+  const jpost = (p, body) =>
+    fetch(`${s.base}${p}`, { method: 'POST', headers: { ...s.headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json() }));
+  const jget = (p) => fetch(`${s.base}${p}`, { headers: s.headers }).then((r) => r.json());
+
+  // Delivered before, but that is no classification.
+  const before = await s.save(s.fakeUrl('video', 'tiktok', 'Jane Doe', 'n1'), 'main');
+  assert.equal(before.status, 422, JSON.stringify(before.body));
+  assert.match(before.body.error, /not classified/);
+
+  const queue = await jget('/api/hub/review/creators?q=jane');
+  assert.equal(queue.total, 1, JSON.stringify(queue));
+  const jane = queue.items[0];
+  assert.equal(jane.status, 'unknown');
+
+  // Bulk "all matching" must name the count the owner saw.
+  const stale = await jpost('/api/hub/review/creators', { audience: 'general', all: true, q: 'jane', expected: 5 });
+  assert.equal(stale.status, 409, JSON.stringify(stale.body));
+  const ok = await jpost('/api/hub/review/creators', { audience: 'general', all: true, q: 'jane', expected: 1 });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.deepEqual(ok.body.changed, [jane.id]);
+  const after = await s.save(s.fakeUrl('video', 'tiktok', 'Jane Doe', 'n1'), 'main');
+  assert.equal(after.status, 200, JSON.stringify(after.body) + s.logs());
+
+  // 18+ by hand, then general again is refused per id.
+  const max = (await jget('/api/hub/review/creators?q=max')).items[0];
+  assert.equal((await jpost('/api/hub/review/creators', { audience: 'adult', ids: [max.id] })).body.changed[0], max.id);
+  const back = await jpost('/api/hub/review/creators', { audience: 'general', ids: [max.id, jane.id] });
+  assert.deepEqual(back.body.changed, []);
+  assert.match(back.body.skipped.find((x) => x.id === max.id).reason, /never classified general/);
+  const maxSave = await s.save(s.fakeUrl('video', 'tiktok', 'Max', 'm1'), 'main');
+  assert.equal(maxSave.status, 422);
+  assert.match(maxSave.body.error, /18\+/);
+
+  // A refused item shows up in the item queue; classified general by hand it goes through.
+  const url = s.fakeUrl('video', 'tiktok', 'stranger', 's1');
+  assert.equal((await s.save(url, 'main')).status, 422);
+  const items = await jget('/api/hub/review/items?refused=1');
+  const row = items.items.find((r) => r.creator === 'stranger');
+  assert.ok(row, JSON.stringify(items));
+  assert.match(row.last_refusal, /not classified/);
+  assert.deepEqual((await jpost('/api/hub/review/items', { audience: 'general', ids: [row.id] })).body.changed, [row.id]);
+  const delivered = await s.save(url, 'main');
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  // Another clip by the same stranger is still refused: the item was classified, not the creator.
+  assert.equal((await s.save(s.fakeUrl('video', 'tiktok', 'stranger', 's2'), 'main')).status, 422);
+
+  // An 18+ item is never classified general.
+  const adultUrl = s.fakeUrl('video', 'redgifs.com', 'stranger', 'r1');
+  assert.equal((await s.save(adultUrl, '18plus')).status, 200);
+  const adultRow = s.items().rows.find((r) => r.audience === 'adult');
+  const refused = await jpost('/api/hub/review/items', { audience: 'general', ids: [adultRow.id] });
+  assert.deepEqual(refused.body.changed, []);
+  assert.equal((await s.save(adultUrl, 'main')).status, 422);
+  assert.equal((await jpost('/api/hub/review/items', { audience: 'maybe', ids: [1] })).status, 400);
+});

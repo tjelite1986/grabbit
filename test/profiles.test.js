@@ -177,9 +177,80 @@ test('list sums registry numbers per profile and filters', () => {
   store = P.merge(store, anna.id, [bert.id], T0).store;
   const all = P.list(store, stats);
   assert.equal(all.total, 2);
-  assert.deepEqual(all.counts, { general: 1, adult: 1, linked: 0 });
+  assert.deepEqual(all.counts, { general: 1, adult: 1, linked: 0, unclassified: 1 });
   assert.equal(all.items[0].files, 3);
   assert.deepEqual(all.items[0].sites, ['instagram', 'tiktok']);
   assert.equal(P.list(store, stats, { audience: 'adult' }).items[0].files, 1);
   assert.equal(P.list(store, stats, { q: 'bert' }).items[0].id, anna.id, 'search finds a profile by an alias');
+});
+
+test('effective audience: registry profiles are unclassified, manual and reviewed general are general, 18+ wins', () => {
+  const { store } = seeded();
+  const anna = byName(store, 'anna');
+  assert.equal(anna.origin, 'registry');
+  assert.equal(P.effectiveAudience(anna), 'unknown');
+  assert.equal(P.effectiveAudience(byName(store, 'anna', 'adult')), 'adult');
+  const made = P.create(store, { name: 'Hand', audience: 'general' }, T0).profile;
+  assert.equal(P.effectiveAudience(made), 'general');
+  assert.equal(P.effectiveAudience({ ...anna, classifiedAs: 'general' }), 'general');
+  assert.equal(P.effectiveAudience({ ...made, classifiedAs: 'adult' }), 'adult');
+});
+
+test('classifyProfiles: general and 18+ by hand, never 18+ back to general', () => {
+  const { store } = seeded();
+  const anna = byName(store, 'anna');
+  const annaAdult = byName(store, 'anna', 'adult');
+  const bert = byName(store, 'bert');
+  const g = P.classifyProfiles(store, [anna.id, annaAdult.id, 9999], 'general', T0 + 10);
+  assert.deepEqual(g.changed, [anna.id]);
+  assert.deepEqual(g.skipped.map((x) => x.id).sort(), [annaAdult.id, 9999].sort());
+  assert.match(g.skipped.find((x) => x.id === annaAdult.id).reason, /never classified general/);
+  assert.equal(P.effectiveAudience(byName(g.store, 'anna')), 'general');
+  assert.equal(byName(store, 'anna').classifiedAs, null, 'the input store is not changed');
+  assert.equal(g.store.log.at(-1).action, 'classify');
+
+  const a = P.classifyProfiles(g.store, [bert.id, anna.id], 'adult', T0 + 11);
+  assert.deepEqual(a.changed.sort(), [anna.id, bert.id].sort());
+  const back = P.classifyProfiles(a.store, [anna.id, bert.id], 'general', T0 + 12);
+  assert.deepEqual(back.changed, []);
+  assert.equal(back.store, a.store, 'nothing changed, same store');
+  for (const id of [anna.id, bert.id]) assert.equal(P.effectiveAudience(P.findProfile(back.store, id)), 'adult');
+
+  // A store file with an 18+ profile marked general is refused on load.
+  const bad = JSON.parse(JSON.stringify(a.store));
+  bad.profiles.find((p) => p.id === annaAdult.id).classifiedAs = 'general';
+  assert.throws(() => P.normalizeStore(bad), /classified general/);
+  assert.throws(() => P.classifyProfiles(store, [anna.id], 'unknown', T0), /general or adult/);
+  assert.throws(() => P.classifyProfiles(store, [], 'general', T0), /at least one/);
+  // The decision survives a save and a load.
+  assert.equal(P.normalizeStore(JSON.parse(JSON.stringify(a.store))).profiles.find((p) => p.id === bert.id).classifiedAs, 'adult');
+});
+
+test('an 18+ decision is never merged away or split off', () => {
+  const { store } = seeded();
+  const anna = byName(store, 'anna');
+  const bert = byName(store, 'bert');
+  const s1 = P.classifyProfiles(store, [bert.id], 'adult', T0 + 1).store;
+  assert.throws(() => P.merge(s1, anna.id, [bert.id], T0 + 2), /classified 18\+/);
+  assert.throws(() => P.merge(s1, bert.id, [anna.id], T0 + 2), /classified 18\+/);
+  // Split from a profile classified 18+: the new half stays 18+.
+  let s2 = P.merge(store, anna.id, [bert.id], T0 + 2).store;
+  s2 = P.classifyProfiles(s2, [anna.id], 'adult', T0 + 3).store;
+  const half = P.split(s2, anna.id, { name: 'Bert again', aliases: ['Bert'] }, T0 + 4).profile;
+  assert.equal(P.effectiveAudience(half), 'adult');
+  // A general decision does not travel: the split half is unclassified.
+  let s3 = P.merge(store, anna.id, [bert.id], T0 + 2).store;
+  s3 = P.classifyProfiles(s3, [anna.id], 'general', T0 + 3).store;
+  const half2 = P.split(s3, anna.id, { name: 'Bert again', aliases: ['Bert'] }, T0 + 4).profile;
+  assert.equal(P.effectiveAudience(half2), 'unknown');
+});
+
+test('list filters on the gate status and pages with offset', () => {
+  const { store, stats } = seeded();
+  const all = P.list(store, stats, { status: 'unknown' });
+  assert.ok(all.items.every((p) => p.status === 'unknown'));
+  assert.equal(all.total, all.counts.unclassified);
+  const page = P.list(store, stats, { status: 'unknown', limit: 1, offset: 1 });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0].id, all.items[1].id);
 });

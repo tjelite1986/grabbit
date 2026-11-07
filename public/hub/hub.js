@@ -38,6 +38,7 @@
     settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1-2 3.4-.2-.1a1.7 1.7 0 0 0-1.9.2 7 7 0 0 1-1.6.9 1.7 1.7 0 0 0-1.1 1.5V23H9v-.2a1.7 1.7 0 0 0-1.1-1.5 7 7 0 0 1-1.6-.9 1.7 1.7 0 0 0-1.9-.2l-.2.1-2-3.4.1-.1a1.7 1.7 0 0 0 .3-1.8 7 7 0 0 1 0-1.8 1.7 1.7 0 0 0-.3-1.8l-.1-.1 2-3.4.2.1a1.7 1.7 0 0 0 1.9-.2 7 7 0 0 1 1.6-.9A1.7 1.7 0 0 0 9 1.2V1h4v.2a1.7 1.7 0 0 0 1.1 1.5 7 7 0 0 1 1.6.9 1.7 1.7 0 0 0 1.9.2l.2-.1 2 3.4-.1.1a1.7 1.7 0 0 0-.3 1.8 7 7 0 0 1 0 1.8z',
     link: 'M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1',
     pulse: 'M3 12h4l3-8 4 16 3-8h4',
+    review: 'M9 11l3 3 8-8M20 12v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11',
     sites: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18',
   };
   function icon(name) {
@@ -99,6 +100,7 @@
     config: null,
     history: null,
     jobs: new Map(),
+    review: null,
   };
   const ACTIVE = new Set(['queued', 'running', 'scheduled']);
   const activeJobs = () => [...state.jobs.values()].filter((j) => ACTIVE.has(j.status)).sort((a, b) => a.createdAt - b.createdAt);
@@ -110,6 +112,7 @@
       health: () => api('/api/health').then((d) => { state.health = d; }),
       config: () => api('/api/config').then((d) => { state.config = d; }),
       history: () => api('/api/history').then((d) => { state.history = d.items || []; }),
+      review: () => api('/api/hub/review').then((d) => { state.review = d; }),
       jobs: () => api('/api/jobs').then((d) => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
     };
     await Promise.all(what.map((k) => tasks[k]().catch((e) => { console.warn(`hub: ${k} failed`, e); })));
@@ -157,6 +160,7 @@
     { id: 'queue', label: 'Queue & jobs', icon: 'queue', badge: () => activeJobs().length, live: true, view: viewQueue },
     { id: 'media', label: 'Media', icon: 'media', view: viewMedia },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
+    { id: 'review', label: 'Review', icon: 'review', badge: () => (state.review ? state.review.creators.unclassified : 0), view: viewReview },
     { id: 'duplicates', label: 'Duplicates', icon: 'dupes', planned: true, view: viewDuplicates },
     { id: 'conversion', label: 'Conversion', icon: 'convert', view: viewConversion },
     { id: 'metadata', label: 'Metadata & tags', icon: 'tags', planned: true, view: viewMetadata },
@@ -475,7 +479,16 @@
 
   // --- Profiles ------------------------------------------------------------
   const jsonPost = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const audienceChip = (a) => h('span', { class: `chip ${a === 'adult' ? 'adult' : ''}` }, a === 'adult' ? '18+' : 'general');
+  // 'general', 'adult' or 'unknown' (not classified by hand yet).
+  const audienceChip = (a) =>
+    h('span', { class: `chip ${a === 'adult' ? 'adult' : a === 'unknown' ? 'unclassified' : ''}` },
+      a === 'adult' ? '18+' : a === 'unknown' ? 'unclassified' : 'general');
+  const webHref = (u) => (/^https?:\/\//i.test(String(u || '')) ? String(u) : null);
+  function skippedNote(r) {
+    if (!r.skipped || !r.skipped.length) return '';
+    const why = [...new Set(r.skipped.map((x) => x.reason))].join('; ');
+    return ` ${r.skipped.length} skipped (${why}).`;
+  }
   const accountLabel = (a) => `${a.platform} @${a.handle}`;
   const accountKey = (a) => `${a.platform}:${a.handle.toLowerCase()}`;
 
@@ -523,7 +536,7 @@
             h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Profile'), h('th', null, 'Accounts'), h('th', { class: 'num' }, 'Aliases'), h('th', { class: 'num' }, 'Files'), h('th', null, 'Latest'))),
             h('tbody', null, d.items.map((p) => h('tr', null,
               h('td', null, h('input', { type: 'checkbox', 'aria-label': `Select ${p.name}`, checked: picked.has(p.id), onchange: (e) => { if (e.target.checked) picked.set(p.id, p); else picked.delete(p.id); paintMergeBar(); } })),
-              h('td', null, h('a', { href: `#/profiles?id=${p.id}` }, p.name), ' ', p.audience === 'adult' ? audienceChip('adult') : null),
+              h('td', null, h('a', { href: `#/profiles?id=${p.id}` }, p.name), ' ', p.status !== 'general' ? audienceChip(p.status) : null),
               h('td', null, p.accounts.length ? p.accounts.map((a) => h('span', { class: 'chip' }, accountLabel(a))) : h('span', { class: 'muted' }, p.sites.join(', '))),
               h('td', { class: 'num' }, num(p.aliases.length)),
               h('td', { class: 'num' }, num(p.files)),
@@ -632,7 +645,8 @@
     } }, 'Split off');
 
     return [
-      h('h1', null, p.name, ' ', audienceChip(p.audience)),
+      h('h1', null, p.name, ' ', audienceChip(p.status)),
+      classifyBar(p),
       h('p', { class: 'lead' },
         `#${p.id} · ${num(p.files)} files · ${p.sites.length ? p.sites.join(', ') : 'no files yet'}`,
         p.lastAt ? ` · latest ${ago(p.lastAt)}` : '',
@@ -648,6 +662,168 @@
           h('p', { class: 'empty' }, 'Tick names or accounts that belong to someone else and split them into a new profile. At least one must stay here.'),
           h('div', { class: 'toolbar' }, splitName, splitBtn))),
     ];
+  }
+
+  // The owner's decision for one profile, from its own page.
+  function classifyBar(p) {
+    const set = async (aud) => {
+      const msg = aud === 'adult'
+        ? `Classify "${p.name}" as 18+? This cannot be undone: an 18+ creator is never classified general again.`
+        : `Classify "${p.name}" as general? Its files may then go to the general apps.`;
+      if (!confirm(msg)) return;
+      try {
+        const r = await jsonPost('/api/hub/review/creators', { audience: aud, ids: [p.id] });
+        toast(`${r.changed.length ? 'Classified' : 'Nothing changed'}.${skippedNote(r)}`);
+        load(['review']).then(updateNav);
+        render(false);
+      } catch (e) { toast(e.message); }
+    };
+    if (p.status === 'adult') return h('p', { class: 'note' }, '18+: never delivered to a general app, and never classified general again.');
+    return h('div', { class: 'toolbar' },
+      p.status === 'unknown' ? h('span', { class: 'muted' }, 'Not classified: general apps refuse this creator.') : h('span', { class: 'muted' }, 'General (classified by hand).'),
+      p.status === 'unknown' ? h('button', { class: 'btn small', type: 'button', onclick: () => set('general') }, 'Classify general') : null,
+      h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => set('adult') }, 'Classify 18+'));
+  }
+
+  // --- Review queue ----------------------------------------------------------
+  // Creators no one has classified, and the items general apps refused. Every
+  // decision is by hand; 18+ is final.
+  function viewReview() {
+    return [
+      h('h1', null, 'Review'),
+      h('p', { class: 'lead' }, 'General apps only take creators and items you classified by hand. Everything else waits here.'),
+      h('p', { class: 'note' }, 'Having been delivered before is not a classification. 18+ always wins and is final: an 18+ creator or item is never classified general again.'),
+      reviewCreators(),
+      reviewItems(),
+    ];
+  }
+
+  function pager(page, total, size, go) {
+    if (total <= size) return null;
+    const last = Math.max(0, Math.ceil(total / size) - 1);
+    return h('div', { class: 'toolbar' },
+      h('button', { class: 'btn small ghost', type: 'button', disabled: page <= 0, onclick: () => go(page - 1) }, 'Previous'),
+      h('span', { class: 'muted' }, `Page ${page + 1} of ${last + 1}`),
+      h('button', { class: 'btn small ghost', type: 'button', disabled: page >= last, onclick: () => go(page + 1) }, 'Next'));
+  }
+
+  function reviewCreators() {
+    const SIZE = 100;
+    const input = h('input', { class: 'field', type: 'search', placeholder: 'Filter creators', 'aria-label': 'Filter creators' });
+    const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+    const picked = new Set();
+    let page = 0;
+    let total = 0;
+    let timer;
+
+    async function decide(aud, ids, all) {
+      const n = all ? total : ids.length;
+      if (!n) return toast('Tick the creators first');
+      const what = all ? `all ${num(n)} unclassified creators${input.value.trim() ? ` matching "${input.value.trim()}"` : ''}` : `${num(n)} creator(s)`;
+      const msg = aud === 'adult'
+        ? `Classify ${what} as 18+? This cannot be undone.`
+        : `Classify ${what} as general? Their files may then go to Tikshortis, Platform and the posts library.`;
+      if (!confirm(msg)) return;
+      try {
+        const body = all ? { audience: aud, all: true, q: input.value, expected: total } : { audience: aud, ids };
+        const r = await jsonPost('/api/hub/review/creators', body);
+        toast(`${num(r.changed.length)} classified ${aud === 'adult' ? '18+' : 'general'}.${skippedNote(r)}`);
+        picked.clear();
+        load(['review']).then(updateNav);
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+
+    async function fill() {
+      try {
+        const d = await api(`/api/hub/review/creators?limit=${SIZE}&offset=${page * SIZE}&q=${encodeURIComponent(input.value)}`);
+        total = d.total;
+        if (!d.total) return box.replaceChildren(h('p', { class: 'empty' }, input.value ? 'No unclassified creator matches.' : 'Every creator is classified.'));
+        const all = h('input', { type: 'checkbox', 'aria-label': 'Select every creator on this page', onchange: (e) => {
+          for (const p of d.items) { if (e.target.checked) picked.add(p.id); else picked.delete(p.id); }
+          fill();
+        } });
+        box.replaceChildren(
+          h('div', { class: 'toolbar' },
+            h('b', null, `${num(d.total)} unclassified`),
+            h('button', { class: 'btn small', type: 'button', onclick: () => decide('general', [...picked]) }, `General (${picked.size})`),
+            h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => decide('adult', [...picked]) }, `18+ (${picked.size})`),
+            h('span', { class: 'muted' }, 'or every match:'),
+            h('button', { class: 'btn small ghost', type: 'button', onclick: () => decide('general', null, true) }, `All ${num(d.total)} general`),
+            h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => decide('adult', null, true) }, `All ${num(d.total)} 18+`)),
+          h('div', { class: 'scroll-x' }, h('table', null,
+            h('thead', null, h('tr', null, h('th', null, all), h('th', null, 'Creator'), h('th', null, 'Sources'), h('th', { class: 'num' }, 'Files'), h('th', null, 'Latest'))),
+            h('tbody', null, d.items.map((p) => h('tr', null,
+              h('td', null, h('input', { type: 'checkbox', 'aria-label': `Select ${p.name}`, checked: picked.has(p.id), onchange: (e) => { if (e.target.checked) picked.add(p.id); else picked.delete(p.id); fill(); } })),
+              h('td', null, h('a', { href: `#/profiles?id=${p.id}` }, p.name)),
+              h('td', { class: 'muted' }, p.accounts.length ? p.accounts.map(accountLabel).join(', ') : p.sites.join(', ')),
+              h('td', { class: 'num' }, num(p.files)),
+              h('td', null, ago(p.lastAt))))))),
+          pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
+      } catch (e) {
+        box.replaceChildren(h('p', { class: 'empty' }, e.message));
+      }
+    }
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { page = 0; picked.clear(); fill(); }, 250); });
+    fill();
+    return card('Creators', 'profiles', null, h('div', { class: 'toolbar' }, input), box);
+  }
+
+  function reviewItems() {
+    const SIZE = 100;
+    const input = h('input', { class: 'field', type: 'search', placeholder: 'Filter items', 'aria-label': 'Filter items' });
+    const refusedOnly = h('input', { type: 'checkbox', checked: true });
+    const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+    const picked = new Set();
+    let page = 0;
+    let timer;
+
+    async function decide(aud) {
+      if (!picked.size) return toast('Tick the items first');
+      const msg = aud === 'adult'
+        ? `Classify ${picked.size} item(s) as 18+? This cannot be undone.`
+        : `Classify ${picked.size} item(s) as general? Only these items, not their creators.`;
+      if (!confirm(msg)) return;
+      try {
+        const r = await jsonPost('/api/hub/review/items', { audience: aud, ids: [...picked] });
+        toast(`${num(r.changed.length)} classified ${aud === 'adult' ? '18+' : 'general'}.${skippedNote(r)}`);
+        picked.clear();
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+
+    async function fill() {
+      try {
+        const d = await api(`/api/hub/review/items?refused=${refusedOnly.checked ? 1 : 0}&limit=${SIZE}&offset=${page * SIZE}&q=${encodeURIComponent(input.value)}`);
+        if (!d.total) return box.replaceChildren(h('p', { class: 'empty' }, refusedOnly.checked ? 'No refused item is waiting.' : 'No unclassified item.'));
+        box.replaceChildren(
+          h('div', { class: 'toolbar' },
+            h('b', null, `${num(d.total)} unclassified${refusedOnly.checked ? ', refused by a general app' : ''}`),
+            h('button', { class: 'btn small', type: 'button', onclick: () => decide('general') }, `General (${picked.size})`),
+            h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => decide('adult') }, `18+ (${picked.size})`)),
+          h('div', { class: 'scroll-x' }, h('table', null,
+            h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Item'), h('th', null, 'Creator'), h('th', null, 'Why it waits'), h('th', null, 'Refused'))),
+            h('tbody', null, d.items.map((r) => {
+              const href = webHref(r.source_url);
+              const label = r.title || r.filename || r.key;
+              return h('tr', null,
+                h('td', null, h('input', { type: 'checkbox', 'aria-label': `Select ${label}`, checked: picked.has(r.id), onchange: (e) => { if (e.target.checked) picked.add(r.id); else picked.delete(r.id); fill(); } })),
+                h('td', null, href ? h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label) : label, r.site ? h('small', { class: 'muted' }, ` · ${r.site}`) : null),
+                h('td', null, r.creator || h('span', { class: 'muted' }, 'none')),
+                h('td', { class: 'muted' }, h('span', { class: 'clamp', title: r.last_refusal || '' }, r.last_refusal || 'imported from the download registry')),
+                h('td', null, r.last_refused_at ? `${ago(r.last_refused_at)}${r.refusals > 1 ? ` (${r.refusals}x)` : ''}` : ''));
+            })))),
+          pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
+      } catch (e) {
+        box.replaceChildren(h('p', { class: 'empty' }, e.message));
+      }
+    }
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { page = 0; picked.clear(); fill(); }, 250); });
+    refusedOnly.addEventListener('change', () => { page = 0; picked.clear(); fill(); });
+    fill();
+    return card('Items', 'media', null,
+      h('div', { class: 'toolbar' }, input, h('label', { class: 'muted' }, refusedOnly, ' Refused only')),
+      box);
   }
 
   function viewDuplicates() {
@@ -752,7 +928,7 @@
   async function boot() {
     buildNav();
     render();
-    await load(['config', 'summary', 'history', 'jobs']);
+    await load(['config', 'summary', 'history', 'jobs', 'review']);
     const apps = (state.summary && state.summary.apps) || [];
     if (state.summary && state.summary.brand) $('#brandSub').textContent = state.summary.brand;
     if (apps.length) {

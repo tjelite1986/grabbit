@@ -13,13 +13,16 @@
 //   general signals say.
 // - A job may tighten the audience to adult, never lower it. An item once
 //   recorded adult stays adult.
-// - General evidence is a profile the owner created by hand, and nothing
-//   else. A delivery is not a classification: that an alias reached a general
+// - General evidence is the owner's hand and nothing else: a profile created
+//   by hand or classified general in the review queue, or the item itself
+//   classified general by hand. A delivery is not a classification: that an alias reached a general
 //   app before (or was saved to the plain server library) says nothing about
 //   its audience. Profiles the registry sync created stay unknown until the
 //   owner classifies them.
 // - Adshortis (the 18+ destination) takes videos only. Every other
 //   destination is general.
+
+const { effectiveAudience } = require('./profiles');
 
 const AUDIENCES = ['general', 'adult', 'unknown'];
 
@@ -119,7 +122,7 @@ function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
     const byAccount =
       handle &&
       (p.accounts || []).some(
-        (a) => norm(a.handle) === handle && (p.audience === 'adult' || (platform && a.platform === platform))
+        (a) => norm(a.handle) === handle && (effectiveAudience(p) === 'adult' || (platform && a.platform === platform))
       );
     if (byAlias || byName || byAccount) out.push({ profile: p, byAlias, byName, byAccount });
   }
@@ -133,6 +136,7 @@ function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
 //   handle:     the creator as the site spells it, lowercased (for accounts)
 //   requested:  'adult' when the job tightens the audience, else anything
 //   prior:      the audience this item was recorded with before, or null
+//   priorByHand: true when the owner set that audience by hand
 // -> { audience, reasons: [string], profileId: number|null }
 function classify(input, store, { keyOf = norm } = {}) {
   const i = input || {};
@@ -146,13 +150,16 @@ function classify(input, store, { keyOf = norm } = {}) {
   if (i.prior === 'adult') reasons.push('this item was recorded as 18+ before');
   if (isAdultSite(i.site, i.extractor, i.sourceUrl)) reasons.push('the source site is an 18+ site');
   const matches = matchProfiles(store, { creatorKey, handle, platform }, keyOf);
-  const adultProfile = matches.find((m) => m.profile.audience === 'adult');
+  const adultProfile = matches.find((m) => effectiveAudience(m.profile) === 'adult');
   if (adultProfile) reasons.push(`the creator matches the 18+ profile #${adultProfile.profile.id}`);
   if (reasons.length) {
     return { audience: 'adult', reasons, profileId: adultProfile ? adultProfile.profile.id : null };
   }
 
-  const general = matches.find((m) => m.profile.audience === 'general' && m.profile.origin === 'manual');
+  if (i.prior === 'general' && i.priorByHand === true) {
+    return { audience: 'general', reasons: ['this item was classified general by hand'], profileId: null };
+  }
+  const general = matches.find((m) => effectiveAudience(m.profile) === 'general');
   if (general) {
     return {
       audience: 'general',
@@ -187,7 +194,7 @@ function refusal(classification, destinationId, { mediaType, creator } = {}) {
   const who = creator ? `"${creator}"` : 'this creator';
   return (
     `${dest.app} is a general app and the audience of ${who} is not classified (${why}). ` +
-    'Create a general profile for the creator in the hub, or save to the server library instead.'
+    'Classify the creator or the item on the hub\'s Review page, or save to the server library instead.'
   );
 }
 

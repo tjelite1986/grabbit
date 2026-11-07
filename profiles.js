@@ -14,6 +14,13 @@
 //   else general). The same name in both channels makes two profiles, and a
 //   merge across audiences is refused. A manually created profile must name its
 //   audience; there is no default, because the default would be a permission.
+// - Classification is by hand only. A profile is general for the audience
+//   gate when the owner created it by hand or classified it general in the
+//   review queue; one the registry sync created stays unclassified until then.
+//   `audience` stays the registry bucket the aliases are keyed by and never
+//   changes; `classifiedAs` holds the owner's decision. Anything 18+ (the
+//   bucket or the decision) makes the profile 18+, and an 18+ profile is never
+//   classified general again.
 // - Source info is kept. Each account records where it came from (`manual`,
 //   or the importer that will add it later) and when; a merge keeps every
 //   account, and each profile remembers the ids merged into it.
@@ -37,6 +44,16 @@ const bad = (msg) => new ProfileError(400, msg);
 
 function emptyStore() {
   return { version: VERSION, nextId: 1, profiles: [], log: [] };
+}
+
+const CLASSIFY_MAX = 5000;
+
+// The audience the gate reads for a profile: 'adult', 'general' or 'unknown'.
+function effectiveAudience(p) {
+  if (!p) return 'unknown';
+  if (p.audience === 'adult' || p.classifiedAs === 'adult') return 'adult';
+  if (p.audience === 'general' && (p.origin === 'manual' || p.classifiedAs === 'general')) return 'general';
+  return 'unknown';
 }
 
 const audienceOfChannel = (channel) => (channel === '18plus' ? 'adult' : 'general');
@@ -94,6 +111,8 @@ function normalizeStore(raw) {
       aliases: Array.isArray(p.aliases) ? p.aliases : [],
       mergedFrom: Array.isArray(p.mergedFrom) ? p.mergedFrom : [],
       origin: p.origin || 'manual',
+      classifiedAs: p.classifiedAs === undefined ? null : p.classifiedAs,
+      classifiedAt: Number(p.classifiedAt) || null,
       createdAt: Number(p.createdAt) || 0,
       updatedAt: Number(p.updatedAt) || 0,
     })),
@@ -116,6 +135,8 @@ function check(store) {
     if (ids.has(p.id)) problems.push(`duplicate id ${p.id}`);
     ids.add(p.id);
     if (!AUDIENCES.includes(p.audience)) problems.push(`profile ${p.id} has no audience`);
+    if (p.classifiedAs != null && !AUDIENCES.includes(p.classifiedAs)) problems.push(`profile ${p.id} has a bad classification`);
+    if (p.audience === 'adult' && p.classifiedAs === 'general') problems.push(`18+ profile ${p.id} is classified general`);
     if (!p.name) problems.push(`profile ${p.id} has no name`);
     for (const a of p.aliases) {
       const k = aliasKey(p.audience, a.name);
@@ -189,6 +210,8 @@ function sync(store, stats, now) {
       aliases: [{ name: s.name, addedAt: now }],
       mergedFrom: [],
       origin: 'registry',
+      classifiedAs: null,
+      classifiedAt: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -238,6 +261,8 @@ function create(store, input, now) {
     aliases: [],
     mergedFrom: [],
     origin: 'manual',
+    classifiedAs: null,
+    classifiedAt: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -282,6 +307,10 @@ function merge(store, targetId, sourceIds, now) {
     if (s.audience !== target.audience) {
       throw new ProfileError(409, `"${s.name}" is ${s.audience} and "${target.name}" is ${target.audience}; general and adult profiles are never merged`);
     }
+    if ((effectiveAudience(s) === 'adult') !== (effectiveAudience(target) === 'adult')) {
+      const which = effectiveAudience(s) === 'adult' ? s : target;
+      throw new ProfileError(409, `"${which.name}" is classified 18+; it is never merged with a profile that is not`);
+    }
   }
   if (target.accounts.length + sources.reduce((n, s) => n + s.accounts.length, 0) > LIMITS.accounts) {
     throw bad(`the merged profile would have more than ${LIMITS.accounts} accounts`);
@@ -299,6 +328,38 @@ function merge(store, targetId, sourceIds, now) {
   const problems = check(next);
   if (problems.length) throw new Error(`merge broke the store: ${problems.join('; ')}`);
   return { store: next, profile: target };
+}
+
+// The owner's decision for many profiles at once (the review queue).
+// General is refused for anything 18+; 18+ may be set on any profile. Returns
+// the profiles changed and, per refused id, why.
+function classifyProfiles(store, ids, audience, now) {
+  if (!AUDIENCES.includes(audience)) throw bad('audience must be general or adult');
+  if (!Array.isArray(ids) || !ids.length) throw bad('choose at least one profile');
+  if (ids.length > CLASSIFY_MAX) throw bad(`at most ${CLASSIFY_MAX} profiles at a time`);
+  const next = clone(store);
+  const changed = [];
+  const skipped = [];
+  for (const id of [...new Set(ids.map(Number))]) {
+    const p = next.profiles.find((x) => x.id === id);
+    if (!p) { skipped.push({ id, reason: 'no such profile' }); continue; }
+    if (audience === 'general' && effectiveAudience(p) === 'adult') {
+      skipped.push({ id, reason: 'an 18+ profile is never classified general' });
+      continue;
+    }
+    if (p.classifiedAs === audience || (audience === 'general' && effectiveAudience(p) === 'general')) {
+      skipped.push({ id, reason: `already ${audience}` });
+      continue;
+    }
+    p.classifiedAs = audience;
+    p.classifiedAt = now;
+    p.updatedAt = now;
+    changed.push(p.id);
+  }
+  if (changed.length) logEntry(next, now, 'classify', { audience, ids: changed });
+  const problems = check(next);
+  if (problems.length) throw new Error(`classify broke the store: ${problems.join('; ')}`);
+  return { store: changed.length ? next : store, changed, skipped };
 }
 
 // Moves the chosen aliases and accounts of one profile into a new profile of
@@ -329,6 +390,10 @@ function split(store, id, input, now) {
     aliases: moveAliases,
     mergedFrom: [],
     origin: `split:${from.id}`,
+    // An 18+ decision travels with the names; a general one does not, so the
+    // new profile is classified again before a general app takes it.
+    classifiedAs: from.classifiedAs === 'adult' ? 'adult' : null,
+    classifiedAt: from.classifiedAs === 'adult' ? from.classifiedAt : null,
     createdAt: now,
     updatedAt: now,
   };
@@ -362,6 +427,9 @@ function view(p, stats) {
     audience: p.audience,
     note: p.note,
     origin: p.origin,
+    classifiedAs: p.classifiedAs || null,
+    classifiedAt: p.classifiedAt || null,
+    status: effectiveAudience(p),
     accounts: p.accounts,
     aliases,
     mergedFrom: p.mergedFrom,
@@ -373,14 +441,21 @@ function view(p, stats) {
   };
 }
 
-function list(store, stats, { q = '', audience = '', limit = 200 } = {}) {
+// The profiles a list shows. `status` filters on the gate's audience
+// ('general', 'adult', 'unknown'); `audience` on the registry bucket.
+function matching(store, { q = '', audience = '', status = '' } = {}) {
   const needle = String(q || '').trim().toLowerCase();
-  const all = store.profiles
+  return store.profiles
     .filter((p) => !audience || p.audience === audience)
+    .filter((p) => !status || effectiveAudience(p) === status)
     .filter((p) => !needle
       || p.name.toLowerCase().includes(needle)
       || p.aliases.some((a) => a.name.toLowerCase().includes(needle))
-      || p.accounts.some((a) => a.handle.toLowerCase().includes(needle)))
+      || p.accounts.some((a) => a.handle.toLowerCase().includes(needle)));
+}
+
+function list(store, stats, { q = '', audience = '', status = '', limit = 200, offset = 0 } = {}) {
+  const all = matching(store, { q, audience, status })
     .map((p) => view(p, stats))
     .sort((a, b) => b.files - a.files || (b.lastAt || 0) - (a.lastAt || 0) || a.id - b.id);
   return {
@@ -389,8 +464,10 @@ function list(store, stats, { q = '', audience = '', limit = 200 } = {}) {
       general: store.profiles.filter((p) => p.audience === 'general').length,
       adult: store.profiles.filter((p) => p.audience === 'adult').length,
       linked: store.profiles.filter((p) => p.accounts.length).length,
+      unclassified: store.profiles.filter((p) => effectiveAudience(p) === 'unknown').length,
     },
-    items: all.slice(0, Math.max(1, Math.min(1000, Number(limit) || 200))),
+    offset: Math.max(0, Number(offset) || 0),
+    items: all.slice(Math.max(0, Number(offset) || 0)).slice(0, Math.max(1, Math.min(1000, Number(limit) || 200))),
   };
 }
 
@@ -398,4 +475,5 @@ module.exports = {
   VERSION, AUDIENCES, PLATFORMS, LIMITS, ProfileError,
   emptyStore, normalizeStore, check, aliasStats, audienceOfChannel, aliasKey, accountKey,
   sync, create, update, merge, split, view, list, findProfile,
+  effectiveAudience, classifyProfiles, matching, CLASSIFY_MAX,
 };

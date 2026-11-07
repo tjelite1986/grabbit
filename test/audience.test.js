@@ -214,3 +214,24 @@ test('an adult account matches its handle on any site, so an unknown site never 
     assert.equal(c.audience, 'adult', String(site));
   }
 });
+
+test('a registry profile classified general in the review queue is general; classified 18+ is adult', () => {
+  const reg = synced([['alice', 'main'], ['bob', null]]);
+  const [alice, bob] = ['alice', 'bob'].map((n) => reg.store.profiles.find((p) => p.name === n));
+  const s1 = profiles.classifyProfiles(reg.store, [alice.id], 'general', NOW).store;
+  assert.equal(classify({ creatorKey: 'alice' }, s1).audience, 'general');
+  assert.equal(classify({ creatorKey: 'bob' }, s1).audience, 'unknown');
+  const s2 = profiles.classifyProfiles(s1, [alice.id, bob.id], 'adult', NOW).store;
+  for (const n of ['alice', 'bob']) assert.equal(classify({ creatorKey: n }, s2).audience, 'adult', n);
+});
+
+test('an item classified general by hand is general, but never against an adult signal', () => {
+  const store = storeWith([{ name: 'ada', audience: 'adult' }]);
+  const byHand = { prior: 'general', priorByHand: true };
+  assert.equal(classify({ creatorKey: 'nobody', ...byHand }, store).audience, 'general');
+  assert.equal(classify({ creatorKey: 'nobody', prior: 'general' }, store).audience, 'unknown', 'general without the hand mark is no evidence');
+  assert.equal(classify({ creatorKey: 'nobody', prior: 'general', priorByHand: 'yes' }, store).audience, 'unknown');
+  for (const s of [{ creatorKey: 'ada' }, { creatorKey: 'x', site: 'redgifs.com' }, { creatorKey: 'x', requested: 'adult' }]) {
+    assert.equal(classify({ ...s, ...byHand }, store).audience, 'adult', JSON.stringify(s));
+  }
+});

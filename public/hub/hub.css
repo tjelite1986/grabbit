@@ -194,6 +194,9 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Profiles */
 .chip.adult { border-color: var(--bad); color: var(--bad); }
+.chip.unclassified { border-color: var(--warn, #e0b341); color: var(--warn, #e0b341); }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-width: 12em; }
 .muted { color: var(--muted); }
 .scroll-x { overflow-x: auto; }
 .mergebar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--panel); }

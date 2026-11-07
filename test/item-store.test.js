@@ -166,3 +166,60 @@ test('content hashes report the older twin and refuse nothing', (t) => {
   assert.equal(s.recordHash(a.id, 'f'.repeat(64), 10), null);
   assert.equal(s.recordHash(b.id, 'f'.repeat(64), 10).key, 'a');
 });
+
+test('a v1 store migrates to v2 with every row, a backup, and no item classified by hand', (t) => {
+  const file = tmpDb(t);
+  // A v1 database as the previous release wrote it, built raw: this code's
+  // own statements already name the v2 column.
+  const Database = require('better-sqlite3');
+  const v1 = new Database(file);
+  v1.exec(itemStore.__MIGRATIONS[0]);
+  v1.pragma('user_version = 1');
+  const ins = v1.prepare("INSERT INTO items (key, audience, origin, created_at, updated_at) VALUES (?, ?, 'save', 1, 1)");
+  ins.run('a', 'adult');
+  ins.run('b', 'general');
+  ins.run('c', 'unknown');
+  v1.close();
+  const s = itemStore.open(file, { now: () => 1_700_000_000_000 });
+  t.after(() => s.close());
+  assert.ok(s.migrationBackup && fs.existsSync(s.migrationBackup));
+  t.after(() => fs.rmSync(s.migrationBackup, { force: true }));
+  const rows = s.db.prepare('SELECT key, audience, classified_by_hand FROM items ORDER BY key').all();
+  assert.deepEqual(rows.map((r) => `${r.key}=${r.audience}/${r.classified_by_hand}`), ['a=adult/0', 'b=general/0', 'c=unknown/0']);
+});
+
+test('classifyItems sets the hand mark, never lowers 18+, and listItems puts refusals first', (t) => {
+  const s = itemStore.open(tmpDb(t));
+  t.after(() => s.close());
+  const a = s.upsert({ key: 'adult', audience: 'adult', creator: 'ada' }, 1);
+  const u1 = s.upsert({ key: 'u1', creator: 'jane', filename: 'jane_-_one.mp4' }, 2);
+  const u2 = s.upsert({ key: 'u2', creator: 'bob_100%' }, 3);
+  s.recordDelivery(u1.id, 'main', 'refused', { detail: 'not classified', at: 10 });
+
+  const list = s.listItems({ audience: 'unknown' });
+  assert.equal(list.total, 2);
+  assert.deepEqual(list.items.map((r) => r.key), ['u1', 'u2']);
+  assert.equal(list.items[0].refusals, 1);
+  assert.equal(list.items[0].last_refusal, 'not classified');
+  assert.deepEqual(s.listItems({ refused: true }).items.map((r) => r.key), ['u1']);
+  // LIKE wildcards in the search are literal.
+  assert.deepEqual(s.listItems({ q: '100%' }).items.map((r) => r.key), ['u2']);
+  assert.equal(s.listItems({ q: 'ja_e' }).total, 0, '_ is not a wildcard');
+  assert.equal(s.counts().refusedUnknown, 1);
+
+  const g = s.classifyItems([u1.id, a.id, 999], 'general', 50);
+  assert.deepEqual(g.changed, [u1.id]);
+  assert.deepEqual(g.skipped.map((x) => x.id).sort((x, y) => x - y), [a.id, 999].sort((x, y) => x - y));
+  assert.equal(s.get('u1').audience, 'general');
+  assert.equal(s.get('u1').classified_by_hand, 1);
+  assert.equal(s.get('adult').audience, 'adult');
+  // A general item may then be delivered; an adult decision sticks for good.
+  s.recordDelivery(u1.id, 'main', 'dropped');
+  assert.deepEqual(s.classifyItems([u2.id], 'adult').changed, [u2.id]);
+  assert.deepEqual(s.classifyItems([u2.id], 'general').changed, []);
+  assert.equal(s.get('u2').audience, 'adult');
+  // A later save of an unknown look does not undo the hand mark.
+  assert.equal(s.upsert({ key: 'u1', audience: 'unknown' }).classified_by_hand, 1);
+  assert.throws(() => s.classifyItems([u1.id], 'unknown'), /general or adult/);
+  assert.throws(() => s.classifyItems([], 'general'), /at least one/);
+});
