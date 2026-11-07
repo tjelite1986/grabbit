@@ -216,10 +216,12 @@
     const out = [{ value: 'server', label: 'Server library', q: { dest: 'server' } }];
     const ch = cfg.channels || [];
     if (ch.includes('platform')) out.unshift({ value: 'platform', label: 'Platform inbox (social app)', q: { dest: 'elite', channel: 'platform' }, platform: true });
-    if (ch.includes('main')) out.push({ value: 'main', label: 'Shorts', q: { dest: 'elite', channel: 'main' }, shorts: true });
-    if (ch.includes('18plus')) out.push({ value: '18plus', label: 'Shorts 18+', q: { dest: 'elite', channel: '18plus' }, shorts: true });
+    if (ch.includes('main')) out.push({ value: 'main', label: 'Tikshortis (shorts)', q: { dest: 'elite', channel: 'main' }, shorts: true });
     out.push({ value: 'navidrome', label: 'Music library (audio)', q: { dest: 'navidrome' } });
     out.push({ value: 'audiobooks', label: 'Audiobooks (audio)', q: { dest: 'audiobooks' } });
+    // Adshortis is its own destination, listed apart from every general one
+    // and only when the server reports it configured and separate.
+    if (ch.includes('18plus')) out.push({ value: '18plus', label: 'Adshortis (18+ shorts)', q: { dest: 'elite', channel: '18plus' }, shorts: true, adult: true });
     return out;
   }
   const DEST_KEY = 'grabbit.hub.dest';
@@ -228,24 +230,41 @@
   // a half-typed link is not wiped. It is rebuilt on navigation only.
   let grabCache = null;
   function grabForm(opts) {
-    const key = route().id;
+    // The destinations come from /api/config, which loads after the first
+    // paint: a form built before it must be rebuilt once it is there.
+    const key = `${route().id}:${state.config ? 'cfg' : 'none'}`;
     if (grabCache && grabCache.key === key) return grabCache.el;
     grabCache = { key, el: buildGrabForm(opts) };
     return grabCache.el;
   }
   function buildGrabForm({ big }) {
     const dests = destinations();
+    // An 18+ destination is never restored as the default: it is chosen on
+    // purpose, every time.
     const saved = localStorage.getItem(DEST_KEY);
+    const opt = (d) => h('option', { value: d.value, selected: !d.adult && d.value === saved }, d.label);
+    const general = dests.filter((d) => !d.adult);
+    const adult = dests.filter((d) => d.adult);
     const select = h('select', { class: 'field', 'aria-label': 'Save to' },
-      dests.map((d) => h('option', { value: d.value, selected: d.value === saved }, d.label)));
+      adult.length
+        ? [h('optgroup', { label: 'General' }, general.map(opt)), h('optgroup', { label: '18+ only' }, adult.map(opt))]
+        : general.map(opt));
     const webBox = h('input', { type: 'checkbox' });
     const webLabel = h('label', null, webBox, ' Web copy (H.264/AAC) next to the original');
-    const syncWeb = () => {
+    const adultBox = h('input', { type: 'checkbox' });
+    const adultLabel = h('label', { class: 'adult-confirm' }, adultBox, ' This link is 18+ content for Adshortis');
+    const syncDest = () => {
       const d = dests.find((x) => x.value === select.value);
       webLabel.hidden = !(d && d.shorts);
+      adultLabel.hidden = !(d && d.adult);
+      adultBox.checked = false;
     };
-    select.addEventListener('change', () => { localStorage.setItem(DEST_KEY, select.value); syncWeb(); });
-    syncWeb();
+    select.addEventListener('change', () => {
+      const d = dests.find((x) => x.value === select.value);
+      if (d && !d.adult) localStorage.setItem(DEST_KEY, select.value);
+      syncDest();
+    });
+    syncDest();
     const input = h('input', { type: 'url', required: true, placeholder: 'Paste a link (Facebook, TikTok, Instagram, YouTube ...)', 'aria-label': 'Link' });
     const button = h('button', { class: 'btn', type: 'submit' }, icon('download'), 'Add');
     const advanced = h('a', { href: '/' }, 'Advanced options in the classic view');
@@ -256,6 +275,7 @@
       onsubmit: async (e) => {
         e.preventDefault();
         const d = dests.find((x) => x.value === select.value) || dests[0];
+        if (d.adult && !adultBox.checked) return toast('Confirm that this link is 18+ content first');
         const q = new URLSearchParams({ url: input.value.trim(), device: '0', ...d.q });
         if (d.shorts && webBox.checked) q.set('web', '1');
         button.disabled = true;
@@ -263,6 +283,7 @@
           await api('/api/jobs/start?' + q.toString());
           connectStream();
           input.value = '';
+          adultBox.checked = false;
           toast(`Queued for ${d.label}`);
         } catch (err) {
           toast(err.message);
@@ -276,6 +297,7 @@
       big ? h('h2', null, icon('link'), 'Add a link') : null,
       form,
       h('div', { class: 'grab-foot' },
+        adultLabel,
         webLabel,
         sites.length ? h('span', { class: 'sites' }, 'Most used:', sites.map((s) => h('span', { class: 'chip' }, s.site))) : null,
         advanced));
@@ -340,14 +362,18 @@
   }
 
   // Shorts/platform save locations, as the health check reports them.
-  function routeRows() {
-    const dests = ((state.health && state.health.dests) || []).filter((d) => /^(shorts|platform|posts)/.test(d.label));
+  // adult=true lists the 18+ app only, adult=false every general one, and
+  // no argument lists both (the dashboard summary).
+  const isAdultRoute = (d) => /18\+/.test(d.label);
+  function routeRows(adult) {
+    const dests = ((state.health && state.health.dests) || [])
+      .filter((d) => /^(shorts|platform|posts)/.test(d.label) && (adult === undefined || isAdultRoute(d) === adult));
     if (!state.health) return [h('li', { class: 'empty' }, 'Loading ...')];
-    if (!dests.length) return [h('li', { class: 'empty' }, 'No app destinations are configured on this server.')];
+    if (!dests.length) return [h('li', { class: 'empty' }, adult ? 'Adshortis is not configured on this server.' : 'No app destinations are configured on this server.')];
     return dests.map((d) => {
-      const good = d.exists && d.writable && !d.unreachable;
-      return h('li', null, h('span', { class: `dot ${good ? 'ok' : 'bad'}` }), d.label,
-        h('span', { class: `v ${good ? 'ok-t' : 'bad-t'}` }, d.unreachable ? 'unreachable' : !d.exists ? 'missing' : !d.writable ? 'read-only' : 'ready'));
+      const good = d.exists && d.writable && !d.unreachable && !d.blocked;
+      return h('li', { title: d.blocked || null }, h('span', { class: `dot ${good ? 'ok' : 'bad'}` }), d.label,
+        h('span', { class: `v ${good ? 'ok-t' : 'bad-t'}` }, d.blocked ? 'blocked' : d.unreachable ? 'unreachable' : !d.exists ? 'missing' : !d.writable ? 'read-only' : 'ready'));
     });
   }
 
@@ -666,7 +692,12 @@
       h('h1', null, 'Distribution'),
       h('p', { class: 'lead' }, 'Where Grabbit hands media to other apps. Each app imports from its own drop folder under its own rules.'),
       h('div', { class: 'two' },
-        card('App destinations', 'share', null, h('ul', { class: 'rows' }, routeRows())),
+        h('div', { class: 'col' },
+          card('App destinations', 'share', null, h('ul', { class: 'rows' }, routeRows(false))),
+          card('18+ destination (Adshortis)', 'share', null,
+            h('ul', { class: 'rows' }, routeRows(true)),
+            h('p', { class: 'note' }, 'Kept apart from every general app: its folder may not share a tree with them, only the owner session and 18+ app clients can save to it, and it is never the default choice.'),
+            state.config && state.config.adultBlocked ? h('p', { class: 'err' }, state.config.adultBlocked) : null)),
         card('Downloads by source', 'sites', null,
           s ? h('ul', { class: 'rows' }, s.sites.map((x) => h('li', null, x.site, h('span', { class: 'v' }, num(x.count))))) : h('p', { class: 'empty' }, 'Loading ...'))),
     ];

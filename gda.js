@@ -89,6 +89,27 @@ function targetForLegacy({ dest, channel, folder }) {
 }
 
 // ---------------------------------------------------------------------------
+// Adult and general destinations never share a folder tree. Two folders
+// overlap when they are the same folder or one holds the other; a shared
+// prefix alone (`/a/shorts` vs `/a/shorts-posts`) is not an overlap. Callers
+// pass resolved paths (realpath where the folder exists) so a symlink or a
+// second spelling of the same path cannot hide an overlap.
+function pathsOverlap(a, b) {
+  if (!a || !b) return false;
+  const ra = path.resolve(a) + path.sep;
+  const rb = path.resolve(b) + path.sep;
+  return ra.startsWith(rb) || rb.startsWith(ra);
+}
+
+// The general destinations an adult folder shares a tree with, as
+// [{ name, dir }]. Empty means the adult destination is cleanly separate.
+function adultOverlaps(adultDir, generalDirs) {
+  return Object.entries(generalDirs || {})
+    .filter(([, dir]) => pathsOverlap(adultDir, dir))
+    .map(([name, dir]) => ({ name, dir }));
+}
+
+// ---------------------------------------------------------------------------
 // Errors in the v1 envelope: { ok:false, error:{ code, message, retryable } }.
 const ERRORS = {
   unauthorized: [401, 'Sign in first.', false],
@@ -473,6 +494,8 @@ module.exports = {
   LEGACY_SHARED,
   INTERNAL,
   targetForLegacy,
+  pathsOverlap,
+  adultOverlaps,
   validateClient,
   hashSecret,
   verifySecret,

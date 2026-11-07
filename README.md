@@ -172,6 +172,20 @@ review, metadata editing) are marked as planned instead of showing sample
 values. The classic interface at `/` keeps every feature and is linked from the
 hub's sidebar.
 
+### The 18+ destination (Adshortis)
+
+Adshortis is a destination of its own, never mixed with the general apps:
+
+- The hub lists it in a separate *18+ only* group, only when `ELITE_ROOT` is
+  set and passed the boot check, and never restores it as the default choice.
+  Saving to it needs a confirmation tick, every time.
+- Its folder may not share a tree with a general destination; if it does, the
+  channel is disabled at boot (see `ELITE_ROOT` below).
+- Only the owner session and app clients with the `adult` audience can save to
+  it (GDA target `adshortis.inbox`); a general client is refused.
+- A save to it is refused up front when it is not available, and an 18+ image
+  is refused instead of going to the general posts import.
+
 ### Creator profiles
 
 The hub's Profiles page manages one profile per creator, stored in
@@ -429,9 +443,11 @@ up only once the destination is Navidrome); that's noted per setting.
   the audio lands in: *My music* or *Kids* (a separate library/instance).
 
 - **Channel** — *shown only when Save to = Shorts.* Which shorts channel new
-  clips post to: *main* or *18+*. The two can live in separate libraries — see
-  `ELITE_ROOT` / `TIKSHORTIS_ROOT`. Only the channels whose root is configured
+  clips post to: *main* or *18+*. Each is its own app with its own root — see
+  `TIKSHORTIS_ROOT` / `ELITE_ROOT`. Only the channels whose root is configured
   are shown, and with neither set the *Shorts* destination is hidden entirely.
+  The 18+ channel takes videos only: an 18+ image is refused rather than filed
+  into the general posts import.
 
 - **Library folder** — *shown only when Save to = Server library.* The subfolder
   inside the server library that video downloads are filed under.
@@ -899,8 +915,8 @@ environment variables:
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
 | `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |
-| `ELITE_ROOT` | Shorts storage root — enables the shorts destination. Clips are dropped in `<root>/<channel>/_import/`. Unset (the default) there is no shorts destination at all: the *Shorts* option and the *Shorts* mode disappear from the UI and new downloads default to the server library. |
-| `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. Set one of the two and only that channel is offered. |
+| `ELITE_ROOT` | Storage root of the **18+** shorts app (Adshortis, channel `18plus`). Clips are dropped in `<root>/18plus/_import/`. Unset (the default), there is no 18+ channel. If `<root>/18plus` shares a folder tree with any general destination (the main channel folder, `PLATFORM_IMPORT_ROOT` or the posts import folder, compared after resolving symlinks), the 18+ channel is disabled at boot and the reason is logged, shown in `/api/config` (`adultBlocked`) and in the health check. |
+| `TIKSHORTIS_ROOT` | Storage root of the **main** (general) shorts app. Same `<root>/main/_import/` layout. Unset (the default), there is no main channel. It no longer falls back to `ELITE_ROOT`: that root is the 18+ library, and a general channel is never filed inside it. With neither root set, the *Shorts* option and mode disappear and new downloads default to the server library. |
 | `DROP_FORMAT_MAIN` / `DROP_FORMAT_18PLUS` | How a clip dropped into that channel's `_import/` is named. `legacy` (default): `<creator>_-_<title>.mp4` plus a `.md` caption. `brackets`: `<title> [@<creator>] [id=<media id>].mp4` plus a yt-dlp style `.json` sidecar (title, description, tags, uploader, webpage_url). |
 | `PLATFORM_IMPORT_ROOT` | Drop folder of a social app that imports clips as posts by per-creator profiles (channel `platform`, GDA target `platform.inbox`). Unlike the other shorts roots this IS the drop folder (no `<channel>/_import/`). Each save writes `<creator>_-_<title>.mp4` first, then `<creator>_-_<title>.json` (drop-zone contract v1: `version`, `file`, `source`, `sourceId`, `sourceUrl`, `creator{handle,name,profileUrl}`, `caption`, `tags`), both by an atomic rename from a dot-name. Videos only; a clip whose creator is unknown is refused. Unset (the default), the channel does not exist. |
 | `HUB_BRAND` | The line under the logo in the Grabbit 2.0 hub (`/hub/`). Default `Media hub`. |

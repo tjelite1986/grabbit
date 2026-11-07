@@ -190,4 +190,21 @@ test('v1 status mapping', () => {
   assert.equal(gda.v1Status({ status: 'cancelled' }), 'cancelled');
 });
 
+test('adult and general folders overlap only when one holds the other', () => {
+  assert.equal(gda.pathsOverlap('/a/shorts/18plus', '/a/shorts/18plus'), true);
+  assert.equal(gda.pathsOverlap('/a/shorts', '/a/shorts/18plus/_import'), true);
+  assert.equal(gda.pathsOverlap('/a/shorts/18plus', '/a/shorts'), true);
+  assert.equal(gda.pathsOverlap('/a/shorts/', '/a/shorts'), true);
+  // A shared prefix is not a shared tree.
+  assert.equal(gda.pathsOverlap('/a/shorts', '/a/shorts-posts'), false);
+  assert.equal(gda.pathsOverlap('/a/shorts/18plus', '/a/shorts/main'), false);
+  assert.equal(gda.pathsOverlap('/a/x', null), false);
+});
+
+test('adultOverlaps names every general destination inside the adult tree', () => {
+  const general = { 'main channel': '/m/main', 'platform drop folder': '/ads/18plus/inbox', 'posts import folder': null };
+  assert.deepEqual(gda.adultOverlaps('/ads/18plus', general), [{ name: 'platform drop folder', dir: '/ads/18plus/inbox' }]);
+  assert.deepEqual(gda.adultOverlaps('/ads/18plus', { 'main channel': '/tik/main' }), []);
+});
+
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));

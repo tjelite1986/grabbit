@@ -90,7 +90,9 @@ function guardChild(child, label) {
 // inside the container that no importer was watching. Unset means the channel
 // does not exist: see shortsUnavailable(), parseDest() and /api/config.
 const ELITE_ROOT = process.env.ELITE_ROOT || null;
-const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || ELITE_ROOT;
+// No fallback to ELITE_ROOT: that root is the 18+ library, and a general
+// channel must never be filed inside it. Unset means no main channel.
+const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || null;
 // A third, general channel: a social app's drop folder (drop-zone contract v1,
 // see platform-drop.js). Unlike the other two, the root IS the drop folder: the
 // importer removes every item it handles from it, and keeps its own record of
@@ -100,6 +102,34 @@ const CHANNELS = { main: 'main', '18plus': '18plus', platform: 'platform' };
 const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT, platform: PLATFORM_IMPORT_ROOT };
 // The env var that would configure each channel, for the message a user reads.
 const CHANNEL_ROOT_VARS = { main: 'TIKSHORTIS_ROOT', '18plus': 'ELITE_ROOT', platform: 'PLATFORM_IMPORT_ROOT' };
+// The 18+ channel (Adshortis) is refused at boot when its folder shares a
+// tree with any general destination, rather than risk filing adult clips where
+// a general importer reads (or the reverse). realpath where the folder exists,
+// so a symlink or a second spelling cannot hide the overlap.
+function realDir(dir) {
+  if (!dir) return null;
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
+const ADULT_OVERLAPS = CHANNEL_ROOTS['18plus']
+  ? gda.adultOverlaps(realDir(path.join(CHANNEL_ROOTS['18plus'], '18plus')), {
+      'main channel': realDir(CHANNEL_ROOTS.main && path.join(CHANNEL_ROOTS.main, 'main')),
+      'platform drop folder': realDir(CHANNEL_ROOTS.platform),
+      'posts import folder': realDir(process.env.ELITE_POSTS_IMPORT_DIR ||
+        (process.env.ELITE_POSTS_ROOT ? path.join(process.env.ELITE_POSTS_ROOT, '_import') : null)),
+    })
+  : [];
+const ADULT_BLOCKED = ADULT_OVERLAPS.length
+  ? `The 18+ channel is disabled: its folder shares a tree with the ${ADULT_OVERLAPS.map((o) => o.name).join(', ')}. ` +
+    'Give ELITE_ROOT a folder of its own.'
+  : null;
+if (ADULT_BLOCKED) {
+  console.error(`[grabbit] ${ADULT_BLOCKED}`);
+  CHANNEL_ROOTS['18plus'] = null;
+}
 const SHORTS_ENABLED = Object.values(CHANNEL_ROOTS).some(Boolean);
 // The app serving each channel, for the messages a user reads.
 const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis', platform: 'Platform' };
@@ -162,6 +192,7 @@ function parseImportDest(v) {
 function shortsUnavailable(channel) {
   const ch = CHANNELS[channel] || 'main';
   if (CHANNEL_ROOTS[ch]) return null;
+  if (ch === '18plus' && ADULT_BLOCKED) return ADULT_BLOCKED;
   return (
     `No shorts library is configured for the ${ch} channel — set ` +
     `${CHANNEL_ROOT_VARS[ch]} to a bind-mounted host path, or save to the server library instead.`
@@ -1863,7 +1894,14 @@ function channelDir(channel) {
 // Why this item cannot be saved into this channel for reasons of its own (not
 // the deploy's), or null. Only the platform channel has any.
 function channelRefusal(channel, job) {
-  return (CHANNELS[channel] || 'main') === 'platform' ? platformDrop.platformRefusal(job) : null;
+  const ch = CHANNELS[channel] || 'main';
+  if (ch === 'platform') return platformDrop.platformRefusal(job);
+  // With dest=elite an image is filed by the posts import, a general app. An
+  // 18+ image must never go there, and Adshortis takes clips only.
+  if (ch === '18plus' && job && job.mediaType === 'image') {
+    return 'Adshortis takes videos only, and 18+ images are never filed into the general posts library. Save them to the server library instead.';
+  }
+  return null;
 }
 
 // The app that will show a clip saved to this channel.
@@ -2573,6 +2611,12 @@ app.get('/api/config', (_req, res) =>
     posts: POSTS_ENABLED,
     elite: ELITE_ENABLED,
     channels: Object.keys(CHANNELS).filter((ch) => !!CHANNEL_ROOTS[ch]),
+    // The app behind each configured channel and its audience, so a UI can keep
+    // the 18+ app apart from the general ones instead of guessing from a name.
+    apps: Object.keys(CHANNELS)
+      .filter((ch) => !!CHANNEL_ROOTS[ch])
+      .map((ch) => ({ channel: ch, app: CHANNEL_LIBRARY[ch], audience: ch === '18plus' ? 'adult' : 'general' })),
+    adultBlocked: ADULT_BLOCKED,
   })
 );
 
@@ -5229,11 +5273,13 @@ async function runJob(job, params) {
   // Refuse a save into a library this deploy has not been given. Audio-only is
   // exempt: with dest=elite it is streamed, never filed.
   if (params.dest === 'elite' && !params.audio) {
+    // The channel's own refusal first: an 18+ image must be refused as such,
+    // not reported as a missing posts library.
+    const refused = channelRefusal(params.channel, { ...meta, mediaType });
+    if (refused) return failJob(job, refused);
     const unavailable =
       mediaType === 'image' ? postsUnavailable() : shortsUnavailable(params.channel);
     if (unavailable) return failJob(job, unavailable);
-    const refused = channelRefusal(params.channel, { ...meta, mediaType });
-    if (refused) return failJob(job, refused);
   }
 
   if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
@@ -5826,6 +5872,14 @@ function startJobFromQuery(query, who, via) {
     req.query = { ...req.query, folder: gda.TARGETS[target].legacy.folder, xargs: undefined };
   }
   console.log(`gda: client=${who.id} target=${target} via=${via} result=allow`);
+  // The 18+ app is refused at the door when it is not there (unset, or
+  // disabled at boot for sharing a tree with a general app), so a scheduled
+  // job cannot sit in the queue looking accepted. 18+ images are refused
+  // later too, so no media type can route around this.
+  if (target === 'adshortis.inbox' && req.query.audio !== '1') {
+    const unavailable = shortsUnavailable('18plus');
+    if (unavailable) return { status: 422, body: { ok: false, error: unavailable } };
+  }
   let params;
   try {
     params = {
@@ -6497,6 +6551,8 @@ app.get('/api/health', async (_req, res) => {
       // would be noise in the one panel that must only show real problems.
       ...(CHANNEL_ROOTS.main ? [dirHealth('shorts main (tikshortis)', channelDir('main'), true)] : []),
       ...(CHANNEL_ROOTS['18plus'] ? [dirHealth('shorts 18+ (adshortis)', channelDir('18plus'), true)] : []),
+      // Configured but refused at boot: a real problem, so it gets a row.
+      ...(ADULT_BLOCKED ? [{ label: 'shorts 18+ (adshortis)', path: null, exists: false, writable: false, unreachable: false, blocked: ADULT_BLOCKED }] : []),
       ...(CHANNEL_ROOTS.platform ? [dirHealth('platform drop folder', channelDir('platform'), true)] : []),
       ...(POSTS_ENABLED ? [dirHealth('posts (elitogram)', POSTS_IMPORT_DIR, true)] : []),
       dirHealth('server videos', VIDEOS_DIR, true),
