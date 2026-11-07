@@ -407,6 +407,22 @@ function split(store, id, input, now) {
   return { store: next, profile: p, from };
 }
 
+// Where a profile's files were delivered, from the registry channel of each
+// file: 'main', 'platform', 'none' (the plain server library) and so on,
+// sorted. Having been delivered is history, never a classification.
+function historyOf(p, stats) {
+  const out = new Set();
+  for (const a of p.aliases) {
+    const s = stats.get(aliasKey(p.audience, a.name));
+    if (s) s.channels.forEach((c) => out.add(c || 'none'));
+  }
+  return [...out].sort();
+}
+
+// The review group of a profile: the exact set of sites and the exact
+// delivery history. Two profiles share a group only when both match.
+const groupKey = (sites, history) => `${sites.length ? sites.join('+') : 'no site'} | ${history.length ? history.join('+') : 'no files'}`;
+
 // A profile with what the registry says about its aliases.
 function view(p, stats) {
   let files = 0;
@@ -421,6 +437,8 @@ function view(p, stats) {
     }
     return { name: a.name, files: s ? s.files : 0, lastAt: (s && s.lastAt) || null };
   });
+  const sitesSorted = [...sites].sort();
+  const history = historyOf(p, stats);
   return {
     id: p.id,
     name: p.name,
@@ -434,7 +452,9 @@ function view(p, stats) {
     aliases,
     mergedFrom: p.mergedFrom,
     files,
-    sites: [...sites].sort(),
+    sites: sitesSorted,
+    history,
+    group: groupKey(sitesSorted, history),
     lastAt: lastAt || null,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
@@ -443,9 +463,12 @@ function view(p, stats) {
 
 // The profiles a list shows. `status` filters on the gate's audience
 // ('general', 'adult', 'unknown'); `audience` on the registry bucket.
-function matching(store, { q = '', audience = '', status = '' } = {}) {
+// `group` (a groupKey) needs `stats`, since sites and history come from the registry.
+function matching(store, { q = '', audience = '', status = '', group = '', stats = null } = {}) {
   const needle = String(q || '').trim().toLowerCase();
+  if (group && !stats) throw new Error('matching on a group needs the registry stats');
   return store.profiles
+    .filter((p) => !group || view(p, stats).group === group)
     .filter((p) => !audience || p.audience === audience)
     .filter((p) => !status || effectiveAudience(p) === status)
     .filter((p) => !needle
@@ -454,8 +477,8 @@ function matching(store, { q = '', audience = '', status = '' } = {}) {
       || p.accounts.some((a) => a.handle.toLowerCase().includes(needle)));
 }
 
-function list(store, stats, { q = '', audience = '', status = '', limit = 200, offset = 0 } = {}) {
-  const all = matching(store, { q, audience, status })
+function list(store, stats, { q = '', audience = '', status = '', group = '', limit = 200, offset = 0 } = {}) {
+  const all = matching(store, { q, audience, status, group, stats })
     .map((p) => view(p, stats))
     .sort((a, b) => b.files - a.files || (b.lastAt || 0) - (a.lastAt || 0) || a.id - b.id);
   return {
@@ -471,9 +494,24 @@ function list(store, stats, { q = '', audience = '', status = '', limit = 200, o
   };
 }
 
+// The profiles with this gate status, grouped by groupKey, biggest group first:
+// [{ group, sites, history, count, files, lastAt }].
+function groups(store, stats, { status = 'unknown', q = '' } = {}) {
+  const out = new Map();
+  for (const p of matching(store, { q, status })) {
+    const v = view(p, stats);
+    let g = out.get(v.group);
+    if (!g) out.set(v.group, (g = { group: v.group, sites: v.sites, history: v.history, count: 0, files: 0, lastAt: null }));
+    g.count++;
+    g.files += v.files;
+    if (v.lastAt) g.lastAt = Math.max(g.lastAt || 0, v.lastAt);
+  }
+  return [...out.values()].sort((a, b) => b.count - a.count || b.files - a.files || (a.group < b.group ? -1 : 1));
+}
+
 module.exports = {
   VERSION, AUDIENCES, PLATFORMS, LIMITS, ProfileError,
   emptyStore, normalizeStore, check, aliasStats, audienceOfChannel, aliasKey, accountKey,
   sync, create, update, merge, split, view, list, findProfile,
-  effectiveAudience, classifyProfiles, matching, CLASSIFY_MAX,
+  effectiveAudience, classifyProfiles, matching, groups, groupKey, historyOf, CLASSIFY_MAX,
 };

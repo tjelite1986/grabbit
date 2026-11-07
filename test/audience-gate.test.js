@@ -402,6 +402,41 @@ test('review queue: a creator once delivered is refused until classified by hand
   assert.equal((await jpost('/api/hub/review/items', { audience: 'maybe', ids: [1] })).status, 400);
 });
 
+test('review groups: a whole group is classified only with its exact count, and only that group', async (t) => {
+  const registry = {
+    'id:tiktok:a1': { filename: 'Jane Doe_-_a a1.mp4', at: 1, channel: 'main' },
+    'id:tiktok:a2': { filename: 'Kim_-_b a2.mp4', at: 2, channel: 'main' },
+    'id:tiktok:a3': { filename: 'Max_-_c a3.mp4', at: 3, channel: 'platform' },
+    'id:tiktok:a4': { filename: 'Lo_-_d a4.mp4', at: 4 },
+    'id:redgifs:a5': { filename: 'Rex_-_e a5.mp4', at: 5, channel: '18plus' },
+  };
+  const s = await boot(t, { registry });
+  const jpost = (p, body) =>
+    fetch(`${s.base}${p}`, { method: 'POST', headers: { ...s.headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json() }));
+  const jget = (p) => fetch(`${s.base}${p}`, { headers: s.headers }).then((r) => r.json());
+
+  const { groups } = await jget('/api/hub/review/groups');
+  assert.deepEqual(groups.map((g) => `${g.group}=${g.count}`), ['tiktok | main=2', 'tiktok | none=1', 'tiktok | platform=1']);
+  const main = groups[0];
+  const listed = await jget(`/api/hub/review/creators?group=${encodeURIComponent(main.group)}`);
+  assert.deepEqual(listed.items.map((p) => p.name).sort(), ['Jane Doe', 'Kim']);
+
+  // No count, a wrong count, or a group that is not a string: nothing is classified.
+  assert.equal((await jpost('/api/hub/review/creators', { audience: 'general', all: true, group: main.group })).status, 409);
+  assert.equal((await jpost('/api/hub/review/creators', { audience: 'general', all: true, group: main.group, expected: 4 })).status, 409);
+  assert.equal((await jpost('/api/hub/review/creators', { audience: 'general', all: true, group: ['x'], expected: 2 })).status, 400);
+  assert.equal((await jget('/api/hub/review')).creators.unclassified, 4);
+
+  const ok = await jpost('/api/hub/review/creators', { audience: 'general', all: true, q: '', group: main.group, expected: 2 });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.changed.length, 2);
+  const left = (await jget('/api/hub/review/groups')).groups;
+  assert.deepEqual(left.map((g) => g.group), ['tiktok | none', 'tiktok | platform']);
+  assert.equal((await s.save(s.fakeUrl('video', 'tiktok', 'Kim', 'k1'), 'main')).status, 200);
+  assert.equal((await s.save(s.fakeUrl('video', 'tiktok', 'Max', 'm1'), 'main')).status, 422);
+});
+
 test('reddclips reaches no general app without a hand classification', async (t) => {
   const registry = { 'id:reddclips:old': { filename: 'someuser_-_old old.mp4', at: 1, channel: 'main' } };
   const s = await boot(t, { registry });

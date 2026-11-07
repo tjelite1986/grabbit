@@ -160,6 +160,7 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 500; font-size: 13px; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.selected td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #231d42; border: 1px solid var(--accent); padding: 10px 16px; border-radius: 12px; z-index: 30; max-width: calc(100vw - 32px); }
 
@@ -190,6 +191,12 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .job .thumb { width: 48px; height: 40px; }
   .job .acts { grid-column: 1 / -1; justify-content: flex-end; }
   select.field { flex: 1 1 100%; }
+  /* Review groups: one block per group, the actions on their own line. */
+  table.groups thead { display: none; }
+  table.groups tr { display: grid; grid-template-columns: repeat(3, auto); justify-content: start; column-gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  table.groups td { border: 0; padding: 2px 4px; text-align: left; }
+  table.groups td:nth-child(-n + 2), table.groups td:last-child { grid-column: 1 / -1; }
+  table.groups td[data-label]::before { content: attr(data-label) ': '; color: var(--muted); }
 }
 
 /* Profiles */

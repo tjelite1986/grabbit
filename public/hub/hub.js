@@ -693,9 +693,68 @@
       h('h1', null, 'Review'),
       h('p', { class: 'lead' }, 'General apps only take creators and items you classified by hand. Everything else waits here.'),
       h('p', { class: 'note' }, 'Having been delivered before is not a classification. 18+ always wins and is final: an 18+ creator or item is never classified general again.'),
-      reviewCreators(),
+      ...reviewCreatorCards(),
       reviewItems(),
     ];
+  }
+
+  // Where a group's files went before. Delivery is history, not a decision.
+  const HISTORY_LABEL = { main: 'main (Tikshortis)', platform: 'Platform', none: 'server library only' };
+  const historyLabel = (hist) => (hist.length ? hist.map((c) => HISTORY_LABEL[c] || c).join(' + ') : 'no files');
+
+  // The groups card and the creators card share one group filter.
+  function reviewCreatorCards() {
+    const ctl = { group: null, refresh: () => {} };
+    const groupsCard = reviewGroups(ctl);
+    const creatorsCard = reviewCreators(ctl);
+    return [groupsCard, creatorsCard];
+  }
+
+  // Unclassified creators grouped by site and delivery history. A group is
+  // classified only by an explicit click, a confirm naming its count, and a
+  // server check that the count is still the same.
+  function reviewGroups(ctl) {
+    const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+
+    async function decide(aud, g) {
+      const where = `${g.sites.length ? g.sites.join(', ') : 'no site'}, delivered to ${historyLabel(g.history)}`;
+      const msg = aud === 'adult'
+        ? `Classify all ${num(g.count)} creators in the group "${where}" (${num(g.files)} files) as 18+? This cannot be undone.`
+        : `Classify all ${num(g.count)} creators in the group "${where}" (${num(g.files)} files) as general? Their files may then go to Tikshortis, Platform and the posts library.`;
+      if (!confirm(msg)) return;
+      try {
+        const r = await jsonPost('/api/hub/review/creators', { audience: aud, all: true, q: '', group: g.group, expected: g.count });
+        toast(`${num(r.changed.length)} classified ${aud === 'adult' ? '18+' : 'general'}.${skippedNote(r)}`);
+        load(['review']).then(updateNav);
+        ctl.refresh();
+      } catch (e) { toast(e.message); }
+    }
+
+    async function fill() {
+      try {
+        const d = await api('/api/hub/review/groups');
+        if (!d.groups.length) return box.replaceChildren(h('p', { class: 'empty' }, 'Every creator is classified.'));
+        box.replaceChildren(h('div', { class: 'scroll-x' }, h('table', { class: 'groups' },
+          h('thead', null, h('tr', null, h('th', null, 'Sources'), h('th', null, 'Delivered before to'), h('th', { class: 'num' }, 'Creators'), h('th', { class: 'num' }, 'Files'), h('th', null, 'Latest'), h('th', null, ''))),
+          h('tbody', null, d.groups.map((g) => h('tr', { class: ctl.group === g.group ? 'selected' : null },
+            h('td', null, g.sites.length ? g.sites.join(', ') : h('span', { class: 'muted' }, 'no site')),
+            h('td', { class: 'muted' }, historyLabel(g.history)),
+            h('td', { class: 'num', 'data-label': 'Creators' }, num(g.count)),
+            h('td', { class: 'num', 'data-label': 'Files' }, num(g.files)),
+            h('td', { 'data-label': 'Latest' }, g.lastAt ? ago(g.lastAt) : ''),
+            h('td', null, h('div', { class: 'toolbar' },
+              h('button', { class: 'btn small ghost', type: 'button', onclick: () => ctl.show(ctl.group === g.group ? null : g) }, ctl.group === g.group ? 'Showing' : 'Show'),
+              h('button', { class: 'btn small', type: 'button', onclick: () => decide('general', g) }, `General (${num(g.count)})`),
+              h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => decide('adult', g) }, `18+ (${num(g.count)})`)))))))));
+      } catch (e) {
+        box.replaceChildren(h('p', { class: 'empty' }, e.message));
+      }
+    }
+    ctl.fillGroups = fill;
+    fill();
+    return card('Creators by source and history', 'profiles', null,
+      h('p', { class: 'note' }, 'Grouped by the exact sites and the exact channels their files were delivered to. Delivered before is not a classification: look at a group before you classify it.'),
+      box);
   }
 
   function pager(page, total, size, go) {
@@ -707,7 +766,7 @@
       h('button', { class: 'btn small ghost', type: 'button', disabled: page >= last, onclick: () => go(page + 1) }, 'Next'));
   }
 
-  function reviewCreators() {
+  function reviewCreators(ctl) {
     const SIZE = 100;
     const input = h('input', { class: 'field', type: 'search', placeholder: 'Filter creators', 'aria-label': 'Filter creators' });
     const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
@@ -719,31 +778,34 @@
     async function decide(aud, ids, all) {
       const n = all ? total : ids.length;
       if (!n) return toast('Tick the creators first');
-      const what = all ? `all ${num(n)} unclassified creators${input.value.trim() ? ` matching "${input.value.trim()}"` : ''}` : `${num(n)} creator(s)`;
+      const what = all
+        ? `all ${num(n)} unclassified creators${groupLabel ? ` in the group "${groupLabel}"` : ''}${input.value.trim() ? ` matching "${input.value.trim()}"` : ''}`
+        : `${num(n)} creator(s)`;
       const msg = aud === 'adult'
         ? `Classify ${what} as 18+? This cannot be undone.`
         : `Classify ${what} as general? Their files may then go to Tikshortis, Platform and the posts library.`;
       if (!confirm(msg)) return;
       try {
-        const body = all ? { audience: aud, all: true, q: input.value, expected: total } : { audience: aud, ids };
+        const body = all ? { audience: aud, all: true, q: input.value, group: ctl.group || '', expected: total } : { audience: aud, ids };
         const r = await jsonPost('/api/hub/review/creators', body);
         toast(`${num(r.changed.length)} classified ${aud === 'adult' ? '18+' : 'general'}.${skippedNote(r)}`);
         picked.clear();
         load(['review']).then(updateNav);
-        fill();
+        ctl.refresh();
       } catch (e) { toast(e.message); }
     }
 
     async function fill() {
       try {
-        const d = await api(`/api/hub/review/creators?limit=${SIZE}&offset=${page * SIZE}&q=${encodeURIComponent(input.value)}`);
+        const d = await api(`/api/hub/review/creators?limit=${SIZE}&offset=${page * SIZE}&q=${encodeURIComponent(input.value)}&group=${encodeURIComponent(ctl.group || '')}`);
         total = d.total;
-        if (!d.total) return box.replaceChildren(h('p', { class: 'empty' }, input.value ? 'No unclassified creator matches.' : 'Every creator is classified.'));
+        if (!d.total) return box.replaceChildren(groupChip() || '', h('p', { class: 'empty' }, input.value || ctl.group ? 'No unclassified creator matches.' : 'Every creator is classified.'));
         const all = h('input', { type: 'checkbox', 'aria-label': 'Select every creator on this page', onchange: (e) => {
           for (const p of d.items) { if (e.target.checked) picked.add(p.id); else picked.delete(p.id); }
           fill();
         } });
         box.replaceChildren(
+          groupChip() || '',
           h('div', { class: 'toolbar' },
             h('b', null, `${num(d.total)} unclassified`),
             h('button', { class: 'btn small', type: 'button', onclick: () => decide('general', [...picked]) }, `General (${picked.size})`),
@@ -764,6 +826,22 @@
         box.replaceChildren(h('p', { class: 'empty' }, e.message));
       }
     }
+    function groupChip() {
+      if (!ctl.group) return null;
+      return h('div', { class: 'toolbar' },
+        h('span', null, 'Group: ', h('b', null, groupLabel)),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => ctl.show(null) }, 'Show every group'));
+    }
+    let groupLabel = '';
+    ctl.show = (g) => {
+      ctl.group = g ? g.group : null;
+      groupLabel = g ? `${g.sites.length ? g.sites.join(', ') : 'no site'}, delivered to ${historyLabel(g.history)}` : '';
+      page = 0;
+      picked.clear();
+      ctl.fillGroups();
+      fill();
+    };
+    ctl.refresh = () => { ctl.fillGroups(); fill(); };
     input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { page = 0; picked.clear(); fill(); }, 250); });
     fill();
     return card('Creators', 'profiles', null, h('div', { class: 'toolbar' }, input), box);

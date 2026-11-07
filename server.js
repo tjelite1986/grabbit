@@ -2927,28 +2927,40 @@ app.get('/api/hub/review', (_req, res) => {
     profileError(res, e);
   }
 });
-// GET /api/hub/review/creators?q=&limit=&offset= -> unclassified profiles, most files first.
-app.get('/api/hub/review/creators', (req, res) => {
+// GET /api/hub/review/groups?q= -> unclassified profiles grouped by site and
+// delivery history, so the owner can look at one kind of creator at a time.
+app.get('/api/hub/review/groups', (req, res) => {
   try {
     const { store, stats } = readProfiles();
-    res.json({ ok: true, ...profiles.list(store, stats, { q: req.query.q, status: 'unknown', limit: Number(req.query.limit) || 100, offset: req.query.offset }) });
+    res.json({ ok: true, groups: profiles.groups(store, stats, { status: 'unknown', q: req.query.q }) });
   } catch (e) {
     profileError(res, e);
   }
 });
-// POST /api/hub/review/creators { audience, ids: [id] } or { audience, all: true, q, expected }
-// `all` classifies every unclassified profile matching q; `expected` must be
-// the count the owner saw, so a list that changed meanwhile is not classified blind.
+// GET /api/hub/review/creators?q=&group=&limit=&offset= -> unclassified profiles, most files first.
+app.get('/api/hub/review/creators', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    res.json({ ok: true, ...profiles.list(store, stats, { q: req.query.q, group: req.query.group, status: 'unknown', limit: Number(req.query.limit) || 100, offset: req.query.offset }) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// POST /api/hub/review/creators { audience, ids: [id] } or { audience, all: true, q, group, expected }
+// `all` classifies every unclassified profile matching q (and group, when
+// given); `expected` must be the count the owner saw, so a list that changed
+// meanwhile is not classified blind. Without `expected` nothing is classified.
 app.post('/api/hub/review/creators', (req, res) => {
   const b = req.body || {};
   const aud = reviewAudience(b.audience);
   if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
   try {
-    const { store } = readProfiles();
+    const { store, stats } = readProfiles();
     let ids = b.ids;
     if (b.all === true) {
-      ids = profiles.matching(store, { q: b.q, status: 'unknown' }).map((p) => p.id);
-      if (Number(b.expected) !== ids.length) {
+      if (b.group != null && typeof b.group !== 'string') return res.status(400).json({ ok: false, error: 'group must be a string' });
+      ids = profiles.matching(store, { q: b.q, group: b.group || '', stats, status: 'unknown' }).map((p) => p.id);
+      if (b.expected == null || Number(b.expected) !== ids.length) {
         return res.status(409).json({ ok: false, error: `The list changed: ${ids.length} creators match now, not ${b.expected}. Reload and check again.` });
       }
     }

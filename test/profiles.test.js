@@ -254,3 +254,28 @@ test('list filters on the gate status and pages with offset', () => {
   assert.equal(page.items.length, 1);
   assert.equal(page.items[0].id, all.items[1].id);
 });
+
+test('review groups: exact sites and delivery history, unknown only, 18+ never listed', () => {
+  const { store, stats } = seeded();
+  const anna = P.view(byName(store, 'anna'), stats);
+  assert.deepEqual(anna.history, ['main']);
+  assert.equal(anna.group, 'instagram+tiktok | main');
+  // Bert's file has no channel: the plain server library.
+  assert.equal(P.view(byName(store, 'bert'), stats).group, 'tiktok | none');
+
+  const groups = P.groups(store, stats);
+  assert.deepEqual(groups.map((g) => `${g.group}=${g.count}/${g.files}`).sort(),
+    ['instagram+tiktok | main=1/2', 'tiktok | none=1/1']);
+  // The 18+ Anna is adult, never in a review group.
+  assert.ok(!groups.some((g) => g.history.includes('18plus')));
+
+  const inGroup = P.matching(store, { status: 'unknown', group: 'tiktok | none', stats });
+  assert.deepEqual(inGroup.map((p) => p.name), ['Bert']);
+  assert.equal(P.list(store, stats, { status: 'unknown', group: 'tiktok | none' }).total, 1);
+  assert.equal(P.matching(store, { status: 'unknown', group: 'nope | main', stats }).length, 0);
+  assert.throws(() => P.matching(store, { group: 'tiktok | none' }), /needs the registry stats/);
+
+  // Classified creators leave their group.
+  const r = P.classifyProfiles(store, [byName(store, 'bert').id], 'general', T0);
+  assert.deepEqual(P.groups(r.store, stats).map((g) => g.group), ['instagram+tiktok | main']);
+});
