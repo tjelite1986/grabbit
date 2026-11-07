@@ -101,6 +101,29 @@ test('every adult signal wins over a general profile', () => {
   }
 });
 
+test('a general profile matched every way at once still loses to one adult signal', () => {
+  const store = storeWith([
+    { name: 'alice', audience: 'general', accounts: [{ platform: 'tiktok', handle: 'alice' }] },
+  ]);
+  const base = { creatorKey: 'alice', handle: 'alice', site: 'tiktok' };
+  assert.equal(classify(base, store).audience, 'general');
+  for (const s of [{ requested: 'adult' }, { prior: 'adult' }, { sourceUrl: 'https://redgifs.com/watch/x' }]) {
+    const c = classify({ ...base, ...s }, store);
+    assert.equal(c.audience, 'adult', JSON.stringify(s));
+    assert.notEqual(c.profileId, store.profiles[0].id, 'the general profile is not credited');
+  }
+  // An adult profile that holds the handle on another platform wins too.
+  const both = storeWith([
+    { name: 'alice', audience: 'general', accounts: [{ platform: 'tiktok', handle: 'alice' }] },
+    { name: 'Al', audience: 'adult', accounts: [{ platform: 'onlyfans', handle: 'alice' }] },
+  ]);
+  assert.equal(classify(base, both).audience, 'adult');
+  // And stricter() never lets a general look outvote an adult one.
+  const adult = classify({ ...base, requested: 'adult' }, store);
+  assert.equal(audience.stricter(classify(base, store), adult).audience, 'adult');
+  assert.equal(audience.stricter(adult, classify(base, store)).audience, 'adult');
+});
+
 test('a lookalike host is not an adult site, and a general profile still decides', () => {
   const store = storeWith([{ name: 'alice', audience: 'general' }]);
   for (const site of ['notredgifs.com', 'redgifs.com.example.com', 'example.com']) {

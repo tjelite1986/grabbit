@@ -231,6 +231,32 @@ test('18+ material never reaches a general app: adult profile, adult site, adult
   assert.deepEqual(s.generalFiles(), []);
 });
 
+test("an item's own 18+ flag beats a general profile, by every route and app", async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general', accounts: [{ platform: 'tiktok', handle: 'jane doe' }] }] });
+  const flagged = (kind, id) => `${s.fakeUrl(kind, 'tiktok', 'Jane Doe', id)}?adult=1`;
+  for (const channel of ['main', 'platform']) {
+    const r = await s.save(flagged('video', `f-${channel}`), channel);
+    assert.equal(r.status, 422, `${channel}: ${JSON.stringify(r.body)}`);
+    assert.match(r.body.error, /18\+/);
+    const job = await s.saveJob(flagged('video', `fj-${channel}`), channel);
+    assert.match(String(job.job && job.job.error), /18\+/, `${channel} (job): ${JSON.stringify(job)}`);
+  }
+  const img = await s.save(flagged('image', 'f-img'), 'main');
+  assert.equal(img.status, 422, JSON.stringify(img.body));
+  assert.match(img.body.error, /18\+/);
+  // A renamed creator does not wash the flag off either.
+  const renamed = await s.save(flagged('video', 'f-rn'), 'main', { creator: 'Jane Doe' });
+  assert.equal(renamed.status, 422, JSON.stringify(renamed.body));
+  assert.deepEqual(s.generalFiles(), []);
+  // The same flagged item may go to Adshortis, and is then recorded 18+.
+  const ok = await s.save(flagged('video', 'f-ads'), '18plus');
+  assert.equal(ok.status, 200, JSON.stringify(ok.body) + s.logs());
+  const back = await s.save(flagged('video', 'f-ads').replace('?adult=1', ''), 'main');
+  assert.equal(back.status, 422, 'the unflagged link to the same item is still 18+');
+  assert.match(back.body.error, /recorded as 18\+/);
+  assert.deepEqual(s.generalFiles(), []);
+});
+
 test('18+ images are refused by Adshortis too and land nowhere', async (t) => {
   const s = await boot(t, { profileList: [{ name: 'Ada', audience: 'adult' }] });
   const r = await s.save(s.fakeUrl('image', 'erome.com', 'Ada', 'i9'), '18plus');
