@@ -235,3 +235,30 @@ test('an item classified general by hand is general, but never against an adult 
     assert.equal(classify({ ...s, ...byHand }, store).audience, 'adult', JSON.stringify(s));
   }
 });
+
+test('kids library rule: only general passes; unknown, 18+ and anything malformed are refused', () => {
+  const store = storeWith([{ name: 'alice', audience: 'general' }, { name: 'ada', audience: 'adult' }]);
+  assert.equal(audience.kidsRefusal(classify({ creatorKey: 'alice' }, store)), null);
+  assert.match(audience.kidsRefusal(classify({ creatorKey: 'nobody' }, store)), /only takes items classified general/);
+  assert.match(audience.kidsRefusal(classify({ creatorKey: 'ada' }, store)), /never takes 18\+/);
+  assert.match(audience.kidsRefusal(classify({ creatorKey: 'alice', site: 'redgifs.com' }, store)), /never takes 18\+/);
+  for (const c of [null, undefined, {}, { audience: 'GENERAL' }, { audience: 'kids' }, 'general']) {
+    assert.ok(audience.kidsRefusal(c), JSON.stringify(c));
+  }
+});
+
+test('reddclips is never general by itself: no creator, a listing, or an alias once delivered all stay unknown', () => {
+  const reg = synced([['someuser', 'main']]);
+  for (const input of [
+    { creatorKey: null, site: 'reddclips.com', sourceUrl: 'https://reddclips.com/r/pics' },
+    { creatorKey: 'unknown', site: 'reddclips', sourceUrl: 'https://reddclips.com/r/pics/abc' },
+    { creatorKey: 'someuser', handle: 'someuser', site: 'reddclips.com', sourceUrl: 'https://reddclips.com/r/pics/abc' },
+  ]) {
+    const c = classify(input, reg.store);
+    assert.equal(c.audience, 'unknown', JSON.stringify(input));
+    assert.ok(audience.refusal(c, 'main'));
+  }
+  // Only the owner's hand makes it general.
+  const s = profiles.classifyProfiles(reg.store, [reg.store.profiles[0].id], 'general', NOW).store;
+  assert.equal(classify({ creatorKey: 'someuser', site: 'reddclips.com' }, s).audience, 'general');
+});

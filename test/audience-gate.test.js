@@ -401,3 +401,14 @@ test('review queue: a creator once delivered is refused until classified by hand
   assert.equal((await s.save(adultUrl, 'main')).status, 422);
   assert.equal((await jpost('/api/hub/review/items', { audience: 'maybe', ids: [1] })).status, 400);
 });
+
+test('reddclips reaches no general app without a hand classification', async (t) => {
+  const registry = { 'id:reddclips:old': { filename: 'someuser_-_old old.mp4', at: 1, channel: 'main' } };
+  const s = await boot(t, { registry });
+  for (const creator of ['-', 'someuser']) {
+    const r = await s.save(s.fakeUrl('video', 'reddclips', creator, `rc-${creator}`), 'main');
+    assert.equal(r.status, 422, `${creator}: ${JSON.stringify(r.body)}`);
+    assert.match(r.body.error, /not classified/);
+  }
+  assert.deepEqual(s.generalFiles(), []);
+});

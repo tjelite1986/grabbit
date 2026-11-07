@@ -198,6 +198,19 @@ function refusal(classification, destinationId, { mediaType, creator } = {}) {
   );
 }
 
+// The Navidrome kids library: a child-safety rule of its own, stricter than
+// a general app. Only an item positively classified general may go there;
+// unknown and 18+ are refused, and so is anything this function does not
+// recognise. NOT WIRED YET: the kids library keeps its current behaviour until
+// the owner decides to switch this on (see the save path for lib=kids).
+function kidsRefusal(classification) {
+  const audience = classification && AUDIENCES.includes(classification.audience) ? classification.audience : 'unknown';
+  if (audience === 'general') return null;
+  const why = (classification && classification.reasons && classification.reasons.join('; ')) || 'no classification';
+  if (audience === 'adult') return `The kids library never takes 18+ material (${why}).`;
+  return `The kids library only takes items classified general by hand, and this one is not (${why}).`;
+}
+
 // Two looks at one item (say the creator as the site named it and as the job
 // renamed it): adult if either is adult, general only if both are general.
 function stricter(a, b) {
@@ -229,6 +242,7 @@ module.exports = {
   matchProfiles,
   classify,
   refusal,
+  kidsRefusal,
   stricter,
   storedAudience,
 };
