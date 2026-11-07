@@ -242,6 +242,21 @@ test('18+ images are refused by Adshortis too and land nowhere', async (t) => {
   assert.deepEqual(filesUnder(s.apps.ads), []);
 });
 
+test('audio=1 does not let an image past the gate, by either route', async (t) => {
+  // A general creator, so only the 18+ channel choice stands between this
+  // image and the general posts library.
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  const r = await s.save(s.fakeUrl('image', 'instagram', 'Jane Doe', 'au1'), '18plus', { audio: '1' });
+  assert.equal(r.status, 422, JSON.stringify(r.body));
+  assert.match(r.body.error, /videos only/);
+  const job = await s.saveJob(s.fakeUrl('image', 'instagram', 'Jane Doe', 'au2'), '18plus', { audio: '1' });
+  assert.match(String(job.job && job.job.error), /videos only/, JSON.stringify(job));
+  const stranger = await s.save(s.fakeUrl('image', 'instagram', 'stranger', 'au3'), 'main', { audio: '1' });
+  assert.equal(stranger.status, 422, JSON.stringify(stranger.body));
+  assert.deepEqual(s.generalFiles(), []);
+  assert.deepEqual(filesUnder(s.apps.ads), []);
+});
+
 test('Adshortis takes adult and unclassified videos, and the item stays 18+ for good', async (t) => {
   const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
   // A job tightens: an item first saved to Adshortis is adult, so the same

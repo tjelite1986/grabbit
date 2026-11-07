@@ -160,3 +160,17 @@ test('storedAudience never lowers', () => {
   assert.equal(audience.storedAudience('general', 'unknown'), 'general');
   assert.equal(audience.storedAudience(null, 'unknown'), 'unknown');
 });
+
+test('platforms match exactly; lookalike sites match no account', () => {
+  const store = storeWith([{ name: 'Someone', audience: 'general', accounts: [{ platform: 'tiktok', handle: 'janed' }] }]);
+  for (const site of ['tiktok', 'tiktok.com', 'www.tiktok.com', 'vm.tiktok.com']) {
+    assert.equal(audience.platformOfSite(site), 'tiktok', site);
+    assert.equal(classify({ creatorKey: 'other', handle: 'janed', site }, store, new Map()).audience, 'general', site);
+  }
+  for (const site of ['nottiktok.com', 'tiktok.com.example.com', 'tiktokclips', 'mytiktok', 'evil-tiktok.net']) {
+    assert.equal(audience.platformOfSite(site), null, site);
+    assert.equal(classify({ creatorKey: 'other', handle: 'janed', site }, store, new Map()).audience, 'unknown', site);
+  }
+  assert.equal(audience.platformOfSite('x'), 'x');
+  assert.equal(audience.platformOfSite('box.com'), null);
+});

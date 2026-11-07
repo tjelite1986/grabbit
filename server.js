@@ -4890,8 +4890,9 @@ app.get('/api/download', async (req, res) => {
   }
 
   // Audio-only with dest=elite is streamed to the device, never filed into an
-  // app, so the audience gate has nothing to guard there.
-  const refused = dest === 'elite' && !audio ? channelRefusal(channel, job) : null;
+  // app, so the audience gate has nothing to guard there. An image is filed
+  // whatever audio says (its branch runs first), so it is always checked.
+  const refused = dest === 'elite' && !(audio && job.mediaType !== 'image') ? channelRefusal(channel, job) : null;
   if (refused) return res.status(422).json({ ok: false, error: refused });
 
   // Images don't fit the video pipeline: with dest=elite they are dropped into
@@ -4899,7 +4900,7 @@ app.get('/api/download', async (req, res) => {
   if (job.mediaType === 'image') {
     const unavailable = dest === 'elite' ? postsUnavailable() : null;
     if (unavailable) return res.status(400).json({ ok: false, error: unavailable });
-    return downloadImage(res, job, url, device, dest);
+    return downloadImage(res, job, url, device, dest, channel);
   }
 
   // Audio-only: for the elite destination it's streamed (audio doesn't fit the
@@ -5171,7 +5172,7 @@ app.get('/api/download-all', async (req, res) => {
       // fetch. Above the branch, so all four destinations get the tags.
       job = await enrichProfileItem(job);
       if (isImage) {
-        if (toPosts) await saveImageToPosts(job);
+        if (toPosts) await saveImageToPosts(job, channel);
         else await saveImageToLibrary(job);
       } else if (dest === 'server') await saveJobToServer(job, folder, quality);
       else await saveJobToImport(job, channel, web, quality);
@@ -5460,8 +5461,9 @@ async function runJob(job, params) {
   });
 
   // Refuse a save into a library this deploy has not been given. Audio-only is
-  // exempt: with dest=elite it is streamed, never filed.
-  if (params.dest === 'elite' && !params.audio) {
+  // exempt: with dest=elite it is streamed, never filed. An image is not: its
+  // branch runs before the audio one, so it is filed whatever audio says.
+  if (params.dest === 'elite' && (!params.audio || mediaType === 'image')) {
     // The channel's own refusal first: an 18+ image must be refused as such,
     // not reported as a missing posts library.
     const refused = channelRefusal(params.channel, { ...meta, mediaType });
@@ -5645,7 +5647,7 @@ async function produceImage(job, meta, params) {
   const libPath = path.join(dir, outName);
   setJob(job, { phase: 'downloading' });
   if (!fs.existsSync(libPath)) {
-    if (toPosts) await saveImageToPosts(meta);
+    if (toPosts) await saveImageToPosts(meta, params.channel);
     else {
       fs.mkdirSync(PHOTOS_DIR, { recursive: true });
       await downloadDirect(meta, libPath);
@@ -7392,13 +7394,15 @@ async function saveImageToLibrary(job) {
 // post per picture. The file itself is fetched under a dot-name (both importers
 // skip dotfiles) and renamed last, so a run that starts mid-download never
 // picks up half a picture — or a picture without its caption.
-async function saveImageToPosts(job) {
+async function saveImageToPosts(job, channel) {
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const ext = safeExt(job.ext, 'jpg');
   const outName = `${stem}.${ext}`;
   const dir = postsImportDir(job.creator);
   // The audience gate, as the last step before the posts folder is touched.
-  assertDeliverable('posts', job);
+  // An image saved under the 18+ channel meets Adshortis' videos-only rule
+  // here, never the posts library's.
+  assertDeliverable(destinationOf(channel, { ...job, mediaType: 'image' }), job);
   makeDropDir(dir);
   const finalPath = path.join(dir, outName);
   const partPath = path.join(dir, `.${outName}.part`);
@@ -7419,7 +7423,7 @@ async function saveImageToPosts(job) {
 
 // Single-image handler: save it (posts import or photos library, per dest) and
 // optionally stream it to the device too.
-async function downloadImage(res, job, url, device, dest) {
+async function downloadImage(res, job, url, device, dest, channel) {
   const toPosts = dest === 'elite';
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const ext = safeExt(job.ext, 'jpg');
@@ -7429,7 +7433,7 @@ async function downloadImage(res, job, url, device, dest) {
   const already = fs.existsSync(libPath);
   try {
     if (!already) {
-      if (toPosts) await saveImageToPosts(job);
+      if (toPosts) await saveImageToPosts(job, channel);
       else {
         fs.mkdirSync(PHOTOS_DIR, { recursive: true });
         await downloadDirect(job, libPath);

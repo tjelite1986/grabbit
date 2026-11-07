@@ -64,22 +64,41 @@ function isAdultSite(...values) {
   return false;
 }
 
-// The site of a job, as a profile account platform.
-const SITE_PLATFORMS = [
-  ['tiktok', 'tiktok'],
-  ['instagram', 'instagram'],
-  ['facebook', 'facebook'],
-  ['youtube', 'youtube'],
-  ['twitter', 'x'],
+// The site of a job, as a profile account platform. Exact matches only: a
+// hostname equal to (or a subdomain of) the platform's domain, or yt-dlp's
+// extractor key for it. Anything else matches no account.
+const PLATFORM_DOMAINS = [
+  ['tiktok.com', 'tiktok'],
+  ['instagram.com', 'instagram'],
+  ['facebook.com', 'facebook'],
+  ['fb.watch', 'facebook'],
+  ['youtube.com', 'youtube'],
+  ['youtu.be', 'youtube'],
+  ['twitter.com', 'x'],
   ['x.com', 'x'],
-  ['reddit', 'reddit'],
-  ['snapchat', 'snapchat'],
-  ['twitch', 'twitch'],
+  ['reddit.com', 'reddit'],
+  ['snapchat.com', 'snapchat'],
+  ['twitch.tv', 'twitch'],
 ];
+const PLATFORM_KEYS = {
+  tiktok: 'tiktok',
+  instagram: 'instagram',
+  facebook: 'facebook',
+  youtube: 'youtube',
+  twitter: 'x',
+  x: 'x',
+  reddit: 'reddit',
+  snapchat: 'snapchat',
+  twitch: 'twitch',
+};
 function platformOfSite(site) {
-  const s = String(site || '').toLowerCase();
-  if (s === 'x') return 'x';
-  for (const [needle, platform] of SITE_PLATFORMS) if (s.includes(needle)) return platform;
+  const s = String(site || '').trim().toLowerCase();
+  if (!s) return null;
+  if (Object.prototype.hasOwnProperty.call(PLATFORM_KEYS, s)) return PLATFORM_KEYS[s];
+  const host = s.replace(/^(www|m|mobile)\./, '');
+  for (const [domain, platform] of PLATFORM_DOMAINS) {
+    if (host === domain || host.endsWith(`.${domain}`)) return platform;
+  }
   return null;
 }
 
