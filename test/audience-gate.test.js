@@ -60,7 +60,7 @@ function filesUnder(dir) {
 
 // Boots a server with every app root configured and these profiles in the
 // store, and returns helpers. `seed` may also hold a downloaded.json.
-async function boot(t, { profileList = [], registry = null, breakItemStore = false } = {}) {
+async function boot(t, { profileList = [], registry = null, breakItemStore = false, corruptItemStore = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-gate-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const media = await mediaServer();
@@ -74,6 +74,7 @@ async function boot(t, { profileList = [], registry = null, breakItemStore = fal
   fs.writeFileSync(path.join(dataDir, 'profiles.json'), JSON.stringify(store));
   if (registry) fs.writeFileSync(path.join(dataDir, 'downloaded.json'), JSON.stringify(registry));
   if (breakItemStore) fs.mkdirSync(path.join(dataDir, 'items.db'));
+  if (corruptItemStore) fs.writeFileSync(path.join(dataDir, 'items.db'), Buffer.alloc(8192, 0x5a));
   const port = await freePort();
   const env = {
     PATH: process.env.PATH,
@@ -314,14 +315,39 @@ test('renaming the creator cannot borrow a general profile', async (t) => {
   assert.deepEqual(s.generalFiles(), []);
 });
 
-test('without its item store the server delivers nothing to a general app', async (t) => {
-  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }], breakItemStore: true });
-  assert.match(s.logs(), /items\.db could not be opened/);
-  const r = await s.save(s.fakeUrl('video', 'tiktok', 'Jane Doe', 'nb1'), 'main');
-  assert.equal(r.status, 422);
-  assert.match(r.body.error, /item store is unavailable/);
-  assert.deepEqual(s.generalFiles(), []);
-});
+// A broken items.db (not a database) and an unavailable one (cannot be opened)
+// must both stop every app delivery, by both routes, for a creator that would
+// otherwise pass: general to the general apps, adult to Adshortis. There is no
+// fallback to delivering unrecorded.
+for (const [what, opts] of [
+  ['an unavailable', { breakItemStore: true }],
+  ['a corrupt', { corruptItemStore: true }],
+]) {
+  test(`with ${what} items.db no app receives anything, by either route`, async (t) => {
+    const s = await boot(t, {
+      profileList: [{ name: 'Jane Doe', audience: 'general' }, { name: 'Ada', audience: 'adult' }],
+      ...opts,
+    });
+    assert.match(s.logs(), /items\.db could not be opened/);
+    const cases = [
+      ['video', 'Jane Doe', 'main'],
+      ['video', 'Jane Doe', 'platform'],
+      ['image', 'Jane Doe', 'main'], // lands in the posts library
+      ['video', 'Ada', '18plus'],
+    ];
+    for (const [kind, who, channel] of cases) {
+      const tag = `${kind}/${who}/${channel}`;
+      const r = await s.save(s.fakeUrl(kind, 'tiktok', who, `nb-${kind}-${channel}`), channel);
+      assert.equal(r.status, 422, `${tag}: ${JSON.stringify(r.body)}`);
+      assert.match(r.body.error, /item store is unavailable/, tag);
+      const job = await s.saveJob(s.fakeUrl(kind, 'tiktok', who, `nbj-${kind}-${channel}`), channel);
+      assert.notEqual(job.job && job.job.status, 'done', `${tag} (job): ${JSON.stringify(job)}`);
+      assert.match(String(job.job && job.job.error), /item store is unavailable/, `${tag} (job)`);
+    }
+    assert.deepEqual(s.generalFiles(), []);
+    assert.deepEqual(filesUnder(s.apps.ads), []);
+  });
+}
 
 test('boot imports the registry without touching downloaded.json or profiles.json', async (t) => {
   const registry = {

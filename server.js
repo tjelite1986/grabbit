@@ -2738,7 +2738,7 @@ try {
 } catch (e) {
   ITEM_STORE = null;
   ITEM_STORE_ERROR = e.message;
-  console.error(`[grabbit] items.db could not be opened (${e.message}). General apps receive nothing until it can.`);
+  console.error(`[grabbit] items.db could not be opened (${e.message}). No app receives anything until it can.`);
 }
 
 // The app destination a save into this channel lands in. With dest=elite an
@@ -2820,12 +2820,15 @@ function recordItem(job, classification, filename) {
 }
 
 // Why this job may not be delivered to this app destination, or null. Fails
-// closed: no item store, no key, or any error means a general app gets nothing.
+// closed: without the item store no app gets anything (18+ included, since its
+// deliveries could not be recorded either); no key or any error means a general
+// app gets nothing.
 function audienceRefusal(destination, job) {
   try {
-    const general = audience.DESTINATIONS[destination] && audience.DESTINATIONS[destination].audience === 'general';
-    if (general && !ITEM_STORE) {
-      return `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}), so nothing is delivered to a general app.`;
+    const app = audience.DESTINATIONS[destination];
+    const general = app && app.audience === 'general';
+    if (app && !ITEM_STORE) {
+      return `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}), so nothing is delivered to any app.`;
     }
     if (general && !itemKeyOf(job)) {
       return 'This item has no source id or URL, so its audience cannot be recorded; nothing is delivered to a general app.';
