@@ -7,8 +7,8 @@
 // - The media file is written first, then `<stem>.json` last. The sidecar's
 //   presence is the signal that the item is complete.
 // - Both appear by an atomic rename within the drop folder. Temp names start
-//   with `.`: the importer ignores dotfiles, and moves any other file that no
-//   sidecar names to failed/ after an hour.
+//   with `.`: the importer ignores dotfiles, and deletes any other file that
+//   no sidecar names after an hour.
 // - The sidecar names its media file as a plain name in the same folder.
 // - The importer takes video only, and keys duplicates on `source:sourceId`.
 
@@ -106,7 +106,7 @@ function commitPlatformDrop(dir, buildPath, finalPath, sidecarName, sidecarText)
   } catch (e) {
     fs.rmSync(tmp, { force: true });
     // Without its sidecar the clip would sit until the importer's orphan sweep
-    // files it under failed/; take it back now so a retry starts clean.
+    // deletes it; take it back now so a retry starts clean.
     fs.rmSync(finalPath, { force: true });
     throw e;
   }

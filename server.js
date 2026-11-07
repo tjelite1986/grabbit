@@ -91,7 +91,8 @@ const ELITE_ROOT = process.env.ELITE_ROOT || null;
 const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || ELITE_ROOT;
 // A third, general channel: a social app's drop folder (drop-zone contract v1,
 // see platform-drop.js). Unlike the other two, the root IS the drop folder: the
-// importer moves what it took to done/ and what it refused to failed/.
+// importer removes every item it handles from it, and keeps its own record of
+// what it took somewhere this app cannot see.
 const PLATFORM_IMPORT_ROOT = process.env.PLATFORM_IMPORT_ROOT || null;
 const CHANNELS = { main: 'main', '18plus': '18plus', platform: 'platform' };
 const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT, platform: PLATFORM_IMPORT_ROOT };
@@ -1881,18 +1882,15 @@ function profileSlug(name) {
 //   null       -> not present
 function importedStatus(channel, creator, stem) {
   const root = channelRoot(channel);
-  // The platform drop folder has no creator folders: waiting items sit in the
-  // root, taken ones in done/. Its importer also dedups on the site id.
+  // The platform drop folder has no creator folders and keeps nothing it took:
+  // a clip still in it is waiting, and once gone we cannot tell taken from
+  // refused. A re-save is harmless, since the importer dedups on the site id.
   if ((CHANNELS[channel] || 'main') === 'platform') {
-    const has = (dir) => {
-      try {
-        return fs.readdirSync(dir).includes(`${stem}.mp4`);
-      } catch {
-        return false;
-      }
-    };
-    if (has(path.join(root, 'done'))) return 'imported';
-    return has(root) ? 'pending' : null;
+    try {
+      return fs.readdirSync(root).includes(`${stem}.mp4`) ? 'pending' : null;
+    } catch {
+      return null;
+    }
   }
   try {
     const profDir = path.join(root, profileSlug(safeCreator(creator)));
