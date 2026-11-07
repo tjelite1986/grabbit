@@ -266,7 +266,9 @@ async function resolve(url) {
   // downloaded-registry can recognise a repeat even from a brand new link.
   const mediaId = info && info.id ? String(info.id) : null;
   const site = info ? String(info.extractor_key || info.extractor || '').toLowerCase() || null : null;
-  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, probeFatal, mediaId, site };
+  // The uploader's own page, for importers that make a profile per creator.
+  const creatorUrl = info ? info.uploader_url || info.channel_url || null : null;
+  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, probeFatal, mediaId, site, creatorUrl };
 }
 
 module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };

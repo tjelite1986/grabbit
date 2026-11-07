@@ -60,6 +60,12 @@ const TARGETS = {
     audience: 'general',
     label: 'Audiobook library',
     legacy: { dest: 'audiobooks' },
+  },  // A social app's drop folder (contract v1): videos only, filed as posts by
+  // auto-created creator profiles. Opt-in via PLATFORM_IMPORT_ROOT.
+  'platform.inbox': {
+    audience: 'general',
+    label: 'Platform (Shortis import)',
+    legacy: { dest: 'elite', channel: 'platform' },
   },
 };
 
@@ -68,7 +74,11 @@ const TARGETS = {
 // the same sanitizing server.js applies, so `folder=Adults` and `folder=adults!`
 // cannot slip past as something other than the 18+ library.
 function targetForLegacy({ dest, channel, folder }) {
-  if (dest === 'elite') return channel === '18plus' ? 'adshortis.inbox' : 'legacy.tikshortis';
+  if (dest === 'elite') {
+    if (channel === '18plus') return 'adshortis.inbox';
+    if (channel === 'platform') return 'platform.inbox';
+    return 'legacy.tikshortis';
+  }
   if (dest === 'navidrome') return 'library.music';
   if (dest === 'audiobooks') return 'library.audiobooks';
   const f = String(folder || '')

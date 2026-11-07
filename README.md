@@ -855,6 +855,7 @@ environment variables:
 | `ELITE_ROOT` | Shorts storage root — enables the shorts destination. Clips are dropped in `<root>/<channel>/_import/`. Unset (the default) there is no shorts destination at all: the *Shorts* option and the *Shorts* mode disappear from the UI and new downloads default to the server library. |
 | `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. Set one of the two and only that channel is offered. |
 | `DROP_FORMAT_MAIN` / `DROP_FORMAT_18PLUS` | How a clip dropped into that channel's `_import/` is named. `legacy` (default): `<creator>_-_<title>.mp4` plus a `.md` caption. `brackets`: `<title> [@<creator>] [id=<media id>].mp4` plus a yt-dlp style `.json` sidecar (title, description, tags, uploader, webpage_url). |
+| `PLATFORM_IMPORT_ROOT` | Drop folder of a social app that imports clips as posts by per-creator profiles (channel `platform`, GDA target `platform.inbox`). Unlike the other shorts roots this IS the drop folder (no `<channel>/_import/`). Each save writes `<creator>_-_<title>.mp4` first, then `<creator>_-_<title>.json` (drop-zone contract v1: `version`, `file`, `source`, `sourceId`, `sourceUrl`, `creator{handle,name,profileUrl}`, `caption`, `tags`), both by an atomic rename from a dot-name. Videos only; a clip whose creator is unknown is refused. Unset (the default), the channel does not exist. |
 | `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 
@@ -923,6 +924,7 @@ folders. A client never sends a path.
 |---|---|---|
 | `legacy.tikshortis` | general | `dest=elite&channel=main` |
 | `adshortis.inbox` | adult | `dest=elite&channel=18plus` |
+| `platform.inbox` | general | `dest=elite&channel=platform` |
 | `server.downloads` | general | `dest=server` |
 | `library.adults` | adult | `dest=server&folder=adults` |
 | `library.music` | general | `dest=navidrome` |

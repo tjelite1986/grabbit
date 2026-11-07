@@ -19,6 +19,7 @@ const { COOKIES_DIR, cookieArgs, cookieFileFor, sanitizeCookieName, listCookieFi
 const { safeFetch } = require('./url-guard');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 const gda = require('./gda');
+const platformDrop = require('./platform-drop');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -88,13 +89,17 @@ function guardChild(child, label) {
 // does not exist: see shortsUnavailable(), parseDest() and /api/config.
 const ELITE_ROOT = process.env.ELITE_ROOT || null;
 const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || ELITE_ROOT;
-const CHANNELS = { main: 'main', '18plus': '18plus' };
-const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT };
+// A third, general channel: a social app's drop folder (drop-zone contract v1,
+// see platform-drop.js). Unlike the other two, the root IS the drop folder: the
+// importer moves what it took to done/ and what it refused to failed/.
+const PLATFORM_IMPORT_ROOT = process.env.PLATFORM_IMPORT_ROOT || null;
+const CHANNELS = { main: 'main', '18plus': '18plus', platform: 'platform' };
+const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT, platform: PLATFORM_IMPORT_ROOT };
 // The env var that would configure each channel, for the message a user reads.
-const CHANNEL_ROOT_VARS = { main: 'TIKSHORTIS_ROOT', '18plus': 'ELITE_ROOT' };
-const SHORTS_ENABLED = !!(CHANNEL_ROOTS.main || CHANNEL_ROOTS['18plus']);
+const CHANNEL_ROOT_VARS = { main: 'TIKSHORTIS_ROOT', '18plus': 'ELITE_ROOT', platform: 'PLATFORM_IMPORT_ROOT' };
+const SHORTS_ENABLED = Object.values(CHANNEL_ROOTS).some(Boolean);
 // The app serving each channel, for the messages a user reads.
-const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis' };
+const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis', platform: 'Platform' };
 // Root of the photo-posts store (a host folder bind-mounted here). Images saved
 // with dest=elite land in <root>/_import/<creator>/, where that app's posts
 // importer turns each drop folder into that creator's posts. The library left
@@ -1839,11 +1844,19 @@ function channelRoot(channel) {
   // names the missing variable instead of failing inside path.join(null).
   const unavailable = shortsUnavailable(ch);
   if (unavailable) throw new Error(unavailable);
+  if (ch === 'platform') return CHANNEL_ROOTS.platform;
   return path.join(CHANNEL_ROOTS[ch], ch);
 }
 
 function channelDir(channel) {
+  if ((CHANNELS[channel] || 'main') === 'platform') return channelRoot('platform');
   return path.join(channelRoot(channel), '_import');
+}
+
+// Why this item cannot be saved into this channel for reasons of its own (not
+// the deploy's), or null. Only the platform channel has any.
+function channelRefusal(channel, job) {
+  return (CHANNELS[channel] || 'main') === 'platform' ? platformDrop.platformRefusal(job) : null;
 }
 
 // The app that will show a clip saved to this channel.
@@ -1868,6 +1881,19 @@ function profileSlug(name) {
 //   null       -> not present
 function importedStatus(channel, creator, stem) {
   const root = channelRoot(channel);
+  // The platform drop folder has no creator folders: waiting items sit in the
+  // root, taken ones in done/. Its importer also dedups on the site id.
+  if ((CHANNELS[channel] || 'main') === 'platform') {
+    const has = (dir) => {
+      try {
+        return fs.readdirSync(dir).includes(`${stem}.mp4`);
+      } catch {
+        return false;
+      }
+    };
+    if (has(path.join(root, 'done'))) return 'imported';
+    return has(root) ? 'pending' : null;
+  }
   try {
     const profDir = path.join(root, profileSlug(safeCreator(creator)));
     if (fs.existsSync(profDir)) {
@@ -2151,6 +2177,15 @@ const DROP_FORMATS = {
 // The clip's file name and its sidecar for a save into this channel's _import.
 function dropFiles(channel, job, web) {
   const legacyStem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
+  if ((CHANNELS[channel] || 'main') === 'platform') {
+    // Always `.mp4`: the importer makes its own web copy.
+    const outName = `${legacyStem}.mp4`;
+    return {
+      outName,
+      sidecarName: `${legacyStem}.json`,
+      sidecar: JSON.stringify(platformDrop.platformSidecar(job, outName, cleanDescription), null, 2),
+    };
+  }
   if (DROP_FORMATS[CHANNELS[channel] || 'main'] !== 'brackets') {
     return {
       outName: `${legacyStem}${web ? '.web.mp4' : '.mp4'}`,
@@ -2173,6 +2208,18 @@ function dropFiles(channel, job, web) {
       webpage_url: job.sourceUrl || undefined,
     }, null, 2),
   };
+}
+
+// Publishes a finished drop: the clip at buildPath goes to finalPath and the
+// sidecar beside it, in the order the channel's importer needs. The legacy
+// importers read the caption when the clip appears, so theirs goes first; the
+// platform importer treats the sidecar as the "complete" signal, so it goes last.
+function commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar) {
+  if ((CHANNELS[channel] || 'main') === 'platform') {
+    return platformDrop.commitPlatformDrop(destDir, buildPath, finalPath, sidecarName, sidecar);
+  }
+  fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
+  fs.renameSync(buildPath, finalPath);
 }
 
 // GET /api/resolve?url=... -> metadata preview.
@@ -4501,6 +4548,9 @@ app.get('/api/download', async (req, res) => {
       .filter(Boolean);
   }
 
+  const refused = dest === 'elite' ? channelRefusal(channel, job) : null;
+  if (refused) return res.status(422).json({ ok: false, error: refused });
+
   // Images don't fit the video pipeline: with dest=elite they are dropped into
   // the posts import, otherwise into the plain photos library.
   if (job.mediaType === 'image') {
@@ -4577,8 +4627,7 @@ app.get('/api/download', async (req, res) => {
     // 3. Write the .md caption sidecar elite-v2 reads on import, then publish
     //    the clip itself with the rename.
     if (!skipImport) {
-      fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
-      fs.renameSync(buildPath, finalPath);
+      commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar);
       // Register the save so playlist views and "download new" recognise the
       // clip as fetched — the jobs/batch paths do this via finishJob.
       markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
@@ -4752,6 +4801,12 @@ app.get('/api/download-all', async (req, res) => {
     const id = job.id || stem;
     try {
       const isImage = job.mediaType === 'image';
+      const refused = dest === 'elite' ? channelRefusal(channel, job) : null;
+      if (refused) {
+        skipped++;
+        send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'skipped', error: refused });
+        continue;
+      }
       const toPosts = isImage && dest === 'elite';
       const exists = isImage
         ? (toPosts ? postsPending(job.creator, stem) : photoHas(stem))
@@ -5067,6 +5122,8 @@ async function runJob(job, params) {
     const unavailable =
       mediaType === 'image' ? postsUnavailable() : shortsUnavailable(params.channel);
     if (unavailable) return failJob(job, unavailable);
+    const refused = channelRefusal(params.channel, { ...meta, mediaType });
+    if (refused) return failJob(job, refused);
   }
 
   if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
@@ -5154,10 +5211,7 @@ async function produceEliteVideo(job, meta, params, onProgress) {
     else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress, extraArgs: params.extraArgs });
     setJob(job, { phase: 'processing', percent: 100 });
     await embedMetadata(tmpPath, buildPath, meta, params.web, 'mp4');
-    if (!skipImport) {
-      fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
-      fs.renameSync(buildPath, finalPath);
-    }
+    if (!skipImport) commitDrop(params.channel, destDir, buildPath, finalPath, sidecarName, sidecar);
     recordJobHistory(meta, params, params.channel, outName, !skipImport);
     finishJob(job, {
       saved: !skipImport, channel: params.channel, dir: params.channel, filename: outName, mime: 'video/mp4',
@@ -6333,6 +6387,7 @@ app.get('/api/health', async (_req, res) => {
       // would be noise in the one panel that must only show real problems.
       ...(CHANNEL_ROOTS.main ? [dirHealth('shorts main (tikshortis)', channelDir('main'), true)] : []),
       ...(CHANNEL_ROOTS['18plus'] ? [dirHealth('shorts 18+ (adshortis)', channelDir('18plus'), true)] : []),
+      ...(CHANNEL_ROOTS.platform ? [dirHealth('platform drop folder', channelDir('platform'), true)] : []),
       ...(POSTS_ENABLED ? [dirHealth('posts (elitogram)', POSTS_IMPORT_DIR, true)] : []),
       dirHealth('server videos', VIDEOS_DIR, true),
       dirHealth('server mp3', AUDIO_DIR, true),
@@ -6425,6 +6480,8 @@ app.post('/api/jobs/clear', (_req, res) => {
 // Download a job and write it (with metadata + .md sidecar) into the channel's
 // _import folder. Shared by the batch profile downloader.
 async function saveJobToImport(job, channel, web, quality) {
+  const refused = channelRefusal(channel, job);
+  if (refused) throw new Error(refused);
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const destDir = channelDir(channel);
   const { outName, sidecarName, sidecar } = dropFiles(channel, job, web);
@@ -6436,8 +6493,7 @@ async function saveJobToImport(job, channel, web, quality) {
     if (job.kind === 'direct') await downloadDirect(job, tmpPath);
     else await downloadYtdlp(job, tmpPath, { quality });
     await embedMetadata(tmpPath, buildPath, job, web, 'mp4');
-    fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
-    fs.renameSync(buildPath, finalPath);
+    commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar);
     return finalPath;
   } finally {
     fs.rm(tmpPath, { force: true }, () => {});
@@ -7248,7 +7304,7 @@ for (const dir of [VIDEOS_DIR, AUDIO_DIR, ADULTS_DIR, PHOTOS_DIR]) {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(
     `grabbit listening on :${PORT}, shorts roots main=${CHANNEL_ROOTS.main || '(unset)'} ` +
-      `18plus=${CHANNEL_ROOTS['18plus'] || '(unset)'} posts=${POSTS_IMPORT_DIR || '(unset)'}`
+      `18plus=${CHANNEL_ROOTS['18plus'] || '(unset)'} platform=${CHANNEL_ROOTS.platform || '(unset)'} posts=${POSTS_IMPORT_DIR || '(unset)'}`
   );
   // Which mode the gate ended up in, so a wide-open service is visible in the
   // log rather than only in a request that should have been refused.

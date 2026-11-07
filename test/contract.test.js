@@ -18,7 +18,7 @@ const gda = require('../gda');
 const SHARED = 'shared-test-password';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-contract-'));
 const dirs = {};
-for (const d of ['data', 'downloads', 'adults', 'tik/main/_import', 'ads/18plus/_import', 'music', 'kids', 'books']) {
+for (const d of ['data', 'downloads', 'adults', 'tik/main/_import', 'ads/18plus/_import', 'platform', 'music', 'kids', 'books']) {
   dirs[d] = path.join(root, d);
   fs.mkdirSync(dirs[d], { recursive: true });
 }
@@ -47,6 +47,7 @@ test.before(async () => {
     elitetok: ['general', ['legacy.tikshortis']],
     'grabbit-send': ['general', ['legacy.tikshortis', 'server.downloads', 'library.music', 'library.audiobooks']],
     elitegifs: ['adult', ['adshortis.inbox']],
+    shortis: ['general', ['platform.inbox']],
   };
   for (const [id, [audience, targets]] of Object.entries(clients)) {
     reg.upsertClient({
@@ -74,6 +75,7 @@ test.before(async () => {
       GRABBIT_INTERNAL_TOKEN: 'internal-test-token',
       TIKSHORTIS_ROOT: path.join(root, 'tik'),
       ELITE_ROOT: path.join(root, 'ads'),
+      PLATFORM_IMPORT_ROOT: dirs.platform,
       DOWNLOAD_DIR: dirs.downloads,
       ADULTS_DOWNLOAD_DIR: dirs.adults,
       NAVIDROME_MUSIC_DIR: dirs.music,
@@ -198,6 +200,26 @@ test('app passwords: refused outside their scope with the shape the apps show', 
     assert.equal(typeof r.body.error, 'string');
   }
   assert.match(logs, /gda: client=elitebook target=adshortis\.inbox via=legacy result=deny code=forbidden_target/);
+});
+
+test('platform.inbox: its own client and the owner may save there, no other app', async () => {
+  const own = await appLogin(pw.shortis);
+  let r = await jobsStart(own.cookie, { dest: 'elite', channel: 'platform' });
+  assert.equal(r.status, 200);
+  assert.match(logs, /gda: client=shortis target=platform\.inbox via=legacy result=allow/);
+  // An app whose main target is the platform is moved there, as with any main switch.
+  r = await jobsStart(own.cookie, { dest: 'elite', channel: 'main' });
+  assert.equal(r.status, 200);
+  for (const id of ['elitetok', 'grabbit-send', 'elitegifs']) {
+    const { cookie } = await appLogin(pw[id]);
+    r = await jobsStart(cookie, { dest: 'elite', channel: 'platform' });
+    assert.equal(r.status, 403, id);
+  }
+  const shared = await appLogin(SHARED);
+  r = await jobsStart(shared.cookie, { dest: 'elite', channel: 'platform' });
+  assert.equal(r.status, 200);
+  const cfg = await (await fetch(`${base}/api/config`, { headers: { Cookie: shared.cookie } })).json();
+  assert.ok(cfg.channels.includes('platform'));
 });
 
 test('jobs record which client sent them', async () => {
