@@ -75,9 +75,18 @@ function siteOf(job, url) {
 // site extractors, as `mediaId` from yt-dlp. Normalising both into `site` +
 // `mediaId` here is what lets the downloaded-registry recognise a repeat that
 // arrives under a different URL, without touching each extractor.
+//
+// `sourceCreator` keeps the creator as the site reported it. A job may rename
+// the creator (the `creator` override, rules), and the audience gate checks
+// both names, so a rename can never borrow another creator's general profile.
 function withMediaId(job, url) {
   if (!job || typeof job !== 'object') return job;
-  return { ...job, site: siteOf(job, url), mediaId: job.mediaId || (job.id != null ? String(job.id) : null) };
+  return {
+    ...job,
+    site: siteOf(job, url),
+    mediaId: job.mediaId || (job.id != null ? String(job.id) : null),
+    sourceCreator: job.sourceCreator !== undefined ? job.sourceCreator : job.creator == null ? null : String(job.creator),
+  };
 }
 
 async function resolve(url) {

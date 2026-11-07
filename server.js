@@ -20,6 +20,10 @@ const { safeFetch } = require('./url-guard');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 const gda = require('./gda');
 const platformDrop = require('./platform-drop');
+const hub = require('./hub');
+const profiles = require('./profiles');
+const audience = require('./audience');
+const itemStore = require('./item-store');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -88,7 +92,9 @@ function guardChild(child, label) {
 // inside the container that no importer was watching. Unset means the channel
 // does not exist: see shortsUnavailable(), parseDest() and /api/config.
 const ELITE_ROOT = process.env.ELITE_ROOT || null;
-const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || ELITE_ROOT;
+// No fallback to ELITE_ROOT: that root is the 18+ library, and a general
+// channel must never be filed inside it. Unset means no main channel.
+const TIKSHORTIS_ROOT = process.env.TIKSHORTIS_ROOT || null;
 // A third, general channel: a social app's drop folder (drop-zone contract v1,
 // see platform-drop.js). Unlike the other two, the root IS the drop folder: the
 // importer removes every item it handles from it, and keeps its own record of
@@ -98,6 +104,34 @@ const CHANNELS = { main: 'main', '18plus': '18plus', platform: 'platform' };
 const CHANNEL_ROOTS = { main: TIKSHORTIS_ROOT, '18plus': ELITE_ROOT, platform: PLATFORM_IMPORT_ROOT };
 // The env var that would configure each channel, for the message a user reads.
 const CHANNEL_ROOT_VARS = { main: 'TIKSHORTIS_ROOT', '18plus': 'ELITE_ROOT', platform: 'PLATFORM_IMPORT_ROOT' };
+// The 18+ channel (Adshortis) is refused at boot when its folder shares a
+// tree with any general destination, rather than risk filing adult clips where
+// a general importer reads (or the reverse). realpath where the folder exists,
+// so a symlink or a second spelling cannot hide the overlap.
+function realDir(dir) {
+  if (!dir) return null;
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
+const ADULT_OVERLAPS = CHANNEL_ROOTS['18plus']
+  ? gda.adultOverlaps(realDir(path.join(CHANNEL_ROOTS['18plus'], '18plus')), {
+      'main channel': realDir(CHANNEL_ROOTS.main && path.join(CHANNEL_ROOTS.main, 'main')),
+      'platform drop folder': realDir(CHANNEL_ROOTS.platform),
+      'posts import folder': realDir(process.env.ELITE_POSTS_IMPORT_DIR ||
+        (process.env.ELITE_POSTS_ROOT ? path.join(process.env.ELITE_POSTS_ROOT, '_import') : null)),
+    })
+  : [];
+const ADULT_BLOCKED = ADULT_OVERLAPS.length
+  ? `The 18+ channel is disabled: its folder shares a tree with the ${ADULT_OVERLAPS.map((o) => o.name).join(', ')}. ` +
+    'Give ELITE_ROOT a folder of its own.'
+  : null;
+if (ADULT_BLOCKED) {
+  console.error(`[grabbit] ${ADULT_BLOCKED}`);
+  CHANNEL_ROOTS['18plus'] = null;
+}
 const SHORTS_ENABLED = Object.values(CHANNEL_ROOTS).some(Boolean);
 // The app serving each channel, for the messages a user reads.
 const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis', platform: 'Platform' };
@@ -160,6 +194,7 @@ function parseImportDest(v) {
 function shortsUnavailable(channel) {
   const ch = CHANNELS[channel] || 'main';
   if (CHANNEL_ROOTS[ch]) return null;
+  if (ch === '18plus' && ADULT_BLOCKED) return ADULT_BLOCKED;
   return (
     `No shorts library is configured for the ${ch} channel — set ` +
     `${CHANNEL_ROOT_VARS[ch]} to a bind-mounted host path, or save to the server library instead.`
@@ -503,6 +538,7 @@ const STATE_FILES = [
   'genres.json',
   'push-subscriptions.json',
   'gda-clients.json',
+  'profiles.json',
 ];
 
 function writeJsonAtomic(file, value) {
@@ -600,6 +636,15 @@ function snapshotState() {
       const dst = path.join(dir, name);
       fs.copyFileSync(src, `${dst}.part`);
       fs.renameSync(`${dst}.part`, dst);
+    }
+    // items.db is live SQLite (WAL): a file copy could miss the -wal pages, so
+    // the snapshot is a consistent VACUUM INTO copy instead.
+    if (ITEM_STORE) {
+      try {
+        ITEM_STORE.snapshotTo(path.join(dir, 'items.db'));
+      } catch (e) {
+        console.warn('items.db snapshot failed:', e.message);
+      }
     }
     // Prune whole days past the retention window.
     const days = fs
@@ -1538,6 +1583,9 @@ const REVALIDATE = new Set([
   'icon-192.png',
   'icon-512.png',
   'icon-maskable-512.png',
+  // The hub's own shell (public/hub/), same reason.
+  'hub.js',
+  'hub.css',
 ]);
 
 app.use(
@@ -1855,9 +1903,16 @@ function channelDir(channel) {
 }
 
 // Why this item cannot be saved into this channel for reasons of its own (not
-// the deploy's), or null. Only the platform channel has any.
+// the deploy's), or null. First the platform channel's own contract rules.
+// Then the audience gate (audience.js): a general app receives only items
+// classified general, and Adshortis takes videos only.
 function channelRefusal(channel, job) {
-  return (CHANNELS[channel] || 'main') === 'platform' ? platformDrop.platformRefusal(job) : null;
+  const ch = CHANNELS[channel] || 'main';
+  if (ch === 'platform') {
+    const own = platformDrop.platformRefusal(job);
+    if (own) return own;
+  }
+  return audienceRefusal(destinationOf(ch, job), job);
 }
 
 // The app that will show a clip saved to this channel.
@@ -2212,12 +2267,18 @@ function dropFiles(channel, job, web) {
 // sidecar beside it, in the order the channel's importer needs. The legacy
 // importers read the caption when the clip appears, so theirs goes first; the
 // platform importer treats the sidecar as the "complete" signal, so it goes last.
-function commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar) {
+// The audience gate runs again here, as the last step before anything lands
+// in the app's folder, so no caller can skip it.
+function commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar) {
+  const destination = destinationOf(channel, { ...job, mediaType: 'video' });
+  assertDeliverable(destination, job);
   if ((CHANNELS[channel] || 'main') === 'platform') {
-    return platformDrop.commitPlatformDrop(destDir, buildPath, finalPath, sidecarName, sidecar);
+    platformDrop.commitPlatformDrop(destDir, buildPath, finalPath, sidecarName, sidecar);
+  } else {
+    fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
+    fs.renameSync(buildPath, finalPath);
   }
-  fs.writeFileSync(path.join(destDir, sidecarName), sidecar);
-  fs.renameSync(buildPath, finalPath);
+  recordDrop(destination, job, path.basename(finalPath), finalPath);
 }
 
 // GET /api/resolve?url=... -> metadata preview.
@@ -2567,8 +2628,386 @@ app.get('/api/config', (_req, res) =>
     posts: POSTS_ENABLED,
     elite: ELITE_ENABLED,
     channels: Object.keys(CHANNELS).filter((ch) => !!CHANNEL_ROOTS[ch]),
+    // The app behind each configured channel and its audience, so a UI can keep
+    // the 18+ app apart from the general ones instead of guessing from a name.
+    apps: Object.keys(CHANNELS)
+      .filter((ch) => !!CHANNEL_ROOTS[ch])
+      .map((ch) => ({ channel: ch, app: CHANNEL_LIBRARY[ch], audience: ch === '18plus' ? 'adult' : 'general' })),
+    adultBlocked: ADULT_BLOCKED,
   })
 );
+
+// --- Grabbit 2.0 hub ----------------------------------------------------------
+// HUB_BRAND: the line under the logo. HUB_APP_LINKS: the sidebar's app list,
+// `Name|https://url,Name|https://url`. Both are deploy settings, not code, so
+// this public repo names no real app or domain. Non-https links are dropped.
+const HUB_BRAND = String(process.env.HUB_BRAND || 'Media hub').slice(0, 60);
+const HUB_APP_LINKS = hub.parseAppLinks(process.env.HUB_APP_LINKS);
+// Read-only numbers for the hub dashboard (public/hub/), counted from the
+// downloaded registry by hub.js. Nothing here is estimated: a count the
+// registry cannot answer is left out rather than guessed.
+app.get('/api/hub/summary', async (_req, res) => {
+  const summary = hub.summarize(readDownloaded());
+  let storage = null;
+  try {
+    const fsx = await fs.promises.statfs(DOWNLOAD_DIR);
+    storage = { path: 'downloads', size: fsx.blocks * fsx.bsize, free: fsx.bavail * fsx.bsize };
+  } catch {
+    /* not mounted or not reachable: the dashboard shows no storage row */
+  }
+  res.json({
+    ok: true,
+    ...summary,
+    storage,
+    channels: Object.keys(CHANNELS).filter((ch) => !!CHANNEL_ROOTS[ch]),
+    brand: HUB_BRAND,
+    apps: HUB_APP_LINKS,
+  });
+});
+
+// GET /api/hub/creators?q=&limit= -> creators seen in file names, most files first.
+app.get('/api/hub/creators', (req, res) => {
+  res.json({ ok: true, ...hub.creatorList(readDownloaded(), { q: req.query.q, limit: Number(req.query.limit) || 200 }) });
+});
+
+// --- Grabbit 2.0 profiles -------------------------------------------------------
+// One creator profile holds many platform accounts and the creator names seen in
+// file names (see profiles.js for the rules). The store is profiles.json; files on
+// disk and the downloaded registry are never touched. Only the admin session gets
+// here: app passwords are refused by the gate above.
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+let profilesCache = null;
+
+// The store, with every creator the registry knows given a profile. A file that
+// is readable JSON but breaks the invariants is refused rather than "repaired":
+// writing a reconstruction over it could drop links the owner made by hand.
+function readProfiles() {
+  if (!profilesCache) profilesCache = profiles.normalizeStore(readJsonState(PROFILES_FILE, null));
+  const stats = profiles.aliasStats(readDownloaded());
+  const synced = profiles.sync(profilesCache, stats, Date.now());
+  if (synced.added) saveProfiles(synced.store);
+  return { store: profilesCache, stats };
+}
+function saveProfiles(store) {
+  writeJsonAtomic(PROFILES_FILE, store);
+  profilesCache = store;
+}
+function profileError(res, e) {
+  if (e instanceof profiles.ProfileError) return res.status(e.status).json({ ok: false, error: e.message });
+  console.error('profiles:', e.message);
+  return res.status(500).json({ ok: false, error: 'The profile store could not be used. See the server log.' });
+}
+// Runs one store operation and saves its result.
+function changeProfiles(res, op) {
+  try {
+    const { store, stats } = readProfiles();
+    const r = op(store, Date.now());
+    saveProfiles(r.store);
+    res.json({
+      ok: true,
+      profile: r.profile ? profiles.view(r.profile, stats) : null,
+      from: r.from ? profiles.view(r.from, stats) : null,
+    });
+  } catch (e) {
+    profileError(res, e);
+  }
+}
+
+// --- Grabbit 2.0 items and the audience gate --------------------------------------
+// Every item Grabbit delivers into an app gets a row in items.db (SQLite, WAL)
+// with its audience, and every delivery gets a row of its own. The gate
+// (audience.js) runs before any byte is written into an app's folder, and the
+// database refuses a general delivery of an item that is not general on its
+// own, so a code path that forgets the gate still cannot record one.
+const ITEMS_DB_FILE = path.join(DATA_DIR, 'items.db');
+let ITEM_STORE = null;
+let ITEM_STORE_ERROR = null;
+try {
+  ITEM_STORE = itemStore.open(ITEMS_DB_FILE);
+  if (ITEM_STORE.migrationBackup) {
+    console.log(`items.db migrated to schema ${ITEM_STORE.SCHEMA_VERSION}; the old copy is ${path.basename(ITEM_STORE.migrationBackup)}`);
+  }
+  // Phase A: the registry is the source of truth until the index is proven
+  // against it. Read-only on downloaded.json; adds what is missing.
+  const r = ITEM_STORE.importRegistry(readDownloaded());
+  const c = ITEM_STORE.counts();
+  console.log(
+    `items.db: ${c.items} items (${c.general} general, ${c.adult} 18+, ${c.unknown} unclassified), ` +
+    `${c.deliveries} deliveries; registry has ${r.registryItems} items, ${r.added} added, ${r.tightened} tightened`
+  );
+} catch (e) {
+  ITEM_STORE = null;
+  ITEM_STORE_ERROR = e.message;
+  console.error(`[grabbit] items.db could not be opened (${e.message}). No app receives anything until it can.`);
+}
+
+// The app destination a save into this channel lands in. With dest=elite an
+// image in a non-platform channel goes to the posts import.
+function destinationOf(channel, job) {
+  const ch = CHANNELS[channel] || 'main';
+  if (ch === 'platform' || ch === '18plus') return ch;
+  return job && job.mediaType === 'image' ? 'posts' : 'main';
+}
+
+// The item key: the registry's site-native id key, else its URL key.
+function itemKeyOf(job) {
+  if (!job) return null;
+  return idKey(job.site, job.mediaId) || (job.sourceUrl ? mediaKey(job.sourceUrl) : null);
+}
+
+function itemKindOf(job) {
+  if (job && job.mediaType === 'image') return 'image';
+  return job && job.audioOnly ? 'audio' : 'video';
+}
+
+const creatorKey = (name) => safeCreator(name);
+
+// The audience of the item behind this job, for a save into `destination`.
+// A save into the 18+ app tightens it to adult; a job's own `audience: adult`
+// does too. Nothing a job says can make an item general.
+function classifyJob(destination, job) {
+  const prior = ITEM_STORE && itemKeyOf(job) ? ITEM_STORE.get(itemKeyOf(job)) : null;
+  let store = null;
+  let storeProblem = null;
+  try {
+    ({ store } = readProfiles());
+  } catch (e) {
+    storeProblem = `the profile store could not be read (${e.message})`;
+  }
+  const look = (creator) =>
+    audience.classify(
+      {
+        creatorKey: creator,
+        handle: creator,
+        site: job && job.site,
+        extractor: job && job.extractor,
+        sourceUrl: job && job.sourceUrl,
+        requested: destination === '18plus' || (job && job.audience === 'adult') ? 'adult' : null,
+        prior: prior ? prior.audience : null,
+        priorByHand: Boolean(prior && prior.classified_by_hand),
+      },
+      store,
+      { keyOf: creatorKey }
+    );
+  // The creator as the job names it, and as the site named it when the job
+  // renamed it: a rename never borrows another creator's general profile.
+  let c = look(job && job.creator);
+  if (job && job.sourceCreator !== undefined && job.sourceCreator !== job.creator) {
+    c = audience.stricter(c, look(job.sourceCreator));
+  }
+  if (storeProblem && c.audience === 'general') return { audience: 'unknown', reasons: [storeProblem], profileId: null };
+  if (storeProblem) c.reasons.push(storeProblem);
+  return c;
+}
+
+function recordItem(job, classification, filename) {
+  const key = itemKeyOf(job);
+  if (!ITEM_STORE || !key) return null;
+  return ITEM_STORE.upsert({
+    key,
+    site: job.site,
+    sourceId: job.mediaId,
+    sourceUrl: job.sourceUrl,
+    kind: itemKindOf(job),
+    audience: classification.audience,
+    reasons: classification.reasons,
+    profileId: classification.profileId,
+    creator: job.creator,
+    title: job.title,
+    filename,
+    origin: 'save',
+  });
+}
+
+// Why this job may not be delivered to this app destination, or null. Fails
+// closed: without the item store no app gets anything (18+ included, since its
+// deliveries could not be recorded either); no key or any error means a general
+// app gets nothing.
+function audienceRefusal(destination, job) {
+  try {
+    const app = audience.DESTINATIONS[destination];
+    const general = app && app.audience === 'general';
+    if (app && !ITEM_STORE) {
+      return `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}), so nothing is delivered to any app.`;
+    }
+    if (general && !itemKeyOf(job)) {
+      return 'This item has no source id or URL, so its audience cannot be recorded; nothing is delivered to a general app.';
+    }
+    const c = classifyJob(destination, job);
+    const why = audience.refusal(c, destination, { mediaType: job && job.mediaType, creator: job && job.creator });
+    if (why) {
+      const item = recordItem(job, c, null);
+      if (item) ITEM_STORE.recordDelivery(item.id, destination, 'refused', { detail: why });
+    }
+    return why;
+  } catch (e) {
+    console.error('audience gate:', e.message);
+    return `The audience check failed (${e.message}); nothing is delivered.`;
+  }
+}
+
+// The last check before bytes go into an app's folder. Throws on refusal.
+function assertDeliverable(destination, job) {
+  const why = audienceRefusal(destination, job);
+  if (why) throw new Error(why);
+}
+
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    let bytes = 0;
+    fs.createReadStream(file)
+      .on('data', (d) => { h.update(d); bytes += d.length; })
+      .on('error', reject)
+      .on('end', () => resolve({ sha256: h.digest('hex'), bytes }));
+  });
+}
+
+// Records a finished drop. The database trigger is the second lock: if this
+// item is not general, a general delivery cannot be recorded, and that is
+// logged loudly because the file is already in place.
+function recordDrop(destination, job, filename, filePath) {
+  if (!ITEM_STORE || !itemKeyOf(job)) return;
+  try {
+    const c = classifyJob(destination, job);
+    const item = recordItem(job, c, filename);
+    ITEM_STORE.recordDelivery(item.id, destination, 'dropped', { filename });
+    if (filePath) {
+      sha256File(filePath)
+        .then(({ sha256, bytes }) => {
+          const twin = ITEM_STORE.recordHash(item.id, sha256, bytes);
+          if (twin) console.warn(`duplicate content: ${filename} has the same bytes as item ${twin.key} (${twin.filename || 'no file name'})`);
+        })
+        .catch(() => { /* the importer may already have taken the file */ });
+    }
+  } catch (e) {
+    console.error(`[grabbit] delivery of ${filename} to ${destination} could not be recorded: ${e.message}`);
+  }
+}
+
+// GET /api/hub/profiles?q=&audience=general|adult&limit=
+app.get('/api/hub/profiles', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    const audience = profiles.AUDIENCES.includes(req.query.audience) ? req.query.audience : '';
+    res.json({ ok: true, platforms: profiles.PLATFORMS, ...profiles.list(store, stats, { q: req.query.q, audience, limit: Number(req.query.limit) || 200 }) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/profiles/:id
+app.get('/api/hub/profiles/:id', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    res.json({ ok: true, platforms: profiles.PLATFORMS, profile: profiles.view(profiles.findProfile(store, req.params.id), stats) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// POST /api/hub/profiles { name, audience, note?, accounts? } -> a manual profile.
+app.post('/api/hub/profiles', (req, res) => changeProfiles(res, (s, now) => profiles.create(s, req.body, now)));
+// POST /api/hub/profiles/merge { target, sources: [id] }
+app.post('/api/hub/profiles/merge', (req, res) =>
+  changeProfiles(res, (s, now) => profiles.merge(s, (req.body || {}).target, (req.body || {}).sources, now)));
+// POST /api/hub/profiles/:id { name?, note?, accounts? }
+app.post('/api/hub/profiles/:id', (req, res) => changeProfiles(res, (s, now) => profiles.update(s, req.params.id, req.body, now)));
+// POST /api/hub/profiles/:id/split { name, aliases: [name], accounts: ['platform:handle'] }
+app.post('/api/hub/profiles/:id/split', (req, res) =>
+  changeProfiles(res, (s, now) => profiles.split(s, req.params.id, req.body, now)));
+
+// --- Review queue: the owner classifies creators and items by hand ----------------
+// Nothing here downgrades 18+: the profile store and the item store both refuse
+// to classify an 18+ creator or item general, and say so per id.
+const reviewAudience = (v) => (v === 'general' || v === 'adult' ? v : null);
+
+// GET /api/hub/review -> how much is waiting.
+app.get('/api/hub/review', (_req, res) => {
+  try {
+    const { store } = readProfiles();
+    const unclassified = store.profiles.filter((p) => profiles.effectiveAudience(p) === 'unknown').length;
+    res.json({ ok: true, creators: { unclassified }, items: ITEM_STORE ? ITEM_STORE.counts() : null, itemStoreError: ITEM_STORE ? null : ITEM_STORE_ERROR });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/review/groups?q= -> unclassified profiles grouped by site and
+// delivery history, so the owner can look at one kind of creator at a time.
+app.get('/api/hub/review/groups', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    res.json({ ok: true, groups: profiles.groups(store, stats, { status: 'unknown', q: req.query.q }) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/review/creators?q=&group=&limit=&offset= -> unclassified profiles, most files first.
+app.get('/api/hub/review/creators', (req, res) => {
+  try {
+    const { store, stats } = readProfiles();
+    res.json({ ok: true, ...profiles.list(store, stats, { q: req.query.q, group: req.query.group, status: 'unknown', limit: Number(req.query.limit) || 100, offset: req.query.offset }) });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// POST /api/hub/review/creators { audience, ids: [id] } or { audience, all: true, q, group, expected }
+// `all` classifies every unclassified profile matching q (and group, when
+// given); `expected` must be the count the owner saw, so a list that changed
+// meanwhile is not classified blind. Without `expected` nothing is classified.
+app.post('/api/hub/review/creators', (req, res) => {
+  const b = req.body || {};
+  const aud = reviewAudience(b.audience);
+  if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+  try {
+    const { store, stats } = readProfiles();
+    let ids = b.ids;
+    if (b.all === true) {
+      if (b.group != null && typeof b.group !== 'string') return res.status(400).json({ ok: false, error: 'group must be a string' });
+      ids = profiles.matching(store, { q: b.q, group: b.group || '', stats, status: 'unknown' }).map((p) => p.id);
+      if (b.expected == null || Number(b.expected) !== ids.length) {
+        return res.status(409).json({ ok: false, error: `The list changed: ${ids.length} creators match now, not ${b.expected}. Reload and check again.` });
+      }
+    }
+    const r = profiles.classifyProfiles(store, ids, aud, Date.now());
+    if (r.changed.length) saveProfiles(r.store);
+    console.log(`review: ${r.changed.length} creator profile(s) classified ${aud} by hand, ${r.skipped.length} skipped`);
+    res.json({ ok: true, changed: r.changed, skipped: r.skipped });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/review/items?audience=unknown&refused=1&q=&limit=&offset=
+app.get('/api/hub/review/items', (req, res) => {
+  if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
+  try {
+    const r = ITEM_STORE.listItems({
+      audience: req.query.audience || 'unknown',
+      refused: req.query.refused === '1',
+      q: req.query.q,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('review items:', e.message);
+    res.status(500).json({ ok: false, error: 'The item store could not be read. See the server log.' });
+  }
+});
+// POST /api/hub/review/items { audience, ids: [id] }
+app.post('/api/hub/review/items', (req, res) => {
+  const b = req.body || {};
+  const aud = reviewAudience(b.audience);
+  if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+  if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
+  try {
+    const r = ITEM_STORE.classifyItems(b.ids, aud);
+    console.log(`review: ${r.changed.length} item(s) classified ${aud} by hand, ${r.skipped.length} skipped`);
+    res.json({ ok: true, changed: r.changed, skipped: r.skipped });
+  } catch (e) {
+    if (e instanceof itemStore.StoreError) return res.status(400).json({ ok: false, error: e.message });
+    console.error('review items:', e.message);
+    res.status(500).json({ ok: false, error: 'The item store could not be changed. See the server log.' });
+  }
+});
 
 app.get('/api/folders', (_req, res) => {
   res.json({ ok: true, folders: listServerFolders() });
@@ -4546,7 +4985,10 @@ app.get('/api/download', async (req, res) => {
       .filter(Boolean);
   }
 
-  const refused = dest === 'elite' ? channelRefusal(channel, job) : null;
+  // Audio-only with dest=elite is streamed to the device, never filed into an
+  // app, so the audience gate has nothing to guard there. An image is filed
+  // whatever audio says (its branch runs first), so it is always checked.
+  const refused = dest === 'elite' && !(audio && job.mediaType !== 'image') ? channelRefusal(channel, job) : null;
   if (refused) return res.status(422).json({ ok: false, error: refused });
 
   // Images don't fit the video pipeline: with dest=elite they are dropped into
@@ -4554,7 +4996,7 @@ app.get('/api/download', async (req, res) => {
   if (job.mediaType === 'image') {
     const unavailable = dest === 'elite' ? postsUnavailable() : null;
     if (unavailable) return res.status(400).json({ ok: false, error: unavailable });
-    return downloadImage(res, job, url, device, dest);
+    return downloadImage(res, job, url, device, dest, channel);
   }
 
   // Audio-only: for the elite destination it's streamed (audio doesn't fit the
@@ -4625,7 +5067,7 @@ app.get('/api/download', async (req, res) => {
     // 3. Write the .md caption sidecar elite-v2 reads on import, then publish
     //    the clip itself with the rename.
     if (!skipImport) {
-      commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar);
+      commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar);
       // Register the save so playlist views and "download new" recognise the
       // clip as fetched — the jobs/batch paths do this via finishJob.
       markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
@@ -4826,7 +5268,7 @@ app.get('/api/download-all', async (req, res) => {
       // fetch. Above the branch, so all four destinations get the tags.
       job = await enrichProfileItem(job);
       if (isImage) {
-        if (toPosts) await saveImageToPosts(job);
+        if (toPosts) await saveImageToPosts(job, channel);
         else await saveImageToLibrary(job);
       } else if (dest === 'server') await saveJobToServer(job, folder, quality);
       else await saveJobToImport(job, channel, web, quality);
@@ -5115,13 +5557,16 @@ async function runJob(job, params) {
   });
 
   // Refuse a save into a library this deploy has not been given. Audio-only is
-  // exempt: with dest=elite it is streamed, never filed.
-  if (params.dest === 'elite' && !params.audio) {
+  // exempt: with dest=elite it is streamed, never filed. An image is not: its
+  // branch runs before the audio one, so it is filed whatever audio says.
+  if (params.dest === 'elite' && (!params.audio || mediaType === 'image')) {
+    // The channel's own refusal first: an 18+ image must be refused as such,
+    // not reported as a missing posts library.
+    const refused = channelRefusal(params.channel, { ...meta, mediaType });
+    if (refused) return failJob(job, refused);
     const unavailable =
       mediaType === 'image' ? postsUnavailable() : shortsUnavailable(params.channel);
     if (unavailable) return failJob(job, unavailable);
-    const refused = channelRefusal(params.channel, { ...meta, mediaType });
-    if (refused) return failJob(job, refused);
   }
 
   if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
@@ -5209,7 +5654,7 @@ async function produceEliteVideo(job, meta, params, onProgress) {
     else await downloadYtdlp(meta, tmpPath, { quality: params.quality, onProgress, extraArgs: params.extraArgs });
     setJob(job, { phase: 'processing', percent: 100 });
     await embedMetadata(tmpPath, buildPath, meta, params.web, 'mp4');
-    if (!skipImport) commitDrop(params.channel, destDir, buildPath, finalPath, sidecarName, sidecar);
+    if (!skipImport) commitDrop(params.channel, meta, destDir, buildPath, finalPath, sidecarName, sidecar);
     recordJobHistory(meta, params, params.channel, outName, !skipImport);
     finishJob(job, {
       saved: !skipImport, channel: params.channel, dir: params.channel, filename: outName, mime: 'video/mp4',
@@ -5298,7 +5743,7 @@ async function produceImage(job, meta, params) {
   const libPath = path.join(dir, outName);
   setJob(job, { phase: 'downloading' });
   if (!fs.existsSync(libPath)) {
-    if (toPosts) await saveImageToPosts(meta);
+    if (toPosts) await saveImageToPosts(meta, params.channel);
     else {
       fs.mkdirSync(PHOTOS_DIR, { recursive: true });
       await downloadDirect(meta, libPath);
@@ -5714,6 +6159,14 @@ function startJobFromQuery(query, who, via) {
     req.query = { ...req.query, folder: gda.TARGETS[target].legacy.folder, xargs: undefined };
   }
   console.log(`gda: client=${who.id} target=${target} via=${via} result=allow`);
+  // The 18+ app is refused at the door when it is not there (unset, or
+  // disabled at boot for sharing a tree with a general app), so a scheduled
+  // job cannot sit in the queue looking accepted. 18+ images are refused
+  // later too, so no media type can route around this.
+  if (target === 'adshortis.inbox' && req.query.audio !== '1') {
+    const unavailable = shortsUnavailable('18plus');
+    if (unavailable) return { status: 422, body: { ok: false, error: unavailable } };
+  }
   let params;
   try {
     params = {
@@ -6385,6 +6838,8 @@ app.get('/api/health', async (_req, res) => {
       // would be noise in the one panel that must only show real problems.
       ...(CHANNEL_ROOTS.main ? [dirHealth('shorts main (tikshortis)', channelDir('main'), true)] : []),
       ...(CHANNEL_ROOTS['18plus'] ? [dirHealth('shorts 18+ (adshortis)', channelDir('18plus'), true)] : []),
+      // Configured but refused at boot: a real problem, so it gets a row.
+      ...(ADULT_BLOCKED ? [{ label: 'shorts 18+ (adshortis)', path: null, exists: false, writable: false, unreachable: false, blocked: ADULT_BLOCKED }] : []),
       ...(CHANNEL_ROOTS.platform ? [dirHealth('platform drop folder', channelDir('platform'), true)] : []),
       ...(POSTS_ENABLED ? [dirHealth('posts (elitogram)', POSTS_IMPORT_DIR, true)] : []),
       dirHealth('server videos', VIDEOS_DIR, true),
@@ -6397,6 +6852,9 @@ app.get('/api/health', async (_req, res) => {
       dirHealth('data', DATA_DIR, true),
     ]),
     state: stateHealth(),
+    items: ITEM_STORE
+      ? { ok: true, file: path.basename(ITEMS_DB_FILE), schema: ITEM_STORE.SCHEMA_VERSION, ...ITEM_STORE.counts() }
+      : { ok: false, file: path.basename(ITEMS_DB_FILE), error: ITEM_STORE_ERROR },
     backups: {
       days: STATE_BACKUP_DAYS,
       dir: STATE_BACKUP_DIR,
@@ -6491,7 +6949,7 @@ async function saveJobToImport(job, channel, web, quality) {
     if (job.kind === 'direct') await downloadDirect(job, tmpPath);
     else await downloadYtdlp(job, tmpPath, { quality });
     await embedMetadata(tmpPath, buildPath, job, web, 'mp4');
-    commitDrop(channel, destDir, buildPath, finalPath, sidecarName, sidecar);
+    commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar);
     return finalPath;
   } finally {
     fs.rm(tmpPath, { force: true }, () => {});
@@ -7032,11 +7490,15 @@ async function saveImageToLibrary(job) {
 // post per picture. The file itself is fetched under a dot-name (both importers
 // skip dotfiles) and renamed last, so a run that starts mid-download never
 // picks up half a picture — or a picture without its caption.
-async function saveImageToPosts(job) {
+async function saveImageToPosts(job, channel) {
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const ext = safeExt(job.ext, 'jpg');
   const outName = `${stem}.${ext}`;
   const dir = postsImportDir(job.creator);
+  // The audience gate, as the last step before the posts folder is touched.
+  // An image saved under the 18+ channel meets Adshortis' videos-only rule
+  // here, never the posts library's.
+  assertDeliverable(destinationOf(channel, { ...job, mediaType: 'image' }), job);
   makeDropDir(dir);
   const finalPath = path.join(dir, outName);
   const partPath = path.join(dir, `.${outName}.part`);
@@ -7051,12 +7513,13 @@ async function saveImageToPosts(job) {
     fs.rm(partPath, { force: true }, () => {});
     throw e;
   }
+  recordDrop('posts', job, outName, finalPath);
   return { path: finalPath, name: outName, creator: postsCreator(job.creator) };
 }
 
 // Single-image handler: save it (posts import or photos library, per dest) and
 // optionally stream it to the device too.
-async function downloadImage(res, job, url, device, dest) {
+async function downloadImage(res, job, url, device, dest, channel) {
   const toPosts = dest === 'elite';
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   const ext = safeExt(job.ext, 'jpg');
@@ -7066,7 +7529,7 @@ async function downloadImage(res, job, url, device, dest) {
   const already = fs.existsSync(libPath);
   try {
     if (!already) {
-      if (toPosts) await saveImageToPosts(job);
+      if (toPosts) await saveImageToPosts(job, channel);
       else {
         fs.mkdirSync(PHOTOS_DIR, { recursive: true });
         await downloadDirect(job, libPath);

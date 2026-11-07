@@ -162,6 +162,120 @@ the state (job history, cookies, playlists) in `./data`, both next to
 To stop the server, press `Ctrl + C`. For running it permanently on a server,
 see [Deploy with Docker](#deploy-with-docker).
 
+## Grabbit 2.0 hub (preview)
+
+`/hub/` is a second front end over the same API: a dashboard with counts from
+the downloaded registry, a paste-a-link box, the live job queue, the latest
+downloads, creators found in file names, app destinations and system status.
+Every number comes from the server. Parts that are not built yet (duplicate
+review, metadata editing) are marked as planned instead of showing sample
+values. The classic interface at `/` keeps every feature and is linked from the
+hub's sidebar.
+
+### The 18+ destination (Adshortis)
+
+Adshortis is a destination of its own, never mixed with the general apps:
+
+- The hub lists it in a separate *18+ only* group, only when `ELITE_ROOT` is
+  set and passed the boot check, and never restores it as the default choice.
+  Saving to it needs a confirmation tick, every time.
+- Its folder may not share a tree with a general destination; if it does, the
+  channel is disabled at boot (see `ELITE_ROOT` below).
+- Only the owner session and app clients with the `adult` audience can save to
+  it (GDA target `adshortis.inbox`); a general client is refused.
+- A save to it is refused up front when it is not available, and an 18+ image
+  is refused instead of going to the general posts import.
+
+### The audience gate
+
+Every item has an audience: `general`, `adult` or `unknown`. Before anything is
+written into an app's folder, Grabbit works out the item's audience and checks
+it against the app (`audience.js`). The check runs when the save starts and
+again right before the file lands.
+
+- **Adult wins.** An item is adult when the save goes to Adshortis, when it was
+  recorded as adult before, when it comes from an 18+ site, when the site
+  itself flags it 18+ (yt-dlp's `age_limit`), or when its creator matches a
+  profile that is 18+ or was classified 18+. Once adult, an item stays adult.
+- **General is a decision by hand.** An item is general only when its creator
+  matches a general profile that was created by hand or classified general on
+  the hub's *Review* page, or when the item itself was classified general
+  there. Having been delivered to a general app before is not a
+  classification, and neither is a save to the plain server library.
+- **Unknown is not general.** A creator no one has classified, or an item with
+  no creator, is refused by every general app (Tikshortis, Platform, the posts
+  import). Classify it on the *Review* page, or save to Adshortis or the
+  server library.
+- **18+ is final.** An 18+ creator or item is never classified general again,
+  and 18+ and other profiles are never merged.
+- **A job can tighten, never loosen.** Saving to Adshortis makes the item
+  adult. Renaming the creator (`creator=`) cannot borrow another creator's
+  general profile: both the site's name and the new name are checked, and the
+  stricter answer wins.
+- Adshortis takes videos only.
+
+**Review page.** The hub's *Review* page lists unclassified creators (most
+files first) and the items a general app refused (latest refusal first). Tick
+creators or items and classify them general or 18+, or classify every
+unclassified creator that matches a filter at once; that bulk action states
+the count you saw, and is refused if the list changed meanwhile.
+
+**Kids library.** A child-safety rule for the Navidrome kids library
+(`kidsRefusal()` in `audience.js`: only items classified general, never
+unknown or 18+) is written and tested but not switched on; the kids library
+works as before.
+
+Items and deliveries are recorded in `items.db` (SQLite, WAL) in the data
+directory. The database refuses on its own any general delivery of an item that
+is not general, and any lowering of an adult item. On boot, items are imported
+from `downloaded.json` (read only; nothing is added to or changed in the JSON
+files). Before a schema migration the existing database is copied to
+`items.db.pre-v<N>-<time>`, and a database newer than the code is refused. The
+daily state snapshot includes a consistent copy of `items.db`. If `items.db`
+cannot be opened, general apps receive nothing until it can; `/api/health`
+shows the reason under `items`.
+
+Content hashes (SHA-256) are recorded for each delivered file. A file with the
+same bytes as an earlier item is logged as a duplicate; nothing is refused on
+that yet.
+
+### Creator profiles
+
+The hub's Profiles page manages one profile per creator, stored in
+`profiles.json` in the data directory (snapshotted daily with the other state
+files). A profile holds:
+
+- **Linked accounts**: any number of platform accounts (`tiktok`, `instagram`,
+  `facebook`, ...), each with a handle, an optional profile link and where it
+  came from (`manual`, or the importer that added it).
+- **Aliases**: the creator names found in downloaded file names
+  (`<creator>_-_<title>`). Every creator in the downloaded registry gets a
+  profile of its own the first time the page is opened, and new creators are
+  added as they appear.
+
+Edit renames a profile and changes its accounts. Merge moves the aliases and
+accounts of other profiles into one and remembers the merged ids. Split moves
+chosen aliases or accounts out into a new profile. The rules:
+
+- Nothing on disk changes. Files are never renamed or moved, and the registry is
+  only read.
+- An alias is only ever moved, never deleted, so every file name's creator
+  always resolves to exactly one profile.
+- One platform account belongs to one profile. Adding it to a second profile is
+  refused with a hint to merge instead.
+- General and 18+ are kept apart. A file saved to the `18plus` channel makes its
+  creator an 18+ alias, so the same name in both channels becomes two profiles,
+  and merging across audiences is refused. A profile created by hand must be
+  given its audience explicitly.
+
+API (web session only; app passwords are refused):
+`GET /api/hub/profiles?q=&audience=general|adult`, `GET /api/hub/profiles/:id`,
+`POST /api/hub/profiles` (`{ name, audience, note?, accounts? }`),
+`POST /api/hub/profiles/:id` (`{ name?, note?, accounts? }`),
+`POST /api/hub/profiles/merge` (`{ target, sources: [id] }`),
+`POST /api/hub/profiles/:id/split` (`{ name, aliases: [name], accounts: ['platform:handle'] }`).
+
+
 ## Everyday use
 
 A few things the web UI does that aren't obvious at first glance.
@@ -382,9 +496,11 @@ up only once the destination is Navidrome); that's noted per setting.
   the audio lands in: *My music* or *Kids* (a separate library/instance).
 
 - **Channel** — *shown only when Save to = Shorts.* Which shorts channel new
-  clips post to: *main* or *18+*. The two can live in separate libraries — see
-  `ELITE_ROOT` / `TIKSHORTIS_ROOT`. Only the channels whose root is configured
+  clips post to: *main* or *18+*. Each is its own app with its own root — see
+  `TIKSHORTIS_ROOT` / `ELITE_ROOT`. Only the channels whose root is configured
   are shown, and with neither set the *Shorts* destination is hidden entirely.
+  The 18+ channel takes videos only: an 18+ image is refused rather than filed
+  into the general posts import.
 
 - **Library folder** — *shown only when Save to = Server library.* The subfolder
   inside the server library that video downloads are filed under.
@@ -852,10 +968,12 @@ environment variables:
 | `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
 | `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
 | `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |
-| `ELITE_ROOT` | Shorts storage root — enables the shorts destination. Clips are dropped in `<root>/<channel>/_import/`. Unset (the default) there is no shorts destination at all: the *Shorts* option and the *Shorts* mode disappear from the UI and new downloads default to the server library. |
-| `TIKSHORTIS_ROOT` | Storage root for the *main* channel, when that library is a separate app from the 18+ one. Same `<root>/<channel>/_import/` layout; unset, *main* stays under `ELITE_ROOT`. Set one of the two and only that channel is offered. |
+| `ELITE_ROOT` | Storage root of the **18+** shorts app (Adshortis, channel `18plus`). Clips are dropped in `<root>/18plus/_import/`. Unset (the default), there is no 18+ channel. If `<root>/18plus` shares a folder tree with any general destination (the main channel folder, `PLATFORM_IMPORT_ROOT` or the posts import folder, compared after resolving symlinks), the 18+ channel is disabled at boot and the reason is logged, shown in `/api/config` (`adultBlocked`) and in the health check. |
+| `TIKSHORTIS_ROOT` | Storage root of the **main** (general) shorts app. Same `<root>/main/_import/` layout. Unset (the default), there is no main channel. It no longer falls back to `ELITE_ROOT`: that root is the 18+ library, and a general channel is never filed inside it. With neither root set, the *Shorts* option and mode disappear and new downloads default to the server library. |
 | `DROP_FORMAT_MAIN` / `DROP_FORMAT_18PLUS` | How a clip dropped into that channel's `_import/` is named. `legacy` (default): `<creator>_-_<title>.mp4` plus a `.md` caption. `brackets`: `<title> [@<creator>] [id=<media id>].mp4` plus a yt-dlp style `.json` sidecar (title, description, tags, uploader, webpage_url). |
 | `PLATFORM_IMPORT_ROOT` | Drop folder of a social app that imports clips as posts by per-creator profiles (channel `platform`, GDA target `platform.inbox`). Unlike the other shorts roots this IS the drop folder (no `<channel>/_import/`). Each save writes `<creator>_-_<title>.mp4` first, then `<creator>_-_<title>.json` (drop-zone contract v1: `version`, `file`, `source`, `sourceId`, `sourceUrl`, `creator{handle,name,profileUrl}`, `caption`, `tags`), both by an atomic rename from a dot-name. Videos only; a clip whose creator is unknown is refused. Unset (the default), the channel does not exist. |
+| `HUB_BRAND` | The line under the logo in the Grabbit 2.0 hub (`/hub/`). Default `Media hub`. |
+| `HUB_APP_LINKS` | The hub sidebar's list of connected apps: `Name\|https://app.example.com,Other\|https://other.example.com`. Only https links are shown. Unset, the list is hidden. |
 | `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 

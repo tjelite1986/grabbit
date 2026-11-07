@@ -24,8 +24,10 @@ ENV PORT=3000
 ENV DATA_DIR=/data
 ENV DOWNLOAD_DIR=/downloads
 
-COPY package.json ./
-RUN npm install --omit=dev
+# Install exactly what package-lock.json pins, so every build of a commit gets
+# the same dependency tree (npm ci fails if the lockfile and package.json disagree).
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY . .
 

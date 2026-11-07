@@ -268,7 +268,12 @@ async function resolve(url) {
   const site = info ? String(info.extractor_key || info.extractor || '').toLowerCase() || null : null;
   // The uploader's own page, for importers that make a profile per creator.
   const creatorUrl = info ? info.uploader_url || info.channel_url || null : null;
-  return { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, probeFatal, mediaId, site, creatorUrl };
+  const job = { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, probeFatal, mediaId, site, creatorUrl };
+  // The site's own age gate (Reddit over_18, YouTube age restriction) is an
+  // 18+ signal on the item itself. The audience gate lets it tighten an item
+  // to adult; nothing here can make one general.
+  if (info && Number(info.age_limit) >= 18) job.audience = 'adult';
+  return job;
 }
 
 module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };
