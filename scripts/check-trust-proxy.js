@@ -34,7 +34,16 @@ try {
 }
 
 // Overridable so the same cases fit another network.
-const TRAEFIK = process.env.CHECK_TRAEFIK_IP || '10.0.0.16'; // grabbit's peer on the traefik network
+// The defaults are examples; set the real addresses of the network you check.
+// The reverse proxy's own address on the shared network, i.e. grabbit's socket
+// peer for proxied requests. Docker hands out a new one on recreate unless the
+// address is pinned.
+const TRAEFIK = process.env.CHECK_TRAEFIK_IP || '172.18.0.2';
+// The shared network's gateway. docker-proxy connects from here for whatever
+// iptables does not DNAT: the host itself and IPv6 clients of the published port.
+const GATEWAY = process.env.CHECK_GATEWAY_IP || '172.18.0.1';
+// Any other container on the shared network.
+const NEIGHBOUR = process.env.CHECK_NEIGHBOUR_IP || '172.18.0.3';
 const CF4 = process.env.CHECK_CF_IP || '172.68.10.20'; // inside 172.64.0.0/13
 const CF6 = process.env.CHECK_CF_IP6 || '2400:cb00:2049::1';
 const LAN = process.env.CHECK_LAN_IP || '192.168.0.50'; // a LAN client hitting the port directly
@@ -51,6 +60,8 @@ const CASES = [
   ['IPv4-mapped Traefik peer (server bound to ::)', `::ffff:${TRAEFIK}`, `${CLIENT}, ${CF4}`, CLIENT],
   ['LAN client straight to the port, forging the header', LAN, FORGED, LAN],
   ['IPv4-mapped LAN client, forging the header', `::ffff:${LAN}`, FORGED, `::ffff:${LAN}`],
+  ['host or IPv6 LAN client via docker-proxy, forging the header', GATEWAY, FORGED, GATEWAY],
+  ['neighbouring container, forging the header', NEIGHBOUR, FORGED, NEIGHBOUR],
   ['Traefik with no header at all', TRAEFIK, null, TRAEFIK],
   ['visitor reaching Traefik directly (no Cloudflare)', TRAEFIK, CLIENT, CLIENT],
 ];
