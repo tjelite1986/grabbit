@@ -115,8 +115,14 @@ function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
   for (const p of store.profiles) {
     const byAlias = creatorKey && (p.aliases || []).some((a) => norm(keyOf(a.name)) === creatorKey);
     const byName = creatorKey && p.origin === 'manual' && norm(keyOf(p.name)) === creatorKey;
+    // A general account must match on its own platform. An adult account
+    // matches its handle on any platform: an unrecognised site (a yt-dlp key
+    // such as "tiktokuser") must never drop an adult signal.
     const byAccount =
-      handle && platform && (p.accounts || []).some((a) => a.platform === platform && norm(a.handle) === handle);
+      handle &&
+      (p.accounts || []).some(
+        (a) => norm(a.handle) === handle && (p.audience === 'adult' || (platform && a.platform === platform))
+      );
     if (byAlias || byName || byAccount) out.push({ profile: p, byAlias, byName, byAccount });
   }
   return out;

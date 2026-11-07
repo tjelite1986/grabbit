@@ -174,3 +174,14 @@ test('platforms match exactly; lookalike sites match no account', () => {
   assert.equal(audience.platformOfSite('x'), 'x');
   assert.equal(audience.platformOfSite('box.com'), null);
 });
+
+test('an adult account matches its handle on any site, so an unknown site never drops the adult signal', () => {
+  const store = storeWith([
+    { name: 'Jane Doe', audience: 'general' },
+    { name: 'Ada', audience: 'adult', accounts: [{ platform: 'tiktok', handle: 'ada99' }] },
+  ]);
+  for (const site of ['tiktok', 'tiktokuser', 'youtubetab', 'example.com', null]) {
+    const c = classify({ creatorKey: 'Jane Doe', handle: 'ada99', site }, store, new Map());
+    assert.equal(c.audience, 'adult', String(site));
+  }
+});
