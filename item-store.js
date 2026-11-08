@@ -20,6 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const itemMeta = require('./item-meta');
 
 const GENERAL_DESTINATIONS = ['main', 'platform', 'posts', 'egram'];
 const ADULT_DESTINATIONS = ['18plus'];
@@ -160,6 +161,112 @@ const MIGRATIONS = [
   CREATE INDEX inbox_state ON inbox (state, received_at);
   CREATE INDEX inbox_user ON inbox (username);
   CREATE INDEX inbox_item ON inbox (item_id) WHERE item_id IS NOT NULL;
+  `,
+  // v4: metadata and duplicates.
+  // - The owner's title and creator live beside the source's, never over them:
+  //   a later save refreshes items.title/creator from the source and leaves the
+  //   edits alone. The audience gate never reads either column.
+  // - Source metadata (caption, raw record) one row per item; tags one row per
+  //   (item, origin, kind, norm), so a tag is stored once per origin.
+  // - Source and caption tags cannot be deleted or rewritten: triggers.
+  // - meta_rev counts the owner's metadata edits; meta_sync is where a later
+  //   connector to the apps will record which revision it has sent.
+  // - file_hashes: what the duplicate scan read, one row per file, keyed on
+  //   (root, rel). It only describes files; nothing here deletes one.
+  `
+  ALTER TABLE items ADD COLUMN title_edit TEXT;
+  ALTER TABLE items ADD COLUMN creator_edit TEXT;
+  ALTER TABLE items ADD COLUMN meta_rev INTEGER NOT NULL DEFAULT 0;
+
+  CREATE TABLE item_source_meta (
+    item_id INTEGER PRIMARY KEY REFERENCES items (id),
+    extractor TEXT,
+    description TEXT,
+    raw TEXT,
+    captured_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE item_tags (
+    id INTEGER PRIMARY KEY,
+    item_id INTEGER NOT NULL REFERENCES items (id),
+    origin TEXT NOT NULL CHECK (origin IN ('site', 'caption', 'user')),
+    kind TEXT NOT NULL DEFAULT 'tag' CHECK (kind IN ('tag', 'category')),
+    label TEXT NOT NULL,
+    norm TEXT NOT NULL CHECK (length(norm) > 0),
+    created_at INTEGER NOT NULL,
+    UNIQUE (item_id, origin, kind, norm)
+  );
+  CREATE INDEX item_tags_norm ON item_tags (norm, origin);
+  CREATE INDEX item_tags_item ON item_tags (item_id);
+
+  CREATE TRIGGER item_tags_source_kept
+  BEFORE DELETE ON item_tags
+  WHEN OLD.origin <> 'user'
+  BEGIN
+    SELECT RAISE(ABORT, 'a tag from the source cannot be removed');
+  END;
+
+  CREATE TRIGGER item_tags_never_rewritten
+  BEFORE UPDATE ON item_tags
+  BEGIN
+    SELECT RAISE(ABORT, 'a tag is added or removed, never rewritten');
+  END;
+
+  CREATE TABLE item_edits (
+    id INTEGER PRIMARY KEY,
+    item_id INTEGER NOT NULL REFERENCES items (id),
+    field TEXT NOT NULL CHECK (field IN ('title', 'creator', 'tag_add', 'tag_remove')),
+    old_value TEXT,
+    new_value TEXT,
+    batch TEXT,
+    by TEXT,
+    at INTEGER NOT NULL
+  );
+  CREATE INDEX item_edits_item ON item_edits (item_id, id);
+
+  CREATE TABLE meta_sync (
+    item_id INTEGER NOT NULL REFERENCES items (id),
+    target TEXT NOT NULL,
+    synced_rev INTEGER NOT NULL,
+    synced_at INTEGER NOT NULL,
+    detail TEXT,
+    PRIMARY KEY (item_id, target)
+  );
+
+  CREATE TABLE file_hashes (
+    id INTEGER PRIMARY KEY,
+    root TEXT NOT NULL,
+    rel TEXT NOT NULL,
+    dev INTEGER,
+    ino INTEGER,
+    bytes INTEGER NOT NULL,
+    mtime_ms INTEGER NOT NULL,
+    sha256 TEXT,
+    item_id INTEGER REFERENCES items (id),
+    link TEXT NOT NULL DEFAULT 'none' CHECK (link IN ('filename', 'ambiguous', 'none')),
+    error TEXT,
+    seen_at INTEGER NOT NULL,
+    hashed_at INTEGER,
+    gone_at INTEGER,
+    UNIQUE (root, rel)
+  );
+  CREATE INDEX file_hashes_sha ON file_hashes (sha256) WHERE sha256 IS NOT NULL AND gone_at IS NULL;
+  CREATE INDEX deliveries_filename ON deliveries (filename) WHERE filename IS NOT NULL;
+
+  CREATE TABLE dupe_acks (
+    sha256 TEXT PRIMARY KEY,
+    members TEXT NOT NULL,
+    note TEXT,
+    by TEXT,
+    at INTEGER NOT NULL
+  );
+
+  CREATE TABLE settings (
+    name TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at INTEGER NOT NULL
+  );
   `,
 ];
 const CLASSIFY_MAX = 5000;
@@ -532,6 +639,9 @@ function wrap(db, migrationBackup) {
       fs.renameSync(part, file);
     },
     close: () => db.close(),
+    // Metadata, tags and duplicate records (schema v4): item-meta.js.
+    // Only on a v4 database (the migration tests open older schemas).
+    ...(db.pragma('user_version', { simple: true }) >= 4 ? itemMeta.attach(db) : {}),
   };
 }
 
