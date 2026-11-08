@@ -2982,32 +2982,49 @@ function inboxAvailable() {
   };
 }
 
-// Copies a file into `dir` under `name`: a dot-named temp first (every importer
-// ignores dotfiles), fsync, then an atomic rename. Works across mounts.
 // When Grabbit runs as root (the container does), a folder or file it creates
 // in another app's import tree would be root-owned, and that app could not
-// move it on. Both take the owner of `ownerRef` (the app's import root).
-function adoptOwner(target, ownerRef) {
-  if (!ownerRef || typeof process.getuid !== 'function' || process.getuid() !== 0) return;
+// move it on. Both take the owner of `ownerRef` (the app's import root). The
+// change goes through a descriptor (files) or lchown (folders), never a path a
+// user of that tree could swap for a symlink in between.
+function ownerOf(ownerRef) {
+  if (!ownerRef || typeof process.getuid !== 'function' || process.getuid() !== 0) return null;
   const { uid, gid } = fs.statSync(ownerRef);
-  fs.chownSync(target, uid, gid);
+  return { uid, gid };
 }
 
+// Copies a file into `dir` under `name`: a dot-named temp first (every importer
+// ignores dotfiles), created exclusively and never through a symlink, fsync,
+// then an atomic rename. Works across mounts.
 function copyInto(src, dir, name, mtime = null, ownerRef = null) {
+  const owner = ownerOf(ownerRef);
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-    adoptOwner(dir, ownerRef);
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    fs.mkdirSync(dir);
+    if (owner) fs.lchownSync(dir, owner.uid, owner.gid);
   }
-  const tmp = path.join(dir, `.${name}.part-${process.pid}`);
+  const tmp = path.join(dir, `.${name}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   const final = path.join(dir, name);
+  const C = fs.constants;
+  let fd = null;
   try {
-    fs.copyFileSync(src, tmp);
-    const fd = fs.openSync(tmp, 'r+');
-    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    if (mtime) fs.utimesSync(tmp, mtime, mtime);
-    adoptOwner(tmp, ownerRef);
+    fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o644);
+    const inFd = fs.openSync(src, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(1 << 20);
+      let n;
+      while ((n = fs.readSync(inFd, buf, 0, buf.length, null)) > 0) fs.writeSync(fd, buf, 0, n);
+    } finally {
+      fs.closeSync(inFd);
+    }
+    fs.fsyncSync(fd);
+    if (mtime) fs.futimesSync(fd, mtime, mtime);
+    if (owner) fs.fchownSync(fd, owner.uid, owner.gid);
+    fs.closeSync(fd);
+    fd = null;
     fs.renameSync(tmp, final);
   } catch (e) {
+    if (fd !== null) try { fs.closeSync(fd); } catch { /* already closed */ }
     fs.rmSync(tmp, { force: true });
     throw e;
   }
