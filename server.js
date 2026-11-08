@@ -699,6 +699,7 @@ function recordHistory(entry) {
     const id = `${Date.now()}-${historySeq++}`;
     list.unshift({ id, time: Date.now(), ...entry });
     writeJsonAtomic(HISTORY_FILE, list.slice(0, HISTORY_MAX));
+    warmThumb(entry && entry.thumbnail);
   } catch (e) {
     console.warn('history write failed:', e.message);
   }
@@ -2504,6 +2505,28 @@ async function fetchThumb(url) {
   const err = new Error('upstream HTTP 403');
   err.status = 403;
   throw err;
+}
+
+// Fetch a site thumbnail into the cache while its link still works. CDN links
+// are signed and expire within hours, so a picture nobody looked at on the day
+// of the download could never be shown later. Best effort, in the background.
+const thumbsWarming = new Set();
+function warmThumb(url) {
+  if (!url || !/^https?:\/\//i.test(String(url)) || !validUrl(url)) return;
+  const key = thumbKey(url);
+  if (thumbsWarming.has(key) || cachedThumb(key)) return;
+  thumbsWarming.add(key);
+  fetchThumb(url)
+    .then(({ buf, ext }) => {
+      const file = path.join(THUMB_DIR, `${key}.${ext}`);
+      const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, file);
+    })
+    .catch(() => {
+      /* the picture is gone or refused: the hub shows a placeholder */
+    })
+    .finally(() => thumbsWarming.delete(key));
 }
 
 // Store a picture grabbit produced itself (a frame from a video). It has no

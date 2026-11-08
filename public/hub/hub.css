@@ -130,6 +130,10 @@ p.err { color: var(--bad); margin: 10px 0 0; }
 .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .tile .site { position: absolute; left: 6px; top: 6px; }
 .tile .cap { position: absolute; inset: auto 0 0 0; padding: 18px 8px 6px; font-size: 12px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.8)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile.no-thumb::before { content: attr(data-kind); position: absolute; inset: 0; display: grid; place-items: center; color: #8f86b8; font-size: 13px; text-transform: capitalize; }
+.warn-note { border: 1px solid rgba(255, 180, 80, 0.4); border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; }
+.warn-note ul { margin: 6px 0 0; padding-left: 18px; }
+.warn-note li { margin: 4px 0; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
 
 .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }

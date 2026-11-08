@@ -69,7 +69,21 @@
     return `${n.toFixed(i >= 3 ? 1 : 0)} ${u[i]}`;
   }
   // Site thumbnails go through Grabbit's proxy: their CDNs refuse a foreign Referer.
-  const thumbSrc = (u) => (/^https?:\/\//i.test(String(u || '')) ? '/api/thumb?url=' + encodeURIComponent(u) : null);
+  // A picture Grabbit took itself (a video frame) is already a local /api/thumb?id= path.
+  const thumbSrc = (u) => {
+    const s = String(u || '');
+    if (/^https?:\/\//i.test(s)) return '/api/thumb?url=' + encodeURIComponent(s);
+    if (/^\/api\/thumb\?id=local-[0-9a-f]{40}$/.test(s)) return s;
+    return null;
+  };
+  // Signed CDN links expire; a picture that can no longer be fetched gives way
+  // to the empty placeholder instead of a broken-image icon.
+  const dropBrokenImg = (e) => {
+    const img = e.currentTarget;
+    const parent = img.parentNode;
+    img.remove();
+    if (parent && parent.classList && parent.classList.contains('tile')) parent.classList.add('no-thumb');
+  };
   function hostOf(u) {
     try { return new URL(u).hostname.replace(/^(www|m|music)\./, '').replace(/\.com$/, ''); } catch { return ''; }
   }
@@ -324,7 +338,7 @@
       acts.append(h('button', { class: 'btn small', onclick: () => post(`/api/jobs/${encodeURIComponent(j.id)}/retry`).then(() => toast('Retrying')).catch((e) => toast(e.message)) }, 'Retry'));
     }
     return h('div', { class: 'job' },
-      src ? h('img', { class: 'thumb', src, alt: '', loading: 'lazy', 'data-media-bg': '1' }) : h('div', { class: 'thumb' }),
+      src ? h('img', { class: 'thumb', src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: (e) => e.currentTarget.replaceWith(h('div', { class: 'thumb' })) }) : h('div', { class: 'thumb' }),
       h('div', { style: 'min-width:0' },
         h('div', { class: 't' }, [j.creator, j.title].filter(Boolean).join(' - ') || 'Resolving link ...'),
         h('div', { class: 's' }, status),
@@ -335,8 +349,8 @@
   function tile(it) {
     const src = thumbSrc(it.thumbnail);
     const site = hostOf(it.sourceUrl);
-    return h('a', { class: 'tile', href: it.sourceUrl && /^https?:/i.test(it.sourceUrl) ? it.sourceUrl : null, target: '_blank', rel: 'noopener noreferrer', title: [it.creator, it.title].filter(Boolean).join(' - ') },
-      src ? h('img', { src, alt: '', loading: 'lazy', 'data-media-bg': '1' }) : null,
+    return h('a', { class: `tile${src ? '' : ' no-thumb'}`, 'data-kind': it.kind || null, href: it.sourceUrl && /^https?:/i.test(it.sourceUrl) ? it.sourceUrl : null, target: '_blank', rel: 'noopener noreferrer', title: [it.creator, it.title].filter(Boolean).join(' - ') },
+      src ? h('img', { src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null,
       site ? h('span', { class: 'chip site' }, site) : null,
       h('span', { class: 'cap' }, it.title || it.filename || ''));
   }
@@ -477,9 +491,16 @@
       if (['mp3', 'm4a', 'opus', 'ogg', 'flac', 'wav', 'aac', 'm4b'].includes(e)) return 'audio';
       return 'other';
     };
+    // History entries without a file are refused or failed attempts, not media.
+    // They stay out of the grid, but the newest ones are named above it so the
+    // latest download never just goes missing.
+    const recent = (state.history || []).slice(0, 10);
+    const lastFile = recent.findIndex((it) => it.filename);
+    const misses = (lastFile === -1 ? recent : recent.slice(0, lastFile)).filter((it) => !it.filename);
     const items = (state.history || [])
       .filter((it) => it.filename)
-      .filter((it) => !kind || kindOf(it.filename) === kind)
+      .map((it) => ({ ...it, kind: kindOf(it.filename) }))
+      .filter((it) => !kind || it.kind === kind)
       .filter((it) => !q || [it.creator, it.title, it.filename].join(' ').toLowerCase().includes(q));
     const tab = (k, label) => h('a', { class: `btn small ${kind === k ? '' : 'ghost'}`, href: `#/media${k ? '?kind=' + k : ''}` }, label);
     return [
@@ -487,6 +508,14 @@
       h('p', { class: 'lead' }, 'The latest downloads from the history log (it keeps the newest 100). A full media library with previews is planned.'),
       h('div', { class: 'toolbar' }, tab('', 'All'), tab('video', 'Videos'), tab('image', 'Images'), tab('audio', 'Audio'),
         q ? h('span', { class: 'chip' }, `Search: ${q}`) : null),
+      misses.length
+        ? h('div', { class: 'note warn-note' },
+            h('strong', null, misses.length === 1 ? 'The newest download has no file:' : `The ${misses.length} newest downloads have no file:`),
+            h('ul', null, misses.map((it) => h('li', null,
+              h('span', null, [it.creator, it.title].filter(Boolean).join(' - ') || it.sourceUrl || 'Unknown item'),
+              ' ', h('span', { class: 'muted' }, `(${ago(it.time)})`),
+              h('div', { class: 'bad-t' }, it.error || 'No file was saved.')))))
+        : null,
       items.length ? h('div', { class: 'media-grid' }, items.map(tile)) : h('p', { class: 'empty' }, state.history ? 'Nothing matches.' : 'Loading ...'),
     ];
   }
