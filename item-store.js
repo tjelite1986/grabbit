@@ -190,6 +190,10 @@ function wrap(db, migrationBackup) {
     get: db.prepare('SELECT * FROM items WHERE key = ?'),
     byId: db.prepare('SELECT * FROM items WHERE id = ?'),
     byFilename: db.prepare('SELECT * FROM items WHERE filename = ? ORDER BY id DESC LIMIT 1'),
+    // A site-id key is the item's real identity; a URL key is what a failed
+    // resolve leaves behind, so it only answers when there is no id-keyed row.
+    bySourceUrl: db.prepare(`SELECT * FROM items WHERE source_url = ?
+      ORDER BY (key LIKE 'id:%') DESC, id DESC LIMIT 1`),
     insert: db.prepare(`
       INSERT INTO items (key, site, source_id, source_url, kind, audience, audience_reasons, profile_id,
                          creator, title, filename, origin, created_at, updated_at)
@@ -271,6 +275,8 @@ function wrap(db, migrationBackup) {
     get: (key) => st.get.get(String(key)) || null,
     // The newest row saved under this file name (the media viewer's lookup).
     getByFilename: (name) => st.byFilename.get(String(name)) || null,
+    // The newest row saved from this source URL (a no-file history entry's lookup).
+    getBySourceUrl: (url) => st.bySourceUrl.get(String(url)) || null,
     upsert,
     // One delivery row. Throws (from the trigger) when the item may not go
     // to that destination: the caller treats that as a refusal.

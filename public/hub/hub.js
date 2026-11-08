@@ -122,6 +122,7 @@
     config: null,
     history: null,
     media: null,
+    mediaMisses: null,
     jobs: new Map(),
     review: null,
   };
@@ -135,7 +136,7 @@
       health: () => api('/api/health').then((d) => { state.health = d; }),
       config: () => api('/api/config').then((d) => { state.config = d; }),
       history: () => api('/api/history').then((d) => { state.history = d.items || []; }),
-      media: () => api('/api/hub/media').then((d) => { state.media = d.items || []; }),
+      media: () => api('/api/hub/media').then((d) => { state.media = d.items || []; state.mediaMisses = d.misses || []; }),
       review: () => api('/api/hub/review').then((d) => { state.review = d; }),
       jobs: () => api('/api/jobs').then((d) => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
     };
@@ -541,6 +542,24 @@
   const MEDIA_GROUPS = [['general', 'General'], ['adult', '18+'], ['unknown', 'Unclassified']];
   const mediaGroup = (it) => (it.audience === 'adult' || it.audience === 'general' ? it.audience : 'unknown');
 
+  // A no-file entry: the error it failed with, and, when its item has been
+  // classified general by hand since, a button that sends it again.
+  function missState(it) {
+    if (!it.resend) return h('div', { class: 'bad-t' }, it.error || 'No file was saved.');
+    const button = h('button', {
+      class: 'btn small',
+      onclick: () => {
+        button.disabled = true;
+        jsonPost(`/api/hub/media/${encodeURIComponent(it.id)}/resend`, {})
+          .then(() => { connectStream(); toast(`Sending again to ${it.app}`); })
+          .catch((err) => { button.disabled = false; toast(err.message); });
+      },
+    }, `Send again to ${it.app}`);
+    return h('div', null,
+      h('div', { class: 'muted small' }, `${it.app} refused it as unclassified. It has been classified general by hand since, but not sent again.`),
+      button);
+  }
+
   function viewMedia(params) {
     const kind = params.get('kind') || '';
     const aud = params.get('aud') || '';
@@ -548,9 +567,7 @@
     // History entries without a file are refused or failed attempts, not media.
     // They stay out of the grid, but the newest ones are named above it so the
     // latest download never just goes missing.
-    const recent = (state.history || []).slice(0, 10);
-    const lastFile = recent.findIndex((it) => it.filename);
-    const misses = (lastFile === -1 ? recent : recent.slice(0, lastFile)).filter((it) => !it.filename);
+    const misses = state.mediaMisses || [];
     const items = mediaList(params);
     const query = new URLSearchParams(params);
     query.delete('open');
@@ -579,7 +596,7 @@
             h('ul', null, misses.map((it) => h('li', null,
               h('span', null, [it.creator, it.title].filter(Boolean).join(' - ') || it.sourceUrl || 'Unknown item'),
               ' ', h('span', { class: 'muted' }, `(${ago(it.time)})`),
-              h('div', { class: 'bad-t' }, it.error || 'No file was saved.')))))
+              missState(it)))))
         : null,
       !items.length
         ? h('p', { class: 'empty' }, state.media ? 'Nothing matches.' : 'Loading ...')

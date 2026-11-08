@@ -3188,12 +3188,80 @@ function probeMedia(file, st) {
 
 // GET /api/hub/media -> the history entries that name a file, newest first,
 // with the audience each one has under the gate's rules.
+// Also `misses`: the newest entries without a file (those newer than the
+// newest entry with one, out of the last ten), each with where its item stands
+// now. The history line keeps the error of the moment it failed; a later hand
+// classification only shows up here.
 app.get('/api/hub/media', (_req, res) => {
   const store = readProfileStoreQuietly();
-  const items = readHistory()
+  const history = readHistory();
+  const items = history
     .filter((e) => mediaViewer.isPlainName(e.filename))
     .map((e) => mediaListItem(e, store));
-  res.json({ ok: true, items });
+  const recent = history.slice(0, 10);
+  const lastFile = recent.findIndex((e) => e.filename);
+  const misses = (lastFile === -1 ? recent : recent.slice(0, lastFile))
+    .filter((e) => !e.filename)
+    .map((e) => ({
+      id: e.id,
+      time: e.time || null,
+      creator: e.creator || null,
+      title: e.title || null,
+      sourceUrl: /^https?:\/\//i.test(e.sourceUrl || '') ? e.sourceUrl : null,
+      error: e.error || null,
+      ...missStatus(e),
+    }));
+  res.json({ ok: true, items, misses });
+});
+
+// Where the item behind a no-file history entry stands now. `resend` is true
+// only when a general app refused it and the item has since been classified
+// general by hand: the one case a plain second attempt can now get through.
+// Anything else (still unclassified, 18+, a failed download) is not offered.
+function missStatus(e) {
+  const none = { itemAudience: null, destination: null, app: null, resend: false };
+  if (!ITEM_STORE || !e || e.filename || !e.sourceUrl) return none;
+  let item;
+  let last;
+  try {
+    item = ITEM_STORE.getBySourceUrl(e.sourceUrl);
+    last = item ? ITEM_STORE.deliveries(item.id).slice(-1)[0] || null : null;
+  } catch {
+    return none;
+  }
+  if (!item) return none;
+  const app = last ? audience.DESTINATIONS[last.destination] : null;
+  return {
+    itemAudience: item.audience,
+    destination: last ? last.destination : null,
+    app: app ? app.app : null,
+    resend: !!(app && app.audience === 'general' && last.status === 'refused' && item.audience === 'general'),
+  };
+}
+
+// POST /api/hub/media/:id/resend -> download a refused entry again, to the
+// general app that refused it, once its item is classified general. The job
+// list lives in memory, so after a restart this is the only way back to a
+// refused download; the gate checks the new job like any other.
+app.post('/api/hub/media/:id/resend', (req, res) => {
+  const id = String(req.params.id || '');
+  const e = MEDIA_ID_RE.test(id) ? readHistory().find((x) => x.id === id) : null;
+  if (!e) return res.status(404).json({ ok: false, error: 'No such history entry' });
+  const st = missStatus(e);
+  if (!st.resend) {
+    const why = e.filename
+      ? 'This entry already has a file'
+      : st.itemAudience !== 'general'
+        ? 'Classify the item as general on the Review page first'
+        : 'Only a download a general app refused can be sent again from here';
+    return res.status(409).json({ ok: false, error: why });
+  }
+  const query = { url: e.sourceUrl, dest: 'elite', channel: st.destination === 'platform' ? 'platform' : 'main', device: '0' };
+  const out = startJobFromQuery(query, req.principal || gda.LEGACY_SHARED, 'legacy');
+  if (out.gdaError) return res.status(out.gdaError.status).json({ ok: false, error: out.gdaError.message });
+  if (out.status === 200) console.log(`hub: resend of history ${e.id} to ${st.destination} queued as job ${out.body.jobId}`);
+  res.status(out.status).json(out.body);
+  if (out.run) out.run();
 });
 
 // GET /api/hub/media/:id -> one entry with its files on disk and their metadata.
