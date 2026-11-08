@@ -232,7 +232,8 @@
     renderedKey = pageKey();
     const r = route();
     const view = $('#view');
-    view.replaceChildren(...[r.view(r.params)].flat());
+    // Views return a node or a list with gaps (null/false) like h() children.
+    view.replaceChildren(...[r.view(r.params)].flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
     updateNav();
     if (focus) {
       view.focus({ preventScroll: true });
@@ -534,6 +535,12 @@
       .filter((it) => !q || [it.creator, it.title, it.filename].join(' ').toLowerCase().includes(q));
   }
 
+  // With no audience chosen the page shows each audience in a section of its
+  // own, so 18+ never sits between general items. Anything not classified as
+  // general or adult gets its own section rather than joining General.
+  const MEDIA_GROUPS = [['general', 'General'], ['adult', '18+'], ['unknown', 'Unclassified']];
+  const mediaGroup = (it) => (it.audience === 'adult' || it.audience === 'general' ? it.audience : 'unknown');
+
   function viewMedia(params) {
     const kind = params.get('kind') || '';
     const aud = params.get('aud') || '';
@@ -574,7 +581,18 @@
               ' ', h('span', { class: 'muted' }, `(${ago(it.time)})`),
               h('div', { class: 'bad-t' }, it.error || 'No file was saved.')))))
         : null,
-      items.length ? h('div', { class: 'media-grid' }, items.map((it) => tile(it, query))) : h('p', { class: 'empty' }, state.media ? 'Nothing matches.' : 'Loading ...'),
+      !items.length
+        ? h('p', { class: 'empty' }, state.media ? 'Nothing matches.' : 'Loading ...')
+        : aud
+          ? h('div', { class: 'media-grid' }, items.map((it) => tile(it, query)))
+          : h('div', { class: 'media-sections' }, MEDIA_GROUPS.map(([g, label]) => {
+            const part = items.filter((it) => mediaGroup(it) === g);
+            return part.length
+              ? h('section', { class: `media-section aud-${g}` },
+                h('h2', null, label, ' ', h('span', { class: 'muted' }, `(${part.length})`)),
+                h('div', { class: 'media-grid' }, part.map((it) => tile(it, query))))
+              : null;
+          })),
     ];
   }
 
@@ -593,7 +611,10 @@
 
   function viewerNeighbours() {
     const r = route();
-    const list = mediaList(r.params);
+    let list = mediaList(r.params);
+    // Under "All audiences" next/previous stays inside the item's own section.
+    const cur = list.find((it) => it.id === viewer.id);
+    if (cur && !r.params.get('aud')) list = list.filter((it) => mediaGroup(it) === mediaGroup(cur));
     const i = list.findIndex((it) => it.id === viewer.id);
     return { list, i, prev: i > 0 ? list[i - 1] : null, next: i >= 0 && i < list.length - 1 ? list[i + 1] : null };
   }
