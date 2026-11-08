@@ -103,14 +103,18 @@ function copyInto(src, dir, name, { root, srcRoot, mtime = null, ownerRef = null
     created = true;
     if (_hooks.afterTmpOpen) _hooks.afterTmpOpen();
     // If the folder was swapped between the check and the open, the empty temp
-    // was created elsewhere: remove it there (by the path the kernel reports,
-    // which was ours a moment ago) and refuse before a byte is written.
+    // was created elsewhere: refuse before a byte is written, and remove it
+    // there only while it still carries our random temp name. The tree's owner
+    // can rename the file and swap folders again, so never unlink a name the
+    // descriptor reports otherwise: a file with this name can only be ours.
     const realDir = path.join(fs.realpathSync(root), dirRel);
     try {
       assertFdAt(fd, realDir, path.basename(tmp));
     } catch (e) {
-      try { fs.unlinkSync(fdRealPath(fd)); } catch { /* best effort */ }
-      created = false;
+      try {
+        const at = fdRealPath(fd);
+        if (path.basename(at) === path.basename(tmp)) fs.unlinkSync(at);
+      } catch { /* best effort */ }
       throw e;
     }
     fs.fchmodSync(fd, mode);
