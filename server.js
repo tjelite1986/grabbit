@@ -2984,8 +2984,20 @@ function inboxAvailable() {
 
 // Copies a file into `dir` under `name`: a dot-named temp first (every importer
 // ignores dotfiles), fsync, then an atomic rename. Works across mounts.
-function copyInto(src, dir, name, mtime = null) {
-  fs.mkdirSync(dir, { recursive: true });
+// When Grabbit runs as root (the container does), a folder or file it creates
+// in another app's import tree would be root-owned, and that app could not
+// move it on. Both take the owner of `ownerRef` (the app's import root).
+function adoptOwner(target, ownerRef) {
+  if (!ownerRef || typeof process.getuid !== 'function' || process.getuid() !== 0) return;
+  const { uid, gid } = fs.statSync(ownerRef);
+  fs.chownSync(target, uid, gid);
+}
+
+function copyInto(src, dir, name, mtime = null, ownerRef = null) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    adoptOwner(dir, ownerRef);
+  }
   const tmp = path.join(dir, `.${name}.part-${process.pid}`);
   const final = path.join(dir, name);
   try {
@@ -2993,6 +3005,7 @@ function copyInto(src, dir, name, mtime = null) {
     const fd = fs.openSync(tmp, 'r+');
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     if (mtime) fs.utimesSync(tmp, mtime, mtime);
+    adoptOwner(tmp, ownerRef);
     fs.renameSync(tmp, final);
   } catch (e) {
     fs.rmSync(tmp, { force: true });
@@ -3077,7 +3090,7 @@ function deliverInboxRow(row, entry, dest, { mtime = null } = {}) {
     const c = classifyJob('egram', entry.job);
     if (c.audience !== 'general') return `The creator is not classified general (${c.reasons.join('; ')}).`;
     if (!EGRAM_IMPORT_DIR) return 'EGRAM_IMPORT_DIR is not set.';
-    copyInto(stagedPath(row, row.sidecar_file), path.join(EGRAM_IMPORT_DIR, row.username), row.sidecar_file, mtime);
+    copyInto(stagedPath(row, row.sidecar_file), path.join(EGRAM_IMPORT_DIR, row.username), row.sidecar_file, mtime, EGRAM_IMPORT_DIR);
     return null;
   }
   const job = entry.job;
@@ -3093,8 +3106,8 @@ function deliverInboxRow(row, entry, dest, { mtime = null } = {}) {
       // egram reads the sidecar when it meets the media file, so the sidecar
       // goes first; both get one mtime so a carousel ripens as one post.
       const dir = path.join(EGRAM_IMPORT_DIR, row.username);
-      if (row.sidecar_file) copyInto(stagedPath(row, row.sidecar_file), dir, row.sidecar_file, mtime);
-      const final = copyInto(stagedPath(row, row.media_file), dir, row.media_file, mtime);
+      if (row.sidecar_file) copyInto(stagedPath(row, row.sidecar_file), dir, row.sidecar_file, mtime, EGRAM_IMPORT_DIR);
+      const final = copyInto(stagedPath(row, row.media_file), dir, row.media_file, mtime, EGRAM_IMPORT_DIR);
       recordDrop('egram', job, row.media_file, final);
       return null;
     }
