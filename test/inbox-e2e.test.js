@@ -231,6 +231,51 @@ test('young files and files of an unknown folder stay in the drop folder', async
   assert.equal(filesUnder(s.dirs.drop).length, 3);
 });
 
+test('a symlinked drop file or username folder never pulls a file from outside', async (t) => {
+  const s = await boot(t);
+  await s.post('/api/hub/inbox/creators', { username: 'link.user', audience: 'general' });
+  await s.post('/api/hub/inbox/creators', { username: 'linkdir.user', audience: 'general' });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-inbox-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outside, 'secret.jpg'), 'secret bytes');
+  fs.writeFileSync(path.join(outside, 'secret.json'), '{}');
+  // A real folder whose files point outside.
+  const d = drop(s.dirs.drop, 'link.user');
+  for (const [n, target] of [[d.media, 'secret.jpg'], [d.sidecar, 'secret.json']]) {
+    fs.rmSync(path.join(s.dirs.drop, 'link.user', n));
+    fs.symlinkSync(path.join(outside, target), path.join(s.dirs.drop, 'link.user', n));
+  }
+  // A username folder that is itself a link to the outside.
+  fs.symlinkSync(outside, path.join(s.dirs.drop, 'linkdir.user'));
+  const r = await s.run();
+  assert.equal(r.status, 200);
+  assert.equal(r.body.run.staged, 0);
+  assert.deepEqual(filesUnder(path.join(s.dirs.data, 'inbox')).filter((f) => !f.endsWith('.jsonl')), []);
+  assert.deepEqual(filesUnder(s.dirs.egram), []);
+  assert.deepEqual(fs.readdirSync(outside).sort(), ['secret.jpg', 'secret.json'], 'the outside folder is untouched');
+  assert.equal(fs.readFileSync(path.join(outside, 'secret.jpg'), 'utf8'), 'secret bytes');
+});
+
+test('a symlinked username folder in egram is refused, nothing is written through it', async (t) => {
+  const s = await boot(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-inbox-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.symlinkSync(outside, path.join(s.dirs.egram, 'swap.user'));
+  const d = drop(s.dirs.drop, 'swap.user');
+  await s.run();
+  // Staged copies are private to Grabbit.
+  const staged = path.join(s.dirs.data, 'inbox', 'staged', 'swap.user');
+  for (const n of [d.media, d.sidecar]) assert.equal(fs.statSync(path.join(staged, n)).mode & 0o777, 0o600, n);
+  const c = await s.post('/api/hub/inbox/creators', { username: 'swap.user', audience: 'general' });
+  assert.equal(c.status, 200, JSON.stringify(c.body));
+  assert.deepEqual(fs.readdirSync(outside), [], 'nothing was written through the link');
+  const l = await s.list();
+  assert.equal(l.items.length, 1);
+  assert.notEqual(l.items[0].state, 'delivered');
+  assert.ok(l.items[0].deliveries.some((x) => x.destination === 'egram' && x.status === 'failed' && /symlink/.test(x.detail || '')),
+    JSON.stringify(l.items[0].deliveries));
+});
+
 test('shadow mode moves nothing and logs what it would do', async (t) => {
   const s = await boot(t, { mode: 'shadow' });
   drop(s.dirs.drop, 'shadow.user', { video: true });

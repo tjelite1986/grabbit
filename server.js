@@ -2993,37 +2993,72 @@ function ownerOf(ownerRef) {
   return { uid, gid };
 }
 
+// Refuses unless `dir` is a real directory at the place its name says, below
+// `root`: no component under the root may be a symlink, and the resolved path
+// must equal the root's resolved path plus the same relative part. The root
+// itself may be a symlink or a mount; what lies below it is someone else's tree
+// (the phone's drop folder, an app's import folder) and is not trusted.
+function assertRealDirUnder(root, dir) {
+  const rel = path.relative(root, dir);
+  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw new Error(`${dir} is not below ${root}`);
+  }
+  let p = root;
+  for (const part of rel.split(path.sep)) {
+    p = path.join(p, part);
+    const st = fs.lstatSync(p);
+    if (st.isSymbolicLink()) throw new Error(`${p} is a symlink; refused`);
+    if (!st.isDirectory()) throw new Error(`${p} is not a directory; refused`);
+  }
+  if (fs.realpathSync(dir) !== path.join(fs.realpathSync(root), rel)) {
+    throw new Error(`${dir} does not resolve below ${root}; refused`);
+  }
+}
+
 // Copies a file into `dir` under `name`: a dot-named temp first (every importer
 // ignores dotfiles), created exclusively and never through a symlink, fsync,
 // then an atomic rename. Works across mounts.
-function copyInto(src, dir, name, mtime = null, ownerRef = null) {
+// `root` is the tree `dir` must stay in, `srcRoot` the tree `src` must come
+// from; both are checked right before use. The source is opened without
+// following a symlink and must be a regular file (a FIFO or a device would
+// otherwise hang or stream forever).
+function copyInto(src, dir, name, { root, srcRoot, mtime = null, ownerRef = null, mode = 0o644 } = {}) {
+  if (!root || !srcRoot) throw new Error('copyInto needs root and srcRoot');
   const owner = ownerOf(ownerRef);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(path.dirname(dir), { recursive: true });
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  try {
     fs.mkdirSync(dir);
     if (owner) fs.lchownSync(dir, owner.uid, owner.gid);
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
   }
   const tmp = path.join(dir, `.${name}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   const final = path.join(dir, name);
   const C = fs.constants;
   let fd = null;
+  let inFd = null;
   try {
-    fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o644);
-    const inFd = fs.openSync(src, 'r');
-    try {
-      const buf = Buffer.allocUnsafe(1 << 20);
-      let n;
-      while ((n = fs.readSync(inFd, buf, 0, buf.length, null)) > 0) fs.writeSync(fd, buf, 0, n);
-    } finally {
-      fs.closeSync(inFd);
-    }
+    assertRealDirUnder(srcRoot, path.dirname(src));
+    inFd = fs.openSync(src, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+    if (!fs.fstatSync(inFd).isFile()) throw new Error(`${src} is not a regular file; refused`);
+    assertRealDirUnder(root, dir);
+    fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, mode);
+    fs.fchmodSync(fd, mode);
+    const buf = Buffer.allocUnsafe(1 << 20);
+    let n;
+    while ((n = fs.readSync(inFd, buf, 0, buf.length, null)) > 0) fs.writeSync(fd, buf, 0, n);
+    fs.closeSync(inFd);
+    inFd = null;
     fs.fsyncSync(fd);
     if (mtime) fs.futimesSync(fd, mtime, mtime);
     if (owner) fs.fchownSync(fd, owner.uid, owner.gid);
     fs.closeSync(fd);
     fd = null;
+    // The folder could have been swapped while the bytes went over.
+    assertRealDirUnder(root, dir);
     fs.renameSync(tmp, final);
   } catch (e) {
+    if (inFd !== null) try { fs.closeSync(inFd); } catch { /* already closed */ }
     if (fd !== null) try { fs.closeSync(fd); } catch { /* already closed */ }
     fs.rmSync(tmp, { force: true });
     throw e;
@@ -3032,6 +3067,7 @@ function copyInto(src, dir, name, mtime = null, ownerRef = null) {
 }
 
 const stagedPath = (row, name) => path.join(INBOX_STAGING, row.username, name);
+const TO_EGRAM = (mtime) => ({ root: EGRAM_IMPORT_DIR, srcRoot: INBOX_STAGING, mtime, ownerRef: EGRAM_IMPORT_DIR });
 
 // The entry behind a staged row, rebuilt from its own sidecar so identity never
 // depends on what a later code version would make of it.
@@ -3061,14 +3097,14 @@ async function stageInboxEntry(e) {
       try { same = fs.statSync(src).size === fs.statSync(path.join(dstDir, n)).size; } catch { same = false; }
       if (!same) {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        copyInto(src, path.join(INBOX_REDROPS, e.username), `${stamp}_${n}`);
+        copyInto(src, path.join(INBOX_REDROPS, e.username), `${stamp}_${n}`, { root: INBOX_REDROPS, srcRoot: INBOX_DROP_DIR, mode: 0o600 });
         console.warn(`inbox: ${e.username}/${n} was dropped again with other bytes; kept in inbox/redrops`);
       }
       fs.rmSync(src, { force: true });
     }
     return null;
   }
-  for (const n of names) copyInto(path.join(srcDir, n), dstDir, n);
+  for (const n of names) copyInto(path.join(srcDir, n), dstDir, n, { root: INBOX_STAGING, srcRoot: INBOX_DROP_DIR, mode: 0o600 });
   let row;
   if (e.kind === 'profile') {
     row = ITEM_STORE.inboxAdd({ entry: e.entry, kind: 'profile', username: e.username, sidecarFile: e.sidecarFile, state: 'held', reason: 'new' });
@@ -3107,7 +3143,7 @@ function deliverInboxRow(row, entry, dest, { mtime = null } = {}) {
     const c = classifyJob('egram', entry.job);
     if (c.audience !== 'general') return `The creator is not classified general (${c.reasons.join('; ')}).`;
     if (!EGRAM_IMPORT_DIR) return 'EGRAM_IMPORT_DIR is not set.';
-    copyInto(stagedPath(row, row.sidecar_file), path.join(EGRAM_IMPORT_DIR, row.username), row.sidecar_file, mtime, EGRAM_IMPORT_DIR);
+    copyInto(stagedPath(row, row.sidecar_file), path.join(EGRAM_IMPORT_DIR, row.username), row.sidecar_file, TO_EGRAM(mtime));
     return null;
   }
   const job = entry.job;
@@ -3123,8 +3159,8 @@ function deliverInboxRow(row, entry, dest, { mtime = null } = {}) {
       // egram reads the sidecar when it meets the media file, so the sidecar
       // goes first; both get one mtime so a carousel ripens as one post.
       const dir = path.join(EGRAM_IMPORT_DIR, row.username);
-      if (row.sidecar_file) copyInto(stagedPath(row, row.sidecar_file), dir, row.sidecar_file, mtime, EGRAM_IMPORT_DIR);
-      const final = copyInto(stagedPath(row, row.media_file), dir, row.media_file, mtime, EGRAM_IMPORT_DIR);
+      if (row.sidecar_file) copyInto(stagedPath(row, row.sidecar_file), dir, row.sidecar_file, TO_EGRAM(mtime));
+      const final = copyInto(stagedPath(row, row.media_file), dir, row.media_file, TO_EGRAM(mtime));
       recordDrop('egram', job, row.media_file, final);
       return null;
     }
