@@ -24,6 +24,7 @@ const hub = require('./hub');
 const profiles = require('./profiles');
 const audience = require('./audience');
 const itemStore = require('./item-store');
+const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
 
 const PORT = process.env.PORT || 3000;
@@ -123,6 +124,7 @@ const ADULT_OVERLAPS = CHANNEL_ROOTS['18plus']
       'platform drop folder': realDir(CHANNEL_ROOTS.platform),
       'posts import folder': realDir(process.env.ELITE_POSTS_IMPORT_DIR ||
         (process.env.ELITE_POSTS_ROOT ? path.join(process.env.ELITE_POSTS_ROOT, '_import') : null)),
+      'egram import folder': realDir(process.env.EGRAM_IMPORT_DIR),
     })
   : [];
 const ADULT_BLOCKED = ADULT_OVERLAPS.length
@@ -146,6 +148,13 @@ const POSTS_ROOT = process.env.ELITE_POSTS_ROOT || null;
 const POSTS_IMPORT_DIR =
   process.env.ELITE_POSTS_IMPORT_DIR || (POSTS_ROOT ? path.join(POSTS_ROOT, '_import') : null);
 const POSTS_ENABLED = !!POSTS_IMPORT_DIR;
+// The Instagram inbox (see the inbox section): where the patched app drops,
+// and egram's import folder. Both opt-in; unset means no inbox and no egram.
+const INBOX_DROP_DIR = process.env.INBOX_DROP_DIR || null;
+const EGRAM_IMPORT_DIR = process.env.EGRAM_IMPORT_DIR || null;
+const INBOX_MODE = ['off', 'shadow', 'on'].includes(process.env.INBOX_MODE) ? process.env.INBOX_MODE : 'off';
+// Drops older than this (ISO time) are not inbox material: an old app's leftovers.
+const INBOX_SINCE = Number.isFinite(Date.parse(process.env.INBOX_SINCE || '')) ? Date.parse(process.env.INBOX_SINCE) : null;
 // Whether dest=elite means anything at all on this deploy.
 const ELITE_ENABLED = SHORTS_ENABLED || POSTS_ENABLED;
 // Audio extraction targets (yt-dlp --audio-format). 'best' keeps the source codec.
@@ -540,6 +549,7 @@ const STATE_FILES = [
   'push-subscriptions.json',
   'gda-clients.json',
   'profiles.json',
+  'inbox-settings.json',
 ];
 
 function writeJsonAtomic(file, value) {
@@ -2938,6 +2948,519 @@ app.post('/api/hub/profiles/:id', (req, res) => changeProfiles(res, (s, now) => 
 // POST /api/hub/profiles/:id/split { name, aliases: [name], accounts: ['platform:handle'] }
 app.post('/api/hub/profiles/:id/split', (req, res) =>
   changeProfiles(res, (s, now) => profiles.split(s, req.params.id, req.body, now)));
+
+// --- Grabbit 2.0 Instagram inbox ---------------------------------------------------
+// The patched Instagram app drops into INBOX_DROP_DIR (one folder per username).
+// With INBOX_MODE=on every settled drop is moved into DATA_DIR/inbox/staged,
+// recorded in items.db, run through the audience gate and delivered to the apps
+// the owner switched on (inbox-settings.json). An unclassified creator's items
+// wait in the inbox until the owner classifies the creator in the hub; nothing is
+// general by default. INBOX_MODE=shadow only reads the drop folder and logs what
+// it would do (inbox/shadow.jsonl), so it can run beside the old bridge.
+// Off by default: unset means the inbox does not exist.
+const INBOX_STAGING = path.join(DATA_DIR, 'inbox', 'staged');
+const INBOX_REDROPS = path.join(DATA_DIR, 'inbox', 'redrops');
+const INBOX_SHADOW_LOG = path.join(DATA_DIR, 'inbox', 'shadow.jsonl');
+const INBOX_SETTINGS_FILE = path.join(DATA_DIR, 'inbox-settings.json');
+const INBOX_INTERVAL_MS = 60 * 1000;
+const INBOX_STATUS = {
+  mode: INBOX_DROP_DIR ? INBOX_MODE : 'off',
+  dropDir: Boolean(INBOX_DROP_DIR),
+  lastRun: null,
+};
+
+function readInboxSettings() {
+  return inbox.normalizeSettings(readJsonState(INBOX_SETTINGS_FILE, null));
+}
+// Which inbox destinations this deploy can write to at all.
+function inboxAvailable() {
+  return {
+    egram: Boolean(EGRAM_IMPORT_DIR),
+    main: !shortsUnavailable('main'),
+    platform: !shortsUnavailable('platform'),
+    '18plus': !shortsUnavailable('18plus'),
+  };
+}
+
+// When Grabbit runs as root (the container does), a folder or file it creates
+// in another app's import tree would be root-owned, and that app could not
+// move it on. Both take the owner of `ownerRef` (the app's import root). The
+// change goes through a descriptor (files) or lchown (folders), never a path a
+// user of that tree could swap for a symlink in between.
+function ownerOf(ownerRef) {
+  if (!ownerRef || typeof process.getuid !== 'function' || process.getuid() !== 0) return null;
+  const { uid, gid } = fs.statSync(ownerRef);
+  return { uid, gid };
+}
+
+// Copies a file into `dir` under `name`: a dot-named temp first (every importer
+// ignores dotfiles), created exclusively and never through a symlink, fsync,
+// then an atomic rename. Works across mounts.
+function copyInto(src, dir, name, mtime = null, ownerRef = null) {
+  const owner = ownerOf(ownerRef);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    fs.mkdirSync(dir);
+    if (owner) fs.lchownSync(dir, owner.uid, owner.gid);
+  }
+  const tmp = path.join(dir, `.${name}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  const final = path.join(dir, name);
+  const C = fs.constants;
+  let fd = null;
+  try {
+    fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o644);
+    const inFd = fs.openSync(src, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(1 << 20);
+      let n;
+      while ((n = fs.readSync(inFd, buf, 0, buf.length, null)) > 0) fs.writeSync(fd, buf, 0, n);
+    } finally {
+      fs.closeSync(inFd);
+    }
+    fs.fsyncSync(fd);
+    if (mtime) fs.futimesSync(fd, mtime, mtime);
+    if (owner) fs.fchownSync(fd, owner.uid, owner.gid);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmp, final);
+  } catch (e) {
+    if (fd !== null) try { fs.closeSync(fd); } catch { /* already closed */ }
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
+  return final;
+}
+
+const stagedPath = (row, name) => path.join(INBOX_STAGING, row.username, name);
+
+// The entry behind a staged row, rebuilt from its own sidecar so identity never
+// depends on what a later code version would make of it.
+function inboxEntryOf(row) {
+  if (row.kind === 'profile') return { kind: 'profile', username: row.username, job: { site: 'instagram', creator: row.username, sourceCreator: row.username } };
+  let sc = null;
+  if (row.sidecar_file) {
+    try { sc = inbox.parseSidecar(fs.readFileSync(stagedPath(row, row.sidecar_file), 'utf8')); } catch { sc = null; }
+  }
+  return inbox.mediaEntry(row.username, row.media_file, row.sidecar_file, sc);
+}
+
+// Moves one scanned entry from the drop folder into staging and records it.
+// Copy first, row second, unlink last: a crash in between leaves a source
+// whose staged twin is already there, and the next run only removes the source.
+async function stageInboxEntry(e) {
+  const srcDir = path.join(INBOX_DROP_DIR, e.username);
+  const dstDir = path.join(INBOX_STAGING, e.username);
+  const names = [e.sidecarFile, e.mediaFile].filter(Boolean);
+  const known = ITEM_STORE.inboxByEntry(e.entry);
+  if (known) {
+    // The same file name again. Same bytes as the staged copy: our own leftover
+    // from an interrupted move. Otherwise a re-drop, kept aside for the owner.
+    for (const n of names) {
+      const src = path.join(srcDir, n);
+      let same = false;
+      try { same = fs.statSync(src).size === fs.statSync(path.join(dstDir, n)).size; } catch { same = false; }
+      if (!same) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        copyInto(src, path.join(INBOX_REDROPS, e.username), `${stamp}_${n}`);
+        console.warn(`inbox: ${e.username}/${n} was dropped again with other bytes; kept in inbox/redrops`);
+      }
+      fs.rmSync(src, { force: true });
+    }
+    return null;
+  }
+  for (const n of names) copyInto(path.join(srcDir, n), dstDir, n);
+  let row;
+  if (e.kind === 'profile') {
+    row = ITEM_STORE.inboxAdd({ entry: e.entry, kind: 'profile', username: e.username, sidecarFile: e.sidecarFile, state: 'held', reason: 'new' });
+  } else {
+    const c = classifyJob('egram', e.job);
+    const item = recordItem(e.job, c, e.mediaFile);
+    if (!item) throw new Error(`no item key for ${e.entry}`);
+    let state = 'held';
+    let reason = 'new';
+    const { sha256, bytes } = await sha256File(path.join(dstDir, e.mediaFile));
+    const twin = ITEM_STORE.recordHash(item.id, sha256, bytes);
+    if (ITEM_STORE.everDelivered(item.id)) {
+      state = 'duplicate';
+      reason = 'this item was delivered before';
+    } else if (twin && ITEM_STORE.everDelivered(twin.id)) {
+      state = 'duplicate';
+      reason = `the same bytes were delivered before as ${twin.key}`;
+    }
+    row = ITEM_STORE.inboxAdd({
+      entry: e.entry, kind: 'media', itemId: item.id, username: e.username, groupKey: e.groupKey, groupSize: e.groupSize,
+      mediaFile: e.mediaFile, sidecarFile: e.sidecarFile, state, reason,
+    });
+  }
+  for (const n of names) fs.rmSync(path.join(srcDir, n), { force: true });
+  return row;
+}
+
+// Delivers one staged row to one app. Returns null on success, else why not;
+// a refusal or a failure is also recorded as a delivery row.
+function deliverInboxRow(row, entry, dest, { mtime = null } = {}) {
+  const item = row.item_id ? ITEM_STORE.getById(row.item_id) : null;
+  const own = inbox.manualRefusal({ kind: row.kind, mediaType: entry.mediaType }, dest);
+  if (own) return own;
+  if (row.kind === 'profile') {
+    // Profile metadata, no media: egram only, and only for a general creator.
+    const c = classifyJob('egram', entry.job);
+    if (c.audience !== 'general') return `The creator is not classified general (${c.reasons.join('; ')}).`;
+    if (!EGRAM_IMPORT_DIR) return 'EGRAM_IMPORT_DIR is not set.';
+    copyInto(stagedPath(row, row.sidecar_file), path.join(EGRAM_IMPORT_DIR, row.username), row.sidecar_file, mtime, EGRAM_IMPORT_DIR);
+    return null;
+  }
+  const job = entry.job;
+  const fail = (why) => {
+    if (item) ITEM_STORE.recordDelivery(item.id, dest, 'failed', { detail: why });
+    return why;
+  };
+  try {
+    if (dest === 'egram') {
+      if (!EGRAM_IMPORT_DIR) return 'EGRAM_IMPORT_DIR is not set.';
+      const refused = audienceRefusal('egram', job);
+      if (refused) return refused;
+      // egram reads the sidecar when it meets the media file, so the sidecar
+      // goes first; both get one mtime so a carousel ripens as one post.
+      const dir = path.join(EGRAM_IMPORT_DIR, row.username);
+      if (row.sidecar_file) copyInto(stagedPath(row, row.sidecar_file), dir, row.sidecar_file, mtime, EGRAM_IMPORT_DIR);
+      const final = copyInto(stagedPath(row, row.media_file), dir, row.media_file, mtime, EGRAM_IMPORT_DIR);
+      recordDrop('egram', job, row.media_file, final);
+      return null;
+    }
+    const unavailable = shortsUnavailable(dest);
+    if (unavailable) return unavailable;
+    const refused = channelRefusal(dest, job);
+    if (refused) return refused;
+    const destDir = channelDir(dest);
+    fs.mkdirSync(destDir, { recursive: true });
+    const { outName, sidecarName, sidecar } = dropFiles(dest, job, false);
+    const buildPath = path.join(destDir, `.${outName}.part-${process.pid}`);
+    try {
+      fs.copyFileSync(stagedPath(row, row.media_file), buildPath);
+      commitDrop(dest, job, destDir, buildPath, path.join(destDir, outName), sidecarName, sidecar);
+    } finally {
+      fs.rmSync(buildPath, { force: true });
+    }
+    return null;
+  } catch (e) {
+    console.error(`inbox: delivery of ${row.entry} to ${dest} failed: ${e.message}`);
+    return fail(e.message);
+  }
+}
+
+// Decides every open row again: a creator classified since the last run
+// releases its items, and an 18+ signal that appeared holds them.
+function releaseInbox(settings, now = Date.now()) {
+  const available = inboxAvailable();
+  const out = { delivered: 0, held: 0, ready: 0, failed: 0 };
+  const groupTime = new Date(now);
+  for (const row of ITEM_STORE.inboxOpen()) {
+    try {
+      const entry = inboxEntryOf(row);
+      const c = classifyJob('egram', entry.job);
+      if (row.kind === 'media') recordItem(entry.job, c, row.media_file);
+      if (c.audience !== 'general') {
+        const why = c.audience === 'adult' ? `18+: ${c.reasons.join('; ')}` : c.reasons.join('; ');
+        if (row.state !== 'held' || row.reason !== why) ITEM_STORE.inboxSetState(row.id, 'held', why, now);
+        out.held++;
+        continue;
+      }
+      if (row.kind === 'media' && row.group_key && row.group_size > 1) {
+        const members = ITEM_STORE.inboxGroup(row.username, row.group_key);
+        if (!inbox.groupReady(members, row.group_size, now)) {
+          ITEM_STORE.inboxSetState(row.id, 'held', `waiting for the rest of the carousel (${members.length} of ${row.group_size})`, now);
+          out.held++;
+          continue;
+        }
+      }
+      const plan = inbox.deliveryPlan({ kind: row.kind, mediaType: entry.mediaType, audience: 'general' }, { auto: settings.auto, available });
+      if (!plan.deliver.length) {
+        if (row.state !== 'ready') {
+          const why = plan.skipped.length
+            ? plan.skipped.map((s) => `${s.dest}: ${s.why}`).join('; ')
+            : 'no automatic destination is switched on';
+          ITEM_STORE.inboxSetState(row.id, 'ready', `general; waiting for a hand delivery (${why})`, now);
+        }
+        out.ready++;
+        continue;
+      }
+      const errors = [];
+      for (const dest of plan.deliver) {
+        if (row.item_id && ITEM_STORE.deliveredTo(row.item_id, dest)) continue;
+        const why = deliverInboxRow(row, entry, dest, { mtime: groupTime });
+        if (why) errors.push(`${dest}: ${why}`);
+      }
+      if (errors.length) {
+        ITEM_STORE.inboxSetState(row.id, 'ready', errors.join('; '), now);
+        out.failed++;
+      } else {
+        ITEM_STORE.inboxSetState(row.id, 'delivered', `delivered to ${plan.deliver.join(', ')}`, now);
+        out.delivered++;
+      }
+    } catch (e) {
+      console.error(`inbox: ${row.entry}: ${e.message}`);
+      out.failed++;
+    }
+  }
+  return out;
+}
+
+// Staged files of settled rows are removed after keepDays: every app holds its
+// own copy by then, and Grabbit keeps none (owner decision D).
+function purgeInbox(settings, now = Date.now()) {
+  let purged = 0;
+  for (const row of ITEM_STORE.inboxPurgeDue(now - settings.keepDays * 24 * 60 * 60 * 1000)) {
+    for (const n of [row.media_file, row.sidecar_file].filter(Boolean)) fs.rmSync(stagedPath(row, n), { force: true });
+    ITEM_STORE.inboxMarkPurged(row.id, now);
+    purged++;
+  }
+  return purged;
+}
+
+// Shadow mode: what the inbox WOULD do, one line per entry, never a write
+// outside DATA_DIR and never a file moved.
+let shadowSeen = null;
+function shadowInbox(scan, settings, now) {
+  if (!shadowSeen) {
+    shadowSeen = new Set();
+    try {
+      for (const line of fs.readFileSync(INBOX_SHADOW_LOG, 'utf8').split('\n')) {
+        try { shadowSeen.add(JSON.parse(line).entry); } catch { /* skip */ }
+      }
+    } catch { /* first run */ }
+  }
+  const available = inboxAvailable();
+  const lines = [];
+  for (const e of scan.entries) {
+    if (shadowSeen.has(e.entry)) continue;
+    shadowSeen.add(e.entry);
+    const c = classifyJob('egram', e.job);
+    const prior = e.key ? ITEM_STORE.get(e.key) : null;
+    const plan = inbox.deliveryPlan({ kind: e.kind, mediaType: e.mediaType, audience: c.audience }, { auto: settings.auto, available });
+    lines.push(JSON.stringify({
+      at: now, entry: e.entry, kind: e.kind, key: e.key || null, mediaType: e.mediaType || null,
+      groupKey: e.groupKey || null, audience: c.audience, reasons: c.reasons,
+      duplicate: Boolean(prior && ITEM_STORE.everDelivered(prior.id)),
+      wouldDeliver: plan.deliver, skipped: plan.skipped,
+    }));
+  }
+  if (lines.length) {
+    fs.mkdirSync(path.dirname(INBOX_SHADOW_LOG), { recursive: true });
+    fs.appendFileSync(INBOX_SHADOW_LOG, lines.join('\n') + '\n');
+  }
+  return lines.length;
+}
+
+let inboxBusy = false;
+async function runInbox(reason = 'interval') {
+  if (!INBOX_DROP_DIR || INBOX_MODE === 'off' || inboxBusy) return INBOX_STATUS.lastRun;
+  if (!ITEM_STORE) {
+    INBOX_STATUS.lastRun = { at: Date.now(), reason, error: `the item store is unavailable (${ITEM_STORE_ERROR || 'not opened'})` };
+    return INBOX_STATUS.lastRun;
+  }
+  inboxBusy = true;
+  const now = Date.now();
+  const run = { at: now, reason, staged: 0, waiting: 0, ignored: [], error: null };
+  try {
+    const settings = readInboxSettings();
+    const scan = inbox.scanDrop(INBOX_DROP_DIR, { now, since: INBOX_SINCE });
+    run.waiting = scan.waiting;
+    run.ignored = scan.ignored.slice(0, 50);
+    run.ignoredTotal = scan.ignored.length;
+    if (INBOX_MODE === 'shadow') {
+      run.shadowLogged = shadowInbox(scan, settings, now);
+    } else {
+      for (const e of scan.entries) {
+        try {
+          if (await stageInboxEntry(e)) run.staged++;
+        } catch (err) {
+          console.error(`inbox: staging ${e.entry} failed: ${err.message}`);
+          run.ignored.push({ path: e.entry, why: `staging failed: ${err.message}` });
+        }
+      }
+      run.release = releaseInbox(settings, Date.now());
+      run.purged = purgeInbox(settings, Date.now());
+      if (run.staged || run.release.delivered) {
+        console.log(`inbox: ${run.staged} staged, ${run.release.delivered} delivered, ${run.release.held} held, ${run.release.ready} ready`);
+      }
+    }
+  } catch (e) {
+    run.error = e.message;
+    console.error(`inbox: ${e.message}`);
+  } finally {
+    inboxBusy = false;
+  }
+  INBOX_STATUS.lastRun = run;
+  return run;
+}
+if (INBOX_DROP_DIR && INBOX_MODE !== 'off') {
+  console.log(`inbox: ${INBOX_MODE} mode, reading ${INBOX_DROP_DIR}`);
+  setTimeout(() => runInbox('boot'), 15 * 1000).unref();
+  setInterval(() => runInbox('interval'), INBOX_INTERVAL_MS).unref();
+}
+
+const inboxUnavailable = (res) => {
+  if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` }), true;
+  return false;
+};
+
+// GET /api/hub/inbox?state=&q=&limit=&offset=
+app.get('/api/hub/inbox', (req, res) => {
+  if (inboxUnavailable(res)) return;
+  try {
+    const r = ITEM_STORE.inboxList({ state: req.query.state, q: req.query.q, limit: req.query.limit, offset: req.query.offset });
+    const items = r.items.map((x) => ({
+      ...x,
+      deliveries: x.item_id ? ITEM_STORE.deliveries(x.item_id).map((d) => ({ destination: d.destination, status: d.status, at: d.at, detail: d.detail })) : [],
+    }));
+    res.json({
+      ok: true,
+      mode: INBOX_STATUS.mode,
+      settings: readInboxSettings(),
+      available: inboxAvailable(),
+      counts: ITEM_STORE.inboxCounts(),
+      lastRun: INBOX_STATUS.lastRun,
+      total: r.total,
+      offset: r.offset,
+      items,
+    });
+  } catch (e) {
+    console.error('inbox list:', e.message);
+    res.status(500).json({ ok: false, error: 'The inbox could not be read. See the server log.' });
+  }
+});
+
+// GET /api/hub/inbox/:id/file -> the staged media file (until it is purged).
+app.get('/api/hub/inbox/:id/file', (req, res) => {
+  if (inboxUnavailable(res)) return;
+  const row = ITEM_STORE.inboxGet(req.params.id);
+  if (!row || !row.media_file || row.purged_at) return res.status(404).json({ ok: false, error: 'No staged file' });
+  let file;
+  try {
+    file = fs.realpathSync(stagedPath(row, row.media_file));
+  } catch {
+    return res.status(404).json({ ok: false, error: 'No staged file' });
+  }
+  const root = fs.realpathSync(INBOX_STAGING);
+  if (!file.startsWith(root + path.sep)) return res.status(404).json({ ok: false, error: 'No staged file' });
+  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+    if (err && !res.headersSent) res.status(404).end();
+  });
+});
+
+// POST /api/hub/inbox/settings { auto: { egram, main, platform }, keepDays }
+app.post('/api/hub/inbox/settings', (req, res) => {
+  try {
+    const next = inbox.normalizeSettings({ ...readInboxSettings(), ...(req.body || {}) });
+    writeJsonAtomic(INBOX_SETTINGS_FILE, next);
+    console.log(`inbox: settings changed, automatic: ${Object.keys(next.auto).filter((k) => next.auto[k]).join(', ') || 'none'}`);
+    res.json({ ok: true, settings: next });
+  } catch (e) {
+    console.error('inbox settings:', e.message);
+    res.status(500).json({ ok: false, error: 'The settings could not be saved. See the server log.' });
+  }
+});
+
+// POST /api/hub/inbox/creators { username, audience } -> the owner's hand
+// classification of one Instagram creator. A profile that already matches the
+// username is classified; without one, a manual profile with the Instagram
+// account is created. Held items are re-decided right away.
+app.post('/api/hub/inbox/creators', async (req, res) => {
+  const b = req.body || {};
+  const aud = reviewAudience(b.audience);
+  const username = String(b.username || '');
+  if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+  if (!/^[A-Za-z0-9._]{1,30}$/.test(username)) return res.status(400).json({ ok: false, error: 'not an Instagram username' });
+  try {
+    const { store } = readProfiles();
+    const matches = audience.matchProfiles(
+      store,
+      { creatorKey: safeCreator(username).toLowerCase(), handle: username.toLowerCase(), platform: 'instagram' },
+      creatorKey
+    );
+    let changed = [];
+    let created = null;
+    if (matches.length) {
+      const adult = matches.find((m) => profiles.effectiveAudience(m.profile) === 'adult');
+      if (aud === 'general' && adult) {
+        return res.status(409).json({ ok: false, error: `${username} matches the 18+ profile #${adult.profile.id}; an 18+ creator is never made general.` });
+      }
+      const ids = matches.filter((m) => profiles.effectiveAudience(m.profile) !== aud).map((m) => m.profile.id);
+      if (ids.length) {
+        const r = profiles.classifyProfiles(store, ids, aud, Date.now());
+        if (r.changed.length) saveProfiles(r.store);
+        changed = r.changed;
+      }
+    } else {
+      const r = profiles.create(store, {
+        name: username,
+        audience: aud,
+        note: 'Created from the Instagram inbox',
+        accounts: [{ platform: 'instagram', handle: username, url: `https://www.instagram.com/${username}/`, source: 'inbox' }],
+      }, Date.now());
+      saveProfiles(r.store);
+      created = r.profile.id;
+    }
+    console.log(`inbox: creator ${username} classified ${aud} by hand${created ? ` (new profile #${created})` : ''}`);
+    const run = INBOX_MODE === 'on' ? await runInbox('classify') : null;
+    res.json({ ok: true, changed, created, run });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+
+// POST /api/hub/inbox/:id/deliver { destination } -> a hand delivery of one row
+// (and, for a carousel, every staged member of its post, so egram files them
+// as one post). The audience gate still decides.
+app.post('/api/hub/inbox/:id/deliver', (req, res) => {
+  if (inboxUnavailable(res)) return;
+  const dest = String((req.body || {}).destination || '');
+  const row = ITEM_STORE.inboxGet(req.params.id);
+  if (!row) return res.status(404).json({ ok: false, error: 'No such inbox entry' });
+  if (row.purged_at) return res.status(409).json({ ok: false, error: 'The staged file was already removed.' });
+  const rows = row.kind === 'media' && row.group_key && row.group_size > 1
+    ? ITEM_STORE.inboxGroup(row.username, row.group_key).filter((r) => !r.purged_at)
+    : [row];
+  const mtime = new Date();
+  const results = [];
+  for (const r of rows) {
+    if (r.item_id && ITEM_STORE.deliveredTo(r.item_id, dest)) { results.push({ id: r.id, ok: true, note: 'already there' }); continue; }
+    const why = deliverInboxRow(r, inboxEntryOf(r), dest, { mtime });
+    if (!why) ITEM_STORE.inboxSetState(r.id, 'delivered', `delivered to ${dest} by hand`);
+    results.push({ id: r.id, ok: !why, error: why || undefined });
+  }
+  const failed = results.filter((r) => !r.ok);
+  res.status(failed.length === results.length ? 422 : 200).json({ ok: failed.length < results.length, error: failed[0] ? failed[0].error : undefined, results });
+});
+
+// POST /api/hub/inbox/run -> one inbox run now.
+app.post('/api/hub/inbox/run', async (_req, res) => {
+  if (!INBOX_DROP_DIR || INBOX_MODE === 'off') return res.status(409).json({ ok: false, error: 'The inbox is off on this server (INBOX_MODE, INBOX_DROP_DIR).' });
+  res.json({ ok: true, run: await runInbox('manual') });
+});
+
+// GET /api/hub/inbox/shadow -> the shadow log summed up, for the switchover.
+app.get('/api/hub/inbox/shadow', (_req, res) => {
+  let lines = [];
+  try {
+    lines = fs.readFileSync(INBOX_SHADOW_LOG, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch { /* no log yet */ }
+  const sum = { entries: lines.length, media: 0, profiles: 0, audience: { general: 0, adult: 0, unknown: 0 }, duplicates: 0, wouldDeliver: {}, creators: {} };
+  for (const l of lines) {
+    if (l.kind === 'profile') sum.profiles++; else sum.media++;
+    if (sum.audience[l.audience] !== undefined) sum.audience[l.audience]++;
+    if (l.duplicate) sum.duplicates++;
+    for (const d of l.wouldDeliver || []) sum.wouldDeliver[d] = (sum.wouldDeliver[d] || 0) + 1;
+    const u = String(l.entry).split('/')[0];
+    const c = sum.creators[u] || (sum.creators[u] = { media: 0, audience: l.audience });
+    if (l.kind !== 'profile') c.media++;
+    if (l.audience === 'adult' || (l.audience === 'unknown' && c.audience === 'general')) c.audience = l.audience;
+  }
+  res.json({ ok: true, mode: INBOX_STATUS.mode, first: lines.length ? lines[0].at : null, last: lines.length ? lines[lines.length - 1].at : null, ...sum });
+});
 
 // --- Review queue: the owner classifies creators and items by hand ----------------
 // Nothing here downgrades 18+: the profile store and the item store both refuse

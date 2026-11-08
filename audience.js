@@ -31,6 +31,7 @@ const DESTINATIONS = {
   main: { id: 'main', app: 'Tikshortis', audience: 'general' },
   platform: { id: 'platform', app: 'Platform', audience: 'general' },
   posts: { id: 'posts', app: 'the posts library', audience: 'general' },
+  egram: { id: 'egram', app: 'egram', audience: 'general' },
   '18plus': { id: '18plus', app: 'Adshortis', audience: 'adult' },
 };
 

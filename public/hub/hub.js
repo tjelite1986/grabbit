@@ -38,6 +38,7 @@
     settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1-2 3.4-.2-.1a1.7 1.7 0 0 0-1.9.2 7 7 0 0 1-1.6.9 1.7 1.7 0 0 0-1.1 1.5V23H9v-.2a1.7 1.7 0 0 0-1.1-1.5 7 7 0 0 1-1.6-.9 1.7 1.7 0 0 0-1.9-.2l-.2.1-2-3.4.1-.1a1.7 1.7 0 0 0 .3-1.8 7 7 0 0 1 0-1.8 1.7 1.7 0 0 0-.3-1.8l-.1-.1 2-3.4.2.1a1.7 1.7 0 0 0 1.9-.2 7 7 0 0 1 1.6-.9A1.7 1.7 0 0 0 9 1.2V1h4v.2a1.7 1.7 0 0 0 1.1 1.5 7 7 0 0 1 1.6.9 1.7 1.7 0 0 0 1.9.2l.2-.1 2 3.4-.1.1a1.7 1.7 0 0 0-.3 1.8 7 7 0 0 1 0 1.8z',
     link: 'M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1',
     pulse: 'M3 12h4l3-8 4 16 3-8h4',
+    inbox: 'M4 13h4l2 3h4l2-3h4M4 13l2-8h12l2 8v6H4z',
     review: 'M9 11l3 3 8-8M20 12v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11',
     sites: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18',
     play: 'M8 5v14l11-7z',
@@ -125,6 +126,7 @@
     mediaMisses: null,
     jobs: new Map(),
     review: null,
+    inbox: null,
   };
   const ACTIVE = new Set(['queued', 'running', 'scheduled']);
   const activeJobs = () => [...state.jobs.values()].filter((j) => ACTIVE.has(j.status)).sort((a, b) => a.createdAt - b.createdAt);
@@ -138,6 +140,7 @@
       history: () => api('/api/history').then((d) => { state.history = d.items || []; }),
       media: () => api('/api/hub/media').then((d) => { state.media = d.items || []; state.mediaMisses = d.misses || []; }),
       review: () => api('/api/hub/review').then((d) => { state.review = d; }),
+      inbox: () => api('/api/hub/inbox?limit=1').then((d) => { state.inbox = d; }),
       jobs: () => api('/api/jobs').then((d) => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
     };
     await Promise.all(what.map((k) => tasks[k]().catch((e) => { console.warn(`hub: ${k} failed`, e); })));
@@ -186,6 +189,7 @@
     { id: 'media', label: 'Media', icon: 'media', view: viewMedia },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
     { id: 'review', label: 'Review', icon: 'review', badge: () => (state.review ? state.review.creators.unclassified : 0), view: viewReview },
+    { id: 'inbox', label: 'Inbox', icon: 'inbox', badge: () => (state.inbox && state.inbox.counts ? state.inbox.counts.held || 0 : 0), view: viewInbox },
     { id: 'duplicates', label: 'Duplicates', icon: 'dupes', planned: true, view: viewDuplicates },
     { id: 'conversion', label: 'Conversion', icon: 'convert', view: viewConversion },
     { id: 'metadata', label: 'Metadata & tags', icon: 'tags', planned: true, view: viewMetadata },
@@ -1360,6 +1364,191 @@
       box);
   }
 
+  // --- Instagram inbox -------------------------------------------------------
+  // What the patched Instagram app saved, before it reaches any app. Creators
+  // are classified here with one click; a general creator's items go out to
+  // the apps switched on below, now and from then on.
+  const INBOX_APPS = [['egram', 'egram'], ['main', 'Tikshortis'], ['platform', 'Platform']];
+  const INBOX_DEST_LABEL = { egram: 'egram', main: 'Tikshortis', platform: 'Platform', '18plus': 'Adshortis' };
+  function viewInbox() {
+    const head = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+    const settingsBox = h('div');
+    const waitingBox = h('div');
+    const doneBox = h('div');
+    const shadowBox = h('div');
+    let donePage = 0;
+
+    function modeNote(d) {
+      if (d.mode === 'off') return h('p', { class: 'note' }, 'The inbox is off on this server (INBOX_MODE / INBOX_DROP_DIR). Nothing is read from the drop folder.');
+      if (d.mode === 'shadow') return h('p', { class: 'note' }, 'Shadow mode: the drop folder is only read, nothing is moved or delivered. The old bridge still delivers.');
+      return null;
+    }
+    function lastRun(r) {
+      if (!r) return h('span', { class: 'muted' }, 'No run yet.');
+      if (r.error) return h('span', { class: 'muted' }, `Last run ${ago(r.at)} failed: ${r.error}`);
+      const rel = r.release || {};
+      return h('span', { class: 'muted' },
+        `Last run ${ago(r.at)}: ${num(r.staged || 0)} new, ${num(rel.delivered || 0)} delivered, ${num(r.waiting || 0)} still uploading` +
+        (r.ignoredTotal ? `, ${num(r.ignoredTotal)} left in the drop folder` : ''));
+    }
+
+    function settingsCard(d) {
+      const boxes = {};
+      const rows = INBOX_APPS.map(([id, label]) => {
+        boxes[id] = h('input', { type: 'checkbox', checked: d.settings.auto[id], disabled: !d.available[id] });
+        return h('label', { class: 'muted', style: 'display:block;margin:4px 0' }, boxes[id], ` ${label}`,
+          d.available[id] ? (id === 'egram' ? '' : ' (videos only)') : ' (not configured on this server)');
+      });
+      const keep = h('input', { class: 'field', type: 'number', min: 1, max: 90, value: d.settings.keepDays, style: 'width:80px', 'aria-label': 'Days to keep staged files' });
+      const save = async () => {
+        try {
+          const auto = {};
+          for (const [id] of INBOX_APPS) auto[id] = boxes[id].checked;
+          await jsonPost('/api/hub/inbox/settings', { auto, keepDays: Number(keep.value) });
+          toast('Inbox settings saved');
+          fill();
+        } catch (e) { toast(e.message); }
+      };
+      settingsBox.replaceChildren(card('Automatic delivery', 'share', null,
+        h('p', { class: 'muted' }, 'A creator classified general sends its items to the apps ticked here. Unclassified and 18+ creators always wait.'),
+        ...rows,
+        h('div', { class: 'toolbar' },
+          h('label', { class: 'muted' }, 'Remove Grabbit\'s staged copy after ', keep, ' days'),
+          h('button', { class: 'btn small', type: 'button', onclick: save }, 'Save'))));
+    }
+
+    async function classify(username, aud) {
+      const msg = aud === 'adult'
+        ? `Classify @${username} as 18+? Nothing of theirs will reach a general app, and this cannot be undone.`
+        : `Classify @${username} as general? Their waiting items and every later one go to the apps switched on.`;
+      if (!confirm(msg)) return;
+      try {
+        const r = await jsonPost('/api/hub/inbox/creators', { username, audience: aud });
+        const rel = r.run && r.run.release;
+        toast(`@${username} classified ${aud === 'adult' ? '18+' : 'general'}${rel ? `; ${num(rel.delivered)} delivered` : ''}`);
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+    async function deliver(row, dest) {
+      try {
+        const r = await jsonPost(`/api/hub/inbox/${row.id}/deliver`, { destination: dest });
+        const ok = r.results.filter((x) => x.ok).length;
+        toast(`${num(ok)} sent to ${INBOX_DEST_LABEL[dest]}${r.error ? ` (${r.error})` : ''}`);
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+
+    function thumb(row) {
+      const src = `/api/hub/inbox/${row.id}/file`;
+      const media = row.kind === 'profile' ? null
+        : row.item_kind === 'video'
+          ? h('video', { src, muted: true, preload: 'metadata', playsinline: true })
+          : h('img', { src, alt: '', loading: 'lazy', onerror: dropBrokenImg });
+      return h('div', { class: `tile${media ? '' : ' no-thumb'}`, 'data-kind': row.kind === 'profile' ? 'profile' : row.item_kind || 'media', 'data-media-bg': '1' },
+        media, row.item_kind === 'video' ? h('span', { class: 'play' }, icon('play')) : null);
+    }
+
+    function creatorBlock(username, rows, available) {
+      const held = rows.filter((r) => r.state === 'held');
+      const ready = rows.filter((r) => r.state === 'ready');
+      const adult = rows.some((r) => r.audience === 'adult');
+      const unknown = rows.some((r) => r.audience === 'unknown' || (r.kind === 'profile' && /not|no profile/.test(r.reason || '')));
+      const reason = (held[0] || ready[0] || {}).reason || '';
+      const media = rows.filter((r) => r.kind === 'media');
+      const destSel = h('select', { class: 'field', 'aria-label': `Send @${username}'s items to` },
+        ...['egram', 'main', 'platform', '18plus'].filter((d) => available[d]).map((d) => h('option', { value: d }, INBOX_DEST_LABEL[d])));
+      const sendAll = async () => {
+        const dest = destSel.value;
+        for (const r of media.filter((x) => !x.deliveries.some((y) => y.destination === dest && y.status === 'dropped'))) await deliver(r, dest);
+      };
+      return h('section', { class: 'card' },
+        h('h2', null, icon('profiles'),
+          h('a', { href: `https://www.instagram.com/${encodeURIComponent(username)}/`, target: '_blank', rel: 'noopener noreferrer' }, `@${username}`),
+          h('span', { class: `chip ${adult ? 'adult' : unknown ? 'unclassified' : ''}` }, adult ? '18+' : unknown ? 'unclassified' : 'general')),
+        h('p', { class: 'muted' }, `${num(media.length)} item(s) waiting`, reason ? ` - ${reason}` : ''),
+        media.length ? h('div', { class: 'inbox-grid' }, media.slice(0, 8).map(thumb)) : null,
+        media.length > 8 ? h('p', { class: 'muted' }, `and ${num(media.length - 8)} more`) : null,
+        h('div', { class: 'toolbar' },
+          adult ? null : h('button', { class: 'btn small', type: 'button', onclick: () => classify(username, 'general') }, 'General'),
+          adult ? null : h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => classify(username, 'adult') }, '18+'),
+          media.length && (ready.length || adult) ? h('span', { class: 'toolbar' }, destSel,
+            h('button', { class: 'btn small ghost', type: 'button', onclick: sendAll }, 'Send by hand')) : null));
+    }
+
+    async function fillWaiting(d) {
+      const [held, ready] = await Promise.all([
+        api('/api/hub/inbox?state=held&limit=1000'),
+        api('/api/hub/inbox?state=ready&limit=1000'),
+      ]);
+      const rows = [...held.items, ...ready.items];
+      if (!rows.length) return waitingBox.replaceChildren(card('Waiting', 'review', null, h('p', { class: 'empty' }, 'Nothing waits in the inbox.')));
+      const by = new Map();
+      for (const r of rows) (by.get(r.username) || by.set(r.username, []).get(r.username)).push(r);
+      const users = [...by.keys()].sort((a, b) => by.get(b).length - by.get(a).length || a.localeCompare(b));
+      waitingBox.replaceChildren(
+        h('h2', { class: 'section' }, `Waiting: ${num(rows.length)} from ${num(users.length)} creator(s)`),
+        ...users.map((u) => creatorBlock(u, by.get(u), d.available)));
+    }
+
+    async function fillDone() {
+      const SIZE = 50;
+      const d = await api(`/api/hub/inbox?limit=${SIZE}&offset=${donePage * SIZE}`);
+      const rows = d.items.filter((r) => r.state === 'delivered' || r.state === 'duplicate');
+      doneBox.replaceChildren(card('Recent', 'media', null,
+        rows.length ? h('div', { class: 'scroll-x' }, h('table', null,
+          h('thead', null, h('tr', null, h('th', null, 'Item'), h('th', null, 'Creator'), h('th', null, 'State'), h('th', null, 'Delivered to'), h('th', null, 'Received'))),
+          h('tbody', null, rows.map((r) => {
+            const href = webHref(r.source_url);
+            const label = r.title || r.entry;
+            return h('tr', null,
+              h('td', null, href ? h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label) : label),
+              h('td', null, `@${r.username}`),
+              h('td', null, h('span', { class: 'clamp', title: r.reason || '' }, r.state)),
+              h('td', null, r.deliveries.filter((x) => x.status === 'dropped').map((x) => INBOX_DEST_LABEL[x.destination] || x.destination).join(', ') || (r.kind === 'profile' ? 'profile' : '')),
+              h('td', { class: 'muted' }, ago(r.received_at)));
+          })))) : h('p', { class: 'empty' }, 'Nothing delivered yet.'),
+        pager(donePage, d.total, SIZE, (n) => { donePage = n; fillDone(); }) || ''));
+    }
+
+    async function fillShadow() {
+      const s = await api('/api/hub/inbox/shadow');
+      const unknownCreators = Object.entries(s.creators).filter(([, c]) => c.audience !== 'general');
+      shadowBox.replaceChildren(card('Shadow run', 'pulse', null,
+        h('p', null, `${num(s.entries)} drops seen${s.first ? ` since ${new Date(s.first).toLocaleString()}` : ''}: ` +
+          `${num(s.audience.general)} general, ${num(s.audience.unknown)} unclassified, ${num(s.audience.adult)} 18+, ${num(s.duplicates)} duplicates.`),
+        h('p', { class: 'muted' }, 'Would deliver: ' + (Object.entries(s.wouldDeliver).map(([k, v]) => `${INBOX_DEST_LABEL[k] || k} ${num(v)}`).join(', ') || 'nothing')),
+        unknownCreators.length ? h('p', { class: 'muted' }, `${num(unknownCreators.length)} creator(s) would wait for a classification: ` +
+          unknownCreators.slice(0, 30).map(([u, c]) => `@${u} (${c.media})`).join(', ')) : null));
+    }
+
+    async function fill() {
+      try {
+        const d = await api('/api/hub/inbox?limit=1');
+        state.inbox = d;
+        updateNav();
+        const c = d.counts || {};
+        head.replaceChildren(
+          modeNote(d) || '',
+          h('p', null, `${num(c.held || 0)} waiting for a decision, ${num(c.ready || 0)} general but not sent, ${num(c.delivered || 0)} delivered, ${num(c.duplicate || 0)} duplicates. `, lastRun(d.lastRun)),
+          d.mode === 'off' ? '' : h('div', { class: 'toolbar' }, h('button', { class: 'btn small ghost', type: 'button', onclick: async () => {
+            try { await post('/api/hub/inbox/run'); fill(); } catch (e) { toast(e.message); }
+          } }, 'Check the drop folder now')));
+        settingsCard(d);
+        if (d.mode === 'shadow') await fillShadow(); else shadowBox.replaceChildren();
+        await fillWaiting(d);
+        await fillDone();
+      } catch (e) {
+        head.replaceChildren(h('p', { class: 'empty' }, e.message));
+      }
+    }
+    fill();
+    return [
+      h('h1', null, 'Inbox'),
+      h('p', { class: 'lead' }, 'What the Instagram app saved. Classify a creator once; their items then go to the apps you switched on.'),
+      head, shadowBox, waitingBox, settingsBox, doneBox,
+    ];
+  }
+
   function viewDuplicates() {
     const s = state.summary;
     return [
@@ -1466,7 +1655,7 @@
   async function boot() {
     buildNav();
     render();
-    await load(['config', 'summary', 'history', 'media', 'jobs', 'review']);
+    await load(['config', 'summary', 'history', 'media', 'jobs', 'review', 'inbox']);
     const apps = (state.summary && state.summary.apps) || [];
     if (state.summary && state.summary.brand) $('#brandSub').textContent = state.summary.brand;
     if (apps.length) {
