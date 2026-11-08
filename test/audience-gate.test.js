@@ -473,3 +473,48 @@ test('reddclips reaches no general app without a hand classification', async (t)
   }
   assert.deepEqual(s.generalFiles(), []);
 });
+
+test('classify-retry: one click sends a refused unclassified item, never an 18+ one', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Adult Star', audience: 'adult' }] });
+  const post = (p) => fetch(`${s.base}${p}`, { method: 'POST', headers: { ...s.headers, 'Content-Type': 'application/json' }, body: '{}' });
+  const waitJob = async (id) => {
+    for (let i = 0; i < 100; i++) {
+      const { jobs } = await (await fetch(`${s.base}/api/jobs`, { headers: s.headers })).json();
+      const j = jobs.find((x) => x.id === id);
+      if (j && ['done', 'error', 'cancelled'].includes(j.status)) return j;
+      await new Promise((res) => setTimeout(res, 100));
+    }
+    throw new Error(`job ${id} did not finish:\n${s.logs()}`);
+  };
+
+  // Unclassified creator: refused, then classified by the click and delivered.
+  const refused = await s.saveJob(s.fakeUrl('video', 'tiktok', 'newcomer', 'cr1'), 'platform');
+  assert.match(String(refused.job.error), /not classified/);
+  const r = await post(`/api/jobs/${encodeURIComponent(refused.job.id)}/classify-retry`);
+  const body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body) + s.logs());
+  const retried = await waitJob(body.jobId);
+  assert.equal(retried.status, 'done', JSON.stringify(retried) + s.logs());
+  const { rows, deliveries } = s.items();
+  const item = rows.find((x) => x.id === body.itemId);
+  assert.equal(item.audience, 'general');
+  assert.equal(item.classified_by_hand, 1);
+  assert.deepEqual(deliveries.filter((d) => d.item_id === item.id).map((d) => d.status), ['refused', 'dropped']);
+  // Only the item: the creator stays unclassified, so their next video is refused again.
+  const next = await s.saveJob(s.fakeUrl('video', 'tiktok', 'newcomer', 'cr2'), 'platform');
+  assert.match(String(next.job.error), /not classified/);
+
+  // 18+: refused for a general app, and the click cannot make it general.
+  const adult = await s.saveJob(s.fakeUrl('video', 'tiktok', 'Adult Star', 'cr3'), 'main');
+  assert.match(String(adult.job.error), /18\+/);
+  const a = await post(`/api/jobs/${encodeURIComponent(adult.job.id)}/classify-retry`);
+  assert.ok(a.status >= 400, `expected a refusal, got ${a.status}`);
+  assert.equal(s.items().rows.find((x) => x.key && x.audience === 'adult' && x.classified_by_hand === 1), undefined);
+
+  // A finished job is not a refused one.
+  const done = await post(`/api/jobs/${encodeURIComponent(retried.id)}/classify-retry`);
+  assert.equal(done.status, 400);
+
+  const delivered = s.generalFiles().filter((f) => !f.endsWith('.md') && !f.endsWith('.json'));
+  assert.equal(delivered.length, 1, delivered.join('\n'));
+});

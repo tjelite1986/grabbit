@@ -6542,6 +6542,38 @@ app.post('/api/jobs/:id/cancel', (req, res) => {
 });
 
 // POST /api/jobs/:id/retry -> re-queue a failed/cancelled job with its params.
+// POST /api/jobs/:id/classify-retry -> classify the item behind a job that a
+// general app refused as unclassified, by hand, as general, then retry it.
+// One item, one deliberate click: the same hand classification the Review page
+// makes. An 18+ item is never made general, and nothing else is classified.
+app.post('/api/jobs/:id/classify-retry', (req, res) => {
+  const old = jobsMap.get(req.params.id);
+  if (!old) return res.status(404).json({ ok: false, error: 'Job not found' });
+  if (!old.params) return res.status(400).json({ ok: false, error: 'This job cannot be retried' });
+  if (old.status !== 'error') return res.status(400).json({ ok: false, error: 'Only a refused job can be classified and retried' });
+  if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
+  const app = audience.DESTINATIONS[destinationOf(old.channel, old)];
+  if (!app || app.audience !== 'general') return res.status(400).json({ ok: false, error: 'This job was not going to a general app' });
+  const key = itemKeyOf(old);
+  const item = key ? ITEM_STORE.get(key) : null;
+  if (!item) return res.status(400).json({ ok: false, error: 'No item is recorded for this job; classify it on the Review page instead' });
+  if (item.audience === 'adult') return res.status(409).json({ ok: false, error: 'This item is 18+ and is never sent to a general app' });
+  try {
+    const r = ITEM_STORE.classifyItems([item.id], 'general');
+    if (!r.changed.length && !(r.skipped[0] && /already general/.test(r.skipped[0].reason))) {
+      return res.status(409).json({ ok: false, error: (r.skipped[0] && r.skipped[0].reason) || 'The item could not be classified' });
+    }
+    console.log(`review: item ${item.id} classified general by hand from job ${old.id} (${old.creator || 'no creator'}), retrying`);
+  } catch (e) {
+    console.error('classify-retry:', e.message);
+    return res.status(500).json({ ok: false, error: 'The item store could not be changed. See the server log.' });
+  }
+  const job = newJob({ dest: old.dest, channel: old.channel, lib: old.lib, device: old.device });
+  job.params = old.params;
+  res.json({ ok: true, jobId: job.id, itemId: item.id });
+  scheduleJob(job, old.params);
+});
+
 app.post('/api/jobs/:id/retry', (req, res) => {
   const old = jobsMap.get(req.params.id);
   if (!old) return res.status(404).json({ ok: false, error: 'Job not found' });

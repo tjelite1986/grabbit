@@ -334,6 +334,23 @@
     if (withActions && ACTIVE.has(j.status)) {
       acts.append(h('button', { class: 'btn ghost small', onclick: () => post(`/api/jobs/${encodeURIComponent(j.id)}/cancel`).catch((e) => toast(e.message)) }, 'Cancel'));
     }
+    // A general app refused it because nobody has classified the creator yet:
+    // one click classifies this one item general by hand and sends it again.
+    if (withActions && j.status === 'error' && / is a general app and the audience of .* is not classified/.test(j.error || '')) {
+      acts.append(h('button', {
+        class: 'btn small',
+        title: 'Marks only this item as general (not the creator) and retries the job',
+        onclick: (e) => {
+          const btn = e.currentTarget; // currentTarget is gone once the promise settles
+          const who = j.creator ? `"${j.creator}"` : 'this item';
+          if (!confirm(`Classify this item from ${who} as general (OK for general apps) and send it again?`)) return;
+          btn.disabled = true;
+          jsonPost(`/api/jobs/${encodeURIComponent(j.id)}/classify-retry`, {})
+            .then(() => { toast('Classified general - retrying'); return load(['review']).then(updateNav); })
+            .catch((err) => { btn.disabled = false; toast(err.message); });
+        },
+      }, 'Classify general & retry'));
+    }
     if (withActions && (j.status === 'error' || j.status === 'cancelled')) {
       acts.append(h('button', { class: 'btn small', onclick: () => post(`/api/jobs/${encodeURIComponent(j.id)}/retry`).then(() => toast('Retrying')).catch((e) => toast(e.message)) }, 'Retry'));
     }
