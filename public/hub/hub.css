@@ -135,6 +135,9 @@ p.err { color: var(--bad); margin: 10px 0 0; }
 .warn-note ul { margin: 6px 0 0; padding-left: 18px; }
 .warn-note li { margin: 4px 0; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.media-section + .media-section { margin-top: 28px; }
+.media-section h2 { font-size: 17px; margin: 0 0 10px; }
+.media-section.aud-adult h2 { color: #ff8fb0; }
 
 .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .rows li { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px solid rgba(42, 38, 69, 0.6); }
