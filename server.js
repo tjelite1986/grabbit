@@ -719,7 +719,7 @@ function recordHistory(entry) {
     const id = `${Date.now()}-${historySeq++}`;
     list.unshift({ id, time: Date.now(), ...entry });
     writeJsonAtomic(HISTORY_FILE, list.slice(0, HISTORY_MAX));
-    warmThumb(entry && entry.thumbnail);
+    warmThumb(entry && entry.thumbnail, { keep: true });
   } catch (e) {
     console.warn('history write failed:', e.message);
   }
@@ -2474,12 +2474,74 @@ function thumbReferer(url) {
 
 // Keep the cache from growing without bound. Runs on boot and every 200 stores
 // — a directory listing per picture would cost more than the pictures do.
-function pruneThumbs() {
-  let names;
+const THUMB_KEEP_PREFIX = 'keep-';
+// A picture that neither the site nor a local file could give is not asked for
+// again for this long, so a page of dead links does not hit the sites on every view.
+const THUMB_MISS_MS = 6 * 3600 * 1000;
+const THUMB_MISS_MAX = 5000;
+const thumbMisses = new Map();
+
+// The cache keys of the site pictures the history still shows.
+function historyThumbKeys() {
+  const keys = new Set();
+  for (const e of readHistory()) {
+    if (e && /^https?:\/\//i.test(String(e.thumbnail || ''))) keys.add(thumbKey(e.thumbnail));
+  }
+  return keys;
+}
+
+function keptThumb(key) {
+  return cachedThumb(THUMB_KEEP_PREFIX + key);
+}
+
+// Atomic write of one picture into THUMB_DIR as <name>.<ext>, via a per-call
+// temp name: two cards can ask for the same picture at once.
+function writeThumbFile(name, buf, ext) {
+  const file = path.join(THUMB_DIR, `${name}.${ext}`);
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
   try {
-    names = fs.readdirSync(THUMB_DIR);
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, file);
+    return { file, ext };
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* never created */
+    }
+    throw e;
+  }
+}
+
+// Three kinds of file share THUMB_DIR. `local-<sha1>` pictures Grabbit made
+// itself (video frames) are the only copy and are never pruned. `keep-<key>`
+// is a history entry's own picture, kept while an entry in the history still
+// uses it and removed once none does. Everything else is the plain cache of
+// site pictures, capped at THUMB_MAX_FILES, oldest first.
+function pruneThumbs() {
+  let all;
+  try {
+    all = fs.readdirSync(THUMB_DIR);
   } catch {
     return;
+  }
+  const inUse = historyThumbKeys();
+  // An unreadable or empty history must not read as "no entry uses any of them".
+  const dropOrphans = inUse.size > 0;
+  const names = [];
+  for (const name of all) {
+    if (name.startsWith('local-') || name.endsWith('.part')) continue;
+    if (name.startsWith(THUMB_KEEP_PREFIX)) {
+      if (dropOrphans && !inUse.has(name.slice(THUMB_KEEP_PREFIX.length).split('.')[0])) {
+        try {
+          fs.unlinkSync(path.join(THUMB_DIR, name));
+        } catch {
+          /* already gone */
+        }
+      }
+      continue;
+    }
+    names.push(name);
   }
   if (names.length <= THUMB_MAX_FILES) return;
   const files = [];
@@ -2499,7 +2561,6 @@ function pruneThumbs() {
     }
   }
 }
-pruneThumbs();
 
 // Fetch one picture, sending the Referer its CDN expects. A CDN that instead
 // refuses every foreign Referer (rather than requiring its own) answers 403, so
@@ -2555,18 +2616,27 @@ async function fetchThumb(url) {
 // Fetch a site thumbnail into the cache while its link still works. CDN links
 // are signed and expire within hours, so a picture nobody looked at on the day
 // of the download could never be shown later. Best effort, in the background.
+// With `keep` (a new history entry) it is stored as that entry's own copy,
+// which the cache prune leaves alone while the entry is in the history.
 const thumbsWarming = new Set();
-function warmThumb(url) {
+function warmThumb(url, { keep = false } = {}) {
   if (!url || !/^https?:\/\//i.test(String(url)) || !validUrl(url)) return;
   const key = thumbKey(url);
-  if (thumbsWarming.has(key) || cachedThumb(key)) return;
+  if (thumbsWarming.has(key) || keptThumb(key)) return;
+  const hit = cachedThumb(key);
+  if (hit) {
+    if (!keep) return;
+    try {
+      fs.copyFileSync(hit.file, path.join(THUMB_DIR, `${THUMB_KEEP_PREFIX}${key}.${hit.ext}`));
+    } catch {
+      /* the cache copy still serves it */
+    }
+    return;
+  }
   thumbsWarming.add(key);
   fetchThumb(url)
     .then(({ buf, ext }) => {
-      const file = path.join(THUMB_DIR, `${key}.${ext}`);
-      const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
-      fs.writeFileSync(tmp, buf);
-      fs.renameSync(tmp, file);
+      writeThumbFile(keep ? THUMB_KEEP_PREFIX + key : key, buf, ext);
     })
     .catch(() => {
       /* the picture is gone or refused: the hub shows a placeholder */
@@ -2611,33 +2681,41 @@ app.get('/api/thumb', async (req, res) => {
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
   const key = thumbKey(url);
-  const hit = cachedThumb(key);
+  const hit = keptThumb(key) || cachedThumb(key);
   if (hit) return send(hit.file, hit.ext);
+  const missAt = thumbMisses.get(key);
+  if (missAt && Date.now() - missAt < THUMB_MISS_MS) {
+    return res.status(404).json({ ok: false, error: 'No picture (tried recently)' });
+  }
+  let got = null;
+  let failure = null;
   try {
-    const { buf, ext } = await fetchThumb(url);
-    const file = path.join(THUMB_DIR, `${key}.${ext}`);
-    // Write via a per-call temp name: two cards can ask for the same picture at
-    // once, and a shared temp name would leave one of them reading a file the
-    // other had already renamed away.
-    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
-    try {
-      fs.writeFileSync(tmp, buf);
-      fs.renameSync(tmp, file);
-      if (++thumbStores % 200 === 0) pruneThumbs();
-    } catch (e) {
-      // An unwritable cache must not cost the user the picture.
-      console.warn('thumb cache write failed:', e.message);
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-        /* never created */
-      }
-      res.setHeader('Cache-Control', 'private, max-age=604800');
-      return res.type(imageMime(ext)).send(buf);
-    }
-    send(file, ext);
+    got = await fetchThumb(url);
   } catch (e) {
-    res.status(e.status === 404 ? 404 : 502).json({ ok: false, error: String(e.message || e) });
+    failure = e;
+    // The site's link has expired or the picture is gone: make it again from
+    // the downloaded file, when Grabbit still finds one for this entry.
+    got = await thumbFromLocalFile(url).catch(() => null);
+  }
+  if (!got) {
+    if (thumbMisses.size >= THUMB_MISS_MAX) thumbMisses.delete(thumbMisses.keys().next().value);
+    thumbMisses.set(key, Date.now());
+    return res.status(failure && failure.status === 404 ? 404 : 502).json({
+      ok: false,
+      error: String((failure && failure.message) || failure || 'No picture'),
+    });
+  }
+  // A picture a history entry shows is that entry's own copy, not cache.
+  const name = failure || historyThumbKeys().has(key) ? THUMB_KEEP_PREFIX + key : key;
+  try {
+    const saved = writeThumbFile(name, got.buf, got.ext);
+    if (++thumbStores % 200 === 0) pruneThumbs();
+    send(saved.file, saved.ext);
+  } catch (e) {
+    // An unwritable cache must not cost the user the picture.
+    console.warn('thumb cache write failed:', e.message);
+    res.setHeader('Cache-Control', 'private, max-age=604800');
+    res.type(imageMime(got.ext)).send(got.buf);
   }
 });
 
@@ -2649,6 +2727,64 @@ app.get('/api/thumb', async (req, res) => {
 // is what lets a <video> start playing before the whole file has arrived — and
 // streams the answer straight back. Nothing is cached on disk: a preview is
 // megabytes, and the browser's own media cache already covers a replay.
+// A history entry's picture made from its downloaded file: the poster beside a
+// video, the image itself, or a frame from the video. At most two ffmpeg runs
+// at a time, so a page full of expired links cannot pile them up on the Pi.
+const LOCAL_THUMB_CONCURRENCY = 2;
+let localThumbRunning = 0;
+const localThumbWaiting = [];
+async function withLocalThumbSlot(fn) {
+  if (localThumbRunning >= LOCAL_THUMB_CONCURRENCY) await new Promise((r) => localThumbWaiting.push(r));
+  localThumbRunning++;
+  try {
+    return await fn();
+  } finally {
+    localThumbRunning--;
+    const next = localThumbWaiting.shift();
+    if (next) next();
+  }
+}
+
+async function thumbFromLocalFile(url) {
+  const entry = readHistory().find((e) => e && e.thumbnail === url && e.filename);
+  if (!entry) return null;
+  const found = mediaViewer.findVariants(entry.filename, mediaDirsOf(entry), MEDIA_ROOTS);
+  if (!found) return null;
+  if (found.poster) {
+    const ext = mediaViewer.extOf(found.poster) === 'jpeg' ? 'jpg' : mediaViewer.extOf(found.poster);
+    if (THUMB_EXTS.includes(ext)) {
+      const buf = fs.readFileSync(found.poster);
+      if (buf.length && buf.length <= THUMB_MAX_BYTES) return { buf, ext };
+    }
+  }
+  const src = found.original || found.web;
+  const kind = src ? mediaViewer.kindOfName(src) : null;
+  if (kind !== 'video' && kind !== 'image') return null;
+  const buf = await withLocalThumbSlot(() => (kind === 'video' ? frameFromVideo(src, entry.duration) : frameFromImage(src)));
+  return buf ? { buf, ext: 'jpg' } : null;
+}
+
+// Once at boot: the history's pictures still in the plain cache become the
+// entries' own copies before the cache prune can take them.
+function keepHistoryThumbs() {
+  for (const key of historyThumbKeys()) {
+    if (keptThumb(key)) continue;
+    const hit = cachedThumb(key);
+    if (!hit) continue;
+    try {
+      fs.copyFileSync(hit.file, path.join(THUMB_DIR, `${THUMB_KEEP_PREFIX}${key}.${hit.ext}`));
+    } catch {
+      /* the cache copy still serves it */
+    }
+  }
+}
+try {
+  keepHistoryThumbs();
+  pruneThumbs();
+} catch (e) {
+  console.warn('thumbs: keeping the history pictures failed:', e.message);
+}
+
 app.get('/api/media', async (req, res) => {
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
@@ -8742,19 +8878,34 @@ async function downloadImage(res, job, url, device, dest, channel) {
 // rather than at 0:00 — a clip routinely opens on a black fade-in, and a black
 // poster is worse than no poster.
 function frameFromVideo(src, duration) {
+  const at = Number.isFinite(duration) && duration > 2 ? Math.min(duration * 0.2, 10) : 1;
+  return ffmpegJpeg(['-ss', String(at), '-i', src]);
+}
+
+function frameFromImage(src) {
+  return ffmpegJpeg(['-i', src]);
+}
+
+// One JPEG at most 640 wide from ffmpeg, or null. Killed after 30 s: a stuck
+// read (a file on a hung NFS mount) must not hold a thumbnail slot forever.
+function ffmpegJpeg(inputArgs) {
   return new Promise((resolve) => {
-    const at = Number.isFinite(duration) && duration > 2 ? Math.min(duration * 0.2, 10) : 1;
     const p = spawn(FFMPEG, [
       '-y', '-hide_banner', '-loglevel', 'error', '-nostdin',
-      '-ss', String(at), '-i', src, '-frames:v', '1',
+      ...inputArgs, '-frames:v', '1',
       '-vf', "scale='min(640,iw)':-2", '-q:v', '4', '-f', 'mjpeg', 'pipe:1',
     ]);
+    const timer = setTimeout(() => p.kill('SIGKILL'), 30_000);
     const chunks = [];
     p.stdout.on('data', (d) => chunks.push(d));
     // Unread stderr fills its pipe and deadlocks ffmpeg on a chatty input.
     p.stderr.resume();
-    p.on('error', () => resolve(null));
+    p.on('error', () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
     p.on('close', () => {
+      clearTimeout(timer);
       const buf = Buffer.concat(chunks);
       // A JPEG of a real frame is kilobytes; anything tiny is ffmpeg giving up
       // (a seek past the end, an unreadable stream).
