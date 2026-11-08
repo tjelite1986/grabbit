@@ -132,6 +132,8 @@ function jobFromApiVideo(v, creator, creatorName) {
     title: metaTitle(v, creatorName || creator),
     description: rendered || metaDesc,
     tags,
+    // The site's keywords as it names them, for the item store.
+    sourceTags: keywords.map(String),
     sourceUrl: `https://tik.porn/video/${id}`,
     thumbnail: v.poster_url || v.medium_thumb || null,
     // Seconds, and only for clips the encoder has measured — the field is
@@ -235,6 +237,8 @@ function jobFromNextVideo(fv) {
         })
       ) || (fv.metadata && fv.metadata.description) || '',
     tags: tagNames.map((k) => '#' + String(k).toLowerCase().replace(/[^a-z0-9]+/g, '')),
+    // The site's tags as it names them, for the item store.
+    sourceTags: tagNames.map(String),
     sourceUrl: `https://tik.porn/video/${id}`,
     thumbnail: fv.poster || null,
     duration: Number.isFinite(fv.duration) ? fv.duration : null,

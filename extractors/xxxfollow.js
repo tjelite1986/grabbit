@@ -76,6 +76,8 @@ function buildJob(userdir, userid, mediaid, title, creator, opts = {}) {
     title: title || String(mediaid),
     description: title || '',
     tags: opts.tags || [],
+    // The post page's /tag/ links (empty until enrich() reads that page).
+    sourceTags: opts.tags || [],
     // The individual post page, used to enrich tags lazily at download time.
     pageUrl: opts.pageUrl || null,
     // Prefer the specific post URL so the downloaded-registry (and the caption's
@@ -124,7 +126,10 @@ async function enrich(job) {
     const res = await fetchT(job.pageUrl, { headers: { 'User-Agent': UA } });
     if (!res.ok) return job;
     const tags = scrapeTags(await res.text());
-    if (tags.length) job.tags = tags;
+    if (tags.length) {
+      job.tags = tags;
+      job.sourceTags = tags;
+    }
   } catch {
     /* best effort — tags stay empty */
   }

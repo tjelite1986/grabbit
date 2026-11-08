@@ -80,13 +80,14 @@ function jobFromVideoPage(html, idHint, fallbackCreator) {
 
   const handle = (ogTitle.match(/@([A-Za-z0-9_.]+)/) || [])[1] || fallbackCreator || 'xfree';
   // The page lists its tags as <meta name="og:video:tag" content="..."> entries.
-  const tags = [
+  const tagLabels = [
     ...new Set(
       [...html.matchAll(/["'](?:og:)?video:tag["'][^>]*content="([^"]+)"/gi)]
-        .map((m) => decodeEntities(m[1]).trim().toLowerCase().replace(/\s+/g, ''))
+        .map((m) => decodeEntities(m[1]).trim())
         .filter(Boolean)
     ),
   ];
+  const tags = [...new Set(tagLabels.map((t) => t.toLowerCase().replace(/\s+/g, '')))];
   // og:title is "<caption> - @handle's Sex Reel On xfree.com ...". Strip the
   // generic tail; some clips have no caption (the whole title is the tail).
   let caption = ogTitle
@@ -104,6 +105,8 @@ function jobFromVideoPage(html, idHint, fallbackCreator) {
     title: caption || id,
     description: caption,
     tags,
+    // The site's tags as it names them, for the item store.
+    sourceTags: tagLabels,
     sourceUrl: `https://www.xfree.com/video?id=${id}`,
     thumbnail: poster,
     filename: `${handle}-${id}.mp4`,

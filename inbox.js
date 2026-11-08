@@ -143,6 +143,9 @@ function mediaEntry(username, mediaName, sidecarName, sidecar) {
       description: caption,
       tags: hashtags(caption),
       mediaType,
+      // The app's sidecar as it came, for the item store's raw record (capped
+      // there). Instagram gives no tag list: the caption's hashtags are all.
+      sourceMeta: sc && typeof sc === 'object' && !Array.isArray(sc) ? { sidecar: sc } : undefined,
     },
   };
 }

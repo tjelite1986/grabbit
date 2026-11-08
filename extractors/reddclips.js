@@ -153,6 +153,8 @@ function jobFromPost(post, subreddit) {
     // buildCaption appends the hashtags and the source link to this.
     description: caption || id,
     tags: sub ? [sub.toLowerCase()] : [],
+    // The subreddit, as the site files the post (a category, not a tag).
+    categories: sub ? [`r/${sub}`] : [],
     mediaType: isImage ? 'image' : 'video',
     ext,
     thumbnail: unslash(post.thumbnail) || null,

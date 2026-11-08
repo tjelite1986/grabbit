@@ -85,11 +85,13 @@ function planRoots(candidates, exclude = []) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class DupeScanner {
-  // opts: store (item store), roots (from planRoots), mbPerSec, pauseMs,
-  // rescanMs, log
+  // opts: store (item store), roots (from planRoots, or a function returning
+  // them: planned again at every pass, so a folder mounted later is picked
+  // up), mbPerSec, pauseMs, rescanMs, log
   constructor(opts) {
     this.store = opts.store;
-    this.roots = opts.roots || [];
+    this.rootsFn = typeof opts.roots === 'function' ? opts.roots : () => opts.roots || [];
+    this.roots = this.rootsFn();
     this.mbPerSec = Math.max(1, Number(opts.mbPerSec) || 20);
     this.pauseMs = Math.max(0, Number(opts.pauseMs != null ? opts.pauseMs : 25));
     this.rescanMs = Math.max(60_000, Number(opts.rescanMs) || 6 * 3600_000);
@@ -159,6 +161,7 @@ class DupeScanner {
   // One walk of every root, then hash what is new or changed. Returns false
   // when paused part-way.
   async pass() {
+    this.roots = this.rootsFn();
     for (const r of this.roots) {
       if (!this.running()) return false;
       await this.walkRoot(r);

@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const { cleanTitle, titleFrom, parseTrackTitle } = require('./util');
 const { cookieArgs } = require('../cookies');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('../premium-fallback');
+const { ytdlpRaw } = require('../source-meta');
 
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 
@@ -269,6 +270,14 @@ async function resolve(url) {
   // The uploader's own page, for importers that make a profile per creator.
   const creatorUrl = info ? info.uploader_url || info.channel_url || null : null;
   const job = { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, probeFatal, mediaId, site, creatorUrl };
+  // What the site itself said, for the item store: its explicit tags and
+  // categories (not the hashtags read out of the caption above) and the
+  // descriptive part of the info dict.
+  if (info) {
+    job.sourceTags = Array.isArray(info.tags) ? info.tags.filter((t) => typeof t === 'string') : [];
+    job.categories = Array.isArray(info.categories) ? info.categories.filter((t) => typeof t === 'string') : [];
+    job.sourceMeta = ytdlpRaw(info);
+  }
   // The site's own age gate (Reddit over_18, YouTube age restriction) is an
   // 18+ signal on the item itself. The audience gate lets it tighten an item
   // to adult; nothing here can make one general.
