@@ -24,6 +24,7 @@ const hub = require('./hub');
 const profiles = require('./profiles');
 const audience = require('./audience');
 const itemStore = require('./item-store');
+const mediaViewer = require('./media-viewer');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -3030,6 +3031,232 @@ app.post('/api/hub/review/items', (req, res) => {
     console.error('review items:', e.message);
     res.status(500).json({ ok: false, error: 'The item store could not be changed. See the server log.' });
   }
+});
+
+// --- Grabbit 2.0 media viewer -----------------------------------------------------
+// The hub's Media page plays videos and shows pictures in place. Entries come
+// from the history log; their files are looked up in the folders the entry's
+// save channel writes to (media-viewer.js). A request names an entry id and a
+// variant, never a path, and a file is served only when its real path lies
+// inside one of the roots below. Only the admin session gets here: the gate
+// above refuses app passwords on every path but the job API.
+const MEDIA_ROOTS = [
+  CHANNEL_ROOTS.main && path.join(CHANNEL_ROOTS.main, 'main'),
+  // Null when the boot check found the 18+ folder overlapping a general one.
+  CHANNEL_ROOTS['18plus'] && path.join(CHANNEL_ROOTS['18plus'], '18plus'),
+  CHANNEL_ROOTS.platform,
+  POSTS_IMPORT_DIR,
+  DOWNLOAD_DIR,
+  VIDEOS_DIR,
+  ADULTS_DIR,
+  PHOTOS_DIR,
+  AUDIO_DIR,
+].filter(Boolean);
+// What each channel is called on screen.
+function mediaPlace(channel) {
+  const ch = String(channel || '');
+  if (ch === 'main') return `${CHANNEL_LIBRARY.main} library`;
+  if (ch === '18plus') return `${CHANNEL_LIBRARY['18plus']} (18+)`;
+  if (ch === 'platform') return `${CHANNEL_LIBRARY.platform} drop folder`;
+  if (ch === 'elite/posts') return 'Posts import';
+  if (ch.startsWith('server/')) return `Server library: ${ch.slice(7)}`;
+  return ch || 'unknown';
+}
+// The folders an entry's files can be in, most likely first.
+function mediaDirsOf(entry) {
+  const ch = String(entry.channel || '');
+  if (ch === 'main' || ch === '18plus') {
+    if (!CHANNEL_ROOTS[ch]) return [];
+    const root = path.join(CHANNEL_ROOTS[ch], ch);
+    // Imported clips sit in the creator's folder; queued ones in _import.
+    return [path.join(root, profileSlug(safeCreator(entry.creator))), path.join(root, '_import')];
+  }
+  if (ch === 'platform') return CHANNEL_ROOTS.platform ? [CHANNEL_ROOTS.platform] : [];
+  if (ch === 'elite/posts') return POSTS_IMPORT_DIR ? [path.join(POSTS_IMPORT_DIR, postsCreator(entry.creator))] : [];
+  const m = /^server\/([^/]+)(?:\/([^/]+))?$/.exec(ch);
+  if (!m) return []; // navidrome/*, audiobooks/*, audio/* and failed saves
+  const [, shelf, sub] = m;
+  if (shelf === 'mp3') return sub ? [] : [AUDIO_DIR];
+  if (sub !== undefined && !mediaViewer.isPlainName(sub)) return [];
+  const base = Object.hasOwn(SERVER_VIDEO_FOLDERS, shelf) ? SERVER_VIDEO_FOLDERS[shelf] : path.join(DOWNLOAD_DIR, sanitizeFolder(shelf));
+  return [sub ? path.join(base, sub) : base];
+}
+const MEDIA_ID_RE = /^(legacy-)?\d+-\d+$/;
+function mediaEntry(id) {
+  if (!MEDIA_ID_RE.test(String(id || ''))) return null;
+  const e = readHistory().find((x) => x.id === id);
+  return e && mediaViewer.isPlainName(e.filename) ? e : null;
+}
+function siteOfUrl(u) {
+  try {
+    return new URL(u).hostname.replace(/^(www|m|music)\./, '');
+  } catch {
+    return null;
+  }
+}
+// The item's audience as the gate would see it: the item store's row (by file
+// name or source URL), the creator's profile, and the place it was saved. A
+// save into the 18+ app or the adults shelf makes it 18+; nothing here can
+// make an item general that the owner did not classify general.
+function mediaAudience(entry, store) {
+  const names = [entry.filename, `${mediaViewer.stemOf(entry.filename)}.mp4`];
+  let row = null;
+  if (ITEM_STORE) {
+    try {
+      row = (entry.sourceUrl && ITEM_STORE.get(mediaKey(entry.sourceUrl))) || null;
+      for (const n of names) row = row || ITEM_STORE.getByFilename(n);
+    } catch {
+      row = null;
+    }
+  }
+  const ch = String(entry.channel || '');
+  const savedAdult = ch === '18plus' || ch === 'server/adults' || ch.startsWith('server/adults/');
+  const c = audience.classify(
+    {
+      creatorKey: entry.creator,
+      handle: entry.creator,
+      site: siteOfUrl(entry.sourceUrl),
+      extractor: entry.extractor,
+      sourceUrl: entry.sourceUrl,
+      requested: savedAdult ? 'adult' : null,
+      prior: row ? row.audience : null,
+      priorByHand: Boolean(row && row.classified_by_hand),
+    },
+    store,
+    { keyOf: creatorKey }
+  );
+  // The creator's profile, for the "open profile" link, whatever its status.
+  let profileId = c.profileId;
+  if (!profileId && store && entry.creator) {
+    const m = audience.matchProfiles(store, {
+      creatorKey: creatorKey(entry.creator).trim().toLowerCase(),
+      handle: String(entry.creator).trim().toLowerCase(),
+      platform: audience.platformOfSite(siteOfUrl(entry.sourceUrl)),
+    }, creatorKey);
+    if (m.length) profileId = m[0].profile.id;
+  }
+  return { audience: c.audience, reasons: c.reasons, profileId: profileId || null };
+}
+function readProfileStoreQuietly() {
+  try {
+    return readProfiles().store;
+  } catch {
+    return null;
+  }
+}
+function mediaListItem(e, store) {
+  const a = mediaAudience(e, store);
+  return {
+    id: e.id,
+    time: e.time || null,
+    kind: mediaViewer.kindOfName(e.filename),
+    creator: e.creator || null,
+    title: e.title || null,
+    filename: e.filename,
+    channel: e.channel || null,
+    place: mediaPlace(e.channel),
+    site: siteOfUrl(e.sourceUrl),
+    sourceUrl: /^https?:\/\//i.test(e.sourceUrl || '') ? e.sourceUrl : null,
+    thumbnail: e.thumbnail || null,
+    audience: a.audience,
+    profileId: a.profileId,
+  };
+}
+// ffprobe results by path + size + mtime; a replaced file probes again.
+const probeCache = new Map();
+function probeMedia(file, st) {
+  const key = `${file}|${st.size}|${st.mtimeMs}`;
+  if (probeCache.has(key)) return Promise.resolve(probeCache.get(key));
+  return new Promise((resolve) => {
+    const args = ['-v', 'error', '-print_format', 'json', '-show_entries',
+      'format=duration:stream=codec_type,codec_name,width,height', '--', file];
+    const p = spawn(FFPROBE, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    const timer = setTimeout(() => p.kill('SIGKILL'), 10000);
+    p.stdout.setEncoding('utf8');
+    p.stdout.on('data', (d) => { if (out.length < 65536) out += d; });
+    p.on('error', () => { clearTimeout(timer); resolve(null); });
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      const r = code === 0 ? mediaViewer.parseProbe(out) : null;
+      if (probeCache.size > 500) probeCache.delete(probeCache.keys().next().value);
+      probeCache.set(key, r);
+      resolve(r);
+    });
+  });
+}
+
+// GET /api/hub/media -> the history entries that name a file, newest first,
+// with the audience each one has under the gate's rules.
+app.get('/api/hub/media', (_req, res) => {
+  const store = readProfileStoreQuietly();
+  const items = readHistory()
+    .filter((e) => mediaViewer.isPlainName(e.filename))
+    .map((e) => mediaListItem(e, store));
+  res.json({ ok: true, items });
+});
+
+// GET /api/hub/media/:id -> one entry with its files on disk and their metadata.
+app.get('/api/hub/media/:id', async (req, res) => {
+  const e = mediaEntry(req.params.id);
+  if (!e) return res.status(404).json({ ok: false, error: 'No such media entry' });
+  const store = readProfileStoreQuietly();
+  const item = mediaListItem(e, store);
+  const a = mediaAudience(e, store);
+  const found = mediaViewer.findVariants(e.filename, mediaDirsOf(e), MEDIA_ROOTS);
+  const variants = [];
+  for (const v of ['original', 'web']) {
+    const file = found && found[v];
+    if (!file) continue;
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    const kind = mediaViewer.kindOfName(file);
+    const ext = mediaViewer.extOf(file);
+    const probe = kind === 'video' || kind === 'image' ? await probeMedia(file, st) : null;
+    variants.push({
+      variant: v,
+      name: path.basename(file),
+      kind,
+      format: ext,
+      bytes: st.size,
+      modified: st.mtimeMs,
+      ...(probe || {}),
+      playable: mediaViewer.playability(kind, ext, probe),
+    });
+  }
+  res.json({
+    ok: true,
+    item: {
+      ...item,
+      extractor: e.extractor || null,
+      description: e.description || null,
+      reasons: a.reasons,
+      available: variants.length > 0,
+      variants,
+      poster: Boolean(found && found.poster),
+      error: e.error || null,
+    },
+  });
+});
+
+// GET /api/hub/media/:id/file?v=original|web|poster[&download=1] -> the file,
+// with Range support so a video can seek before it has fully arrived.
+app.get('/api/hub/media/:id/file', (req, res) => {
+  const e = mediaEntry(req.params.id);
+  const v = String(req.query.v || 'original');
+  if (!e || !mediaViewer.VARIANTS.includes(v)) return res.status(404).json({ ok: false, error: 'Not available' });
+  const found = mediaViewer.findVariants(e.filename, mediaDirsOf(e), MEDIA_ROOTS);
+  const file = found && found[v];
+  if (!file) return res.status(404).json({ ok: false, error: 'Not available' });
+  if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+    if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
+  });
 });
 
 app.get('/api/folders', (_req, res) => {
