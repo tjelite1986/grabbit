@@ -235,3 +235,54 @@ test('getBySourceUrl finds the newest item saved from a URL, and nothing for an 
   s.upsert({ key: 'facebook.com/watch/', sourceUrl: url, audience: 'unknown' });
   assert.equal(s.getBySourceUrl(url).key, 'id:facebook:1');
 });
+
+test('a v2 store migrates to v3 keeping every delivery, and egram is a general app', (t) => {
+  const file = tmpDb(t);
+  const Database = require('better-sqlite3');
+  const v2 = new Database(file);
+  v2.exec(itemStore.__MIGRATIONS[0]);
+  v2.exec(itemStore.__MIGRATIONS[1]);
+  v2.pragma('user_version = 2');
+  const ins = v2.prepare("INSERT INTO items (key, audience, origin, created_at, updated_at) VALUES (?, ?, 'save', 1, 1)");
+  const g = ins.run('g', 'general').lastInsertRowid;
+  const u = ins.run('u', 'unknown').lastInsertRowid;
+  v2.prepare("INSERT INTO deliveries (item_id, destination, status, detail, at) VALUES (?, 'main', 'dropped', NULL, 5)").run(g);
+  v2.prepare("INSERT INTO deliveries (item_id, destination, status, detail, at) VALUES (?, 'platform', 'refused', 'no', 6)").run(u);
+  // v2 has no egram: the CHECK refuses it.
+  assert.throws(() => v2.prepare("INSERT INTO deliveries (item_id, destination, status, at) VALUES (?, 'egram', 'refused', 7)").run(u), /CHECK/);
+  v2.close();
+
+  const s = itemStore.open(file, { now: () => 1_700_000_000_000 });
+  t.after(() => s.close());
+  t.after(() => fs.rmSync(s.migrationBackup, { force: true }));
+  assert.equal(s.db.pragma('user_version', { simple: true }), 3);
+  const rows = s.db.prepare('SELECT id, item_id, destination, status, at FROM deliveries ORDER BY id').all();
+  assert.deepEqual(rows.map((r) => `${r.item_id}:${r.destination}:${r.status}:${r.at}`), [`${g}:main:dropped:5`, `${u}:platform:refused:6`]);
+  // The locks are back on the rebuilt table, egram included.
+  assert.throws(() => s.recordDelivery(Number(u), 'egram', 'dropped'), /not classified general/);
+  assert.throws(() => s.recordDelivery(Number(u), 'main', 'dropped'), /not classified general/);
+  s.recordDelivery(Number(g), 'egram', 'dropped');
+  assert.equal(s.deliveredTo(Number(g), 'egram'), true);
+  assert.equal(s.deliveredTo(Number(u), 'egram'), false);
+  const triggers = s.db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
+  assert.deepEqual(triggers, ['deliveries_adult_takes_no_images', 'deliveries_general_needs_general_item', 'items_audience_never_lowered']);
+});
+
+test('inbox rows: a media row needs an item, states are checked, purge picks settled rows only', (t) => {
+  const s = itemStore.open(tmpDb(t));
+  t.after(() => s.close());
+  assert.throws(() => s.inboxAdd({ entry: 'u/a', kind: 'media', username: 'u', mediaFile: 'a.jpg' }), /CHECK/);
+  const it = s.upsert({ key: 'id:instagram:A1', audience: 'unknown' });
+  const r = s.inboxAdd({ entry: 'u/a', kind: 'media', itemId: it.id, username: 'u', mediaFile: 'a.jpg', groupKey: 'A1', groupSize: 1 }, 100);
+  assert.equal(r.state, 'held');
+  assert.throws(() => s.inboxAdd({ entry: 'u/a', kind: 'media', itemId: it.id, username: 'u' }), /UNIQUE/);
+  assert.throws(() => s.inboxSetState(r.id, 'gone'), /unknown inbox state/);
+  const p = s.inboxAdd({ entry: 'u/u', kind: 'profile', username: 'u', sidecarFile: 'u.json' }, 100);
+  s.inboxSetState(p.id, 'delivered', 'ok', 200);
+  assert.deepEqual(s.inboxOpen().map((x) => x.id), [r.id]);
+  assert.deepEqual(s.inboxPurgeDue(150).map((x) => x.id), []);
+  assert.deepEqual(s.inboxPurgeDue(201).map((x) => x.id), [p.id]);
+  s.inboxMarkPurged(p.id, 300);
+  assert.deepEqual(s.inboxPurgeDue(1000).map((x) => x.id), []);
+  assert.deepEqual(s.inboxCounts(), { held: 1, delivered: 1 });
+});
