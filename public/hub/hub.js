@@ -40,6 +40,14 @@
     pulse: 'M3 12h4l3-8 4 16 3-8h4',
     review: 'M9 11l3 3 8-8M20 12v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11',
     sites: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18',
+    play: 'M8 5v14l11-7z',
+    close: 'M6 6l12 12M18 6 6 18',
+    prev: 'M15 5l-7 7 7 7',
+    next: 'M9 5l7 7-7 7',
+    info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v6M12 7.5h.01',
+    zoomin: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6M11 8v6',
+    zoomout: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6',
+    fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   };
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -113,6 +121,7 @@
     health: null,
     config: null,
     history: null,
+    media: null,
     jobs: new Map(),
     review: null,
   };
@@ -126,6 +135,7 @@
       health: () => api('/api/health').then((d) => { state.health = d; }),
       config: () => api('/api/config').then((d) => { state.config = d; }),
       history: () => api('/api/history').then((d) => { state.history = d.items || []; }),
+      media: () => api('/api/hub/media').then((d) => { state.media = d.items || []; }),
       review: () => api('/api/hub/review').then((d) => { state.review = d; }),
       jobs: () => api('/api/jobs').then((d) => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
     };
@@ -145,7 +155,7 @@
       const prev = state.jobs.get(d.job.id);
       state.jobs.set(d.job.id, d.job);
       // A finished download changes the counts and the recent list.
-      if (d.job.status === 'done' && prev && prev.status !== 'done') load(['summary', 'history']).then(scheduleRender);
+      if (d.job.status === 'done' && prev && prev.status !== 'done') load(['summary', 'history', 'media']).then(scheduleRender);
       scheduleRender();
     };
     // A closed stream (container restart) never reopens by itself.
@@ -210,7 +220,16 @@
       }
     }
   }
+  // The route without the viewer's `open` parameter.
+  function pageKey() {
+    const r = route();
+    const q = new URLSearchParams(r.params);
+    q.delete('open');
+    return `${r.id}?${q}`;
+  }
+  let renderedKey = null;
   function render(focus = true) {
+    renderedKey = pageKey();
     const r = route();
     const view = $('#view');
     view.replaceChildren(...[r.view(r.params)].flat());
@@ -363,12 +382,18 @@
       acts);
   }
 
-  function tile(it) {
+  // A tile opens the media viewer for its history entry. `query` is the Media
+  // page's own filter, so next/previous in the viewer walks the same list.
+  function tile(it, query) {
     const src = thumbSrc(it.thumbnail);
     const site = hostOf(it.sourceUrl);
-    return h('a', { class: `tile${src ? '' : ' no-thumb'}`, 'data-kind': it.kind || null, href: it.sourceUrl && /^https?:/i.test(it.sourceUrl) ? it.sourceUrl : null, target: '_blank', rel: 'noopener noreferrer', title: [it.creator, it.title].filter(Boolean).join(' - ') },
+    const q = new URLSearchParams(query || '');
+    q.set('open', it.id);
+    return h('a', { class: `tile${src ? '' : ' no-thumb'}`, 'data-kind': it.kind || null, href: `#/media?${q}`, title: [it.creator, it.title].filter(Boolean).join(' - ') },
       src ? h('img', { src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null,
       site ? h('span', { class: 'chip site' }, site) : null,
+      it.audience === 'adult' ? h('span', { class: 'chip adult aud' }, '18+') : null,
+      it.kind === 'video' ? h('span', { class: 'play', 'aria-hidden': 'true' }, icon('play')) : null,
       h('span', { class: 'cap' }, it.title || it.filename || ''));
   }
 
@@ -433,7 +458,7 @@
     const stat = (iconName, value, label, href, extra) =>
       h('a', { class: 'stat', href }, icon(iconName), h('span', null, h('b', null, s ? num(value) : '-'), h('small', null, label), extra));
     const active = activeJobs();
-    const recent = (state.history || []).filter((it) => it.filename).slice(0, 6);
+    const recent = (state.media || []).slice(0, 6);
     return [
       h('h1', null, 'Welcome back'),
       h('p', { class: 'lead' }, 'Grabbit 2.0 - one place to download, sort, convert and hand media to your apps.'),
@@ -451,7 +476,7 @@
             card(`Active queue (${active.length})`, 'queue', { href: '#/queue', label: 'Show all' },
               active.length ? h('div', { class: 'jobs' }, active.slice(0, 4).map((j) => jobRow(j, true))) : h('p', { class: 'empty' }, 'Nothing is downloading right now.')),
             card('Recently downloaded', 'media', { href: '#/media', label: 'Show all' },
-              recent.length ? h('div', { class: 'tiles' }, recent.map(tile)) : h('p', { class: 'empty' }, state.history ? 'No downloads in the history yet.' : 'Loading ...'))),
+              recent.length ? h('div', { class: 'tiles' }, recent.map((it) => tile(it))) : h('p', { class: 'empty' }, state.media ? 'No downloads in the history yet.' : 'Loading ...'))),
           card('Workflow in Grabbit', 'pulse', null, h('div', { class: 'flow' },
             flowStep('download', 'Import', 'Fetch media', '#/download'),
             flowStep('dupes', 'Duplicate check', 'Avoid copies', '#/duplicates'),
@@ -497,33 +522,49 @@
     ];
   }
 
+  // The Media page's list for a set of filters. The viewer steps through the
+  // same list, so next/previous never leaves the audience or kind on screen.
+  function mediaList(params) {
+    const kind = params.get('kind') || '';
+    const aud = params.get('aud') || '';
+    const q = (params.get('q') || '').toLowerCase();
+    return (state.media || [])
+      .filter((it) => !kind || it.kind === kind)
+      .filter((it) => !aud || it.audience === aud)
+      .filter((it) => !q || [it.creator, it.title, it.filename].join(' ').toLowerCase().includes(q));
+  }
+
   function viewMedia(params) {
     const kind = params.get('kind') || '';
+    const aud = params.get('aud') || '';
     const q = (params.get('q') || '').toLowerCase();
-    const kindOf = (name) => {
-      const ext = (/\.([a-z0-9]+)$/i.exec(name || '') || [])[1];
-      const e = (ext || '').toLowerCase();
-      if (['mp4', 'mkv', 'webm', 'mov', 'm4v'].includes(e)) return 'video';
-      if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'avif'].includes(e)) return 'image';
-      if (['mp3', 'm4a', 'opus', 'ogg', 'flac', 'wav', 'aac', 'm4b'].includes(e)) return 'audio';
-      return 'other';
-    };
     // History entries without a file are refused or failed attempts, not media.
     // They stay out of the grid, but the newest ones are named above it so the
     // latest download never just goes missing.
     const recent = (state.history || []).slice(0, 10);
     const lastFile = recent.findIndex((it) => it.filename);
     const misses = (lastFile === -1 ? recent : recent.slice(0, lastFile)).filter((it) => !it.filename);
-    const items = (state.history || [])
-      .filter((it) => it.filename)
-      .map((it) => ({ ...it, kind: kindOf(it.filename) }))
-      .filter((it) => !kind || it.kind === kind)
-      .filter((it) => !q || [it.creator, it.title, it.filename].join(' ').toLowerCase().includes(q));
-    const tab = (k, label) => h('a', { class: `btn small ${kind === k ? '' : 'ghost'}`, href: `#/media${k ? '?kind=' + k : ''}` }, label);
+    const items = mediaList(params);
+    const query = new URLSearchParams(params);
+    query.delete('open');
+    const withParam = (k, v) => {
+      const n = new URLSearchParams(query);
+      if (v) n.set(k, v);
+      else n.delete(k);
+      return `#/media${n.toString() ? '?' + n : ''}`;
+    };
+    const tab = (k, label) => h('a', { class: `btn small ${kind === k ? '' : 'ghost'}`, href: withParam('kind', k) }, label);
+    const audSelect = h('select', {
+      class: 'field small',
+      'aria-label': 'Audience',
+      onchange: (e) => { location.hash = withParam('aud', e.currentTarget.value); },
+    },
+    [['', 'All audiences'], ['general', 'General'], ['adult', '18+'], ['unknown', 'Unclassified']]
+      .map(([v, label]) => h('option', { value: v, selected: v === aud }, label)));
     return [
       h('h1', null, 'Media'),
-      h('p', { class: 'lead' }, 'The latest downloads from the history log (it keeps the newest 100). A full media library with previews is planned.'),
-      h('div', { class: 'toolbar' }, tab('', 'All'), tab('video', 'Videos'), tab('image', 'Images'), tab('audio', 'Audio'),
+      h('p', { class: 'lead' }, 'The latest downloads from the history log. Click one to play or view it here.'),
+      h('div', { class: 'toolbar' }, tab('', 'All'), tab('video', 'Videos'), tab('image', 'Images'), tab('audio', 'Audio'), audSelect,
         q ? h('span', { class: 'chip' }, `Search: ${q}`) : null),
       misses.length
         ? h('div', { class: 'note warn-note' },
@@ -533,9 +574,326 @@
               ' ', h('span', { class: 'muted' }, `(${ago(it.time)})`),
               h('div', { class: 'bad-t' }, it.error || 'No file was saved.')))))
         : null,
-      items.length ? h('div', { class: 'media-grid' }, items.map(tile)) : h('p', { class: 'empty' }, state.history ? 'Nothing matches.' : 'Loading ...'),
+      items.length ? h('div', { class: 'media-grid' }, items.map((it) => tile(it, query))) : h('p', { class: 'empty' }, state.media ? 'Nothing matches.' : 'Loading ...'),
     ];
   }
+
+  // --- Media viewer --------------------------------------------------------
+  // A full-screen layer over the Media page, driven by the `open` parameter:
+  // the back button closes it, and a link to it opens the same item. The file
+  // is fetched by entry id and variant; the server decides where it lives.
+  const viewer = { el: null, id: null, detail: null, variant: null, seq: 0, zoom: null };
+  const fmtDuration = (s) => {
+    if (!Number.isFinite(s)) return '';
+    const m = Math.floor(s / 60);
+    const sec = Math.round(s % 60);
+    return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
+  };
+  const fileUrl = (id, v, download) => `/api/hub/media/${encodeURIComponent(id)}/file?v=${v}${download ? '&download=1' : ''}`;
+
+  function viewerNeighbours() {
+    const r = route();
+    const list = mediaList(r.params);
+    const i = list.findIndex((it) => it.id === viewer.id);
+    return { list, i, prev: i > 0 ? list[i - 1] : null, next: i >= 0 && i < list.length - 1 ? list[i + 1] : null };
+  }
+  // Stepping replaces the history entry, so one back press closes the viewer.
+  function viewerGo(it) {
+    if (!it) return;
+    const r = route();
+    const q = new URLSearchParams(r.params);
+    q.set('open', it.id);
+    location.replace(`#/media?${q}`);
+  }
+  let viewerPushed = false;
+  function viewerClose() {
+    if (viewerPushed) return history.back();
+    const q = new URLSearchParams(route().params);
+    q.delete('open');
+    location.replace(`#/${route().id}${q.toString() ? '?' + q : ''}`);
+  }
+
+  function syncViewer() {
+    const r = route();
+    const id = r.id === 'media' ? r.params.get('open') : null;
+    if (!id) {
+      if (viewer.el) {
+        viewer.el.remove();
+        viewer.el = null;
+        viewer.id = null;
+        document.body.classList.remove('viewer-open');
+        viewerPushed = false;
+      }
+      return;
+    }
+    if (viewer.el && viewer.id === id) return;
+    viewer.id = id;
+    viewer.detail = null;
+    viewer.variant = null;
+    if (!viewer.el) {
+      viewer.el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Media viewer' });
+      document.body.append(viewer.el);
+      document.body.classList.add('viewer-open');
+    }
+    drawViewer();
+    const seq = ++viewer.seq;
+    api(`/api/hub/media/${encodeURIComponent(id)}`)
+      .then((d) => {
+        if (seq !== viewer.seq) return;
+        viewer.detail = d.item;
+        const vs = d.item.variants || [];
+        // The web copy is made for browsers and phones; the original is the
+        // choice when there is no copy, or when the original plays as it is.
+        const web = vs.find((v) => v.variant === 'web');
+        const orig = vs.find((v) => v.variant === 'original');
+        viewer.variant = (web && (!orig || orig.playable !== 'yes' || orig.bytes > web.bytes * 1.5) ? web : orig || web || {}).variant || null;
+        drawViewer();
+      })
+      .catch((e) => {
+        if (seq !== viewer.seq) return;
+        viewer.detail = { error: e.message };
+        drawViewer();
+      });
+  }
+
+  function drawViewer() {
+    const el = viewer.el;
+    if (!el) return;
+    const fromList = (state.media || []).find((it) => it.id === viewer.id) || null;
+    const d = viewer.detail;
+    const it = (d && !d.error ? d : null) || fromList || {};
+    const nb = viewerNeighbours();
+    const title = [it.creator, it.title].filter(Boolean).join(' - ') || it.filename || 'Media';
+    const btn = (label, iconName, onclick, attrs) =>
+      h('button', { class: 'icon-btn', type: 'button', 'aria-label': label, title: label, onclick, ...(attrs || {}) }, icon(iconName));
+    const prevBtn = btn('Previous', 'prev', () => viewerGo(nb.prev), { class: 'icon-btn nav-btn prev', disabled: !nb.prev });
+    const nextBtn = btn('Next', 'next', () => viewerGo(nb.next), { class: 'icon-btn nav-btn next', disabled: !nb.next });
+
+    const stage = h('div', { class: 'v-stage' });
+    viewer.zoom = null;
+    if (!d) {
+      stage.append(h('p', { class: 'muted' }, 'Loading ...'));
+    } else if (d.error) {
+      stage.append(h('p', { class: 'bad-t' }, d.error));
+    } else {
+      const cur = (d.variants || []).find((v) => v.variant === viewer.variant);
+      const poster = d.poster ? fileUrl(d.id, 'poster') : thumbSrc(d.thumbnail);
+      if (!cur) {
+        stage.append(h('div', { class: 'v-missing' },
+          poster ? h('img', { src: poster, alt: '', 'data-media-bg': '1', onerror: (e) => e.currentTarget.remove() }) : null,
+          h('p', null, 'The file is not on this server any more.'),
+          h('p', { class: 'muted' }, d.channel === '18plus' || d.channel === 'platform'
+            ? 'This app takes the file out of its drop folder when it imports it.'
+            : d.kind === 'audio' ? 'Audio is played in the music or audiobook library.' : 'It was moved or deleted after the download.')));
+      } else if (cur.kind === 'video') {
+        const video = h('video', {
+          src: fileUrl(d.id, cur.variant),
+          controls: true,
+          playsinline: true,
+          preload: 'metadata',
+          poster: poster || null,
+          'data-media-bg': '1',
+        });
+        video.addEventListener('error', () => {
+          if (!video.error) return;
+          const other = (d.variants || []).find((v) => v.variant !== cur.variant && v.kind === 'video');
+          stage.append(h('p', { class: 'v-err' }, 'This browser cannot play this file.', other ? ' Try the other copy below.' : ' Download it to play it elsewhere.'));
+        });
+        stage.append(video);
+        if (cur.playable === 'no') stage.append(h('p', { class: 'v-err' }, `${cur.format.toUpperCase()} with ${cur.videoCodec || 'this codec'} may not play in a browser.`));
+        // Autoplay only with sound off is allowed everywhere; leave it to the user.
+      } else if (cur.kind === 'image') {
+        stage.append(imageZoom(fileUrl(d.id, cur.variant), title));
+      } else if (cur.kind === 'audio') {
+        stage.append(h('div', { class: 'v-audio' },
+          poster ? h('img', { src: poster, alt: '', 'data-media-bg': '1', onerror: (e) => e.currentTarget.remove() }) : icon('audio'),
+          h('audio', { src: fileUrl(d.id, cur.variant), controls: true, preload: 'metadata' })));
+      }
+    }
+    swipe(stage);
+
+    el.replaceChildren(
+      h('header', { class: 'v-top' },
+        btn('Close', 'close', viewerClose),
+        h('div', { class: 'v-title' }, h('strong', null, title),
+          h('small', null, nb.i >= 0 ? `${nb.i + 1} of ${nb.list.length}` : '', it.audience === 'adult' ? ' - 18+' : '')),
+        viewer.zoom ? h('div', { class: 'v-zoom' },
+          btn('Zoom out', 'zoomout', () => viewer.zoom.step(1 / 1.5)),
+          btn('Reset zoom', 'fit', () => viewer.zoom.reset()),
+          btn('Zoom in', 'zoomin', () => viewer.zoom.step(1.5))) : null,
+        btn('Details', 'info', () => el.classList.toggle('info-open'), { class: 'icon-btn info-btn' })),
+      h('div', { class: 'v-body' },
+        h('div', { class: 'v-media' }, prevBtn, stage, nextBtn),
+        h('aside', { class: 'v-info' }, d && !d.error ? viewerInfo(d) : null)));
+  }
+
+  function viewerInfo(d) {
+    const cur = (d.variants || []).find((v) => v.variant === viewer.variant);
+    const row = (k, ...v) => (v.flat().some((x) => x !== null && x !== undefined && x !== '') ? h('div', { class: 'kv' }, h('dt', null, k), h('dd', null, ...v)) : null);
+    const res = cur && cur.width && cur.height ? `${cur.width} x ${cur.height}` : '';
+    const profile = d.profileId
+      ? h('a', { href: `#/profiles?id=${d.profileId}` }, 'Open profile')
+      : d.creator ? h('a', { href: `#/profiles?q=${encodeURIComponent(d.creator)}` }, 'Find profile') : null;
+    return [
+      h('dl', null,
+        row('Creator', d.creator || '', profile ? [' ', profile] : null),
+        row('Title', d.title || ''),
+        row('Platform', d.site || d.extractor || ''),
+        row('Original URL', d.sourceUrl ? h('a', { href: d.sourceUrl, target: '_blank', rel: 'noopener noreferrer', class: 'break' }, d.sourceUrl) : ''),
+        row('Saved to', d.place || ''),
+        row('Downloaded', d.time ? new Date(d.time).toLocaleString() : ''),
+        row('Classification', audienceChip(d.audience), d.reasons && d.reasons.length ? h('div', { class: 'muted small' }, d.reasons.join('; ')) : null),
+        cur ? [
+          row('File', h('span', { class: 'break' }, cur.name)),
+          row('Format', [cur.format.toUpperCase(), cur.videoCodec, cur.audioCodec].filter(Boolean).join(' / ')),
+          row('Size', bytes(cur.bytes)),
+          row('Resolution', res),
+          cur.kind === 'image' ? null : row('Duration', fmtDuration(cur.duration)),
+        ] : null),
+      (d.variants || []).length > 1
+        ? h('div', { class: 'v-variants' }, h('span', { class: 'muted' }, 'Copy:'),
+            d.variants.map((v) => h('button', {
+              type: 'button',
+              class: `btn small ${v.variant === viewer.variant ? '' : 'ghost'}`,
+              onclick: () => { viewer.variant = v.variant; drawViewer(); },
+            }, v.variant === 'web' ? `Web copy (${bytes(v.bytes)})` : `Original (${bytes(v.bytes)})`)))
+        : null,
+      cur ? h('p', null, h('a', { class: 'btn small ghost', href: fileUrl(d.id, cur.variant, true) }, 'Download file')) : null,
+    ];
+  }
+
+  // Zoom and pan for a picture: wheel, double click or double tap, pinch, drag.
+  function imageZoom(src, alt) {
+    const img = h('img', { src, alt, draggable: 'false', 'data-media-bg': '1' });
+    const box = h('div', { class: 'v-zoombox' }, img);
+    let scale = 1;
+    let x = 0;
+    let y = 0;
+    const apply = () => {
+      if (scale <= 1.001) { scale = 1; x = 0; y = 0; }
+      img.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+      box.classList.toggle('zoomed', scale > 1);
+    };
+    // Zoom around a point given in box coordinates (the centre when omitted).
+    const zoomAt = (factor, cx, cy) => {
+      const rect = box.getBoundingClientRect();
+      const px = (cx === undefined ? rect.width / 2 : cx) - rect.width / 2;
+      const py = (cy === undefined ? rect.height / 2 : cy) - rect.height / 2;
+      const next = Math.min(8, Math.max(1, scale * factor));
+      const k = next / scale;
+      x = px - (px - x) * k;
+      y = py - (py - y) * k;
+      scale = next;
+      apply();
+    };
+    viewer.zoom = { step: (f) => zoomAt(f), reset: () => { scale = 1; apply(); }, zoomed: () => scale > 1 };
+    box.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const r = box.getBoundingClientRect();
+      zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX - r.left, e.clientY - r.top);
+    }, { passive: false });
+    // A double tap is handled in pointerdown; the dblclick the browser then
+    // synthesises from the same taps would undo it.
+    let lastPointer = 'mouse';
+    box.addEventListener('dblclick', (e) => {
+      if (lastPointer === 'touch') return;
+      const r = box.getBoundingClientRect();
+      if (scale > 1) { scale = 1; apply(); } else zoomAt(2.5, e.clientX - r.left, e.clientY - r.top);
+    });
+    // Pointer events cover mouse, pen and touch: one pointer pans, two pinch.
+    const pts = new Map();
+    let pinch = null;
+    let lastTap = 0;
+    box.addEventListener('pointerdown', (e) => {
+      lastPointer = e.pointerType;
+      box.setPointerCapture(e.pointerId);
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale };
+      }
+      if (e.pointerType === 'touch' && pts.size === 1) {
+        const now = Date.now();
+        if (now - lastTap < 300) {
+          const r = box.getBoundingClientRect();
+          if (scale > 1) { scale = 1; apply(); } else zoomAt(2.5, e.clientX - r.left, e.clientY - r.top);
+          lastTap = 0;
+        } else lastTap = now;
+      }
+    });
+    box.addEventListener('pointermove', (e) => {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x;
+      const dy = e.clientY - p.y;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2 && pinch) {
+        const [a, b] = [...pts.values()];
+        const r = box.getBoundingClientRect();
+        const target = pinch.scale * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.dist);
+        zoomAt(target / scale, (a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top);
+      } else if (pts.size === 1 && scale > 1) {
+        x += dx;
+        y += dy;
+        apply();
+      }
+    });
+    const up = (e) => {
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinch = null;
+    };
+    box.addEventListener('pointerup', up);
+    box.addEventListener('pointercancel', up);
+    return box;
+  }
+
+  // A horizontal swipe on the stage steps to the next or previous item, unless
+  // a picture is zoomed in (then the finger pans) or the touch starts on the
+  // video's own control bar.
+  function swipe(stage) {
+    let start = null;
+    stage.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1 || (viewer.zoom && viewer.zoom.zoomed())) { start = null; return; }
+      const t = e.touches[0];
+      const v = stage.querySelector('video');
+      if (v) {
+        const r = v.getBoundingClientRect();
+        if (t.clientY > r.bottom - 70) { start = null; return; }
+      }
+      start = { x: t.clientX, y: t.clientY, at: Date.now() };
+    }, { passive: true });
+    stage.addEventListener('touchend', (e) => {
+      if (!start || e.changedTouches.length !== 1) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - start.x;
+      const dy = t.clientY - start.y;
+      const quick = Date.now() - start.at < 600;
+      start = null;
+      if (!quick || Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      const nb = viewerNeighbours();
+      viewerGo(dx < 0 ? nb.next : nb.prev);
+    }, { passive: true });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (!viewer.el || e.ctrlKey || e.metaKey || e.altKey) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(tag)) return;
+    if (e.key === 'Escape') { e.preventDefault(); viewerClose(); return; }
+    // On a focused video the arrows seek; elsewhere they step through the list.
+    if (tag === 'VIDEO' || tag === 'AUDIO') return;
+    const nb = viewerNeighbours();
+    if (e.key === 'ArrowRight') { e.preventDefault(); viewerGo(nb.next); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); viewerGo(nb.prev); }
+    else if (viewer.zoom && (e.key === '+' || e.key === '=')) viewer.zoom.step(1.5);
+    else if (viewer.zoom && e.key === '-') viewer.zoom.step(1 / 1.5);
+    else if (viewer.zoom && e.key === '0') viewer.zoom.reset();
+  });
+  // A click on a tile pushes the viewer's history entry; close then goes back.
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest && e.target.closest('a.tile');
+    if (a && !e.defaultPrevented && e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey) viewerPushed = true;
+  });
 
   // --- Profiles ------------------------------------------------------------
   const jsonPost = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -1059,14 +1417,18 @@
     }
   });
   window.addEventListener('hashchange', () => {
+    // Opening, closing or stepping in the viewer changes only `open`: the page
+    // under it keeps its scroll position and is not rebuilt.
+    if (pageKey() === renderedKey) return syncViewer();
     grabCache = null;
     render();
+    syncViewer();
   });
 
   async function boot() {
     buildNav();
     render();
-    await load(['config', 'summary', 'history', 'jobs', 'review']);
+    await load(['config', 'summary', 'history', 'media', 'jobs', 'review']);
     const apps = (state.summary && state.summary.apps) || [];
     if (state.summary && state.summary.brand) $('#brandSub').textContent = state.summary.brand;
     if (apps.length) {
@@ -1074,6 +1436,7 @@
       $('#appsBox').hidden = false;
     }
     render(false);
+    syncViewer();
     connectStream();
     // The health probe touches every mount; it can take a moment.
     await load(['health']);

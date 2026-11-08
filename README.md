@@ -172,6 +172,26 @@ review, metadata editing) are marked as planned instead of showing sample
 values. The classic interface at `/` keeps every feature and is linked from the
 hub's sidebar.
 
+### Media viewer
+
+A click on a tile in the hub's *Media* page plays the video or shows the picture
+in place: native video controls (play, seek, volume, full screen, inline on
+phones), zoom and pan for pictures (wheel, double click or double tap, pinch,
+drag), next and previous by button, arrow key or swipe, and a details panel with
+creator, platform, original URL, format, size, resolution and the item's
+classification. Next and previous stay inside the page's filter, so with the
+audience filter set to *General* no 18+ item comes up.
+
+Files are served as they are; nothing is converted. Where an app keeps a
+browser copy beside the original (`<name>.web.mp4`), the viewer offers both and
+starts with the web copy. The browser asks for a history entry id and a variant
+(`original`, `web`, `poster`), never a path: the server looks in the folders the
+entry's save channel writes to and serves a file only when its real path lies
+inside a configured root (a symlink out of a library is refused). The routes
+are for the main session only; app passwords get 403. A file an importer has
+already taken out of its drop folder (Adshortis, Platform) shows as no longer
+on the server.
+
 ### The 18+ destination (Adshortis)
 
 Adshortis is a destination of its own, never mixed with the general apps:
