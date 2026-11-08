@@ -83,6 +83,32 @@ test('a target folder swapped for a symlink and back while the bytes go over lea
   assert.deepEqual(listAll(user), []);
 });
 
+test('a temp renamed by the tree owner after a swap is never unlinked by its new name', (t) => {
+  const d = setup(t);
+  const user = path.join(d.dst, 'user');
+  const elsewhere = path.join(d.parked, 'user');
+  assert.throws(
+    () => copyInto(path.join(d.src, 'user', 'a.jpg'), user, 'a.jpg', {
+      root: d.dst,
+      srcRoot: d.src,
+      _hooks: {
+        beforeTmpOpen() {
+          fs.renameSync(user, elsewhere);
+          fs.symlinkSync(elsewhere, user);
+        },
+        // The owner renames the temp to a name of their choosing; an unlink by
+        // the descriptor's path would now delete a file by that name.
+        afterTmpOpen() {
+          const tmp = fs.readdirSync(elsewhere).find((n) => n.startsWith('.a.jpg.part-'));
+          fs.renameSync(path.join(elsewhere, tmp), path.join(elsewhere, 'victim'));
+        },
+      },
+    }),
+    /refused/,
+  );
+  assert.deepEqual(listAll(elsewhere), ['victim'], 'the file under the chosen name was not unlinked');
+});
+
 test('a source folder swapped for a symlink after the check is caught, no outside bytes are copied', (t) => {
   const d = setup(t);
   fs.writeFileSync(path.join(d.outside, 'a.jpg'), 'secret bytes');
