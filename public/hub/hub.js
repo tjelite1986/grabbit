@@ -310,9 +310,9 @@
     syncDest();
     const input = h('input', { type: 'url', required: true, placeholder: 'Paste a link (Facebook, TikTok, Instagram, YouTube ...)', 'aria-label': 'Link' });
     const button = h('button', { class: 'btn', type: 'submit' }, icon('download'), 'Add');
-    const advanced = h('a', { href: '/' }, 'Advanced options in the classic view');
+    const advanced = h('a', { href: '/classic/' }, 'Advanced options in the classic view');
     input.addEventListener('input', () => {
-      advanced.href = input.value ? '/share?url=' + encodeURIComponent(input.value) : '/';
+      advanced.href = input.value ? '/share?url=' + encodeURIComponent(input.value) : '/classic/';
     });
     const form = h('form', {
       onsubmit: async (e) => {

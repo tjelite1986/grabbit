@@ -162,15 +162,19 @@ the state (job history, cookies, playlists) in `./data`, both next to
 To stop the server, press `Ctrl + C`. For running it permanently on a server,
 see [Deploy with Docker](#deploy-with-docker).
 
-## Grabbit 2.0 hub (preview)
+## Grabbit 2.0 hub
 
-`/hub/` is a second front end over the same API: a dashboard with counts from
-the downloaded registry, a paste-a-link box, the live job queue, the latest
-downloads, creators found in file names, app destinations and system status.
-Every number comes from the server. Parts that are not built yet (duplicate
-review, metadata editing) are marked as planned instead of showing sample
-values. The classic interface at `/` keeps every feature and is linked from the
-hub's sidebar.
+The hub is the start page (`/`): a front end over the same API with a dashboard
+of counts from the downloaded registry, a paste-a-link box, the live job queue,
+the latest downloads, creators found in file names, app destinations, system
+status, and the Media, Review, Profiles, Inbox, Duplicates and Metadata & tags
+pages. Every number comes from the server.
+
+The classic interface lives at `/classic/`, keeps every feature and is linked
+from the hub's sidebar. It still owns the share target (`/share`) and the app
+shortcuts; the old deep links `/?tab=…` and `/?action=…` (installed apps, push
+notifications) are redirected to `/classic/` with their query. `/hub/`, the
+hub's address before it became the start page, redirects to `/`.
 
 ### Media viewer
 
@@ -997,7 +1001,7 @@ environment variables:
 | `INBOX_SINCE` | ISO time. Drops older than this are not inbox material and stay where they are (an earlier app's leftovers). |
 | `EGRAM_IMPORT_DIR` | Import folder of a general Instagram-style app (destination `egram`). The inbox copies the sidecar first, then the media file, into `<dir>/<username>/` under their original names, both by an atomic rename from a dot-name and with one shared mtime per post. Images and videos. Unset (the default), there is no `egram` destination. Counted as a general destination by the 18+ overlap check. |
 | `ADSHORTIS_LIBRARY_DIR` / `EGRAM_LIBRARY_DIR` / `PLATFORM_LIBRARY_DIR` | The 18+ shorts app's, the Instagram-style app's and the social app's own media libraries (where their importers file what they took). Used only by the duplicate scan, which reads and never writes; mount them read-only. The Adshortis library counts as an 18+ folder. Unset (the default), they are not scanned. |
-| `HUB_BRAND` | The line under the logo in the Grabbit 2.0 hub (`/hub/`). Default `Media hub`. |
+| `HUB_BRAND` | The line under the logo in the Grabbit 2.0 hub (`/`). Default `Media hub`. |
 | `HUB_APP_LINKS` | The hub sidebar's list of connected apps: `Name\|https://app.example.com,Other\|https://other.example.com`. Only https links are shown. Unset, the list is hidden. |
 | `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |

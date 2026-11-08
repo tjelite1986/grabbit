@@ -1609,6 +1609,31 @@ const REVALIDATE = new Set([
   'hub.css',
 ]);
 
+// The hub is the start page. Grabbit 1's interface lives on at /classic/; it
+// still owns the share target (/share) and the old deep links (?tab=, ?action=),
+// which installed apps and push notifications keep sending to / and which are
+// passed on to it. /hub/ was the hub's address before it became the start page.
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const queryOf = (req) => {
+  const i = req.originalUrl.indexOf('?');
+  return i < 0 ? '' : req.originalUrl.slice(i);
+};
+const sendShell = (res, file) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(PUBLIC_DIR, file), { cacheControl: false });
+};
+app.get('/', (req, res) => {
+  if (req.query.tab != null || req.query.action != null) return res.redirect(302, '/classic/' + queryOf(req));
+  sendShell(res, 'hub/index.html');
+});
+// One route for both: Express matches /classic and /classic/ alike (non-strict
+// routing), so separate handlers would send /classic/ back to itself.
+app.get('/classic', (req, res) => {
+  if (!req.path.endsWith('/')) return res.redirect(302, '/classic/' + queryOf(req));
+  sendShell(res, 'index.html');
+});
+app.get(['/hub', '/hub/', '/hub/index.html'], (req, res) => res.redirect(302, '/' + queryOf(req)));
+
 app.use(
   express.static(path.join(__dirname, 'public'), {
     setHeaders: (res, filePath) => {
@@ -1688,8 +1713,8 @@ function notifyJobFinished(j) {
   const name = j.title || j.filename || j.sourceUrl || 'download';
   sendPush(
     j.status === 'done'
-      ? { title: 'Download complete', body: name, tag: 'job-' + j.id, url: '/?tab=queue' }
-      : { title: 'Download failed', body: name + (j.error ? ' — ' + j.error : ''), tag: 'job-' + j.id, url: '/?tab=queue' }
+      ? { title: 'Download complete', body: name, tag: 'job-' + j.id, url: '/classic/?tab=queue' }
+      : { title: 'Download failed', body: name + (j.error ? ' — ' + j.error : ''), tag: 'job-' + j.id, url: '/classic/?tab=queue' }
   );
 }
 
