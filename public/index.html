@@ -4348,7 +4348,7 @@
         const tab = q.get('tab');
         const action = q.get('action');
         if (!isShare && !tab && !action) return;
-        history.replaceState(null, '', '/');
+        history.replaceState(null, '', '/classic/');
         const firstUrl = (s) => extractUrls(s)[0] || '';
         if (isShare) {
           const u = firstUrl([q.get('url'), q.get('text'), q.get('title')].filter(Boolean).join(' '));

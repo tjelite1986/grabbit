@@ -5,9 +5,13 @@
 // carry ?v=2 to match the manifest: Android bakes the icon into a generated
 // APK at install time and only rebuilds it when the manifest itself changed,
 // so an icon swapped behind an unchanged URL never reaches the home screen.
-const CACHE = 'grabbit-v7';
+// v8: the hub became the start page (/) and Grabbit 1 moved to /classic/.
+const CACHE = 'grabbit-v8';
 const SHELL = [
   '/',
+  '/classic/',
+  '/hub/hub.js',
+  '/hub/hub.css',
   '/manifest.webmanifest',
   '/favicon-32.png?v=2',
   '/icon-192.png?v=2',
@@ -50,7 +54,7 @@ self.addEventListener('push', (event) => {
         icon: '/icon-192.png?v=2',
         badge: '/icon-192.png?v=2',
         tag: d.tag || undefined,
-        data: { url: d.url || '/?tab=queue' },
+        data: { url: d.url || '/classic/?tab=queue' },
       });
     })()
   );
