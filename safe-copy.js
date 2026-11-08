@@ -101,6 +101,7 @@ function copyInto(src, dir, name, { root, srcRoot, mtime = null, ownerRef = null
     if (_hooks.beforeTmpOpen) _hooks.beforeTmpOpen();
     fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, mode);
     created = true;
+    if (_hooks.afterTmpOpen) _hooks.afterTmpOpen();
     // If the folder was swapped between the check and the open, the empty temp
     // was created elsewhere: remove it there (by the path the kernel reports,
     // which was ours a moment ago) and refuse before a byte is written.

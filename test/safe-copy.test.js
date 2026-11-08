@@ -57,6 +57,32 @@ test('a target folder swapped for a symlink after the check is caught, nothing l
   assert.deepEqual(listAll(path.join(d.parked, 'user')), []);
 });
 
+test('a target folder swapped for a symlink and back while the bytes go over leaves nothing outside', (t) => {
+  const d = setup(t);
+  const user = path.join(d.dst, 'user');
+  const parked = path.join(d.parked, 'user');
+  assert.throws(
+    () => copyInto(path.join(d.src, 'user', 'a.jpg'), user, 'a.jpg', {
+      root: d.dst,
+      srcRoot: d.src,
+      _hooks: {
+        beforeTmpOpen() {
+          fs.renameSync(user, parked);
+          fs.symlinkSync(d.outside, user);
+        },
+        // Swap back so every later check by name sees the real folder again.
+        afterTmpOpen() {
+          fs.unlinkSync(user);
+          fs.renameSync(parked, user);
+        },
+      },
+    }),
+    /refused/,
+  );
+  assert.deepEqual(listAll(d.outside), [], 'no file was written outside the root');
+  assert.deepEqual(listAll(user), []);
+});
+
 test('a source folder swapped for a symlink after the check is caught, no outside bytes are copied', (t) => {
   const d = setup(t);
   fs.writeFileSync(path.join(d.outside, 'a.jpg'), 'secret bytes');
