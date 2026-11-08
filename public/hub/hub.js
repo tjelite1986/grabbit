@@ -1739,7 +1739,7 @@
         };
         detail.replaceChildren(h('div', { class: 'meta-edit' }, card(`Item ${it.id}`, 'tags', null,
           h('div', { class: 'toolbar' }, audienceChip(it.audience), it.site ? h('span', { class: 'chip' }, it.site) : null,
-            it.sourceUrl ? h('a', { href: it.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Source page') : null,
+            webHref(it.sourceUrl) ? h('a', { href: webHref(it.sourceUrl), target: '_blank', rel: 'noopener noreferrer' }, 'Source page') : null,
             h('button', { class: 'btn small ghost', type: 'button', onclick: () => { detail.replaceChildren(); delete detail.dataset.id; } }, 'Close')),
           h('label', { class: 'lbl' }, 'Title', it.edited.title ? h('span', { class: 'muted' }, ` (source: ${it.source.title || 'none'})`) : null), title,
           h('label', { class: 'lbl' }, 'Creator', it.edited.creator ? h('span', { class: 'muted' }, ` (source: ${it.source.creator || 'none'})`) : null), creator,

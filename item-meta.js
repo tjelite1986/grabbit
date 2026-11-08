@@ -157,7 +157,8 @@ function attach(db) {
     site: row.site,
     kind: row.kind,
     audience: row.audience,
-    sourceUrl: row.source_url,
+    // Only a web link leaves the store as a link; a site could hand us any scheme.
+    sourceUrl: /^https?:\/\//i.test(String(row.source_url || '')) ? row.source_url : null,
     filename: row.filename,
     title: row.title_edit != null ? row.title_edit : row.title,
     creator: row.creator_edit != null ? row.creator_edit : row.creator,

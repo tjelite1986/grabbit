@@ -286,3 +286,12 @@ test('a v3 store migrates to v4 with every item, delivery and inbox row kept', (
   assert.equal(s.inboxByEntry('ann/f').item_id, it.id);
   assert.deepEqual(s.fileLink('f.mp4'), { link: 'filename', itemId: it.id });
 });
+
+test('a source URL that is not http(s) never leaves the store as a link', (t) => {
+  const s = store(t);
+  const bad = s.upsert({ key: 'b', sourceUrl: 'javascript:alert(1)' });
+  const good = s.upsert({ key: 'g', sourceUrl: 'https://example.com/p/1' });
+  assert.equal(s.getMeta(bad.id).sourceUrl, null);
+  assert.equal(s.getMeta(good.id).sourceUrl, 'https://example.com/p/1');
+  assert.equal(s.listMeta({ q: 'b' }).items.find((x) => x.key === 'b').sourceUrl, null);
+});
