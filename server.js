@@ -3251,7 +3251,13 @@ app.get('/api/hub/media/:id/file', (req, res) => {
   if (!e || !mediaViewer.VARIANTS.includes(v)) return res.status(404).json({ ok: false, error: 'Not available' });
   const found = mediaViewer.findVariants(e.filename, mediaDirsOf(e), MEDIA_ROOTS);
   const file = found && found[v];
-  if (!file) return res.status(404).json({ ok: false, error: 'Not available' });
+  // Media only: a name the history log got from a site could end in .html or
+  // .svg, and that must never render as a page on this origin.
+  const kind = mediaViewer.kindOfName(file);
+  if (!file || !['video', 'image', 'audio'].includes(kind) || (v === 'poster' && kind !== 'image')) {
+    return res.status(404).json({ ok: false, error: 'Not available' });
+  }
+  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
   if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {

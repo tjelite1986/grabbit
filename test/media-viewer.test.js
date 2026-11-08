@@ -139,6 +139,7 @@ test('routes: admin only, by entry id, inside the roots', async (t) => {
   fs.mkdirSync(data, { recursive: true });
   touch(path.join(dl, 'videos', 'Maker_-_Clip.mp4'), Buffer.alloc(4096, 7));
   touch(path.join(root, 'secret.txt'), 'secret');
+  touch(path.join(dl, 'videos', 'Maker_-_Page.html'), '<script>alert(1)</script>');
   fs.symlinkSync(path.join(root, 'secret.txt'), path.join(dl, 'videos', 'Maker_-_Link.mp4'));
   const now = Date.now();
   fs.writeFileSync(path.join(data, 'history.json'), JSON.stringify([
@@ -146,6 +147,7 @@ test('routes: admin only, by entry id, inside the roots', async (t) => {
     { id: `${now}-2`, time: now, creator: 'Maker', title: 'Link', channel: 'server/videos', filename: 'Maker_-_Link.mp4' },
     { id: `${now}-3`, time: now, creator: 'Maker', title: 'Up', channel: 'server/videos/..', filename: 'secret.txt' },
     { id: `${now}-4`, time: now, creator: 'Maker', title: 'Dots', channel: 'server/videos', filename: '../secret.txt' },
+    { id: `${now}-5`, time: now, creator: 'Maker', title: 'Page', channel: 'server/videos', filename: 'Maker_-_Page.html' },
   ]));
   const reg = gda.createRegistry({ file: path.join(data, 'gda-clients.json'), sessionSecret: 'x' });
   reg.upsertClient({ client_id: 'someapp', audience: 'general', allowed_targets: ['server.downloads'], allowed_ops: ['job', 'status'], legacy_main_target: 'server.downloads' });
@@ -191,7 +193,7 @@ test('routes: admin only, by entry id, inside the roots', async (t) => {
   const get = (p, cookie, headers = {}) => fetch(base + p, { headers: { ...(cookie ? { Cookie: cookie } : {}), ...headers } });
 
   const list = await (await get('/api/hub/media', admin)).json();
-  assert.deepEqual(list.items.map((i) => i.id).sort(), [`${now}-1`, `${now}-2`, `${now}-3`]); // '../secret.txt' is never listed
+  assert.deepEqual(list.items.map((i) => i.id).sort(), [`${now}-1`, `${now}-2`, `${now}-3`, `${now}-5`]); // '../secret.txt' is never listed
   const one = list.items.find((i) => i.id === `${now}-1`);
   assert.equal(one.kind, 'video');
 
@@ -203,6 +205,9 @@ test('routes: admin only, by entry id, inside the roots', async (t) => {
   assert.equal(ranged.status, 206);
   assert.equal(ranged.headers.get('content-range'), 'bytes 0-99/4096');
   assert.equal((await ranged.arrayBuffer()).byteLength, 100);
+  assert.match(ranged.headers.get('content-security-policy') || '', /sandbox/);
+  // A file that is not media is never served, so it can never render as a page here.
+  assert.equal((await get(`/api/hub/media/${now}-5/file`, admin)).status, 404);
 
   // A symlink out of the library, a channel that climbs out, a bad variant, a bad id.
   for (const p of [`/api/hub/media/${now}-2/file`, `/api/hub/media/${now}-3/file`, `/api/hub/media/${now}-1/file?v=../x`, '/api/hub/media/..%2Fsecret.txt/file']) {
