@@ -223,3 +223,15 @@ test('classifyItems sets the hand mark, never lowers 18+, and listItems puts ref
   assert.throws(() => s.classifyItems([u1.id], 'unknown'), /general or adult/);
   assert.throws(() => s.classifyItems([], 'general'), /at least one/);
 });
+
+test('getBySourceUrl finds the newest item saved from a URL, and nothing for an unknown one', (t) => {
+  const s = itemStore.open(tmpDb(t));
+  t.after(() => s.close());
+  const url = 'https://www.facebook.com/watch/?v=1';
+  s.upsert({ key: 'id:facebook:1', sourceUrl: url, audience: 'unknown' });
+  assert.equal(s.getBySourceUrl(url).key, 'id:facebook:1');
+  assert.equal(s.getBySourceUrl('https://example.com/none'), null);
+  // A later failed resolve files the same URL under a URL key: the id-keyed item still answers.
+  s.upsert({ key: 'facebook.com/watch/', sourceUrl: url, audience: 'unknown' });
+  assert.equal(s.getBySourceUrl(url).key, 'id:facebook:1');
+});
