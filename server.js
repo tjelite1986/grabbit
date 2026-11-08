@@ -160,6 +160,7 @@ const EGRAM_IMPORT_DIR = process.env.EGRAM_IMPORT_DIR || null;
 // the duplicate scan only; mount them read-only. Unset means not scanned.
 const ADSHORTIS_LIBRARY_DIR = process.env.ADSHORTIS_LIBRARY_DIR || null;
 const EGRAM_LIBRARY_DIR = process.env.EGRAM_LIBRARY_DIR || null;
+const PLATFORM_LIBRARY_DIR = process.env.PLATFORM_LIBRARY_DIR || null;
 const INBOX_MODE = ['off', 'shadow', 'on'].includes(process.env.INBOX_MODE) ? process.env.INBOX_MODE : 'off';
 // Drops older than this (ISO time) are not inbox material: an old app's leftovers.
 const INBOX_SINCE = Number.isFinite(Date.parse(process.env.INBOX_SINCE || '')) ? Date.parse(process.env.INBOX_SINCE) : null;
@@ -2803,6 +2804,7 @@ const DUPE_ROOT_CANDIDATES = [
   { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram' },
   { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
   { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram' },
+  { path: PLATFORM_LIBRARY_DIR, label: 'Platform library', owner: 'app', app: 'Platform' },
 ];
 const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
 let DUPE_SCANNER = null;
