@@ -26,6 +26,7 @@ const audience = require('./audience');
 const itemStore = require('./item-store');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
+const { copyInto } = require('./safe-copy');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -2980,90 +2981,6 @@ function inboxAvailable() {
     platform: !shortsUnavailable('platform'),
     '18plus': !shortsUnavailable('18plus'),
   };
-}
-
-// When Grabbit runs as root (the container does), a folder or file it creates
-// in another app's import tree would be root-owned, and that app could not
-// move it on. Both take the owner of `ownerRef` (the app's import root). The
-// change goes through a descriptor (files) or lchown (folders), never a path a
-// user of that tree could swap for a symlink in between.
-function ownerOf(ownerRef) {
-  if (!ownerRef || typeof process.getuid !== 'function' || process.getuid() !== 0) return null;
-  const { uid, gid } = fs.statSync(ownerRef);
-  return { uid, gid };
-}
-
-// Refuses unless `dir` is a real directory at the place its name says, below
-// `root`: no component under the root may be a symlink, and the resolved path
-// must equal the root's resolved path plus the same relative part. The root
-// itself may be a symlink or a mount; what lies below it is someone else's tree
-// (the phone's drop folder, an app's import folder) and is not trusted.
-function assertRealDirUnder(root, dir) {
-  const rel = path.relative(root, dir);
-  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    throw new Error(`${dir} is not below ${root}`);
-  }
-  let p = root;
-  for (const part of rel.split(path.sep)) {
-    p = path.join(p, part);
-    const st = fs.lstatSync(p);
-    if (st.isSymbolicLink()) throw new Error(`${p} is a symlink; refused`);
-    if (!st.isDirectory()) throw new Error(`${p} is not a directory; refused`);
-  }
-  if (fs.realpathSync(dir) !== path.join(fs.realpathSync(root), rel)) {
-    throw new Error(`${dir} does not resolve below ${root}; refused`);
-  }
-}
-
-// Copies a file into `dir` under `name`: a dot-named temp first (every importer
-// ignores dotfiles), created exclusively and never through a symlink, fsync,
-// then an atomic rename. Works across mounts.
-// `root` is the tree `dir` must stay in, `srcRoot` the tree `src` must come
-// from; both are checked right before use. The source is opened without
-// following a symlink and must be a regular file (a FIFO or a device would
-// otherwise hang or stream forever).
-function copyInto(src, dir, name, { root, srcRoot, mtime = null, ownerRef = null, mode = 0o644 } = {}) {
-  if (!root || !srcRoot) throw new Error('copyInto needs root and srcRoot');
-  const owner = ownerOf(ownerRef);
-  fs.mkdirSync(path.dirname(dir), { recursive: true });
-  try {
-    fs.mkdirSync(dir);
-    if (owner) fs.lchownSync(dir, owner.uid, owner.gid);
-  } catch (e) {
-    if (e.code !== 'EEXIST') throw e;
-  }
-  const tmp = path.join(dir, `.${name}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
-  const final = path.join(dir, name);
-  const C = fs.constants;
-  let fd = null;
-  let inFd = null;
-  try {
-    assertRealDirUnder(srcRoot, path.dirname(src));
-    inFd = fs.openSync(src, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
-    if (!fs.fstatSync(inFd).isFile()) throw new Error(`${src} is not a regular file; refused`);
-    assertRealDirUnder(root, dir);
-    fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, mode);
-    fs.fchmodSync(fd, mode);
-    const buf = Buffer.allocUnsafe(1 << 20);
-    let n;
-    while ((n = fs.readSync(inFd, buf, 0, buf.length, null)) > 0) fs.writeSync(fd, buf, 0, n);
-    fs.closeSync(inFd);
-    inFd = null;
-    fs.fsyncSync(fd);
-    if (mtime) fs.futimesSync(fd, mtime, mtime);
-    if (owner) fs.fchownSync(fd, owner.uid, owner.gid);
-    fs.closeSync(fd);
-    fd = null;
-    // The folder could have been swapped while the bytes went over.
-    assertRealDirUnder(root, dir);
-    fs.renameSync(tmp, final);
-  } catch (e) {
-    if (inFd !== null) try { fs.closeSync(inFd); } catch { /* already closed */ }
-    if (fd !== null) try { fs.closeSync(fd); } catch { /* already closed */ }
-    fs.rmSync(tmp, { force: true });
-    throw e;
-  }
-  return final;
 }
 
 const stagedPath = (row, name) => path.join(INBOX_STAGING, row.username, name);
