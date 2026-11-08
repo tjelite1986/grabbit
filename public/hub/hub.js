@@ -341,15 +341,29 @@
       h('span', { class: 'cap' }, it.title || it.filename || ''));
   }
 
+  // /api/health sends tools as [{ name, version }]; the views look them up as
+  // { ytdlp, ffmpeg, ... }. Accept both shapes.
+  function toolVersions(hl) {
+    const raw = hl && hl.tools;
+    if (!raw) return {};
+    if (!Array.isArray(raw)) return raw;
+    const out = {};
+    for (const t of raw) {
+      if (t && t.name) out[String(t.name).replace(/-/g, '')] = t.version || (t.ok === false ? null : 'ok');
+    }
+    return out;
+  }
+
   function healthRows() {
     const hl = state.health;
     if (!hl) return [h('li', { class: 'empty' }, 'Loading ...')];
+    const tv = toolVersions(hl);
     const tool = (name, v) => h('li', null, h('span', { class: `dot ${v ? 'ok' : 'bad'}` }), name, h('span', { class: `v ${v ? 'ok-t' : 'bad-t'}` }, v || 'missing'));
     const badDests = (hl.dests || []).filter((d) => !d.exists || !d.writable || d.unreachable);
     const rows = [
-      tool('yt-dlp', hl.tools && hl.tools.ytdlp),
-      tool('ffmpeg (conversion)', hl.tools && hl.tools.ffmpeg),
-      tool('gallery-dl', hl.tools && hl.tools.gallerydl),
+      tool('yt-dlp', tv.ytdlp),
+      tool('ffmpeg (conversion)', tv.ffmpeg),
+      tool('gallery-dl', tv.gallerydl),
       h('li', null, h('span', { class: `dot ${badDests.length ? 'warn' : 'ok'}` }), 'Save locations',
         h('span', { class: `v ${badDests.length ? 'warn-t' : 'ok-t'}` }, badDests.length ? `${badDests.length} need attention` : 'all writable')),
       h('li', null, h('span', { class: `dot ${hl.retry && hl.retry.queued ? 'warn' : 'ok'}` }), 'Retry queue', h('span', { class: 'v' }, num(hl.retry && hl.retry.queued))),
@@ -919,7 +933,7 @@
   }
 
   function viewConversion() {
-    const t = (state.health && state.health.tools) || {};
+    const t = toolVersions(state.health);
     return [
       h('h1', null, 'Conversion'),
       h('p', { class: 'lead' }, 'Originals are kept. A web copy (H.264/AAC) can be made next to them for shorts saves.'),
