@@ -37,8 +37,11 @@ async function boot(t, { history = [], thumbs = {}, files = {} } = {}) {
   fs.writeFileSync(path.join(data, 'history.json'), JSON.stringify(history));
   for (const [name, buf] of Object.entries(thumbs)) fs.writeFileSync(path.join(data, 'thumbs', name), buf);
   for (const [name, buf] of Object.entries(files)) {
-    if (typeof buf === 'function') buf(path.join(drop, name));
-    else fs.writeFileSync(path.join(drop, name), buf);
+    // 'folder/name' files a clip in a creator folder under main/, else in _import.
+    const file = name.includes('/') ? path.join(tik, 'main', name) : path.join(drop, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (typeof buf === 'function') buf(file);
+    else fs.writeFileSync(file, buf);
   }
   const port = await freePort();
   const proc = spawn(process.execPath, ['server.js'], {
@@ -125,4 +128,16 @@ test('at boot the history keeps its cached pictures; orphans go, own frames stay
   const r = await thumb(DEAD(4));
   assert.equal(r.status, 200);
   assert.deepEqual(Buffer.from(await r.arrayBuffer()), pic);
+});
+
+test('a creator folder the importer filed in lower case is found', async (t) => {
+  const poster = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), crypto.randomBytes(3000)]);
+  const e = { ...entry(5, 'SomeOne_-_Clip.mp4'), creator: 'SomeOne' };
+  const { thumb } = await boot(t, {
+    history: [e],
+    files: { 'someone/SomeOne_-_Clip.web.mp4': Buffer.alloc(10), 'someone/SomeOne_-_Clip.jpg': poster },
+  });
+  const r = await thumb(DEAD(5));
+  assert.equal(r.status, 200);
+  assert.deepEqual(Buffer.from(await r.arrayBuffer()), poster);
 });

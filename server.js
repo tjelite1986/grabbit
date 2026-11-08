@@ -3999,8 +3999,13 @@ function mediaDirsOf(entry) {
   if (ch === 'main' || ch === '18plus') {
     if (!CHANNEL_ROOTS[ch]) return [];
     const root = path.join(CHANNEL_ROOTS[ch], ch);
-    // Imported clips sit in the creator's folder; queued ones in _import.
-    return [path.join(root, profileSlug(safeCreator(entry.creator))), path.join(root, '_import')];
+    // Imported clips sit in the creator's folder; queued ones in _import. The
+    // importer may file the folder in lower case (Tikshortis does), and folder
+    // names are case-sensitive here, so both spellings are looked in.
+    const slug = profileSlug(safeCreator(entry.creator));
+    const dirs = [path.join(root, slug)];
+    if (slug.toLowerCase() !== slug) dirs.push(path.join(root, slug.toLowerCase()));
+    return [...dirs, path.join(root, '_import')];
   }
   if (ch === 'platform') return CHANNEL_ROOTS.platform ? [CHANNEL_ROOTS.platform] : [];
   if (ch === 'elite/posts') return POSTS_IMPORT_DIR ? [path.join(POSTS_IMPORT_DIR, postsCreator(entry.creator))] : [];
