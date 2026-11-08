@@ -107,6 +107,17 @@ function normalizeTag(label) {
 }
 
 // The album's tag list: <a class="album-tag" href="/search?q=...">#Big tits</a>.
+function albumTagLabels(html) {
+  const out = [];
+  const re = /<a[^>]*class="album-tag"[^>]*>([^<]*)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const label = decodeEntities(m[1]).replace(/^#+/, '').trim();
+    if (label && !out.includes(label)) out.push(label);
+  }
+  return out;
+}
+
 function albumTags(html) {
   const out = [];
   const re = /<a[^>]*class="album-tag"[^>]*>([^<]*)<\/a>/gi;
@@ -145,7 +156,8 @@ async function albumItems(url) {
   const albumId = albumIdFromUrl(url);
   // Album-wide metadata every item carries: the caption becomes the clip/post
   // description and the tags become its hashtags.
-  const meta = { creator, sourceUrl: url, description: title, tags, albumId };
+  // sourceTags: the tags as the site shows them, for the item store.
+  const meta = { creator, sourceUrl: url, description: title, tags, sourceTags: albumTagLabels(html), albumId };
   // Each media-group div is one item: a <source> mp4 (video) or a `.img`
   // data-src (full image). Video groups carry only a poster, not data-src.
   const blocks = html.split('<div class="media-group"').slice(1);

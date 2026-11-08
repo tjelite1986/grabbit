@@ -255,7 +255,7 @@ test('a v2 store migrates to v3 keeping every delivery, and egram is a general a
   const s = itemStore.open(file, { now: () => 1_700_000_000_000 });
   t.after(() => s.close());
   t.after(() => fs.rmSync(s.migrationBackup, { force: true }));
-  assert.equal(s.db.pragma('user_version', { simple: true }), 3);
+  assert.equal(s.db.pragma('user_version', { simple: true }), itemStore.SCHEMA_VERSION);
   const rows = s.db.prepare('SELECT id, item_id, destination, status, at FROM deliveries ORDER BY id').all();
   assert.deepEqual(rows.map((r) => `${r.item_id}:${r.destination}:${r.status}:${r.at}`), [`${g}:main:dropped:5`, `${u}:platform:refused:6`]);
   // The locks are back on the rebuilt table, egram included.
@@ -265,7 +265,7 @@ test('a v2 store migrates to v3 keeping every delivery, and egram is a general a
   assert.equal(s.deliveredTo(Number(g), 'egram'), true);
   assert.equal(s.deliveredTo(Number(u), 'egram'), false);
   const triggers = s.db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
-  assert.deepEqual(triggers, ['deliveries_adult_takes_no_images', 'deliveries_general_needs_general_item', 'items_audience_never_lowered']);
+  assert.deepEqual(triggers, ['deliveries_adult_takes_no_images', 'deliveries_general_needs_general_item', 'item_tags_never_rewritten', 'item_tags_source_kept', 'items_audience_never_lowered']);
 });
 
 test('inbox rows: a media row needs an item, states are checked, purge picks settled rows only', (t) => {

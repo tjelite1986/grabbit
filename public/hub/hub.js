@@ -190,9 +190,9 @@
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
     { id: 'review', label: 'Review', icon: 'review', badge: () => (state.review ? state.review.creators.unclassified : 0), view: viewReview },
     { id: 'inbox', label: 'Inbox', icon: 'inbox', badge: () => (state.inbox && state.inbox.counts ? state.inbox.counts.held || 0 : 0), view: viewInbox },
-    { id: 'duplicates', label: 'Duplicates', icon: 'dupes', planned: true, view: viewDuplicates },
+    { id: 'duplicates', label: 'Duplicates', icon: 'dupes', ownData: true, view: viewDuplicates },
     { id: 'conversion', label: 'Conversion', icon: 'convert', view: viewConversion },
-    { id: 'metadata', label: 'Metadata & tags', icon: 'tags', planned: true, view: viewMetadata },
+    { id: 'metadata', label: 'Metadata & tags', icon: 'tags', ownData: true, view: viewMetadata },
     { id: 'distribution', label: 'Distribution', icon: 'share', view: viewDistribution },
     { id: 'settings', label: 'Settings', icon: 'settings', view: viewSettings },
   ];
@@ -1549,19 +1549,316 @@
     ];
   }
 
+  // --- Duplicates ----------------------------------------------------------
+  // The scan reads Grabbit's folders and the apps' media folders (never
+  // writing to them) and lists files with the same bytes. Nothing is deleted
+  // here: a group can only be marked known/OK.
   function viewDuplicates() {
-    const s = state.summary;
+    const scanBox = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+    const groupBox = h('div', null);
+    const which = h('select', { class: 'field', 'aria-label': 'Which groups' },
+      h('option', { value: 'open' }, 'Open groups'),
+      h('option', { value: 'acked' }, 'Marked known/OK'),
+      h('option', { value: 'all' }, 'All groups'));
+    const SIZE = 25;
+    let page = 0;
+    let poll;
+
+    async function scanAction(action) {
+      try {
+        await jsonPost('/api/hub/dupes/scan', { action });
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+    async function ack(g) {
+      const note = prompt(`Mark these ${g.files} copies as known/OK? Nothing is deleted. A note (optional):`, '');
+      if (note === null) return;
+      try {
+        await jsonPost(`/api/hub/dupes/${g.sha256}/ack`, { note });
+        toast('Marked known/OK. A new copy opens the group again.');
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+    async function unack(g) {
+      try {
+        await jsonPost(`/api/hub/dupes/${g.sha256}/unack`, {});
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+
+    function scanView(s) {
+      if (s.state === 'off') return [h('p', { class: 'empty' }, `The scan is switched off on this server (${s.reason}).`)];
+      const t = s.totals || {};
+      const pct = t.bytes ? Math.floor((100 * (t.hashedBytes || 0)) / t.bytes) : 0;
+      const label = s.state === 'running'
+        ? (s.phase === 'walking' ? 'Listing files' : s.phase === 'hashing' ? 'Reading files' : s.phase === 'waiting' ? 'Up to date; checks again later' : 'Running')
+        : s.state === 'paused' ? 'Paused' : 'Not started';
+      return [
+        h('div', { class: 'toolbar' },
+          h('b', null, label),
+          s.state === 'running'
+            ? h('button', { class: 'btn small ghost', type: 'button', onclick: () => scanAction('pause') }, 'Pause')
+            : h('button', { class: 'btn small', type: 'button', onclick: () => scanAction('start') }, s.state === 'paused' ? 'Resume' : 'Start scan'),
+          h('span', { class: 'muted' }, `${num(t.hashed)} of ${num(t.files)} files read (${bytes(t.hashedBytes || 0)} of ${bytes(t.bytes || 0)}, ${pct}%)`),
+          s.lastPassAt ? h('span', { class: 'muted' }, `last full pass ${ago(s.lastPassAt)}`) : null),
+        s.current && s.current.rel ? h('p', { class: 'note' }, `Now: ${s.current.rel}`) : null,
+        s.lastError ? h('p', { class: 'err' }, s.lastError) : null,
+        h('div', { class: 'scroll-x' }, h('table', null,
+          h('thead', null, h('tr', null, h('th', null, 'Folder'), h('th', null, 'Belongs to'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Read'), h('th', { class: 'num' }, 'Linked to an item'), h('th', { class: 'num' }, 'Errors'))),
+          h('tbody', null, (s.roots || []).map((r) => h('tr', null,
+            h('td', null, r.label, h('div', { class: 'muted' }, r.path)),
+            h('td', { class: 'muted' }, r.owner === 'app' ? `${r.app} (read only)` : r.app ? `Grabbit, for ${r.app}` : 'Grabbit'),
+            h('td', { class: 'num' }, num(r.files)),
+            h('td', { class: 'num' }, num(r.hashed)),
+            h('td', { class: 'num' }, num(r.linked), r.ambiguous ? h('div', { class: 'muted' }, `${num(r.ambiguous)} ambiguous`) : null),
+            h('td', { class: 'num' }, num(r.errors))))))),
+        h('p', { class: 'note' }, `Reads at most ${s.mbPerSec} MB/s, one file at a time. A file is read again only when its size, date or inode changes. Pausing stops within a second; the scan resumes after a restart only if it was running.`),
+      ];
+    }
+
+    // One copy: where it is, then what Grabbit knows about it. A list, not a
+    // table: long file paths must wrap on a phone.
+    function memberRow(m) {
+      const who = m.item_id
+        ? [m.creator ? h('b', null, m.creator) : null, m.title ? ` ${m.title}` : null, m.site ? h('span', { class: 'muted' }, ` · ${m.site}`) : null, ' ', m.audience ? audienceChip(m.audience) : null]
+        : h('span', { class: 'muted' }, m.link === 'ambiguous' ? 'Not linked: two items share this file name' : 'Not linked to an item');
+      return h('li', { class: 'dupe-member' },
+        h('div', null, h('b', null, m.rootLabel), m.adultFolder ? h('span', { class: 'chip adult' }, '18+') : null,
+          m.mtime_ms ? h('span', { class: 'muted' }, ` · ${new Date(m.mtime_ms).toLocaleDateString()}`) : null),
+        h('div', { class: 'break mono' }, m.rel),
+        h('div', null, who));
+    }
+
+    async function fill() {
+      clearTimeout(poll);
+      try {
+        const d = await api(`/api/hub/dupes?state=${which.value}&limit=${SIZE}&offset=${page * SIZE}`);
+        scanBox.replaceChildren(...scanView(d.scan).filter(Boolean));
+        const head = h('p', { class: 'note' },
+          `${num(d.groups)} groups of identical files in all; ${bytes(d.openBytes)} in extra copies across the open ones.`);
+        if (!d.items.length) {
+          groupBox.replaceChildren(head, h('p', { class: 'empty' }, d.scan.totals && d.scan.totals.files ? 'No group in this list.' : 'Nothing read yet. Start the scan above.'));
+        } else {
+          groupBox.replaceChildren(head, ...d.items.map((g) => h('div', { class: 'dupe-group' },
+            h('div', { class: 'toolbar' },
+              h('b', null, `${g.files} copies, ${bytes(g.bytes)} each`),
+              h('span', { class: 'muted mono' }, g.sha256.slice(0, 16)),
+              g.crossesAudience ? h('span', { class: 'chip adult' }, 'In an 18+ folder and a general app') : null,
+              g.ack && g.ack.current
+                ? [h('span', { class: 'chip' }, `Known/OK ${ago(g.ack.at)}${g.ack.note ? `: ${g.ack.note}` : ''}`),
+                  h('button', { class: 'btn small ghost', type: 'button', onclick: () => unack(g) }, 'Open again')]
+                : [g.ack ? h('span', { class: 'muted' }, 'Changed since it was marked') : null,
+                  h('button', { class: 'btn small ghost', type: 'button', onclick: () => ack(g) }, 'Mark known/OK')]),
+            h('ul', { class: 'rows' }, g.members.map(memberRow)))),
+          pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
+        }
+        if (d.scan.state === 'running' && location.hash.startsWith('#/duplicates')) poll = setTimeout(fill, 4000);
+      } catch (e) {
+        scanBox.replaceChildren(h('p', { class: 'empty' }, e.message));
+      }
+    }
+    which.addEventListener('change', () => { page = 0; fill(); });
+    fill();
     return [
       h('h1', null, 'Duplicates'),
-      h('p', { class: 'lead' }, 'Planned: find, review and resolve duplicate media without losing data.'),
-      card('What exists today', 'dupes', null,
-        h('ul', { class: 'rows' },
-          h('li', null, 'Registry keys', h('span', { class: 'v' }, s ? num(s.keys) : '-')),
-          h('li', null, 'Distinct files behind them', h('span', { class: 'v' }, s ? num(s.files) : '-')),
-          h('li', null, 'Marks without a file (playlist and manual marks)', h('span', { class: 'v' }, s ? num(s.marks) : '-'))),
-        h('p', { class: 'empty' }, 'A link Grabbit has already saved is skipped before it is downloaded again, keyed on the site id. Content-level checks (the same clip from two sites) are not built yet.')),
+      h('p', { class: 'lead' }, 'Files with exactly the same bytes, in Grabbit\'s folders and the apps\' media folders.'),
+      h('p', { class: 'note' }, 'Read only: nothing is moved, changed or deleted, in any folder. A file is linked to an item only when exactly one item was saved under that file name; otherwise it is shown unlinked rather than guessed. Near-duplicates and removing copies come in a later version.'),
+      card('Scan', 'pulse', null, scanBox),
+      card('Identical files', 'dupes', null, h('div', { class: 'toolbar' }, which), groupBox),
     ];
   }
+
+  // --- Metadata & tags -------------------------------------------------------
+  // The source's title, creator, caption and tags stay as they came; the
+  // owner's title, creator and tags sit beside them. None of it changes an
+  // item's audience.
+  const TAG_ORIGIN_LABEL = { site: 'from the site', category: 'site category', caption: 'from the caption', user: 'your tag' };
+  // One chip per tag. Its colour says where it came from; a tag the site and
+  // the caption both have shows once, as the site's. Only your own tags can
+  // be removed.
+  function tagChips(tags, onRemove) {
+    const chips = (tags.all || []).map((t) => {
+      const k = t.kind === 'category' ? 'category' : t.origins.includes('site') ? 'site' : t.origins.includes('caption') ? 'caption' : 'user';
+      const title = t.origins.map((o) => (t.kind === 'category' ? TAG_ORIGIN_LABEL.category : TAG_ORIGIN_LABEL[o])).join(', ');
+      return h('span', { class: `chip t-${k}`, title },
+        k === 'category' ? t.label : `#${t.label}`,
+        k === 'user' && onRemove ? h('button', { class: 'x', type: 'button', 'aria-label': `Remove ${t.label}`, onclick: () => onRemove(t.label) }, '\u00d7') : null);
+    });
+    return chips.length ? h('div', { class: 'chips' }, chips) : h('span', { class: 'muted' }, 'No tags');
+  }
+
+  function viewMetadata(params) {
+    const SIZE = 50;
+    const q = h('input', { class: 'field', type: 'search', placeholder: 'Search title, creator, caption, file name', 'aria-label': 'Search' });
+    const tag = h('input', { class: 'field', type: 'search', placeholder: 'Tag', 'aria-label': 'Tag', value: (params && params.get && params.get('tag')) || '' });
+    const origin = h('select', { class: 'field', 'aria-label': 'Tag origin' },
+      h('option', { value: 'any' }, 'Any origin'), h('option', { value: 'source' }, 'From the source'),
+      h('option', { value: 'site' }, 'From the site'), h('option', { value: 'caption' }, 'From the caption'), h('option', { value: 'user' }, 'Your tags'));
+    const tagged = h('select', { class: 'field', 'aria-label': 'Has tags' },
+      h('option', { value: '' }, 'Tagged or not'), h('option', { value: 'any' }, 'Has tags'), h('option', { value: 'source' }, 'Has source tags'),
+      h('option', { value: 'user' }, 'Has your tags'), h('option', { value: 'none' }, 'No tags'));
+    const aud = h('select', { class: 'field', 'aria-label': 'Audience' },
+      h('option', { value: '' }, 'Any audience'), h('option', { value: 'general' }, 'General'), h('option', { value: 'adult' }, '18+'), h('option', { value: 'unknown' }, 'Unclassified'));
+    const edited = h('input', { type: 'checkbox' });
+    const countsBox = h('div', null);
+    const cloud = h('div', null);
+    const listBox = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+    const detail = h('div', null);
+    const picked = new Set();
+    let page = 0;
+    let timer;
+
+    const query = () => `q=${encodeURIComponent(q.value)}&tag=${encodeURIComponent(tag.value)}&origin=${origin.value}&tagged=${tagged.value}&audience=${aud.value}${edited.checked ? '&edited=1' : ''}`;
+
+    async function changeTags(ids, add, remove) {
+      try {
+        const r = await jsonPost('/api/hub/meta/tags', { ids, add, remove });
+        const a = r.added ? r.added.changed.length : 0;
+        const rm = r.removed ? r.removed.changed.length : 0;
+        const skipped = [...(r.added ? r.added.skipped : []), ...(r.removed ? r.removed.skipped : [])];
+        toast(`${add.length ? `Tagged ${num(a)} item(s). ` : ''}${remove.length ? `Removed from ${num(rm)} item(s). ` : ''}${skipped.length ? `${skipped.length} skipped (${[...new Set(skipped.map((x) => x.reason))].join('; ')}).` : ''}`);
+        fill();
+        if (detail.dataset.id) openItem(Number(detail.dataset.id));
+      } catch (e) { toast(e.message); }
+    }
+
+    async function openItem(id) {
+      detail.dataset.id = String(id);
+      try {
+        const { item: it } = await api(`/api/hub/meta/${id}`);
+        const title = h('input', { class: 'field', value: it.title || '', 'aria-label': 'Title' });
+        const creator = h('input', { class: 'field', value: it.creator || '', 'aria-label': 'Creator' });
+        const newTag = h('input', { class: 'field', placeholder: 'Add your tags (space or comma separated)', 'aria-label': 'New tags' });
+        const save = async () => {
+          try {
+            const r = await jsonPost(`/api/hub/meta/${id}`, { title: title.value, creator: creator.value });
+            toast(r.changed.length ? `Saved ${r.changed.join(' and ')}.` : 'Nothing changed.');
+            fill();
+            openItem(id);
+          } catch (e) { toast(e.message); }
+        };
+        detail.replaceChildren(h('div', { class: 'meta-edit' }, card(`Item ${it.id}`, 'tags', null,
+          h('div', { class: 'toolbar' }, audienceChip(it.audience), it.site ? h('span', { class: 'chip' }, it.site) : null,
+            webHref(it.sourceUrl) ? h('a', { href: webHref(it.sourceUrl), target: '_blank', rel: 'noopener noreferrer' }, 'Source page') : null,
+            h('button', { class: 'btn small ghost', type: 'button', onclick: () => { detail.replaceChildren(); delete detail.dataset.id; } }, 'Close')),
+          h('label', { class: 'lbl' }, 'Title', it.edited.title ? h('span', { class: 'muted' }, ` (source: ${it.source.title || 'none'})`) : null), title,
+          h('label', { class: 'lbl' }, 'Creator', it.edited.creator ? h('span', { class: 'muted' }, ` (source: ${it.source.creator || 'none'})`) : null), creator,
+          h('div', { class: 'toolbar' }, h('button', { class: 'btn small', type: 'button', onclick: save }, 'Save'),
+            h('span', { class: 'muted' }, 'Empty a field to show the source value again. This never changes who may see the item.')),
+          h('h3', null, 'Tags'),
+          tagChips(it.tags, (label) => changeTags([id], [], [label])),
+          h('div', { class: 'toolbar' }, newTag,
+            h('button', { class: 'btn small', type: 'button', onclick: () => { const l = splitTags(newTag.value); if (l.length) changeTags([id], l, []); } }, 'Add')),
+          h('h3', null, 'Caption from the source'),
+          it.description ? h('p', { class: 'caption' }, it.description) : h('p', { class: 'muted' }, 'The source gave no caption.'),
+          it.raw ? h('details', null, h('summary', null, `Raw source record${it.extractor ? ` (${it.extractor})` : ''}`), h('pre', { class: 'raw' }, JSON.stringify(it.raw, null, 2))) : null,
+          it.edits.length ? h('details', null, h('summary', null, `Change log (${it.edits.length})`),
+            h('ul', { class: 'rows' }, it.edits.map((e) => h('li', null, `${e.field.replace('_', ' ')}: ${e.old_value || '—'} → ${e.new_value || '—'}`, h('span', { class: 'v' }, ago(e.at)))))) : null)));
+        detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (e) { toast(e.message); }
+    }
+
+    async function fillCloud() {
+      try {
+        const d = await api(`/api/hub/meta/tags?origin=${origin.value === 'any' ? 'any' : origin.value}&limit=40`);
+        cloud.replaceChildren(d.tags.length
+          ? h('div', { class: 'chips' }, d.tags.map((t) => h('button', { class: `chip pick${tag.value && t.norm === tag.value.replace(/^#/, '').toLowerCase() ? ' on' : ''}`, type: 'button', title: t.origins.map((o) => TAG_ORIGIN_LABEL[o]).join(', '), onclick: () => { tag.value = tag.value === t.norm ? '' : t.norm; page = 0; fill(); fillCloud(); } }, `#${t.label} `, h('span', { class: 'muted' }, num(t.items)))))
+          : h('p', { class: 'empty' }, 'No tags yet. New downloads bring the source\'s tags along.'));
+      } catch (e) { cloud.replaceChildren(h('p', { class: 'empty' }, e.message)); }
+    }
+
+    async function fill() {
+      try {
+        const d = await api(`/api/hub/meta?${query()}&limit=${SIZE}&offset=${page * SIZE}`);
+        const c = d.counts;
+        countsBox.replaceChildren(h('ul', { class: 'rows' },
+          h('li', null, 'Items', h('span', { class: 'v' }, num(c.items))),
+          h('li', null, 'With a caption from the source', h('span', { class: 'v' }, num(c.withCaption))),
+          h('li', null, 'With tags from the site', h('span', { class: 'v' }, num(c.withSiteTags))),
+          h('li', null, 'With hashtags from the caption', h('span', { class: 'v' }, num(c.withCaptionTags))),
+          h('li', null, 'With your tags', h('span', { class: 'v' }, num(c.withUserTags))),
+          h('li', null, 'Edited by you', h('span', { class: 'v' }, num(c.edited)))));
+        const bulkTag = h('input', { class: 'field', placeholder: 'Tags for the ticked items', 'aria-label': 'Tags for the ticked items' });
+        const all = h('input', { type: 'checkbox', 'aria-label': 'Select every item on this page', onchange: (e) => {
+          for (const it of d.items) { if (e.target.checked) picked.add(it.id); else picked.delete(it.id); }
+          fill();
+        } });
+        listBox.replaceChildren(
+          h('div', { class: 'toolbar' },
+            h('b', null, `${num(d.total)} items`),
+            bulkTag,
+            h('button', { class: 'btn small', type: 'button', onclick: () => { const l = splitTags(bulkTag.value); if (!picked.size) return toast('Tick the items first'); if (l.length) changeTags([...picked], l, []); } }, `Add to ${picked.size}`),
+            h('button', { class: 'btn small ghost', type: 'button', onclick: () => { const l = splitTags(bulkTag.value); if (!picked.size) return toast('Tick the items first'); if (l.length) changeTags([...picked], [], l); } }, `Remove from ${picked.size}`)),
+          d.items.length ? h('div', { class: 'scroll-x' }, h('table', null,
+            h('thead', null, h('tr', null, h('th', null, all), h('th', null, 'Title'), h('th', null, 'Creator'), h('th', null, 'Tags'), h('th', null, ''))),
+            h('tbody', null, d.items.map((it) => h('tr', null,
+              h('td', null, h('input', { type: 'checkbox', 'aria-label': `Select item ${it.id}`, checked: picked.has(it.id), onchange: (e) => { if (e.target.checked) picked.add(it.id); else picked.delete(it.id); } })),
+              h('td', null, it.title || h('span', { class: 'muted' }, it.filename || it.key), it.edited.title ? h('span', { class: 'chip' }, 'edited') : null,
+                h('div', { class: 'muted' }, [it.site, it.kind].filter(Boolean).join(' · '), ' ', audienceChip(it.audience))),
+              h('td', null, it.creator || '', it.edited.creator ? h('span', { class: 'chip' }, 'edited') : null),
+              h('td', null, tagChips(it.tags, (label) => changeTags([it.id], [], [label]))),
+              h('td', null, h('button', { class: 'btn small ghost', type: 'button', onclick: () => openItem(it.id) }, 'Edit'))))))) : h('p', { class: 'empty' }, 'No item matches.'),
+          pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
+      } catch (e) {
+        listBox.replaceChildren(h('p', { class: 'empty' }, e.message));
+      }
+    }
+
+    // Bulk creator rename: pick a creator as shown, give the new name, confirm
+    // the count. Profile merges stay on the Profiles page.
+    function renameCard() {
+      const from = h('input', { class: 'field', type: 'search', placeholder: 'Find a creator', 'aria-label': 'Creator to rename' });
+      const to = h('input', { class: 'field', placeholder: 'New creator name', 'aria-label': 'New creator name' });
+      const box = h('div', null);
+      let chosen = null;
+      let t2;
+      async function find() {
+        if (!from.value.trim()) return box.replaceChildren();
+        try {
+          const d = await api(`/api/hub/meta/creators?q=${encodeURIComponent(from.value)}&limit=20`);
+          box.replaceChildren(d.creators.length ? h('div', { class: 'chips' }, d.creators.map((c) => h('button', { class: `chip pick${chosen && chosen.creator === c.creator ? ' on' : ''}`, type: 'button', onclick: () => { chosen = c; find(); } }, `${c.creator} `, h('span', { class: 'muted' }, num(c.items))))) : h('p', { class: 'empty' }, 'No creator matches.'));
+        } catch (e) { box.replaceChildren(h('p', { class: 'empty' }, e.message)); }
+      }
+      async function go() {
+        if (!chosen) return toast('Pick a creator first');
+        if (!to.value.trim()) return toast('Give the new name');
+        if (!confirm(`Show all ${num(chosen.items)} items of "${chosen.creator}" under "${to.value.trim()}"? The source names are kept and this can be undone the same way. It does not change who may see the items.`)) return;
+        try {
+          const r = await jsonPost('/api/hub/meta/creator-rename', { from: chosen.creator, to: to.value.trim(), expected: chosen.items });
+          toast(`${num(r.changed)} item(s) renamed.`);
+          chosen = null;
+          from.value = '';
+          to.value = '';
+          box.replaceChildren();
+          fill();
+        } catch (e) { toast(e.message); }
+      }
+      from.addEventListener('input', () => { clearTimeout(t2); chosen = null; t2 = setTimeout(find, 250); });
+      return card('Rename a creator', 'profiles', { href: '#/profiles', label: 'Profiles' },
+        h('div', { class: 'toolbar' }, from, to, h('button', { class: 'btn small', type: 'button', onclick: go }, 'Rename')),
+        box,
+        h('p', { class: 'note' }, 'Changes the creator shown on every item of that name, in Grabbit only. To join or split creator profiles (and their audience), use the Profiles page.'));
+    }
+
+    for (const el of [q, tag]) el.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { page = 0; fill(); }, 250); });
+    for (const el of [origin, tagged, aud, edited]) el.addEventListener('change', () => { page = 0; fill(); if (el === origin) fillCloud(); });
+    fill();
+    fillCloud();
+    return [
+      h('h1', null, 'Metadata & tags'),
+      h('p', { class: 'lead' }, 'Titles, creators and tags in one place. What the source said is kept; your changes sit beside it.'),
+      h('p', { class: 'note' }, 'Changes stay in Grabbit: files the apps already imported are not touched. Nothing here changes whether an item is general or 18+.'),
+      h('div', { class: 'two' },
+        card('Overview', 'tags', null, countsBox),
+        card('Most used tags', 'tags', null, cloud)),
+      detail,
+      card('Items', 'media', null,
+        h('div', { class: 'toolbar' }, q, tag, origin, tagged, aud, h('label', null, edited, ' Edited by you')),
+        listBox),
+      renameCard(),
+    ];
+  }
+  const splitTags = (s) => String(s || '').split(/[\s,;]+/).map((t) => t.replace(/^#+/, '').trim()).filter(Boolean);
 
   function viewConversion() {
     const t = toolVersions(state.health);
@@ -1573,15 +1870,6 @@
           h('li', null, h('span', { class: `dot ${t[k] ? 'ok' : 'bad'}` }), k === 'ytdlp' ? 'yt-dlp' : k === 'gallerydl' ? 'gallery-dl' : k, h('span', { class: 'v' }, t[k] || 'missing'))))),
       h('div', { style: 'height:18px' }),
       h('p', { class: 'note' }, 'Today: tick "Web copy" when adding a shorts link. Planned: a conversion queue for files already in the library.'),
-    ];
-  }
-
-  function viewMetadata() {
-    return [
-      h('h1', null, 'Metadata & tags'),
-      h('p', { class: 'lead' }, 'Planned: edit captions, tags, creators and source links in one place.'),
-      h('p', { class: 'note' }, 'Today the classic view has the rules engine (auto-tagging and routing by site or creator), naming templates and the music tag editor.'),
-      h('p', null, h('a', { class: 'btn ghost', href: '/' }, 'Open the classic view')),
     ];
   }
 
@@ -1652,6 +1940,13 @@
     syncViewer();
   });
 
+  // Repaint after the boot loads, except a page that fetches its own data:
+  // rebuilding it would throw away what the owner already opened or typed.
+  function settle() {
+    if (route().ownData) updateNav();
+    else render(false);
+  }
+
   async function boot() {
     buildNav();
     render();
@@ -1662,12 +1957,12 @@
       $('#appsList').replaceChildren(...apps.map((a) => h('li', null, h('a', { href: a.url, target: '_blank', rel: 'noopener noreferrer' }, a.name, h('span', { 'aria-hidden': 'true' }, '↗')))));
       $('#appsBox').hidden = false;
     }
-    render(false);
+    settle();
     syncViewer();
     connectStream();
     // The health probe touches every mount; it can take a moment.
     await load(['health']);
-    render(false);
+    settle();
     // Refresh the numbers; repaint only pages without inputs of their own.
     setInterval(() => load(['health', 'summary']).then(() => { if (route().live) render(false); }), 60000);
   }

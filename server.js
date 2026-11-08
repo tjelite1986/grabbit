@@ -27,6 +27,9 @@ const itemStore = require('./item-store');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
 const { copyInto } = require('./safe-copy');
+const sourceMeta = require('./source-meta');
+const itemMeta = require('./item-meta');
+const dupeScan = require('./dupe-scan');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -153,6 +156,10 @@ const POSTS_ENABLED = !!POSTS_IMPORT_DIR;
 // and egram's import folder. Both opt-in; unset means no inbox and no egram.
 const INBOX_DROP_DIR = process.env.INBOX_DROP_DIR || null;
 const EGRAM_IMPORT_DIR = process.env.EGRAM_IMPORT_DIR || null;
+// The apps' own libraries, where their importers file what they took. Read by
+// the duplicate scan only; mount them read-only. Unset means not scanned.
+const ADSHORTIS_LIBRARY_DIR = process.env.ADSHORTIS_LIBRARY_DIR || null;
+const EGRAM_LIBRARY_DIR = process.env.EGRAM_LIBRARY_DIR || null;
 const INBOX_MODE = ['off', 'shadow', 'on'].includes(process.env.INBOX_MODE) ? process.env.INBOX_MODE : 'off';
 // Drops older than this (ISO time) are not inbox material: an old app's leftovers.
 const INBOX_SINCE = Number.isFinite(Date.parse(process.env.INBOX_SINCE || '')) ? Date.parse(process.env.INBOX_SINCE) : null;
@@ -2776,6 +2783,80 @@ try {
   console.error(`[grabbit] items.db could not be opened (${e.message}). No app receives anything until it can.`);
 }
 
+// The duplicate scan (dupe-scan.js): Grabbit's own folders and the apps'
+// media folders, read-only. It starts only when the owner starts it on the
+// hub's Duplicates page, and resumes after a restart only if it was running.
+// DUPES_SCAN=off leaves it out entirely; DUPES_SCAN_MBPS caps its reads.
+const DUPE_ROOT_CANDIDATES = [
+  { path: DOWNLOAD_DIR, label: 'Grabbit library', owner: 'grabbit' },
+  { path: VIDEOS_DIR, label: 'Grabbit videos', owner: 'grabbit' },
+  { path: PHOTOS_DIR, label: 'Grabbit photos', owner: 'grabbit' },
+  { path: AUDIO_DIR, label: 'Grabbit audio', owner: 'grabbit' },
+  { path: ADULTS_DIR, label: 'Grabbit 18+ library', owner: 'grabbit', adult: true },
+  { path: NAVIDROME_DIR, label: 'Music library', owner: 'grabbit', app: 'Navidrome' },
+  { path: NAVIDROME_KIDS_DIR, label: 'Kids music library', owner: 'grabbit', app: 'Navidrome' },
+  { path: AUDIOBOOKS_DIR, label: 'Audiobooks', owner: 'grabbit' },
+  { path: TIKSHORTIS_ROOT, label: 'TikShortis', owner: 'app', app: 'TikShortis' },
+  { path: ELITE_ROOT, label: '18+ app import', owner: 'app', app: 'Adshortis', adult: true },
+  { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform' },
+  { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts' },
+  { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram' },
+  { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
+  { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram' },
+];
+const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
+let DUPE_SCANNER = null;
+if (ITEM_STORE && ITEM_STORE.fileSeen && String(process.env.DUPES_SCAN || '').toLowerCase() !== 'off') {
+  DUPE_SCANNER = new dupeScan.DupeScanner({
+    store: ITEM_STORE,
+    roots: dupeRoots,
+    mbPerSec: Number(process.env.DUPES_SCAN_MBPS) || 20,
+  });
+  try {
+    DUPE_SCANNER.boot();
+  } catch (e) {
+    console.error(`dupes: the scan could not resume (${e.message})`);
+  }
+}
+
+// What the source said about an item (caption, tags, raw record), kept in
+// items.db beside the owner's own metadata. Called wherever a save completes.
+// A save that has no item row yet gets one under the registry's rule for its
+// channel (18+ channel -> adult, else unknown; a job's own adult signal
+// tightens it), exactly as the next registry import would have added it.
+// It never makes anything general. `meta` is a fromJob() result taken before
+// any owner override; without it the job itself is read.
+const SOURCE_META = new WeakMap();
+function noteSourceMeta(job, filename, channel, meta) {
+  if (!ITEM_STORE || !ITEM_STORE.recordSourceMeta || !job) return;
+  const key = itemKeyOf(job);
+  if (!key) return;
+  try {
+    const m = meta !== undefined ? meta : sourceMeta.fromJob(job);
+    if (!m) return;
+    let item = ITEM_STORE.get(key);
+    if (!item) {
+      const aud = job.audience === 'adult' ? 'adult' : itemStore.audienceOfRegistryChannel(channel);
+      item = ITEM_STORE.upsert({
+        key,
+        site: job.site,
+        sourceId: job.mediaId,
+        sourceUrl: job.sourceUrl,
+        kind: itemKindOf(job),
+        audience: aud,
+        reasons: [job.audience === 'adult' ? 'the source marks it 18+' : `registry channel ${channel || 'none'}`],
+        creator: job.creator,
+        title: job.title,
+        filename: filename || null,
+        origin: 'save',
+      });
+    }
+    ITEM_STORE.recordSourceMeta(item.id, m);
+  } catch (e) {
+    console.error(`[grabbit] source metadata of ${key} was not recorded: ${e.message}`);
+  }
+}
+
 // The app destination a save into this channel lands in. With dest=elite an
 // image in a non-platform channel goes to the posts import.
 function destinationOf(channel, job) {
@@ -2854,6 +2935,20 @@ function recordItem(job, classification, filename) {
   });
 }
 
+// recordItem plus the source's metadata, for the delivery paths.
+function recordItemWithMeta(job, classification, filename) {
+  const item = recordItem(job, classification, filename);
+  if (item && ITEM_STORE.recordSourceMeta) {
+    try {
+      const m = SOURCE_META.has(job) ? SOURCE_META.get(job) : sourceMeta.fromJob(job);
+      if (m) ITEM_STORE.recordSourceMeta(item.id, m);
+    } catch (e) {
+      console.error(`[grabbit] source metadata of ${item.key} was not recorded: ${e.message}`);
+    }
+  }
+  return item;
+}
+
 // Why this job may not be delivered to this app destination, or null. Fails
 // closed: without the item store no app gets anything (18+ included, since its
 // deliveries could not be recorded either); no key or any error means a general
@@ -2871,7 +2966,7 @@ function audienceRefusal(destination, job) {
     const c = classifyJob(destination, job);
     const why = audience.refusal(c, destination, { mediaType: job && job.mediaType, creator: job && job.creator });
     if (why) {
-      const item = recordItem(job, c, null);
+      const item = recordItemWithMeta(job, c, null);
       if (item) ITEM_STORE.recordDelivery(item.id, destination, 'refused', { detail: why });
     }
     return why;
@@ -2905,7 +3000,7 @@ function recordDrop(destination, job, filename, filePath) {
   if (!ITEM_STORE || !itemKeyOf(job)) return;
   try {
     const c = classifyJob(destination, job);
-    const item = recordItem(job, c, filename);
+    const item = recordItemWithMeta(job, c, filename);
     ITEM_STORE.recordDelivery(item.id, destination, 'dropped', { filename });
     if (filePath) {
       sha256File(filePath)
@@ -3027,7 +3122,7 @@ async function stageInboxEntry(e) {
     row = ITEM_STORE.inboxAdd({ entry: e.entry, kind: 'profile', username: e.username, sidecarFile: e.sidecarFile, state: 'held', reason: 'new' });
   } else {
     const c = classifyJob('egram', e.job);
-    const item = recordItem(e.job, c, e.mediaFile);
+    const item = recordItemWithMeta(e.job, c, e.mediaFile);
     if (!item) throw new Error(`no item key for ${e.entry}`);
     let state = 'held';
     let reason = 'new';
@@ -3112,7 +3207,7 @@ function releaseInbox(settings, now = Date.now()) {
     try {
       const entry = inboxEntryOf(row);
       const c = classifyJob('egram', entry.job);
-      if (row.kind === 'media') recordItem(entry.job, c, row.media_file);
+      if (row.kind === 'media') recordItemWithMeta(entry.job, c, row.media_file);
       if (c.audience !== 'general') {
         const why = c.audience === 'adult' ? `18+: ${c.reasons.join('; ')}` : c.reasons.join('; ');
         if (row.state !== 'held' || row.reason !== why) ITEM_STORE.inboxSetState(row.id, 'held', why, now);
@@ -3506,6 +3601,203 @@ app.post('/api/hub/review/items', (req, res) => {
     if (e instanceof itemStore.StoreError) return res.status(400).json({ ok: false, error: e.message });
     console.error('review items:', e.message);
     res.status(500).json({ ok: false, error: 'The item store could not be changed. See the server log.' });
+  }
+});
+
+// --- Grabbit 2.0 duplicates and metadata ------------------------------------------
+// Both pages read and write items.db only. Nothing here touches a file in any
+// folder, and nothing here changes an item's audience: the gate never reads
+// the owner's title, creator or tags.
+const actorOf = (req) => (req.principal && req.principal.id) || null;
+function metaStore(res) {
+  if (!ITEM_STORE) {
+    res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
+    return null;
+  }
+  if (!ITEM_STORE.listMeta) {
+    res.status(503).json({ ok: false, error: 'The item store has not been upgraded to schema 4.' });
+    return null;
+  }
+  return ITEM_STORE;
+}
+function metaError(res, e, what) {
+  if (e instanceof itemMeta.MetaError || e instanceof itemStore.StoreError) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+  console.error(`${what}:`, e.message);
+  return res.status(500).json({ ok: false, error: `${what} failed. See the server log.` });
+}
+const SHA256_RE = /^[0-9a-f]{64}$/;
+
+// GET /api/hub/dupes?state=open|acked|all&limit=&offset= -> scan status and
+// exact duplicate groups (each member with its folder, app and item).
+app.get('/api/hub/dupes', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  try {
+    const scan = DUPE_SCANNER
+      ? DUPE_SCANNER.status()
+      : { state: 'off', active: false, roots: [], totals: {}, reason: String(process.env.DUPES_SCAN || '').toLowerCase() === 'off' ? 'DUPES_SCAN=off' : 'unavailable' };
+    const state = ['open', 'acked', 'all'].includes(req.query.state) ? req.query.state : 'open';
+    const groups = store.dupeGroups({ state, limit: req.query.limit, offset: req.query.offset });
+    const rootOf = new Map(DUPE_ROOT_CANDIDATES.filter((r) => r.path).map((r) => [r.path, r]));
+    for (const g of groups.items) {
+      g.members = g.members.map((m) => {
+        const r = rootOf.get(m.root) || {};
+        return { ...m, rootLabel: r.label || m.root, app: r.app || null, owner: r.owner || null, adultFolder: Boolean(r.adult) };
+      });
+      // The same bytes in an 18+ folder and in a folder a general app reads:
+      // worth the owner's eye even when the group is otherwise harmless.
+      g.crossesAudience = g.members.some((m) => m.adultFolder) && g.members.some((m) => !m.adultFolder && m.owner === 'app');
+    }
+    res.json({ ok: true, scan, ...groups });
+  } catch (e) {
+    metaError(res, e, 'Duplicates');
+  }
+});
+
+// POST /api/hub/dupes/scan { action: 'start' | 'pause' }
+app.post('/api/hub/dupes/scan', (req, res) => {
+  if (!metaStore(res)) return;
+  if (!DUPE_SCANNER) return res.status(409).json({ ok: false, error: 'The duplicate scan is switched off on this server (DUPES_SCAN=off).' });
+  const action = req.body && req.body.action;
+  if (action === 'start') {
+    console.log(`dupes: scan started by ${actorOf(req) || 'owner'}`);
+    return res.json({ ok: true, scan: DUPE_SCANNER.start() });
+  }
+  if (action === 'pause') {
+    console.log(`dupes: scan paused by ${actorOf(req) || 'owner'}`);
+    return res.json({ ok: true, scan: DUPE_SCANNER.pause() });
+  }
+  res.status(400).json({ ok: false, error: 'action must be start or pause' });
+});
+
+// POST /api/hub/dupes/:sha256/ack { note? } and .../unack: mark a group known
+// or open it again. Nothing on disk changes.
+app.post('/api/hub/dupes/:sha/ack', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  if (!SHA256_RE.test(req.params.sha)) return res.status(400).json({ ok: false, error: 'Not a SHA-256 hash' });
+  try {
+    const r = store.ackGroup(req.params.sha, { note: req.body && req.body.note, by: actorOf(req) });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    metaError(res, e, 'Acknowledging the group');
+  }
+});
+app.post('/api/hub/dupes/:sha/unack', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  if (!SHA256_RE.test(req.params.sha)) return res.status(400).json({ ok: false, error: 'Not a SHA-256 hash' });
+  res.json({ ok: true, removed: store.unackGroup(req.params.sha) });
+});
+
+// GET /api/hub/meta?q=&tag=&origin=any|source|site|caption|user&creator=&tagged=any|none|source|user&edited=1&audience=&limit=&offset=
+app.get('/api/hub/meta', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  try {
+    const q = req.query;
+    const r = store.listMeta({
+      q: q.q, tag: q.tag, origin: q.origin, creator: q.creator, tagged: q.tagged,
+      edited: q.edited === '1', audience: q.audience, limit: q.limit, offset: q.offset,
+    });
+    res.json({ ok: true, counts: store.metaCounts(), ...r });
+  } catch (e) {
+    metaError(res, e, 'Metadata list');
+  }
+});
+
+// GET /api/hub/meta/tags?origin=&q=&limit= -> the most used tags.
+app.get('/api/hub/meta/tags', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  try {
+    res.json({ ok: true, tags: store.tagCounts({ origin: req.query.origin, q: req.query.q, limit: req.query.limit }) });
+  } catch (e) {
+    metaError(res, e, 'Tag list');
+  }
+});
+
+// GET /api/hub/meta/creators?q=&limit= -> creators as shown, with counts.
+app.get('/api/hub/meta/creators', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  try {
+    res.json({ ok: true, creators: store.creatorCounts({ q: req.query.q, limit: req.query.limit }) });
+  } catch (e) {
+    metaError(res, e, 'Creator list');
+  }
+});
+
+// POST /api/hub/meta/tags { ids: [itemId], add: [label], remove: [label] }
+// -> the owner's own tags. Source and caption tags cannot be removed.
+app.post('/api/hub/meta/tags', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  const b = req.body || {};
+  const add = Array.isArray(b.add) ? b.add : [];
+  const remove = Array.isArray(b.remove) ? b.remove : [];
+  if (!add.length && !remove.length) return res.status(400).json({ ok: false, error: 'Nothing to add or remove' });
+  try {
+    const out = { added: null, removed: null };
+    if (add.length) out.added = store.addUserTags(b.ids, add, actorOf(req));
+    if (remove.length) out.removed = store.removeUserTags(b.ids, remove, actorOf(req));
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    metaError(res, e, 'Changing tags');
+  }
+});
+
+// POST /api/hub/meta/creator-rename { from, to, expected } -> every item shown
+// under `from` is shown under `to`. `expected` must match the count the owner
+// saw, so a list that changed in between is not renamed blind.
+app.post('/api/hub/meta/creator-rename', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  const b = req.body || {};
+  try {
+    const now = store.creatorCounts({ q: b.from, limit: 500 }).find((c) => c.creator === b.from);
+    const n = now ? now.items : 0;
+    if (b.expected == null || Number(b.expected) !== n) {
+      return res.status(409).json({ ok: false, error: `The list changed: ${n} items are shown under that creator now, not ${b.expected}. Reload and check again.` });
+    }
+    const r = store.renameCreator(b.from, b.to, actorOf(req));
+    console.log(`meta: ${r.changed} item(s) moved from creator "${b.from}" to "${b.to}" (batch ${r.batch})`);
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    metaError(res, e, 'Renaming the creator');
+  }
+});
+
+// GET /api/hub/meta/:id -> one item: source and edited fields, caption, raw
+// record, tags by origin, edit log.
+app.get('/api/hub/meta/:id', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  if (!/^\d{1,12}$/.test(req.params.id)) return res.status(404).json({ ok: false, error: 'No such item' });
+  try {
+    res.json({ ok: true, item: store.getMeta(Number(req.params.id)) });
+  } catch (e) {
+    if (e instanceof itemMeta.MetaError) return res.status(404).json({ ok: false, error: e.message });
+    metaError(res, e, 'Metadata');
+  }
+});
+
+// POST /api/hub/meta/:id { title?, creator? } -> the owner's edit ('' removes it).
+app.post('/api/hub/meta/:id', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  if (!/^\d{1,12}$/.test(req.params.id)) return res.status(404).json({ ok: false, error: 'No such item' });
+  const b = req.body || {};
+  const fields = {};
+  for (const k of ['title', 'creator']) if (Object.prototype.hasOwnProperty.call(b, k)) fields[k] = b[k];
+  if (!Object.keys(fields).length) return res.status(400).json({ ok: false, error: 'Nothing to change' });
+  try {
+    const r = store.editItem(Number(req.params.id), fields, actorOf(req));
+    res.json({ ok: true, ...r, item: store.getMeta(Number(req.params.id)) });
+  } catch (e) {
+    metaError(res, e, 'Editing the item');
   }
 });
 
@@ -5871,6 +6163,7 @@ app.get('/api/download', async (req, res) => {
       // Register the save so playlist views and "download new" recognise the
       // clip as fetched — the jobs/batch paths do this via finishJob.
       markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
+      noteSourceMeta(job, outName, channel);
     }
 
     const histEntry = {
@@ -6094,6 +6387,7 @@ app.get('/api/download-all', async (req, res) => {
       // server/photos save recorded under a channel makes a later shorts
       // download of the same clip look like a repeat and get skipped.
       markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, dest === 'elite' ? channel : null);
+      noteSourceMeta(job, null, dest === 'elite' ? channel : null);
       send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'saved' });
     } catch (e) {
       failed++;
@@ -6185,6 +6479,7 @@ function finishJob(job, patch) {
   // server/Navidrome save would make a later shorts download look like a repeat.
   if (job.saved && job.sourceUrl) {
     markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null);
+    noteSourceMeta(job, job.filename, job.dest === 'elite' ? job.channel : null, SOURCE_META.get(job) || null);
   }
   if (job.watch) clearWatchFailure(job.watch.playlistId, job.watch.key);
   if (job.deliverTemp && job.finalPath) {
@@ -6334,6 +6629,12 @@ async function runJob(job, params) {
     meta = await extractors.resolve(params.url);
   } catch (e) {
     return failJob(job, 'Resolve failed: ' + String(e.message || e), e);
+  }
+  // What the source said, before any override below; finishJob stores it.
+  try {
+    SOURCE_META.set(job, sourceMeta.fromJob(meta));
+  } catch (e) {
+    console.error('source metadata:', e.message);
   }
   if (params.creatorOverride) meta.creator = params.creatorOverride;
   if (params.titleOverride) meta.title = params.titleOverride;
@@ -7242,6 +7543,7 @@ async function attemptRetry(entry) {
     device: false,
   });
   markDownloaded(job.sourceUrl || entry.url, null, job.site, job.mediaId, entry.dest === 'elite' ? entry.channel : null);
+  noteSourceMeta(job, null, entry.dest === 'elite' ? entry.channel : null);
 }
 
 let retryRunning = false;
@@ -8111,6 +8413,7 @@ async function downloadAudio(res, job, url, afmt, dest) {
         device: false,
       });
       markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
+      noteSourceMeta(job, outName, null);
       return res.json({ ok: true, saved: true, dest: 'server', dir: 'mp3', filename: outName });
     }
 
@@ -8181,6 +8484,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     // Register a fresh library save (channel null: a server save must not make
     // a later shorts download look like a repeat) — matches finishJob.
     if (!already) markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
+    if (!already) noteSourceMeta(job, outName, null);
     if (!device) {
       recordHistory({ ...histEntry, device: false });
       return res.json({ ok: true, saved: !already, dest: 'server', dir: shelf, filename: outName });

@@ -208,6 +208,23 @@ function jobFromGif(gif) {
     // buildCaption appends the hashtags and the source link to this.
     description: caption,
     tags: hashtags(tagNames),
+    // The site's own tags as it names them, for the item store.
+    sourceTags: tagNames,
+    // The descriptive part of the API object, for the item store.
+    sourceMeta: {
+      id: gif.id,
+      userName: gif.userName,
+      description: gif.description,
+      tags: gif.tags,
+      niches: gif.niches,
+      createDate: gif.createDate,
+      duration: gif.duration,
+      width: gif.width,
+      height: gif.height,
+      views: gif.views,
+      likes: gif.likes,
+      verified: gif.verified,
+    },
     mediaType: isImage ? 'image' : 'video',
     ext,
     thumbnail: urls.poster || urls.thumbnail || null,
