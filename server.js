@@ -156,6 +156,10 @@ const POSTS_ENABLED = !!POSTS_IMPORT_DIR;
 // and egram's import folder. Both opt-in; unset means no inbox and no egram.
 const INBOX_DROP_DIR = process.env.INBOX_DROP_DIR || null;
 const EGRAM_IMPORT_DIR = process.env.EGRAM_IMPORT_DIR || null;
+// The apps' own libraries, where their importers file what they took. Read by
+// the duplicate scan only; mount them read-only. Unset means not scanned.
+const ADSHORTIS_LIBRARY_DIR = process.env.ADSHORTIS_LIBRARY_DIR || null;
+const EGRAM_LIBRARY_DIR = process.env.EGRAM_LIBRARY_DIR || null;
 const INBOX_MODE = ['off', 'shadow', 'on'].includes(process.env.INBOX_MODE) ? process.env.INBOX_MODE : 'off';
 // Drops older than this (ISO time) are not inbox material: an old app's leftovers.
 const INBOX_SINCE = Number.isFinite(Date.parse(process.env.INBOX_SINCE || '')) ? Date.parse(process.env.INBOX_SINCE) : null;
@@ -2797,6 +2801,8 @@ const DUPE_ROOT_CANDIDATES = [
   { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform' },
   { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts' },
   { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram' },
+  { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
+  { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram' },
 ];
 const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
 let DUPE_SCANNER = null;
