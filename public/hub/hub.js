@@ -1638,6 +1638,57 @@
         fill();
       } catch (e) { toast(e.message); }
     }
+    async function removeOne(m) {
+      if (!confirm(`Move this copy to the trash?\n\n${m.rel}\n\nThe other copy stays. You can restore it for 30 days.`)) return;
+      try {
+        await jsonPost('/api/hub/dupes/remove', { id: m.id });
+        toast('Moved to the trash.');
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+    async function removeGroup(g) {
+      if (!confirm(`Move the ${g.removable} extra ${g.removable === 1 ? 'copy' : 'copies'} of this group to the trash? The copy marked Keep stays. You can restore for 30 days.`)) return;
+      try {
+        const r = await jsonPost('/api/hub/dupes/remove-all', { sha256: g.sha256 });
+        toast(r.failed.length ? `${r.files} moved, ${r.failed.length} refused: ${r.failed[0].error}` : `${r.files} moved to the trash.`);
+        fill();
+      } catch (e) { toast(e.message); }
+    }
+    async function removeAll() {
+      try {
+        const p = await jsonPost('/api/hub/dupes/remove-all', { dryRun: true });
+        if (!p.files) return toast('No extra copy can be removed. The rest sit in app folders.');
+        if (!confirm(`Move ${p.files} extra copies in ${p.groups} groups (${bytes(p.bytes)}) to the trash?\n\nOne copy of each group stays: the one an app reads, else the one linked to an item, else the oldest. Groups marked known/OK are left alone. You can restore for 30 days.`)) return;
+        removeAllBtn.disabled = true;
+        removeAllBtn.textContent = 'Removing ...';
+        const r = await jsonPost('/api/hub/dupes/remove-all', {});
+        toast(`${r.files} copies (${bytes(r.bytes)}) moved to the trash${r.failed.length ? `; ${r.failed.length} refused (${r.failed[0].error})` : ''}.`);
+      } catch (e) { toast(e.message); }
+      removeAllBtn.disabled = false;
+      removeAllBtn.textContent = 'Remove all extra copies';
+      fill();
+    }
+    const removeAllBtn = h('button', { class: 'btn small danger', type: 'button', onclick: removeAll }, 'Remove all extra copies');
+    const trashBox = h('div', null);
+    async function fillTrash() {
+      try {
+        const t = await api('/api/hub/dupes/trash');
+        if (!t.items.length) return trashBox.replaceChildren(h('p', { class: 'empty' }, 'The trash is empty.'));
+        trashBox.replaceChildren(
+          h('p', { class: 'note' }, `${num(t.items.length)} copies, ${bytes(t.bytes)}. Each is deleted for good 30 days after it was removed.`),
+          h('ul', { class: 'rows' }, t.items.map((x) => h('li', null,
+            h('div', null, h('b', null, x.rootLabel), h('span', { class: 'muted' }, ` · ${bytes(x.bytes)} · removed ${ago(x.at)}, deleted ${new Date(x.purgeAt).toLocaleDateString()}`)),
+            h('div', { class: 'break mono' }, x.rel),
+            h('button', { class: 'btn small ghost', type: 'button', onclick: () => restore(x) }, 'Restore')))));
+      } catch (e) { trashBox.replaceChildren(h('p', { class: 'empty' }, e.message)); }
+    }
+    async function restore(x) {
+      try {
+        await jsonPost(`/api/hub/dupes/trash/${x.id}/restore`, {});
+        toast('Restored. The scan reads it again.');
+        fill();
+      } catch (e) { toast(e.message); }
+    }
     async function unack(g) {
       try {
         await jsonPost(`/api/hub/dupes/${g.sha256}/unack`, {});
@@ -1690,12 +1741,18 @@
           : ['mp3', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'wav'].includes(ext)
             ? h('audio', { class: 'dupe-audio', src, controls: true, preload: 'none' })
             : null;
-      return h('li', { class: 'dupe-member' },
+      return h('li', { class: `dupe-member${m.suggested ? ' dupe-extra' : ''}` },
         preview,
         h('div', null, h('b', null, m.rootLabel), m.adultFolder ? h('span', { class: 'chip adult' }, '18+') : null,
           m.mtime_ms ? h('span', { class: 'muted' }, ` · ${new Date(m.mtime_ms).toLocaleDateString()}`) : null),
         h('div', { class: 'break mono' }, m.rel),
-        h('div', null, who));
+        h('div', null, who),
+        h('div', { class: 'toolbar dupe-actions' },
+          m.keep ? h('span', { class: 'chip keep' }, 'Keep') : null,
+          m.removable
+            ? h('button', { class: 'btn small danger', type: 'button', onclick: () => removeOne(m) }, 'Remove')
+            : null,
+          m.why && !m.keep ? h('span', { class: 'muted' }, m.why) : null));
     }
 
     // The scan poll refreshes only the scan box and the summary line. The
@@ -1715,6 +1772,8 @@
         scanBox.replaceChildren(...scanView(d.scan).filter(Boolean));
         const sig = sigOf(d);
         const keepList = opts.poll && shownSig;
+        removeAllBtn.hidden = !d.canRemove;
+        if (!keepList && d.canRemove) fillTrash();
         groupHead.replaceChildren(h('p', { class: 'note' },
           `${num(d.groups)} groups of identical files in all; ${bytes(d.openBytes)} in extra copies across the open ones.`),
         keepList && sig !== shownSig
@@ -1737,7 +1796,10 @@
                 ? [h('span', { class: 'chip' }, `Known/OK ${ago(g.ack.at)}${g.ack.note ? `: ${g.ack.note}` : ''}`),
                   h('button', { class: 'btn small ghost', type: 'button', onclick: () => unack(g) }, 'Open again')]
                 : [g.ack ? h('span', { class: 'muted' }, 'Changed since it was marked') : null,
-                  h('button', { class: 'btn small ghost', type: 'button', onclick: () => ack(g) }, 'Mark known/OK')]),
+                  h('button', { class: 'btn small ghost', type: 'button', onclick: () => ack(g) }, 'Mark known/OK')],
+              g.removable && !(g.ack && g.ack.current)
+                ? h('button', { class: 'btn small danger', type: 'button', onclick: () => removeGroup(g) }, `Remove ${g.removable} extra`)
+                : null),
             h('ul', { class: 'rows dupe-grid' }, g.members.map(memberRow)))),
           pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
         }
@@ -1751,9 +1813,10 @@
     return [
       h('h1', null, 'Duplicates'),
       h('p', { class: 'lead' }, 'Files with exactly the same bytes, in Grabbit\'s folders and the apps\' media folders.'),
-      h('p', { class: 'note' }, 'Read only: nothing is moved, changed or deleted, in any folder. A file is linked to an item only when exactly one item was saved under that file name; otherwise it is shown unlinked rather than guessed. Near-duplicates and removing copies come in a later version.'),
+      h('p', { class: 'note' }, 'Remove moves a copy to Grabbit\'s trash; it can be restored for 30 days and is deleted after that. Only copies in Grabbit\'s own folders, or in an app\'s import folder when the app\'s library already has the same bytes, can be removed. Copies an app reads stay, and so does the last copy linked to an item. All copies in a group have exactly the same bytes, so the quality is the same; the one marked Keep is the one an app reads, else the one linked to an item, else the oldest. A file is linked to an item only when exactly one item was saved under that file name.'),
       card('Scan', 'pulse', null, scanBox),
-      card('Identical files', 'dupes', null, h('div', { class: 'toolbar' }, which), groupHead, groupBox),
+      card('Identical files', 'dupes', null, h('div', { class: 'toolbar' }, which, removeAllBtn), groupHead, groupBox),
+      card('Trash', 'dupes', null, trashBox),
     ];
   }
 

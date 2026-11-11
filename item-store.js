@@ -268,6 +268,24 @@ const MIGRATIONS = [
     updated_at INTEGER NOT NULL
   );
   `,
+  // v5: duplicate copies the owner removed. The file sits in Grabbit's trash
+  // folder (trash_name) until it is restored or purged after the hold time.
+  `
+  CREATE TABLE dupe_trash (
+    id INTEGER PRIMARY KEY,
+    file_id INTEGER,
+    root TEXT NOT NULL,
+    rel TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    trash_name TEXT NOT NULL UNIQUE,
+    by TEXT,
+    at INTEGER NOT NULL,
+    restored_at INTEGER,
+    purged_at INTEGER
+  );
+  CREATE INDEX dupe_trash_held ON dupe_trash (at) WHERE restored_at IS NULL AND purged_at IS NULL;
+  `,
 ];
 const CLASSIFY_MAX = 5000;
 const SCHEMA_VERSION = MIGRATIONS.length;

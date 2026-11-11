@@ -315,6 +315,9 @@ pre.raw { max-height: 320px; overflow: auto; font-size: 12px; background: var(--
 .dupe-preview { display: block; width: 100%; max-height: 320px; object-fit: contain; background: #000; border-radius: 6px; }
 .dupe-audio { width: 100%; }
 .rows li.dupe-member > div { margin: 2px 0; }
+.rows.dupe-grid li.dupe-member.dupe-extra { border-style: dashed; }
+.chip.keep { border-color: var(--ok); color: var(--ok); }
+.dupe-actions { margin-top: 6px; gap: 8px; }
 .meta-edit input.field { width: 100%; box-sizing: border-box; }
 .meta-edit .toolbar input.field { flex: 1 1 200px; width: auto; }
 

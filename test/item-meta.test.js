@@ -275,7 +275,7 @@ test('a v3 store migrates to v4 with every item, delivery and inbox row kept', (
   v3.close();
   const s = itemStore.open(file);
   t.after(() => s.close());
-  assert.equal(s.db.pragma('user_version', { simple: true }), 4);
+  assert.equal(s.db.pragma('user_version', { simple: true }), itemStore.SCHEMA_VERSION);
   assert.ok(s.migrationBackup && fs.existsSync(s.migrationBackup));
   const row = s.getById(it.id);
   assert.equal(row.audience, 'general');

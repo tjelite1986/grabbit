@@ -351,3 +351,108 @@ test('duplicate preview: an 18+ file is served only to a logged-in owner, and a 
   fs.symlinkSync(outside, ann);
   assert.equal((await fetch(url(deep.id), { headers: s.headers })).status, 404, 'intermediate symlink');
 });
+
+// --- removing copies: trash, keep rules, restore ------------------------------
+
+async function scanned(s) {
+  assert.equal((await s.post('/api/hub/dupes/scan', { action: 'start' })).status, 200);
+  let d;
+  for (let i = 0; i < 100; i++) {
+    d = await s.get('/api/hub/dupes?limit=100');
+    if (d.scan.lastPassAt) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(d.scan.lastPassAt, JSON.stringify(d.scan));
+  return d;
+}
+
+test('removing copies: app copies stay, the oldest Grabbit copy is kept, removed copies go to the trash and come back', async (t) => {
+  const s = await boot(t);
+  const downloads = path.join(path.dirname(s.dirs.data), 'downloads');
+  const put = (f, body, ageDays) => {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, body);
+    const at = new Date(Date.now() - ageDays * 86400000);
+    fs.utimesSync(f, at, at);
+    return f;
+  };
+  // A: three Grabbit copies and one TikShortis copy.
+  const a = [put(path.join(downloads, 'a', 'one.mp4'), 'AAAA bytes', 3), put(path.join(downloads, 'b', 'two.mp4'), 'AAAA bytes', 2), put(path.join(downloads, 'three.mp4'), 'AAAA bytes', 1)];
+  const aApp = put(path.join(s.dirs.tik, 'main', 'x', 'a.mp4'), 'AAAA bytes', 5);
+  // B: two Grabbit copies; the older one stays.
+  const bOld = put(path.join(downloads, 'old.jpg'), 'BBBB bytes', 9);
+  const bNew = put(path.join(downloads, 'new', 'new.jpg'), 'BBBB bytes', 1);
+  // C: only TikShortis copies: nothing can go.
+  const c = [put(path.join(s.dirs.tik, 'main', 'c1.mp4'), 'CCCC bytes', 2), put(path.join(s.dirs.tik, 'main', 'c2.mp4'), 'CCCC bytes', 1)];
+
+  let d = await scanned(s);
+  assert.equal(d.total, 3);
+  assert.equal(d.canRemove, true);
+  const group = (file) => d.items.find((g) => g.members.some((m) => path.join(m.root, m.rel) === file));
+  const member = (file) => d.items.flatMap((g) => g.members).find((m) => path.join(m.root, m.rel) === file);
+  const gA = group(aApp);
+  assert.equal(gA.removable, 3, 'all three Grabbit copies may go; the app copy stays');
+  assert.equal(member(aApp).keep, true);
+  assert.equal(member(aApp).removable, false);
+  assert.match(member(aApp).why, /TikShortis reads this folder/);
+  const gC = d.items.find((g) => g.members.every((m) => m.root === s.dirs.tik) && g.files === 2);
+  assert.equal(gC.removable, 0);
+  assert.equal(member(bOld).keep, true);
+  assert.equal(member(bNew).suggested, true);
+
+  // An app copy is refused; nothing moves.
+  const refused = await s.post('/api/hub/dupes/remove', { id: member(c[0]).id });
+  assert.equal(refused.status, 409);
+  assert.ok(fs.existsSync(c[0]));
+  assert.equal((await s.post('/api/hub/dupes/remove', { id: 'x' })).status, 400);
+
+  // One copy by hand.
+  const one = await s.post('/api/hub/dupes/remove', { id: member(a[1]).id });
+  assert.equal(one.status, 200, JSON.stringify(one.body));
+  assert.ok(!fs.existsSync(a[1]));
+  d = await s.get('/api/hub/dupes?limit=100');
+  assert.equal(group(aApp).files, 3, 'the removed copy left the group at once');
+
+  // Dry run, then everything that may go.
+  const dry = await s.post('/api/hub/dupes/remove-all', { dryRun: true });
+  assert.deepEqual([dry.body.files, dry.body.groups], [3, 2]);
+  assert.ok(fs.existsSync(a[0]) && fs.existsSync(a[2]) && fs.existsSync(bNew), 'a dry run moves nothing');
+  const all = await s.post('/api/hub/dupes/remove-all', {});
+  assert.equal(all.status, 200);
+  assert.deepEqual([all.body.files, all.body.failed.length], [3, 0]);
+  for (const f of [...a, bNew]) assert.ok(!fs.existsSync(f), `${f} moved`);
+  for (const f of [aApp, bOld, ...c]) assert.ok(fs.existsSync(f), `${f} stays`);
+  d = await s.get('/api/hub/dupes?limit=100');
+  assert.equal(d.total, 1, 'only the TikShortis-only group is left');
+
+  // The trash holds four copies with their bytes; one comes back.
+  const trash = await s.get('/api/hub/dupes/trash');
+  assert.equal(trash.items.length, 4);
+  const trashDir = path.join(s.dirs.data, 'dupe-trash');
+  assert.equal(fs.readdirSync(trashDir).filter((n) => !n.startsWith('.')).length, 4);
+  const back = trash.items.find((x) => x.rel === 'new/new.jpg');
+  assert.equal((await s.post(`/api/hub/dupes/trash/${back.id}/restore`)).status, 200);
+  assert.equal(fs.readFileSync(bNew, 'utf8'), 'BBBB bytes');
+  assert.equal((await s.post(`/api/hub/dupes/trash/${back.id}/restore`)).status, 409, 'restored once only');
+  assert.equal((await s.get('/api/hub/dupes/trash')).items.length, 3);
+});
+
+test('removing a copy is refused when the copy that stays no longer has the same bytes', async (t) => {
+  const s = await boot(t);
+  const downloads = path.join(path.dirname(s.dirs.data), 'downloads');
+  const f1 = path.join(downloads, 'k1.mp4');
+  const f2 = path.join(downloads, 'k2.mp4');
+  fs.mkdirSync(downloads, { recursive: true });
+  fs.writeFileSync(f1, 'same same');
+  fs.writeFileSync(f2, 'same same');
+  const d = await scanned(s);
+  const ids = Object.fromEntries(d.items[0].members.map((m) => [path.join(m.root, m.rel), m.id]));
+  // Same size, other bytes, mtime kept: the scan has not noticed.
+  const st = fs.statSync(f1);
+  fs.writeFileSync(f1, 'diff diff');
+  fs.utimesSync(f1, st.atime, st.mtime);
+  const r = await s.post('/api/hub/dupes/remove', { id: ids[f2] });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /no longer match/);
+  assert.ok(fs.existsSync(f2), 'nothing moved');
+});

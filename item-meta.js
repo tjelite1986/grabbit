@@ -114,6 +114,8 @@ function attach(db) {
     ackSet: db.prepare(`INSERT INTO dupe_acks (sha256, members, note, by, at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (sha256) DO UPDATE SET members = excluded.members, note = excluded.note, by = excluded.by, at = excluded.at`),
     ackDelete: db.prepare('DELETE FROM dupe_acks WHERE sha256 = ?'),
+    fileById: db.prepare('SELECT * FROM file_hashes WHERE id = ? AND gone_at IS NULL'),
+    fileMarkGone: db.prepare('UPDATE file_hashes SET gone_at = ? WHERE id = ? AND gone_at IS NULL'),
     settingGet: db.prepare('SELECT value FROM settings WHERE name = ?'),
     settingSet: db.prepare(`INSERT INTO settings (name, value, updated_at) VALUES (?, ?, ?)
       ON CONFLICT (name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`),
@@ -202,7 +204,8 @@ function attach(db) {
     return { changed: [...changed], skipped, batch };
   }
 
-  return {
+  const hasTrash = () => db.pragma('user_version', { simple: true }) >= 5;
+  const api = {
     // --- source metadata -----------------------------------------------------
     // Stores what the source said (see source-meta.fromJob). Additive: tags
     // already there stay, the first caption and raw record stay.
@@ -410,7 +413,7 @@ function attach(db) {
 
     // Exact duplicate groups: two or more present files with the same bytes.
     // state: open (not acknowledged, or a member changed since), acked, all.
-    dupeGroups({ state = 'open', limit = 50, offset = 0 } = {}) {
+    dupeGroups({ state = 'open', limit = 50, offset = 0, all = false } = {}) {
       const groups = db.prepare(`SELECT sha256, COUNT(*) AS n, MAX(bytes) AS bytes
         FROM file_hashes WHERE sha256 IS NOT NULL AND gone_at IS NULL
         GROUP BY sha256 HAVING COUNT(*) > 1 ORDER BY MAX(bytes) * (COUNT(*) - 1) DESC, sha256`).all();
@@ -425,7 +428,7 @@ function attach(db) {
         if (!acked) wasted += g.bytes * (g.n - 1);
         if (state === 'all' || (state === 'acked') === acked) out.push(view);
       }
-      const lim = Math.max(1, Math.min(500, Number(limit) || 50));
+      const lim = all ? out.length || 1 : Math.max(1, Math.min(500, Number(limit) || 50));
       const off = Math.max(0, Number(offset) || 0);
       return {
         total: out.length,
@@ -446,12 +449,33 @@ function attach(db) {
     },
     unackGroup: (sha256) => st.ackDelete.run(String(sha256)).changes,
 
+    // --- removing duplicate copies (trash) -------------------------------------
+    dupeFile: (id) => (Number.isInteger(Number(id)) ? st.fileById.get(Number(id)) : undefined),
+    dupeMembers: (sha256) => st.groupMembers.all(String(sha256)),
+    // Every open group with its members, for "remove all extra copies".
+    openDupeGroups() {
+      return api.dupeGroups({ state: 'open', all: true }).items;
+    },
+    fileGoneNow: (id, now = Date.now()) => st.fileMarkGone.run(now, Number(id)).changes,
+    trashAdd(t, now = Date.now()) {
+      if (!hasTrash()) throw new MetaError('trash needs schema v5');
+      const r = db.prepare(`INSERT INTO dupe_trash (file_id, root, rel, sha256, bytes, trash_name, by, at)
+        VALUES (@file_id, @root, @rel, @sha256, @bytes, @trash_name, @by, @at)`).run({ by: null, ...t, at: now });
+      return Number(r.lastInsertRowid);
+    },
+    trashGet: (id) => (hasTrash() ? db.prepare('SELECT * FROM dupe_trash WHERE id = ?').get(Number(id)) : undefined),
+    trashHeld: () => (hasTrash() ? db.prepare('SELECT * FROM dupe_trash WHERE restored_at IS NULL AND purged_at IS NULL ORDER BY at DESC, id DESC').all() : []),
+    trashDue: (before) => (hasTrash() ? db.prepare('SELECT * FROM dupe_trash WHERE restored_at IS NULL AND purged_at IS NULL AND at < ? ORDER BY at').all(before) : []),
+    trashRestored: (id, now = Date.now()) => db.prepare('UPDATE dupe_trash SET restored_at = ? WHERE id = ? AND restored_at IS NULL AND purged_at IS NULL').run(now, Number(id)).changes,
+    trashPurged: (id, now = Date.now()) => db.prepare('UPDATE dupe_trash SET purged_at = ? WHERE id = ? AND restored_at IS NULL AND purged_at IS NULL').run(now, Number(id)).changes,
+
     setting(name) {
       const r = st.settingGet.get(String(name));
       return r ? r.value : null;
     },
     setSetting: (name, value, now = Date.now()) => st.settingSet.run(String(name), value == null ? null : String(value), now),
   };
+  return api;
 }
 
 module.exports = { attach, MetaError, editText, TITLE_MAX, CREATOR_MAX, BULK_MAX, TAG_ORIGINS };

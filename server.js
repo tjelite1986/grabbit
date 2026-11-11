@@ -30,6 +30,7 @@ const { copyInto } = require('./safe-copy');
 const sourceMeta = require('./source-meta');
 const itemMeta = require('./item-meta');
 const dupeScan = require('./dupe-scan');
+const { DupeTrash, TrashError } = require('./dupe-trash');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -2970,15 +2971,33 @@ const DUPE_ROOT_CANDIDATES = [
   { path: NAVIDROME_KIDS_DIR, label: 'Kids music library', owner: 'grabbit', app: 'Navidrome' },
   { path: AUDIOBOOKS_DIR, label: 'Audiobooks', owner: 'grabbit' },
   { path: TIKSHORTIS_ROOT, label: 'TikShortis', owner: 'app', app: 'TikShortis' },
-  { path: ELITE_ROOT, label: '18+ app import', owner: 'app', app: 'Adshortis', adult: true },
-  { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform' },
+  { path: ELITE_ROOT, label: '18+ app import', owner: 'app', app: 'Adshortis', adult: true, importFor: ADSHORTIS_LIBRARY_DIR },
+  { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform', importFor: PLATFORM_LIBRARY_DIR },
   { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts' },
-  { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram' },
+  { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram', importFor: EGRAM_LIBRARY_DIR },
   { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
   { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram' },
   { path: PLATFORM_LIBRARY_DIR, label: 'Platform library', owner: 'app', app: 'Platform' },
 ];
+// An import folder's copy may go only when its app's library has the bytes.
+// importFor is null when that library is not mounted here.
 const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
+const dupeRootOf = (p) => DUPE_ROOT_CANDIDATES.find((r) => r.path && r.path === p) || null;
+// Removed duplicate copies wait here (outside every scan root) for 30 days.
+const DUPE_TRASH_DIR = path.join(DATA_DIR, 'dupe-trash');
+const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({ store: ITEM_STORE, trashDir: DUPE_TRASH_DIR, rootOf: dupeRootOf }) : null;
+if (DUPE_TRASH) {
+  const purge = () => {
+    try {
+      const n = DUPE_TRASH.purge();
+      if (n) console.log(`dupes: purged ${n} trashed copies past the hold time`);
+    } catch (e) {
+      console.error(`dupes: trash purge failed (${e.message})`);
+    }
+  };
+  setTimeout(purge, 60 * 1000).unref();
+  setInterval(purge, 60 * 60 * 1000).unref();
+}
 let DUPE_SCANNER = null;
 if (ITEM_STORE && ITEM_STORE.fileSeen && String(process.env.DUPES_SCAN || '').toLowerCase() !== 'off') {
   DUPE_SCANNER = new dupeScan.DupeScanner({
@@ -3883,8 +3902,15 @@ app.get('/api/hub/dupes', (req, res) => {
       // The same bytes in an 18+ folder and in a folder a general app reads:
       // worth the owner's eye even when the group is otherwise harmless.
       g.crossesAudience = g.members.some((m) => m.adultFolder) && g.members.some((m) => !m.adultFolder && m.owner === 'app');
+      if (DUPE_TRASH) {
+        const plan = DUPE_TRASH.plan(g.members);
+        const byId = new Map(plan.members.map((p) => [p.id, p]));
+        g.members = g.members.map((m) => ({ ...m, ...byId.get(m.id) }));
+        g.removable = plan.members.filter((p) => p.suggested).length;
+      }
     }
-    res.json({ ok: true, scan, ...groups });
+    res.locals.trash = DUPE_TRASH ? DUPE_TRASH.held().length : 0;
+    res.json({ ok: true, scan, ...groups, canRemove: Boolean(DUPE_TRASH), trashHeld: res.locals.trash });
   } catch (e) {
     metaError(res, e, 'Duplicates');
   }
@@ -3934,6 +3960,83 @@ app.post('/api/hub/dupes/scan', (req, res) => {
     return res.json({ ok: true, scan: DUPE_SCANNER.pause() });
   }
   res.status(400).json({ ok: false, error: 'action must be start or pause' });
+});
+
+// --- removing duplicate copies ----------------------------------------------
+// A removed copy moves to Grabbit's trash and can be restored for 30 days.
+// Only copies in Grabbit's own folders, or in an app's import folder whose
+// library already has the bytes, can go; the last copy and the only copy
+// linked to an item never do. Both files are hashed again before the move.
+const trashOff = (res) => {
+  if (DUPE_TRASH) return false;
+  res.status(409).json({ ok: false, error: 'Removing copies needs the item store (schema v5).' });
+  return true;
+};
+const trashError = (res, e, what) => {
+  if (e instanceof TrashError) return res.status(409).json({ ok: false, error: e.message });
+  console.error(`dupes: ${what} failed (${e.message})`);
+  res.status(500).json({ ok: false, error: `${what} failed` });
+};
+let dupeRemoveBusy = false;
+
+// POST /api/hub/dupes/remove { id } -> one copy to the trash.
+app.post('/api/hub/dupes/remove', async (req, res) => {
+  if (!metaStore(res) || trashOff(res)) return;
+  const id = Number(req.body && req.body.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ ok: false, error: 'id must be a file id' });
+  if (dupeRemoveBusy) return res.status(409).json({ ok: false, error: 'Another removal is running' });
+  dupeRemoveBusy = true;
+  try {
+    const trashId = await DUPE_TRASH.remove(id, { by: actorOf(req) });
+    console.log(`dupes: file ${id} moved to the trash (entry ${trashId}) by ${actorOf(req) || 'owner'}`);
+    res.json({ ok: true, trashId });
+  } catch (e) {
+    trashError(res, e, 'Removing the copy');
+  } finally {
+    dupeRemoveBusy = false;
+  }
+});
+
+// POST /api/hub/dupes/remove-all { dryRun?, sha256? } -> every suggested extra
+// copy of every open group (or of one group), best copy kept.
+app.post('/api/hub/dupes/remove-all', async (req, res) => {
+  if (!metaStore(res) || trashOff(res)) return;
+  const body = req.body || {};
+  if (body.sha256 != null && !SHA256_RE.test(String(body.sha256))) return res.status(400).json({ ok: false, error: 'Not a SHA-256 hash' });
+  const dryRun = body.dryRun === true;
+  if (!dryRun && dupeRemoveBusy) return res.status(409).json({ ok: false, error: 'Another removal is running' });
+  if (!dryRun) dupeRemoveBusy = true;
+  try {
+    const r = await DUPE_TRASH.removeAll({ by: actorOf(req), dryRun, sha256s: body.sha256 ? [String(body.sha256)] : null });
+    if (!dryRun) console.log(`dupes: ${r.files} copies (${r.bytes} bytes) moved to the trash by ${actorOf(req) || 'owner'}, ${r.failed.length} refused`);
+    res.json({ ok: true, dryRun, ...r });
+  } catch (e) {
+    trashError(res, e, 'Removing copies');
+  } finally {
+    if (!dryRun) dupeRemoveBusy = false;
+  }
+});
+
+// GET /api/hub/dupes/trash -> removed copies still held.
+app.get('/api/hub/dupes/trash', (req, res) => {
+  if (!metaStore(res) || trashOff(res)) return;
+  const items = DUPE_TRASH.held().map((t) => {
+    const r = dupeRootOf(t.root) || {};
+    return { id: t.id, rel: t.rel, rootLabel: r.label || t.root, bytes: t.bytes, at: t.at, by: t.by, purgeAt: t.purgeAt };
+  });
+  res.json({ ok: true, items, bytes: items.reduce((n, t) => n + t.bytes, 0) });
+});
+
+// POST /api/hub/dupes/trash/:id/restore -> back to where it was.
+app.post('/api/hub/dupes/trash/:id/restore', (req, res) => {
+  if (!metaStore(res) || trashOff(res)) return;
+  try {
+    const t = DUPE_TRASH.restore(req.params.id);
+    console.log(`dupes: trash entry ${t.id} restored to ${t.rel} by ${actorOf(req) || 'owner'}`);
+    res.json({ ok: true });
+  } catch (e) {
+    trashError(res, e, 'Restoring the copy');
+  }
 });
 
 // POST /api/hub/dupes/:sha256/ack { note? } and .../unack: mark a group known
