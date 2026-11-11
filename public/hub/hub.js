@@ -1698,17 +1698,37 @@
         h('div', null, who));
     }
 
-    async function fill() {
+    // The scan poll refreshes only the scan box and the summary line. The
+    // list is rebuilt when the owner acts, never under them: a rebuild
+    // reloads every video preview. A changed list is offered with a button.
+    const groupHead = h('div', null);
+    let shownSig = '';
+    const sigOf = (d) => JSON.stringify([d.total, d.items.map((g) => [g.sha256, Boolean(g.ack && g.ack.current), g.members.map((m) => m.id)])]);
+
+    let seq = 0;
+    async function fill(opts = {}) {
       clearTimeout(poll);
+      const mine = ++seq;
       try {
         const d = await api(`/api/hub/dupes?state=${which.value}&limit=${SIZE}&offset=${page * SIZE}`);
+        if (mine !== seq) return; // a newer fill owns the view
         scanBox.replaceChildren(...scanView(d.scan).filter(Boolean));
-        const head = h('p', { class: 'note' },
-          `${num(d.groups)} groups of identical files in all; ${bytes(d.openBytes)} in extra copies across the open ones.`);
-        if (!d.items.length) {
-          groupBox.replaceChildren(head, h('p', { class: 'empty' }, d.scan.totals && d.scan.totals.files ? 'No group in this list.' : 'Nothing read yet. Start the scan above.'));
+        const sig = sigOf(d);
+        const keepList = opts.poll && shownSig;
+        groupHead.replaceChildren(h('p', { class: 'note' },
+          `${num(d.groups)} groups of identical files in all; ${bytes(d.openBytes)} in extra copies across the open ones.`),
+        keepList && sig !== shownSig
+          ? h('p', { class: 'note' }, 'The scan changed this list. ',
+            h('button', { class: 'btn small', type: 'button', onclick: () => fill() }, 'Show the new list'))
+          : null);
+        if (keepList) {
+          // Leave the rendered groups alone.
+        } else if (!d.items.length) {
+          shownSig = sig;
+          groupBox.replaceChildren(h('p', { class: 'empty' }, d.scan.totals && d.scan.totals.files ? 'No group in this list.' : 'Nothing read yet. Start the scan above.'));
         } else {
-          groupBox.replaceChildren(head, ...d.items.map((g) => h('div', { class: 'dupe-group' },
+          shownSig = sig;
+          groupBox.replaceChildren(...d.items.map((g) => h('div', { class: 'dupe-group' },
             h('div', { class: 'toolbar' },
               h('b', null, `${g.files} copies, ${bytes(g.bytes)} each`),
               h('span', { class: 'muted mono' }, g.sha256.slice(0, 16)),
@@ -1721,7 +1741,7 @@
             h('ul', { class: 'rows dupe-grid' }, g.members.map(memberRow)))),
           pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
         }
-        if (d.scan.state === 'running' && location.hash.startsWith('#/duplicates')) poll = setTimeout(fill, 4000);
+        if (d.scan.state === 'running' && location.hash.startsWith('#/duplicates')) poll = setTimeout(() => fill({ poll: true }), 4000);
       } catch (e) {
         scanBox.replaceChildren(h('p', { class: 'empty' }, e.message));
       }
@@ -1733,7 +1753,7 @@
       h('p', { class: 'lead' }, 'Files with exactly the same bytes, in Grabbit\'s folders and the apps\' media folders.'),
       h('p', { class: 'note' }, 'Read only: nothing is moved, changed or deleted, in any folder. A file is linked to an item only when exactly one item was saved under that file name; otherwise it is shown unlinked rather than guessed. Near-duplicates and removing copies come in a later version.'),
       card('Scan', 'pulse', null, scanBox),
-      card('Identical files', 'dupes', null, h('div', { class: 'toolbar' }, which), groupBox),
+      card('Identical files', 'dupes', null, h('div', { class: 'toolbar' }, which), groupHead, groupBox),
     ];
   }
 
