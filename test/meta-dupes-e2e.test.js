@@ -311,3 +311,43 @@ test('duplicate preview refuses a row whose path climbs out of its root or whose
     assert.doesNotMatch(await r.text(), /top secret/);
   }
 });
+
+test('duplicate preview: an 18+ file is served only to a logged-in owner, and a deep intermediate symlink is refused', async (t) => {
+  const s = await boot(t);
+  const body = Buffer.alloc(400, 9);
+  const adultDir = path.join(s.dirs.ads, 'main', 'who');
+  const deepDir = path.join(s.dirs.tik, 'main', 'ann', 'deep');
+  for (const d of [adultDir, deepDir, path.join(s.dirs.tik, 'main', 'ann', 'other')]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(adultDir, 'x.jpg'), body);
+  fs.writeFileSync(path.join(deepDir, 'x.jpg'), body);
+  fs.writeFileSync(path.join(s.dirs.tik, 'main', 'ann', 'other', 'x.jpg'), body);
+  assert.equal((await s.post('/api/hub/dupes/scan', { action: 'start' })).status, 200);
+  let d;
+  for (let i = 0; i < 100; i++) {
+    d = await s.get('/api/hub/dupes?limit=100');
+    if (d.scan.lastPassAt) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const members = d.items.flatMap((g) => g.members);
+  const adult = members.find((m) => m.adultFolder);
+  assert.ok(adult, 'the 18+ copy is listed and flagged');
+  const url = (id) => `${s.base}/api/hub/dupes/file/${id}`;
+
+  // Owner: served. No session: never the bytes.
+  assert.equal((await fetch(url(adult.id), { headers: s.headers })).status, 200);
+  for (const h of [{ Accept: 'application/json' }, { Accept: 'image/*' }]) {
+    const anon = await fetch(url(adult.id), { headers: h, redirect: 'manual' });
+    assert.ok(![200, 206].includes(anon.status), 'anonymous status ' + anon.status);
+  }
+
+  // A folder two levels above the file swapped for a symlink: refused.
+  const deep = members.find((m) => m.rel.includes('deep'));
+  assert.ok(deep);
+  const outside = path.join(s.root, 'outside-deep');
+  fs.mkdirSync(path.join(outside, 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(outside, 'deep', 'x.jpg'), body);
+  const ann = path.join(s.dirs.tik, 'main', 'ann');
+  fs.renameSync(ann, path.join(s.root, 'ann-moved'));
+  fs.symlinkSync(outside, ann);
+  assert.equal((await fetch(url(deep.id), { headers: s.headers })).status, 404, 'intermediate symlink');
+});
