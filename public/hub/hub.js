@@ -534,7 +534,9 @@
     const kind = params.get('kind') || '';
     const aud = params.get('aud') || '';
     const q = (params.get('q') || '').toLowerCase();
+    const profile = Number(params.get('profile')) || 0;
     return (state.media || [])
+      .filter((it) => !profile || it.profileId === profile)
       .filter((it) => !kind || it.kind === kind)
       .filter((it) => !aud || it.audience === aud)
       .filter((it) => !q || [it.creator, it.title, it.filename].join(' ').toLowerCase().includes(q));
@@ -952,6 +954,16 @@
   const accountLabel = (a) => `${a.platform} @${a.handle}`;
   const accountKey = (a) => `${a.platform}:${a.handle.toLowerCase()}`;
 
+  // No picture is stored for a profile, so show a round badge: the first letter
+  // of the name on a colour derived from it. The same name always looks the same.
+  function avatar(p, big) {
+    const name = String(p.name || '?').trim();
+    let hash = 0;
+    for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+    const letter = (Array.from(name.replace(/^[^\p{L}\p{N}]+/u, ''))[0] || '?').toUpperCase();
+    return h('span', { class: `avatar${big ? ' big' : ''}`, style: `background:hsl(${hash % 360} 45% 38%)`, 'aria-hidden': 'true' }, letter);
+  }
+
   function viewProfiles(params) {
     if (params.get('id')) return viewProfile(params.get('id'));
     const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
@@ -996,7 +1008,7 @@
             h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Profile'), h('th', null, 'Accounts'), h('th', { class: 'num' }, 'Aliases'), h('th', { class: 'num' }, 'Files'), h('th', null, 'Latest'))),
             h('tbody', null, d.items.map((p) => h('tr', null,
               h('td', null, h('input', { type: 'checkbox', 'aria-label': `Select ${p.name}`, checked: picked.has(p.id), onchange: (e) => { if (e.target.checked) picked.set(p.id, p); else picked.delete(p.id); paintMergeBar(); } })),
-              h('td', null, h('a', { href: `#/profiles?id=${p.id}` }, p.name), ' ', p.status !== 'general' ? audienceChip(p.status) : null),
+              h('td', null, h('span', { class: 'who' }, avatar(p), h('a', { href: `#/profiles?id=${p.id}` }, p.name)), ' ', p.status !== 'general' ? audienceChip(p.status) : null),
               h('td', null, p.accounts.length ? p.accounts.map((a) => h('span', { class: 'chip' }, accountLabel(a))) : h('span', { class: 'muted' }, p.sites.join(', '))),
               h('td', { class: 'num' }, num(p.aliases.length)),
               h('td', { class: 'num' }, num(p.files)),
@@ -1105,8 +1117,9 @@
     } }, 'Split off');
 
     return [
-      h('h1', null, p.name, ' ', audienceChip(p.status)),
+      profileHeader(p),
       classifyBar(p),
+      profileGallery(p),
       h('p', { class: 'lead' },
         `#${p.id} · ${num(p.files)} files · ${p.sites.length ? p.sites.join(', ') : 'no files yet'}`,
         p.lastAt ? ` · latest ${ago(p.lastAt)}` : '',
@@ -1122,6 +1135,52 @@
           h('p', { class: 'empty' }, 'Tick names or accounts that belong to someone else and split them into a new profile. At least one must stay here.'),
           h('div', { class: 'toolbar' }, splitName, splitBtn))),
     ];
+  }
+
+  // Instagram-style header: avatar (first picture of the profile laid over the
+  // same coloured initial badge the list uses; no profile picture is stored), name, audience and the post counts.
+  function profileHeader(p) {
+    const mine = (state.media || []).filter((it) => it.profileId === p.id);
+    const count = (k) => mine.filter((it) => it.kind === k).length;
+    const first = mine.find((it) => it.kind === 'image' && thumbSrc(it.thumbnail)) || mine.find((it) => thumbSrc(it.thumbnail));
+    const src = first ? thumbSrc(first.thumbnail) : null;
+    const stat = (n, label) => h('div', { class: 'pf-stat' }, h('b', null, num(n)), h('span', null, label));
+    return h('div', { class: 'pf-head' },
+      h('div', { class: 'pf-avatar', 'data-media-bg': '1' },
+        avatar(p, true),
+        src ? h('img', { src, alt: '', onerror: dropBrokenImg }) : null),
+      h('div', { class: 'pf-main' },
+        h('h1', null, p.name, ' ', audienceChip(p.status)),
+        h('div', { class: 'pf-stats' }, stat(mine.length, 'posts'), stat(count('image'), 'photos'), stat(count('video'), 'videos'), stat(p.aliases.length, 'names')),
+        p.accounts.length ? h('div', { class: 'pf-accounts' }, p.accounts.map((a) => (a.url && /^https?:\/\//i.test(a.url)
+          ? h('a', { class: 'chip', href: a.url, target: '_blank', rel: 'noopener noreferrer' }, accountLabel(a))
+          : h('span', { class: 'chip' }, accountLabel(a))))) : null,
+        p.note ? h('p', { class: 'pf-note' }, p.note) : null));
+  }
+
+  // Photos and Videos in separate tabs, as on a creator page. Tiles open the
+  // media viewer, which then steps through the same tab.
+  function profileGallery(p) {
+    const mine = (state.media || []).filter((it) => it.profileId === p.id);
+    const tabs = [['image', 'Photos'], ['video', 'Videos']];
+    const other = mine.filter((it) => it.kind !== 'image' && it.kind !== 'video');
+    if (other.length) tabs.push(['audio', 'Audio']);
+    let kind = mine.some((it) => it.kind === 'image') || !mine.some((it) => it.kind === 'video') ? 'image' : 'video';
+    const grid = h('div', { class: 'pf-grid' });
+    const bar = h('div', { class: 'pf-tabs', role: 'tablist' });
+    const draw = () => {
+      const items = mine.filter((it) => it.kind === kind);
+      const query = new URLSearchParams({ profile: String(p.id), kind });
+      grid.replaceChildren(...(items.length
+        ? items.map((it) => tile(it, query))
+        : [h('p', { class: 'empty' }, mine.length ? `No ${kind === 'image' ? 'photos' : kind === 'video' ? 'videos' : 'audio'} for this profile yet.` : 'No downloaded media for this profile yet.')]));
+      bar.replaceChildren(...tabs.map(([k, label]) => h('button', {
+        class: `pf-tab${k === kind ? ' on' : ''}`, type: 'button', role: 'tab', 'aria-selected': String(k === kind),
+        onclick: () => { kind = k; draw(); },
+      }, `${label} (${num(mine.filter((it) => it.kind === k).length)})`)));
+    };
+    draw();
+    return h('div', { class: 'pf-gallery' }, bar, grid);
   }
 
   // The owner's decision for one profile, from its own page.
@@ -1622,7 +1681,17 @@
       const who = m.item_id
         ? [m.creator ? h('b', null, m.creator) : null, m.title ? ` ${m.title}` : null, m.site ? h('span', { class: 'muted' }, ` · ${m.site}`) : null, ' ', m.audience ? audienceChip(m.audience) : null]
         : h('span', { class: 'muted' }, m.link === 'ambiguous' ? 'Not linked: two items share this file name' : 'Not linked to an item');
+      const ext = ((/\.([a-z0-9]+)$/i.exec(m.rel) || [])[1] || '').toLowerCase();
+      const src = `/api/hub/dupes/file/${m.id}`;
+      const preview = ['mp4', 'm4v', 'mov', 'webm', 'mkv'].includes(ext)
+        ? h('video', { class: 'dupe-preview', src: `${src}#t=0.1`, controls: true, preload: 'metadata', muted: true, playsinline: true })
+        : ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif'].includes(ext)
+          ? h('img', { class: 'dupe-preview', src, loading: 'lazy', alt: '' })
+          : ['mp3', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'wav'].includes(ext)
+            ? h('audio', { class: 'dupe-audio', src, controls: true, preload: 'none' })
+            : null;
       return h('li', { class: 'dupe-member' },
+        preview,
         h('div', null, h('b', null, m.rootLabel), m.adultFolder ? h('span', { class: 'chip adult' }, '18+') : null,
           m.mtime_ms ? h('span', { class: 'muted' }, ` · ${new Date(m.mtime_ms).toLocaleDateString()}`) : null),
         h('div', { class: 'break mono' }, m.rel),
@@ -1649,7 +1718,7 @@
                   h('button', { class: 'btn small ghost', type: 'button', onclick: () => unack(g) }, 'Open again')]
                 : [g.ack ? h('span', { class: 'muted' }, 'Changed since it was marked') : null,
                   h('button', { class: 'btn small ghost', type: 'button', onclick: () => ack(g) }, 'Mark known/OK')]),
-            h('ul', { class: 'rows' }, g.members.map(memberRow)))),
+            h('ul', { class: 'rows dupe-grid' }, g.members.map(memberRow)))),
           pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
         }
         if (d.scan.state === 'running' && location.hash.startsWith('#/duplicates')) poll = setTimeout(fill, 4000);

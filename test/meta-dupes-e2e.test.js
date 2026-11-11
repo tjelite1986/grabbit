@@ -100,7 +100,7 @@ async function boot(t, { mode = 'on', settings = null } = {}) {
   };
   const run = () => post('/api/hub/inbox/run');
   const list = async (q = '') => (await get(`/api/hub/inbox?${q}`));
-  return { dirs, get, post, run, list, logs: () => logs };
+  return { dirs, get, post, run, list, base, headers, root, logs: () => logs };
 }
 
 
@@ -207,4 +207,147 @@ test('caption hashtags arrive with an inbox item; owner edits and tags never mov
   const rm = await s.post('/api/hub/meta/tags', { ids: [item.id], remove: [capTag] });
   assert.deepEqual(rm.body.removed.changed, []);
   assert.deepEqual((await s.get(`/api/hub/meta/${item.id}`)).item.tags.caption, [capTag]);
+});
+
+// --- duplicate preview: GET /api/hub/dupes/file/:id -----------------------------
+
+test('duplicate preview serves scanned media only, with range, and refuses everything else', async (t) => {
+  const s = await boot(t);
+  const downloads = path.join(path.dirname(s.dirs.data), 'downloads');
+  const mp4 = Buffer.concat([Buffer.from('\x00\x00\x00\x18ftypmp42'), Buffer.alloc(2000, 7)]);
+  const kinds = { 'a.mp4': mp4, 'b.jpg': Buffer.alloc(300, 1), 'a.mp3': Buffer.alloc(300, 2) };
+  for (const [name, buf] of Object.entries(kinds)) {
+    for (const [root, sub] of [[s.dirs.tik, path.join('main', 'ann')], [downloads, 'videos']]) {
+      fs.mkdirSync(path.join(root, sub), { recursive: true });
+      fs.writeFileSync(path.join(root, sub, name), buf);
+    }
+  }
+  assert.equal((await s.post('/api/hub/dupes/scan', { action: 'start' })).status, 200);
+  let d;
+  for (let i = 0; i < 100; i++) {
+    d = await s.get('/api/hub/dupes?limit=100');
+    if (d.scan.lastPassAt) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const members = d.items.flatMap((g) => g.members);
+  const idOf = (name, rootLabel) => (members.find((m) => m.rel.endsWith(name) && (!rootLabel || m.rootLabel === rootLabel)) || {}).id;
+  const fetchFile = (id, extra = {}) => fetch(`${s.base}/api/hub/dupes/file/${id}`, { headers: { ...s.headers, ...extra }, redirect: 'manual' });
+
+  // Media types: served with the right type and hardening headers.
+  for (const [name, type] of [['a.mp4', /video\/mp4/], ['b.jpg', /image\/jpeg/], ['a.mp3', /audio\/mpeg/]]) {
+    const id = idOf(name);
+    assert.ok(id, `${name} should be in a duplicate group`);
+    const r = await fetchFile(id);
+    assert.equal(r.status, 200, name);
+    assert.match(r.headers.get('content-type'), type);
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(r.headers.get('content-security-policy'), /sandbox/);
+    assert.equal((await r.arrayBuffer()).byteLength, kinds[name].length);
+  }
+
+  // Range: 206 with Content-Range, and an unsatisfiable range gives 416.
+  const id = idOf('a.mp4');
+  const part = await fetchFile(id, { Range: 'bytes=0-9' });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('content-range'), `bytes 0-9/${mp4.length}`);
+  assert.equal((await part.arrayBuffer()).byteLength, 10);
+  assert.equal((await fetchFile(id, { Range: 'bytes=999999-' })).status, 416);
+
+  // Not logged in: no bytes, whatever the id.
+  const anon = await fetch(`${s.base}/api/hub/dupes/file/${id}`, { headers: { Accept: 'application/json' }, redirect: 'manual' });
+  assert.notEqual(anon.status, 200);
+  assert.notEqual(anon.status, 206);
+
+  // Ids that are not rows.
+  for (const bad of ['0', '999999', 'abc', '1.5', '-1', '1%2F..%2F..']) {
+    assert.equal((await fetchFile(bad)).status, 404, bad);
+  }
+
+  // A file swapped for a symlink after the scan is refused (leaf symlink).
+  const outside = path.join(s.root, 'outside.jpg');
+  fs.writeFileSync(outside, 'outside the roots');
+  const jpgId = idOf('b.jpg', 'TikShortis');
+  const leaf = path.join(s.dirs.tik, 'main', 'ann', 'b.jpg');
+  fs.rmSync(leaf);
+  fs.symlinkSync(outside, leaf);
+  assert.equal((await fetchFile(jpgId)).status, 404, 'leaf symlink');
+
+  // A folder swapped for a symlink after the scan is refused (parent symlink).
+  const mp3Id = idOf('a.mp3', 'Grabbit library');
+  const folder = path.join(downloads, 'videos');
+  const moved = path.join(s.root, 'moved-videos');
+  fs.renameSync(folder, moved);
+  const elsewhere = path.join(s.root, 'elsewhere');
+  fs.mkdirSync(elsewhere);
+  fs.writeFileSync(path.join(elsewhere, 'a.mp3'), 'not in a root');
+  fs.symlinkSync(elsewhere, folder);
+  assert.equal((await fetchFile(mp3Id)).status, 404, 'parent symlink');
+});
+
+test('duplicate preview refuses a row whose path climbs out of its root or whose root is not a scan root', async (t) => {
+  const s = await boot(t);
+  const Database = require('better-sqlite3');
+  const secret = path.join(s.root, 'secret.jpg');
+  fs.writeFileSync(secret, 'top secret');
+  const tik = path.join(s.root, 'tik');
+  const db = new Database(path.join(s.dirs.data, 'items.db'));
+  t.after(() => db.close());
+  const insert = (root, rel) => {
+    return Number(db.prepare('INSERT INTO file_hashes (root, rel, bytes, mtime_ms, sha256, seen_at, hashed_at) VALUES (?, ?, 10, 1, ?, 1, 1)').run(root, rel, 'ab'.repeat(32)).lastInsertRowid);
+  };
+  const up = insert(tik, '../secret.jpg');
+  const sibling = insert(tik, '../tik-evil/x.jpg');
+  const foreignRoot = insert(s.root, 'secret.jpg');
+  const notMedia = insert(tik, 'notes.txt');
+  const html = insert(tik, 'page.html');
+  fs.writeFileSync(path.join(tik, 'notes.txt'), 'top secret');
+  fs.writeFileSync(path.join(tik, 'page.html'), '<script>top secret</script>');
+  const gone = insert(tik, 'gone.jpg');
+  db.prepare('UPDATE file_hashes SET gone_at = 5 WHERE id = ?').run(gone);
+  fs.writeFileSync(path.join(tik, 'gone.jpg'), 'x');
+  for (const id of [up, sibling, foreignRoot, gone, notMedia, html]) {
+    const r = await fetch(`${s.base}/api/hub/dupes/file/${id}`, { headers: s.headers });
+    assert.equal(r.status, 404, `row ${id}`);
+    assert.doesNotMatch(await r.text(), /top secret/);
+  }
+});
+
+test('duplicate preview: an 18+ file is served only to a logged-in owner, and a deep intermediate symlink is refused', async (t) => {
+  const s = await boot(t);
+  const body = Buffer.alloc(400, 9);
+  const adultDir = path.join(s.dirs.ads, 'main', 'who');
+  const deepDir = path.join(s.dirs.tik, 'main', 'ann', 'deep');
+  for (const d of [adultDir, deepDir, path.join(s.dirs.tik, 'main', 'ann', 'other')]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(adultDir, 'x.jpg'), body);
+  fs.writeFileSync(path.join(deepDir, 'x.jpg'), body);
+  fs.writeFileSync(path.join(s.dirs.tik, 'main', 'ann', 'other', 'x.jpg'), body);
+  assert.equal((await s.post('/api/hub/dupes/scan', { action: 'start' })).status, 200);
+  let d;
+  for (let i = 0; i < 100; i++) {
+    d = await s.get('/api/hub/dupes?limit=100');
+    if (d.scan.lastPassAt) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const members = d.items.flatMap((g) => g.members);
+  const adult = members.find((m) => m.adultFolder);
+  assert.ok(adult, 'the 18+ copy is listed and flagged');
+  const url = (id) => `${s.base}/api/hub/dupes/file/${id}`;
+
+  // Owner: served. No session: never the bytes.
+  assert.equal((await fetch(url(adult.id), { headers: s.headers })).status, 200);
+  for (const h of [{ Accept: 'application/json' }, { Accept: 'image/*' }]) {
+    const anon = await fetch(url(adult.id), { headers: h, redirect: 'manual' });
+    assert.ok(![200, 206].includes(anon.status), 'anonymous status ' + anon.status);
+  }
+
+  // A folder two levels above the file swapped for a symlink: refused.
+  const deep = members.find((m) => m.rel.includes('deep'));
+  assert.ok(deep);
+  const outside = path.join(s.root, 'outside-deep');
+  fs.mkdirSync(path.join(outside, 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(outside, 'deep', 'x.jpg'), body);
+  const ann = path.join(s.dirs.tik, 'main', 'ann');
+  fs.renameSync(ann, path.join(s.root, 'ann-moved'));
+  fs.symlinkSync(outside, ann);
+  assert.equal((await fetch(url(deep.id), { headers: s.headers })).status, 404, 'intermediate symlink');
 });

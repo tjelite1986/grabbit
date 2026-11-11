@@ -405,6 +405,8 @@ function attach(db) {
       st.fileHashed.run({ id, sha256, link, item_id: itemId, error: error ? String(error).slice(0, 300) : null, at: now });
     },
     scanCounts: () => st.scanCounts.all(),
+    // One scanned file that is still present (for the duplicate previews).
+    hashedFile: (id) => (Number.isInteger(Number(id)) ? db.prepare('SELECT id, root, rel FROM file_hashes WHERE id = ? AND gone_at IS NULL').get(Number(id)) : undefined),
 
     // Exact duplicate groups: two or more present files with the same bytes.
     // state: open (not acknowledged, or a member changed since), acked, all.
