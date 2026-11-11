@@ -1668,7 +1668,7 @@
       removeAllBtn.textContent = 'Remove all extra copies';
       fill();
     }
-    const removeAllBtn = h('button', { class: 'btn small danger', type: 'button', onclick: removeAll }, 'Remove all extra copies');
+    const removeAllBtn = h('button', { class: 'btn small ghost danger', type: 'button', onclick: removeAll }, 'Remove all extra copies');
     const trashBox = h('div', null);
     async function fillTrash() {
       try {
@@ -1750,7 +1750,7 @@
         h('div', { class: 'toolbar dupe-actions' },
           m.keep ? h('span', { class: 'chip keep' }, 'Keep') : null,
           m.removable
-            ? h('button', { class: 'btn small danger', type: 'button', onclick: () => removeOne(m) }, 'Remove')
+            ? h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => removeOne(m) }, 'Remove')
             : null,
           m.why && !m.keep ? h('span', { class: 'muted' }, m.why) : null));
     }
@@ -1798,7 +1798,7 @@
                 : [g.ack ? h('span', { class: 'muted' }, 'Changed since it was marked') : null,
                   h('button', { class: 'btn small ghost', type: 'button', onclick: () => ack(g) }, 'Mark known/OK')],
               g.removable && !(g.ack && g.ack.current)
-                ? h('button', { class: 'btn small danger', type: 'button', onclick: () => removeGroup(g) }, `Remove ${g.removable} extra`)
+                ? h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => removeGroup(g) }, `Remove ${g.removable} extra`)
                 : null),
             h('ul', { class: 'rows dupe-grid' }, g.members.map(memberRow)))),
           pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
