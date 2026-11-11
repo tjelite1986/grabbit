@@ -310,6 +310,34 @@ label.lbl { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--mu
 p.caption { white-space: pre-wrap; margin: 6px 0; }
 pre.raw { max-height: 320px; overflow: auto; font-size: 12px; background: var(--panel-2); padding: 10px; border-radius: 8px; }
 .rows li.dupe-member { display: block; }
+.rows.dupe-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.rows.dupe-grid li.dupe-member { border: 1px solid rgba(42, 38, 69, 0.9); border-radius: 8px; padding: 8px; min-width: 0; }
+.dupe-preview { display: block; width: 100%; max-height: 320px; object-fit: contain; background: #000; border-radius: 6px; }
+.dupe-audio { width: 100%; }
 .rows li.dupe-member > div { margin: 2px 0; }
 .meta-edit input.field { width: 100%; box-sizing: border-box; }
 .meta-edit .toolbar input.field { flex: 1 1 200px; width: auto; }
+
+/* Profile page: header and Photos / Videos tabs */
+.pf-head { display: flex; gap: 20px; align-items: center; margin-bottom: 14px; }
+.pf-avatar { position: relative; flex: none; width: 96px; height: 96px; border-radius: 50%; overflow: hidden; background: #241f3d; display: grid; place-items: center; font-size: 36px; color: #8f86b8; }
+.pf-avatar .avatar { position: absolute; inset: 0; width: 100%; height: 100%; font-size: 36px; }
+.pf-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.pf-main { min-width: 0; }
+.pf-main h1 { margin: 0 0 8px; }
+.pf-stats { display: flex; gap: 22px; flex-wrap: wrap; }
+.pf-stat b { margin-right: 4px; }
+.pf-stat span { color: #8f86b8; }
+.pf-accounts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.pf-note { margin: 8px 0 0; white-space: pre-wrap; }
+.pf-tabs { display: flex; border-top: 1px solid #2f2950; margin-top: 6px; }
+.pf-tab { flex: 1; background: none; border: 0; border-top: 2px solid transparent; margin-top: -1px; padding: 10px 6px; color: #8f86b8; font: inherit; cursor: pointer; }
+.pf-tab.on { color: inherit; border-top-color: var(--accent); }
+.pf-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; margin: 3px 0 18px; }
+.pf-grid .tile { aspect-ratio: 1 / 1; border-radius: 0; }
+.pf-grid .empty { grid-column: 1 / -1; }
+@media (max-width: 600px) { .pf-head { gap: 12px; } .pf-avatar { width: 72px; height: 72px; font-size: 28px; } .pf-avatar .avatar { font-size: 28px; } }
+
+.who { display: inline-flex; align-items: center; gap: 8px; }
+.avatar { flex: none; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: #fff; }
+.avatar.big { width: 56px; height: 56px; font-size: 24px; }

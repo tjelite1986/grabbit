@@ -78,6 +78,7 @@ async function boot(t, { profileList = [], registry = null, breakItemStore = fal
   const port = await freePort();
   const env = {
     PATH: process.env.PATH,
+    TMPDIR: os.tmpdir(),
     PORT: String(port),
     DATA_DIR: dataDir,
     DOWNLOAD_DIR: path.join(root, 'downloads'),
@@ -517,4 +518,66 @@ test('classify-retry: one click sends a refused unclassified item, never an 18+ 
 
   const delivered = s.generalFiles().filter((f) => !f.endsWith('.md') && !f.endsWith('.json'));
   assert.equal(delivered.length, 1, delivered.join('\n'));
+});
+
+// --- read-only route preview ---------------------------------------------------
+
+const snapshot = (s) => JSON.stringify({ ...s.items(), tik: filesUnder(s.apps.tik), ads: filesUnder(s.apps.ads), plat: filesUnder(s.apps.plat), posts: filesUnder(s.apps.posts) });
+
+async function preview(s, qs) {
+  const r = await fetch(`${s.base}/api/hub/route-preview?${new URLSearchParams(qs)}`, { headers: s.headers });
+  return { status: r.status, body: await r.json() };
+}
+
+test('route preview: same verdicts as the gate, and no side effects', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  // Known items: one general, one unclassified (refused on save), one 18+ site.
+  assert.equal((await s.save(s.fakeUrl('video', 'tiktok', 'Jane Doe', 'p1'), 'main')).status, 200);
+  assert.equal((await s.save(s.fakeUrl('video', 'tiktok', 'stranger', 'p2'), 'main')).status, 422);
+  assert.equal((await s.save(s.fakeUrl('video', 'redgifs', 'someone', 'p3'), 'main')).status, 422);
+  const keyOf = (id) => s.items().rows.find((r) => r.key.endsWith(`:${id}`) || r.key.includes(id)).key;
+  const before = snapshot(s);
+
+  const ok = await preview(s, { channel: 'main', key: keyOf('p1') });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.allowed, true);
+  assert.equal(ok.body.destination, 'main');
+
+  const unk = await preview(s, { channel: 'main', key: keyOf('p2') });
+  assert.equal(unk.body.allowed, false);
+  assert.match(unk.body.reason, /not classified/);
+
+  const adult = await preview(s, { channel: 'main', key: keyOf('p3') });
+  assert.equal(adult.body.allowed, false);
+  assert.match(adult.body.reason, /18\+/);
+  // 18+ risk is never "general allowed" on the 18+ channel's behalf either: the
+  // adult item may go to the 18+ app only, as a video.
+  const toAds = await preview(s, { channel: '18plus', key: keyOf('p3') });
+  assert.equal(toAds.body.allowed, true);
+  assert.equal(toAds.body.destination, '18plus');
+  // A general-looking channel for an adult item through platform is refused.
+  assert.equal((await preview(s, { channel: 'platform', key: keyOf('p3') })).body.allowed, false);
+
+  // Lookup by URL works too, and nothing was written by any of it.
+  const byUrl = await preview(s, { channel: 'main', url: s.fakeUrl('video', 'tiktok', 'Jane Doe', 'p1') });
+  assert.equal(byUrl.body.allowed, true, JSON.stringify(byUrl.body));
+  assert.equal(snapshot(s), before);
+});
+
+test('route preview: unknown channel, unknown item and missing input', async (t) => {
+  const s = await boot(t);
+  const before = snapshot(s);
+  assert.equal((await preview(s, { channel: 'nope', key: 'x' })).status, 400);
+  assert.equal((await preview(s, { channel: 'main' })).status, 400);
+  const miss = await preview(s, { channel: 'main', url: 'https://example.com/never/seen' });
+  assert.equal(miss.status, 404);
+  assert.equal(miss.body.known, false);
+  assert.equal(snapshot(s), before);
+});
+
+test('route preview needs the API login', async (t) => {
+  const s = await boot(t);
+  const r = await fetch(`${s.base}/api/hub/route-preview?channel=main&key=x`, { headers: { Accept: 'application/json' }, redirect: 'manual' });
+  assert.notEqual(r.status, 200);
+  assert.notEqual(r.status, 404);
 });

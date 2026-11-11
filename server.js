@@ -2885,6 +2885,17 @@ let profilesCache = null;
 // The store, with every creator the registry knows given a profile. A file that
 // is readable JSON but breaks the invariants is refused rather than "repaired":
 // writing a reconstruction over it could drop links the owner made by hand.
+// The store as it is, for the read-only preview: no registry sync, no save, no
+// quarantine of a damaged file. Throws when the file cannot be used, and the
+// caller then fails closed.
+function readProfilesReadOnly() {
+  if (profilesCache) return { store: profilesCache };
+  let raw = null;
+  try {
+    raw = fs.readFileSync(PROFILES_FILE, 'utf8');
+  } catch { /* missing file: a fresh install, empty store */ }
+  return { store: profiles.normalizeStore(raw === null ? null : JSON.parse(raw)) };
+}
 function readProfiles() {
   if (!profilesCache) profilesCache = profiles.normalizeStore(readJsonState(PROFILES_FILE, null));
   const stats = profiles.aliasStats(readDownloaded());
@@ -3044,12 +3055,14 @@ const creatorKey = (name) => safeCreator(name);
 // The audience of the item behind this job, for a save into `destination`.
 // A save into the 18+ app tightens it to adult; a job's own `audience: adult`
 // does too. Nothing a job says can make an item general.
-function classifyJob(destination, job) {
-  const prior = ITEM_STORE && itemKeyOf(job) ? ITEM_STORE.get(itemKeyOf(job)) : null;
+// readOnly (the route preview) reads the profile store without syncing or
+// saving it, and takes the item's own row as `priorRow`.
+function classifyJob(destination, job, { readOnly = false, priorRow = null } = {}) {
+  const prior = priorRow || (ITEM_STORE && itemKeyOf(job) ? ITEM_STORE.get(itemKeyOf(job)) : null);
   let store = null;
   let storeProblem = null;
   try {
-    ({ store } = readProfiles());
+    ({ store } = readOnly ? readProfilesReadOnly() : readProfiles());
   } catch (e) {
     storeProblem = `the profile store could not be read (${e.message})`;
   }
@@ -3118,17 +3131,8 @@ function recordItemWithMeta(job, classification, filename) {
 // app gets nothing.
 function audienceRefusal(destination, job) {
   try {
-    const app = audience.DESTINATIONS[destination];
-    const general = app && app.audience === 'general';
-    if (app && !ITEM_STORE) {
-      return `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}), so nothing is delivered to any app.`;
-    }
-    if (general && !itemKeyOf(job)) {
-      return 'This item has no source id or URL, so its audience cannot be recorded; nothing is delivered to a general app.';
-    }
-    const c = classifyJob(destination, job);
-    const why = audience.refusal(c, destination, { mediaType: job && job.mediaType, creator: job && job.creator });
-    if (why) {
+    const { why, c } = audienceVerdict(destination, job);
+    if (why && c) {
       const item = recordItemWithMeta(job, c, null);
       if (item) ITEM_STORE.recordDelivery(item.id, destination, 'refused', { detail: why });
     }
@@ -3137,6 +3141,22 @@ function audienceRefusal(destination, job) {
     console.error('audience gate:', e.message);
     return `The audience check failed (${e.message}); nothing is delivered.`;
   }
+}
+
+// The decision itself, with no recording: { why, c }. Shared by the gate and
+// the read-only route preview so the two can never disagree.
+function audienceVerdict(destination, job, opts = {}) {
+  const app = audience.DESTINATIONS[destination];
+  const general = app && app.audience === 'general';
+  if (app && !ITEM_STORE) {
+    return { why: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}), so nothing is delivered to any app.`, c: null };
+  }
+  if (general && !itemKeyOf(job)) {
+    return { why: 'This item has no source id or URL, so its audience cannot be recorded; nothing is delivered to a general app.', c: null };
+  }
+  const c = classifyJob(destination, job, opts);
+  const why = audience.refusal(c, destination, { mediaType: job && job.mediaType, creator: job && job.creator });
+  return { why, c };
 }
 
 // The last check before bytes go into an app's folder. Throws on refusal.
@@ -3177,6 +3197,57 @@ function recordDrop(destination, job, filename, filePath) {
     console.error(`[grabbit] delivery of ${filename} to ${destination} could not be recorded: ${e.message}`);
   }
 }
+
+// GET /api/hub/route-preview?channel=main|18plus|platform&key=<item key>|url=<source url>
+// -> where a KNOWN item would be filed and whether the gate lets it through.
+// Read-only: it runs the same destinationOf / platformRefusal / audience
+// verdict as a real save, but writes no item, delivery or profile row, fetches
+// nothing, and never lowers a refusal. An item the store does not know gets 404
+// (its audience cannot be judged without resolving it); a failing check is
+// reported as refused, never as allowed.
+app.get('/api/hub/route-preview', (req, res) => {
+  const channel = String(req.query.channel || '');
+  if (!Object.prototype.hasOwnProperty.call(CHANNELS, channel)) {
+    return res.status(400).json({ ok: false, error: `Unknown channel "${channel.slice(0, 40)}". Use one of: ${Object.keys(CHANNELS).join(', ')}.` });
+  }
+  const key = String(req.query.key || '').trim() || (req.query.url ? mediaKey(String(req.query.url)) : '');
+  if (!key) return res.status(400).json({ ok: false, error: 'Give key= (an item key) or url= (a source URL).' });
+  const refuse = (extra) => res.json({ ok: true, allowed: false, channel, ...extra });
+  if (!ITEM_STORE) {
+    return refuse({ known: false, destination: null, reason: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}), so nothing is delivered to any app.` });
+  }
+  let row = null;
+  try {
+    row = ITEM_STORE.get(key) || (req.query.url ? ITEM_STORE.getBySourceUrl(String(req.query.url)) : null);
+  } catch (e) {
+    return refuse({ known: false, destination: null, reason: `The item store could not be read (${e.message}).` });
+  }
+  if (!row) return res.status(404).json({ ok: false, known: false, error: 'This item is not known to Grabbit, so its route cannot be previewed without resolving it.' });
+  const job = {
+    site: row.site,
+    mediaId: row.source_id,
+    sourceUrl: row.source_url,
+    creator: row.creator,
+    title: row.title,
+    mediaType: row.kind === 'image' ? 'image' : 'video',
+    audioOnly: row.kind === 'audio',
+  };
+  const destination = destinationOf(channel, job);
+  const base = { known: true, key: row.key, destination, itemAudience: row.audience };
+  try {
+    const unavailable = shortsUnavailable(channel) || (destination === 'posts' ? postsUnavailable() : null);
+    if (unavailable) return refuse({ ...base, reason: unavailable });
+    if (CHANNELS[channel] === 'platform') {
+      const own = platformDrop.platformRefusal(job);
+      if (own) return refuse({ ...base, reason: own });
+    }
+    const { why, c } = audienceVerdict(destination, job, { readOnly: true, priorRow: row });
+    if (why) return refuse({ ...base, audience: c ? c.audience : null, reasons: c ? c.reasons : [], reason: why });
+    return res.json({ ok: true, allowed: true, channel, ...base, audience: c.audience, reasons: c.reasons, reason: null });
+  } catch (e) {
+    return refuse({ ...base, reason: `The audience check failed (${e.message}); nothing is delivered.` });
+  }
+});
 
 // GET /api/hub/profiles?q=&audience=general|adult&limit=
 app.get('/api/hub/profiles', (req, res) => {
@@ -3816,6 +3887,36 @@ app.get('/api/hub/dupes', (req, res) => {
     res.json({ ok: true, scan, ...groups });
   } catch (e) {
     metaError(res, e, 'Duplicates');
+  }
+});
+
+// GET /api/hub/dupes/file/:id -> a scanned file, for the preview in a group.
+// Read only: the row must be a present file of a known scan root, the path
+// must stay inside that root, a symlink is refused, and only media is served.
+app.get('/api/hub/dupes/file/:id', (req, res) => {
+  const store = metaStore(res);
+  if (!store) return;
+  const notFound = () => res.status(404).json({ ok: false, error: 'Not available' });
+  try {
+    const row = store.hashedFile(req.params.id);
+    if (!row || !DUPE_ROOT_CANDIDATES.some((r) => r.path && r.path === row.root)) return notFound();
+    const abs = path.resolve(row.root, row.rel);
+    if (!abs.startsWith(path.resolve(row.root) + path.sep)) return notFound();
+    const kind = mediaViewer.kindOfName(abs);
+    if (!['video', 'image', 'audio'].includes(kind)) return notFound();
+    if (!fs.lstatSync(abs).isFile()) return notFound();
+    // A symlinked parent folder would pass the lexical check above, so the
+    // real path must stay inside the real root as well.
+    const realRoot = fs.realpathSync(row.root);
+    const realAbs = fs.realpathSync(abs);
+    if (realAbs !== path.join(realRoot, path.relative(path.resolve(row.root), abs))) return notFound();
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(realAbs, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+      if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
+    });
+  } catch (e) {
+    if (!res.headersSent) notFound();
   }
 });
 
@@ -7652,9 +7753,7 @@ function writeRetryQueue(list) {
   try { writeJsonAtomic(RETRY_FILE, list); }
   catch (e) { console.warn('retry-queue write failed:', e.message); }
 }
-// Dedup on the exact URL (not mediaKey, which drops the query string — xfree
-// distinguishes clips only by ?id=, so mediaKey would collapse them all to one).
-function retryKey(e) { return `${e.dest || 'elite'}:${e.channel || ''}:${e.folder || ''}:${e.url}`; }
+const { retryKey, savedFilename, alreadyDownloaded } = require('./retry-queue');
 function retryDelayMs(attempts) {
   return RETRY_BACKOFF_MIN[Math.min(attempts, RETRY_BACKOFF_MIN.length - 1)] * 60 * 1000;
 }
@@ -7694,8 +7793,12 @@ async function attemptRetry(entry) {
   let job = await extractors.resolve(entry.url);
   if (entry.creator) job.creator = entry.creator;
   job = await enrichProfileItem(job);
-  if (entry.dest === 'server') await saveJobToServer(job, entry.folder, entry.quality);
-  else await saveJobToImport(job, entry.channel, entry.web, entry.quality);
+  // Already in the registry (downloaded by another path while this was parked):
+  // drop the retry without fetching, writing a file or touching the registry.
+  if (alreadyDownloaded(entry, job, downloadedEntry)) return { skipped: true };
+  const savedPath = entry.dest === 'server'
+    ? await saveJobToServer(job, entry.folder, entry.quality)
+    : await saveJobToImport(job, entry.channel, entry.web, entry.quality);
   const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
   recordHistory({
     creator: job.creator || null,
@@ -7703,7 +7806,7 @@ async function attemptRetry(entry) {
     channel: entry.dest === 'server'
       ? `server/${serverShelf(entry.folder, serverSaveDir(entry.folder, job.creator))}`
       : entry.channel,
-    filename: `${stem}${entry.dest === 'elite' && entry.web ? '.web.mp4' : '.mp4'}`,
+    filename: savedFilename(savedPath, `${stem}${entry.dest === 'elite' && entry.web ? '.web.mp4' : '.mp4'}`),
     sourceUrl: job.sourceUrl || entry.url,
     thumbnail: job.thumbnail || null,
     extractor: job.extractor || null,
@@ -7712,6 +7815,7 @@ async function attemptRetry(entry) {
   });
   markDownloaded(job.sourceUrl || entry.url, null, job.site, job.mediaId, entry.dest === 'elite' ? entry.channel : null);
   noteSourceMeta(job, null, entry.dest === 'elite' ? entry.channel : null);
+  return { skipped: false };
 }
 
 let retryRunning = false;
@@ -7722,9 +7826,9 @@ async function runRetryCycle() {
     const now = Date.now();
     for (const e of readRetryQueue().filter((x) => x.nextAt <= now)) {
       try {
-        await attemptRetry(e);
+        const r = await attemptRetry(e);
         writeRetryQueue(readRetryQueue().filter((x) => x.id !== e.id));
-        console.log(`[retry] recovered ${e.url}`);
+        console.log(r && r.skipped ? `[retry] already downloaded, skipped ${e.url}` : `[retry] recovered ${e.url}`);
       } catch (err) {
         const msg = String((err && err.message) || err);
         const cur = readRetryQueue();
