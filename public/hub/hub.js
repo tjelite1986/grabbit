@@ -1779,7 +1779,7 @@
         keepList && sig !== shownSig
           ? h('p', { class: 'note' }, 'The scan changed this list. ',
             h('button', { class: 'btn small', type: 'button', onclick: () => fill() }, 'Show the new list'))
-          : null);
+          : '');
         if (keepList) {
           // Leave the rendered groups alone.
         } else if (!d.items.length) {
