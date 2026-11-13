@@ -32,5 +32,11 @@ RUN npm ci --omit=dev
 COPY . .
 
 RUN mkdir -p /data /downloads
+
+# Release identity, set late so it never busts the npm ci layer. Also written to
+# a file, which wins over the env var, so a compose env override cannot change it.
+ARG RELEASE_SHA=unknown
+ENV RELEASE_SHA=$RELEASE_SHA
+RUN echo "$RELEASE_SHA" > /app/RELEASE_SHA
 EXPOSE 3000
 CMD ["node", "server.js"]

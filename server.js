@@ -17,6 +17,7 @@ const extractors = require('./extractors');
 const { cleanDescription, parseTrackTitle } = require('./extractors/util');
 const { COOKIES_DIR, cookieArgs, cookieFileFor, sanitizeCookieName, listCookieFiles, saveCookieFile, deleteCookieFile } = require('./cookies');
 const { safeFetch } = require('./url-guard');
+const { releaseSha } = require('./release');
 const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = require('./premium-fallback');
 const gda = require('./gda');
 const platformDrop = require('./platform-drop');
@@ -1563,6 +1564,8 @@ const PUBLIC_ASSETS = new Set([
 // 401 JSON; page/asset requests are redirected to the login form.
 app.use((req, res, next) => {
   if (PUBLIC_ASSETS.has(req.path)) return next();
+  // Deployer identity probe: returns only the release sha, nothing else.
+  if (req.path === '/api/health/release' && (req.method === 'GET' || req.method === 'HEAD')) return next();
   // Refused before the session is consulted: a cross-site caller must not be
   // able to act as the signed-in user just because the cookie came along.
   if (req.path.startsWith('/api/') && isCrossSite(req)) {
@@ -8331,10 +8334,17 @@ function cookieHealth() {
 }
 
 // GET /api/health -> tool versions, destination mounts, state files, cookies.
+// GET /api/health/release -> { sha } only: no probes, no side effects, public.
+app.get('/api/health/release', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ sha: releaseSha() });
+});
+
 app.get('/api/health', async (_req, res) => {
   const retries = readRetryQueue();
   const now = Date.now();
   res.json({
+    sha: releaseSha(), // first key on purpose: must sit within the first 4 KiB
     ok: true,
     now,
     uptimeSec: Math.round(process.uptime()),
