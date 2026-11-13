@@ -1982,6 +1982,19 @@ function profileSlug(name) {
 //   'imported' -> sitting in the creator's profile folder
 //   'pending'  -> still waiting in _import
 //   null       -> not present
+// The folders an importer may have filed a creator's clips in. Folder names are
+// case-sensitive, and Tikshortis files a creator under the spelling of the
+// profile it first saw (often lower case), so `SomeCreator` can live in
+// `somecreator/`. Checking only the exact spelling made the dedup miss and
+// re-drop clips the library already had; its importer then skipped them and
+// left them in _import for good.
+function creatorDirs(root, creator) {
+  const slug = profileSlug(safeCreator(creator));
+  const dirs = [path.join(root, slug)];
+  if (slug.toLowerCase() !== slug) dirs.push(path.join(root, slug.toLowerCase()));
+  return dirs;
+}
+
 function importedStatus(channel, creator, stem) {
   const root = channelRoot(channel);
   // The platform drop folder has no creator folders and keeps nothing it took:
@@ -1994,14 +2007,14 @@ function importedStatus(channel, creator, stem) {
       return null;
     }
   }
-  try {
-    const profDir = path.join(root, profileSlug(safeCreator(creator)));
-    if (fs.existsSync(profDir)) {
+  for (const profDir of creatorDirs(root, creator)) {
+    try {
+      if (!fs.existsSync(profDir)) continue;
       const files = fs.readdirSync(profDir);
       if (files.includes(`${stem}.mp4`) || files.includes(`${stem}.web.mp4`)) return 'imported';
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
   }
   try {
     const imp = path.join(root, '_import');
@@ -4203,13 +4216,8 @@ function mediaDirsOf(entry) {
   if (ch === 'main' || ch === '18plus') {
     if (!CHANNEL_ROOTS[ch]) return [];
     const root = path.join(CHANNEL_ROOTS[ch], ch);
-    // Imported clips sit in the creator's folder; queued ones in _import. The
-    // importer may file the folder in lower case (Tikshortis does), and folder
-    // names are case-sensitive here, so both spellings are looked in.
-    const slug = profileSlug(safeCreator(entry.creator));
-    const dirs = [path.join(root, slug)];
-    if (slug.toLowerCase() !== slug) dirs.push(path.join(root, slug.toLowerCase()));
-    return [...dirs, path.join(root, '_import')];
+    // Imported clips sit in the creator's folder; queued ones in _import.
+    return [...creatorDirs(root, entry.creator), path.join(root, '_import')];
   }
   if (ch === 'platform') return CHANNEL_ROOTS.platform ? [CHANNEL_ROOTS.platform] : [];
   if (ch === 'elite/posts') return POSTS_IMPORT_DIR ? [path.join(POSTS_IMPORT_DIR, postsCreator(entry.creator))] : [];
