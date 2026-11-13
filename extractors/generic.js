@@ -144,6 +144,23 @@ function hashtagsFrom(...texts) {
 // description. Treat those as no title at all.
 const PLACEHOLDER_TITLE = /^(video|reel|reels|watch|photo|post|facebook|untitled)$/i;
 
+// The file name is the dedup key, and a page posts many clips under the same
+// caption ("Cmon Barbie" twice, months apart): without the site id the second
+// one gets the first one's name and every importer skips it as a repeat.
+// The caption is shortened first so the id survives the name's length cap.
+const ID_SUFFIX_SITES = /^facebook/i;
+const ID_TITLE_CAPTION_BYTES = 80;
+function withSiteId(title, info) {
+  const id = info && info.id ? String(info.id) : '';
+  if (!id || !ID_SUFFIX_SITES.test(String(info.extractor_key || info.extractor || ''))) return title;
+  const t = String(title || '').trim();
+  if (t === id || t.endsWith(` ${id}`)) return t;
+  let caption = t;
+  while (Buffer.byteLength(caption) > ID_TITLE_CAPTION_BYTES) caption = Array.from(caption).slice(0, -1).join('');
+  caption = caption.trim();
+  return caption ? `${caption} ${id}` : id;
+}
+
 // Facebook titles arrive as "<n> reactions · <n> comments | <caption> | <page>".
 // Keep the caption; the engagement counts and the page name are noise (the page
 // is already the creator).
@@ -203,6 +220,7 @@ async function resolve(url) {
     title = cleanTitle(stripSocialTitleNoise(info.title, info.uploader));
     // A placeholder title (or none) means the caption is the real title.
     if (!title || PLACEHOLDER_TITLE.test(title)) title = titleFrom(description, tags, info.id, info.upload_date);
+    title = withSiteId(title, info);
     thumbnail = info.thumbnail;
     duration = Number.isFinite(info.duration) ? info.duration : null;
     const ext = info.ext || 'mp4';
@@ -285,4 +303,4 @@ async function resolve(url) {
   return job;
 }
 
-module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile };
+module.exports = { name: 'generic (yt-dlp)', match, resolve, resolveProfile, withSiteId };
