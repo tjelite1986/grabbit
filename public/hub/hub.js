@@ -43,6 +43,10 @@
     sites: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18',
     play: 'M8 5v14l11-7z',
     close: 'M6 6l12 12M18 6 6 18',
+    up: 'M5 15l7-7 7 7',
+    down: 'M5 9l7 7 7-7',
+    sound: 'M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11',
+    muted: 'M4 9h4l5-4v14l-5-4H4zM16.5 9.5l5 5M21.5 9.5l-5 5',
     prev: 'M15 5l-7 7 7 7',
     next: 'M9 5l7 7-7 7',
     info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v6M12 7.5h.01',
@@ -623,7 +627,7 @@
   // A full-screen layer over the Media page, driven by the `open` parameter:
   // the back button closes it, and a link to it opens the same item. The file
   // is fetched by entry id and variant; the server decides where it lives.
-  const viewer = { el: null, id: null, detail: null, variant: null, seq: 0, zoom: null };
+  const viewer = { el: null, id: null, mode: null, detail: null, variant: null, seq: 0, zoom: null };
   const fmtDuration = (s) => {
     if (!Number.isFinite(s)) return '';
     const m = Math.floor(s / 60);
@@ -662,6 +666,7 @@
     const id = r.id === 'media' ? r.params.get('open') : null;
     if (!id) {
       if (viewer.el) {
+        feedTeardown();
         viewer.el.remove();
         viewer.el = null;
         viewer.id = null;
@@ -670,10 +675,32 @@
       }
       return;
     }
-    if (viewer.el && viewer.id === id) return;
+    // A video opens the vertical feed; pictures and audio the plain viewer.
+    const listed = (state.media || []).find((it) => it.id === id);
+    const mode = listed && listed.kind === 'video' ? 'feed' : 'plain';
+    if (viewer.el && viewer.mode === 'feed' && mode === 'feed' && feed.slides.has(id)) {
+      if (feed.active !== id) feedScrollTo(id, 'auto');
+      return;
+    }
+    if (viewer.el && viewer.id === id && viewer.mode === mode) return;
+    if (viewer.el && viewer.mode !== mode) {
+      feedTeardown();
+      viewer.el.remove();
+      viewer.el = null;
+    }
+    viewer.mode = mode;
     viewer.id = id;
     viewer.detail = null;
     viewer.variant = null;
+    if (mode === 'feed') {
+      if (!viewer.el) {
+        viewer.el = h('div', { class: 'viewer feed', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Video feed' });
+        document.body.append(viewer.el);
+        document.body.classList.add('viewer-open');
+      }
+      buildFeed(id);
+      return;
+    }
     if (!viewer.el) {
       viewer.el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Media viewer' });
       document.body.append(viewer.el);
@@ -685,12 +712,7 @@
       .then((d) => {
         if (seq !== viewer.seq) return;
         viewer.detail = d.item;
-        const vs = d.item.variants || [];
-        // The web copy is made for browsers and phones; the original is the
-        // choice when there is no copy, or when the original plays as it is.
-        const web = vs.find((v) => v.variant === 'web');
-        const orig = vs.find((v) => v.variant === 'original');
-        viewer.variant = (web && (!orig || orig.playable !== 'yes' || orig.bytes > web.bytes * 1.5) ? web : orig || web || {}).variant || null;
+        viewer.variant = pickVariant(d.item.variants || []);
         drawViewer();
       })
       .catch((e) => {
@@ -698,6 +720,14 @@
         viewer.detail = { error: e.message };
         drawViewer();
       });
+  }
+
+  // The web copy is made for browsers and phones; the original is the choice
+  // when there is no copy, or when the original plays as it is.
+  function pickVariant(vs) {
+    const web = vs.find((v) => v.variant === 'web');
+    const orig = vs.find((v) => v.variant === 'original');
+    return (web && (!orig || orig.playable !== 'yes' || orig.bytes > web.bytes * 1.5) ? web : orig || web || {}).variant || null;
   }
 
   function drawViewer() {
@@ -799,7 +829,11 @@
             d.variants.map((v) => h('button', {
               type: 'button',
               class: `btn small ${v.variant === viewer.variant ? '' : 'ghost'}`,
-              onclick: () => { viewer.variant = v.variant; drawViewer(); },
+              onclick: () => {
+                viewer.variant = v.variant;
+                if (viewer.mode === 'feed') feedVariant(d.id, v.variant);
+                else drawViewer();
+              },
             }, v.variant === 'web' ? `Web copy (${bytes(v.bytes)})` : `Original (${bytes(v.bytes)})`)))
         : null,
       cur ? h('p', null, h('a', { class: 'btn small ghost', href: fileUrl(d.id, cur.variant, true) }, 'Download file')) : null,
@@ -891,6 +925,279 @@
     return box;
   }
 
+  // --- Video feed ------------------------------------------------------------
+  // A video opens full screen in a vertical feed of the videos in the list the
+  // Media page shows: swipe, scroll or use the arrow keys to move up and down,
+  // and the video in view plays on a loop. Only the active video and its two
+  // neighbours carry a src, so a long list never holds dozens of open streams.
+  const FEED_MUTE_KEY = 'grabbit.feedMuted';
+  const feed = { slides: new Map(), order: [], active: null, observer: null, muted: true, details: new Map(), chrome: null };
+  try { feed.muted = localStorage.getItem(FEED_MUTE_KEY) !== '0'; } catch { /* storage blocked: start muted */ }
+
+  function buildFeed(id) {
+    feedTeardown();
+    let list = viewerNeighbours().list.filter((it) => it.kind === 'video');
+    if (!list.some((it) => it.id === id)) list = (state.media || []).filter((it) => it.id === id);
+    const scroller = h('div', { class: 'f-scroll' });
+    // One wheel gesture moves one video. A trackpad sends a burst of events,
+    // so the rest of the burst is swallowed until it pauses.
+    let wheelUntil = 0;
+    scroller.addEventListener('wheel', (e) => {
+      if (e.ctrlKey || Math.abs(e.deltaY) < Math.abs(e.deltaX)) return;
+      e.preventDefault();
+      const now = Date.now();
+      const quiet = now > wheelUntil;
+      wheelUntil = now + 350;
+      if (quiet && Math.abs(e.deltaY) >= 4) feedStep(e.deltaY > 0 ? 1 : -1);
+    }, { passive: false });
+    for (const it of list) {
+      const slide = feedSlide(it);
+      feed.slides.set(it.id, slide);
+      feed.order.push(it.id);
+      scroller.append(slide.el);
+    }
+    const btn = (label, iconName, onclick, cls) =>
+      h('button', { class: `icon-btn ${cls || ''}`, type: 'button', 'aria-label': label, title: label, onclick }, icon(iconName));
+    const counter = h('small', { class: 'f-count' });
+    const muteBtn = btn('Sound', 'muted', () => feedSetMuted(!feed.muted, true), 'f-mute');
+    const info = h('aside', { class: 'v-info f-info' });
+    feed.chrome = { counter, muteBtn, info };
+    viewer.el.classList.remove('info-open');
+    viewer.el.replaceChildren(
+      scroller,
+      h('header', { class: 'f-top' },
+        btn('Close', 'close', viewerClose),
+        counter,
+        h('span', { class: 'f-spacer' }),
+        muteBtn,
+        btn('Details', 'info', () => viewer.el.classList.toggle('info-open'))),
+      h('div', { class: 'f-nav' },
+        btn('Previous video', 'up', () => feedStep(-1)),
+        btn('Next video', 'down', () => feedStep(1))),
+      info);
+    feedSetMuted(feed.muted, false);
+    feedScrollTo(id, 'auto');
+    feedActivate(id);
+    feed.observer = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting && e.intersectionRatio >= 0.6) feedActivate(e.target.dataset.id);
+      }
+    }, { root: scroller, threshold: [0.6] });
+    for (const s of feed.slides.values()) feed.observer.observe(s.el);
+  }
+
+  function feedSlide(it) {
+    const video = h('video', { playsinline: true, loop: true, preload: 'none', 'data-media-bg': '1' });
+    video.muted = feed.muted;
+    const poster = thumbSrc(it.thumbnail);
+    if (poster) video.poster = poster;
+    const bar = h('i');
+    const progress = h('div', { class: 'f-progress', role: 'slider', 'aria-label': 'Seek' }, h('div', { class: 'f-track' }, bar));
+    const note = h('p', { class: 'f-note', hidden: true });
+    const profile = it.profileId
+      ? `#/profiles?id=${it.profileId}`
+      : it.creator ? `#/profiles?q=${encodeURIComponent(it.creator)}` : null;
+    const el = h('section', { class: 'f-slide paused', 'data-id': it.id },
+      video,
+      h('span', { class: 'f-paused', 'aria-hidden': 'true' }, icon('play')),
+      note,
+      h('div', { class: 'f-meta' },
+        it.creator ? (profile ? h('a', { class: 'f-creator', href: profile }, it.creator) : h('strong', { class: 'f-creator' }, it.creator)) : null,
+        it.audience === 'adult' ? h('span', { class: 'chip adult' }, '18+') : null,
+        it.title ? h('p', { class: 'f-title' }, it.title) : null),
+      progress);
+    const slide = { id: it.id, el, video, note, progress, variant: null, loaded: false };
+
+    video.addEventListener('click', () => {
+      if (video.paused) feedPlay(it.id);
+      else video.pause();
+    });
+    video.addEventListener('play', () => el.classList.remove('paused'));
+    video.addEventListener('pause', () => el.classList.add('paused'));
+    video.addEventListener('timeupdate', () => {
+      bar.style.width = video.duration ? `${(video.currentTime / video.duration) * 100}%` : '0';
+    });
+    video.addEventListener('error', () => {
+      if (!video.error || !video.getAttribute('src')) return;
+      const d = feed.details.get(it.id);
+      const other = d && (d.variants || []).some((v) => v.variant !== slide.variant && v.kind === 'video');
+      feedNote(slide, `This browser cannot play this file.${other ? ' Try the other copy under Details.' : ''}`);
+    });
+    // Tap or drag along the bar to seek.
+    const seek = (e) => {
+      const r = progress.getBoundingClientRect();
+      if (video.duration && r.width) video.currentTime = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * video.duration;
+    };
+    progress.addEventListener('pointerdown', (e) => {
+      progress.setPointerCapture(e.pointerId);
+      progress.classList.add('seeking');
+      seek(e);
+    });
+    progress.addEventListener('pointermove', (e) => { if (progress.hasPointerCapture(e.pointerId)) seek(e); });
+    const release = () => progress.classList.remove('seeking');
+    progress.addEventListener('pointerup', release);
+    progress.addEventListener('pointercancel', release);
+    return slide;
+  }
+
+  function feedNote(slide, text) {
+    slide.note.textContent = text;
+    slide.note.hidden = !text;
+  }
+
+  function feedActivate(id) {
+    if (feed.active === id || !feed.slides.has(id)) return;
+    feed.active = id;
+    viewer.id = id;
+    const i = feed.order.indexOf(id);
+    feed.order.forEach((oid, j) => {
+      const s = feed.slides.get(oid);
+      if (oid !== id) s.video.pause();
+      if (Math.abs(j - i) <= 1) feedLoad(oid);
+      else feedUnload(oid);
+    });
+    const s = feed.slides.get(id);
+    s.video.preload = 'auto';
+    if (s.video.readyState > 0) s.video.currentTime = 0;
+    feedPlay(id);
+    feed.chrome.counter.textContent = `${i + 1} of ${feed.order.length}`;
+    feedInfo();
+    // Stepping replaces the history entry, so one back press closes the feed.
+    const q = new URLSearchParams(route().params);
+    q.set('open', id);
+    location.replace(`#/media?${q}`);
+  }
+
+  function feedLoad(id) {
+    const s = feed.slides.get(id);
+    if (!s || s.loaded) return;
+    s.loaded = true;
+    const apply = (d) => {
+      if (!s.loaded) return;
+      const vs = (d && d.variants) || [];
+      s.variant = s.variant || pickVariant(vs);
+      const cur = vs.find((v) => v.variant === s.variant);
+      if (!cur) {
+        s.el.classList.add('missing');
+        feedNote(s, d && d.error ? d.error : 'The file is not on this server any more.');
+      } else {
+        if (d.poster) s.video.poster = fileUrl(id, 'poster');
+        if (cur.playable === 'no') feedNote(s, `${cur.format.toUpperCase()} with ${cur.videoCodec || 'this codec'} may not play in a browser.`);
+        s.video.preload = id === feed.active ? 'auto' : 'metadata';
+        s.video.src = fileUrl(id, cur.variant);
+        if (id === feed.active) feedPlay(id);
+      }
+      if (id === feed.active) feedInfo();
+    };
+    const known = feed.details.get(id);
+    if (known) return apply(known);
+    api(`/api/hub/media/${encodeURIComponent(id)}`)
+      .then((d) => { feed.details.set(id, d.item); apply(d.item); })
+      .catch((e) => apply({ error: e.message }));
+  }
+
+  // Drop the stream of a slide far from view; its details stay cached.
+  function feedUnload(id) {
+    const s = feed.slides.get(id);
+    if (!s || !s.loaded) return;
+    s.loaded = false;
+    s.video.pause();
+    if (s.video.getAttribute('src')) {
+      s.video.removeAttribute('src');
+      s.video.load();
+    }
+  }
+
+  // Sound on is remembered, but a browser may refuse to start a video with
+  // sound before the page has had a tap; then it plays muted for now.
+  function feedPlay(id) {
+    const s = feed.slides.get(id);
+    if (!s || !s.video.getAttribute('src')) return;
+    s.video.muted = feed.muted;
+    s.video.play().catch((e) => {
+      if (e && e.name === 'NotAllowedError' && !s.video.muted && feed.active === id) {
+        feedSetMuted(true, false);
+        s.video.play().catch(() => {});
+      }
+    });
+  }
+
+  function feedSetMuted(muted, remember) {
+    feed.muted = muted;
+    for (const s of feed.slides.values()) s.video.muted = muted;
+    if (feed.chrome) {
+      const b = feed.chrome.muteBtn;
+      b.replaceChildren(icon(muted ? 'muted' : 'sound'));
+      b.setAttribute('aria-label', muted ? 'Turn sound on' : 'Turn sound off');
+      b.title = b.getAttribute('aria-label');
+    }
+    if (remember) {
+      try { localStorage.setItem(FEED_MUTE_KEY, muted ? '1' : '0'); } catch { /* storage blocked */ }
+    }
+    // Turning sound on is a tap, so a video paused by the browser can start now.
+    if (!muted && feed.active) {
+      const s = feed.slides.get(feed.active);
+      if (s && s.video.paused) feedPlay(feed.active);
+    }
+  }
+
+  function feedInfo() {
+    if (!feed.chrome) return;
+    const d = feed.details.get(feed.active);
+    const s = feed.slides.get(feed.active);
+    viewer.detail = d || null;
+    viewer.variant = s ? s.variant : null;
+    feed.chrome.info.replaceChildren(...(d && !d.error ? viewerInfo(d).flat().filter(Boolean) : [h('p', { class: 'muted' }, 'Loading ...')]));
+  }
+
+  // The copy buttons under Details switch the stream and keep the position.
+  function feedVariant(id, variant) {
+    const s = feed.slides.get(id);
+    if (!s) return;
+    const t = s.video.currentTime;
+    s.variant = variant;
+    feedNote(s, '');
+    s.video.src = fileUrl(id, variant);
+    s.video.addEventListener('loadedmetadata', () => { s.video.currentTime = t; }, { once: true });
+    if (id === feed.active) feedPlay(id);
+    feedInfo();
+  }
+
+  function feedScrollTo(id, behavior) {
+    const s = feed.slides.get(id);
+    if (s) s.el.scrollIntoView({ behavior: behavior || 'smooth', block: 'start' });
+  }
+
+  function feedStep(delta) {
+    const i = feed.order.indexOf(feed.active);
+    const next = feed.order[i + delta];
+    if (next) feedScrollTo(next);
+  }
+
+  function feedKey(e) {
+    const k = e.key;
+    if (k === 'ArrowDown' || k === 'ArrowRight' || k === 'PageDown' || k === 'j') { e.preventDefault(); feedStep(1); }
+    else if (k === 'ArrowUp' || k === 'ArrowLeft' || k === 'PageUp' || k === 'k') { e.preventDefault(); feedStep(-1); }
+    else if (k === ' ') {
+      e.preventDefault();
+      const s = feed.slides.get(feed.active);
+      if (s) { if (s.video.paused) feedPlay(s.id); else s.video.pause(); }
+    } else if (k === 'm') feedSetMuted(!feed.muted, true);
+  }
+
+  // A detached video can keep playing its sound, so every stream is stopped
+  // before the feed leaves the page.
+  function feedTeardown() {
+    if (feed.observer) feed.observer.disconnect();
+    feed.observer = null;
+    for (const id of feed.order) feedUnload(id);
+    feed.slides.clear();
+    feed.details.clear();
+    feed.order = [];
+    feed.active = null;
+    feed.chrome = null;
+  }
+
   // A horizontal swipe on the stage steps to the next or previous item, unless
   // a picture is zoomed in (then the finger pans) or the touch starts on the
   // video's own control bar.
@@ -924,6 +1231,7 @@
     const tag = (e.target && e.target.tagName) || '';
     if (/^(INPUT|SELECT|TEXTAREA)$/.test(tag)) return;
     if (e.key === 'Escape') { e.preventDefault(); viewerClose(); return; }
+    if (viewer.mode === 'feed') { feedKey(e); return; }
     // On a focused video the arrows seek; elsewhere they step through the list.
     if (tag === 'VIDEO' || tag === 'AUDIO') return;
     const nb = viewerNeighbours();
