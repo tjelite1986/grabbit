@@ -195,6 +195,8 @@
     { id: 'media', label: 'Media', icon: 'media', view: viewMedia },
     // Listed only when the server has the 18+ app's library mounted.
     { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
+    // Listed only when the server has the 18+ film library mounted.
+    { id: 'adflix', label: 'Adflix 18+', icon: 'media', ownData: true, show: () => !!(state.config && state.config.adflixLibrary), view: viewAdflix },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
     { id: 'review', label: 'Review', icon: 'review', badge: () => (state.review ? state.review.creators.unclassified : 0), view: viewReview },
     { id: 'inbox', label: 'Inbox', icon: 'inbox', badge: () => (state.inbox && state.inbox.counts ? state.inbox.counts.held || 0 : 0), view: viewInbox },
@@ -727,6 +729,213 @@
     ];
   }
 
+  // --- Adflix film library ----------------------------------------------------
+  // An 18+ film library on this server: long films with .nfo metadata, so a
+  // grid of frames and a plain player with seeking, not the vertical feed. The
+  // player is its own layer, driven by the `open` parameter like the viewer.
+  const FILM_PAGE = 60;
+  const filmFileUrl = (id, v, download) => `/api/hub/adflix/file?id=${encodeURIComponent(id)}&v=${v}${download ? '&download=1' : ''}`;
+  const filmImage = (it) => (it.thumb ? filmFileUrl(it.id, 'thumb') : it.poster ? filmFileUrl(it.id, 'poster') : null);
+  let filmLoading = null;
+  function loadFilms(fresh) {
+    if (filmLoading) return filmLoading;
+    filmLoading = api(`/api/hub/adflix${fresh ? '?fresh=1' : ''}`)
+      .then((d) => { state.films = d.items || []; state.filmsError = null; })
+      .catch((e) => { state.filmsError = e.message; })
+      .finally(() => {
+        filmLoading = null;
+        if (route().id === 'adflix') {
+          render(false);
+          syncViewer();
+        }
+      });
+    return filmLoading;
+  }
+  const filmText = (it) => [it.studio, it.title, it.year, ...(it.actors || []), ...(it.genres || [])].join(' ').toLowerCase();
+  function filmList(params) {
+    const studio = params.get('studio') || '';
+    const q = (params.get('q') || '').toLowerCase();
+    const sort = params.get('sort') || '';
+    const seed = params.get('seed') || '';
+    const list = (state.films || [])
+      .filter((it) => !studio || it.studio === studio)
+      .filter((it) => !q || filmText(it).includes(q));
+    if (seed) return list.map((it) => [adsHash(seed + it.id), it]).sort((a, b) => a[0] - b[0]).map((p) => p[1]);
+    if (sort === 'title') return list.slice().sort((a, b) => a.title.localeCompare(b.title));
+    if (sort === 'year') return list.slice().sort((a, b) => (b.date || String(b.year || '')).localeCompare(a.date || String(a.year || '')) || a.title.localeCompare(b.title));
+    return list;
+  }
+  function filmTile(it, query) {
+    const q = new URLSearchParams(query || '');
+    q.set('open', it.id);
+    const img = filmImage(it);
+    return h('a', { class: `tile film-tile${img ? '' : ' no-thumb'}`, 'data-kind': 'video', href: `#/adflix?${q}`, title: [it.studio, it.title].filter(Boolean).join(' - ') },
+      img ? h('img', { src: img, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null,
+      it.studio ? h('span', { class: 'chip site' }, it.studio) : null,
+      h('span', { class: 'chip adult aud' }, '18+'),
+      h('span', { class: 'play', 'aria-hidden': 'true' }, icon('play')),
+      h('span', { class: 'cap' }, it.year ? `${it.title} (${it.year})` : it.title));
+  }
+  function viewAdflix(params) {
+    if (!state.films && !state.filmsError) loadFilms(false);
+    const query = new URLSearchParams(params);
+    query.delete('open');
+    const withParams = (changes) => {
+      const n = new URLSearchParams(query);
+      for (const [k, v] of Object.entries(changes)) {
+        if (v) n.set(k, v);
+        else n.delete(k);
+      }
+      return `#/adflix${n.toString() ? '?' + n : ''}`;
+    };
+    const studio = params.get('studio') || '';
+    const q = params.get('q') || '';
+    const sort = params.get('seed') ? 'shuffle' : params.get('sort') || '';
+    const items = filmList(params);
+    const studios = state.films ? [...new Set(state.films.map((it) => it.studio).filter(Boolean))].sort((a, b) => a.localeCompare(b)) : [];
+    const search = h('input', { class: 'field small', type: 'search', placeholder: 'Search title, studio, actor or genre', value: q, 'aria-label': 'Search' });
+    const studioPick = h('select', { class: 'field small', 'aria-label': 'Studio', onchange: (e) => { location.hash = withParams({ studio: e.target.value }); } },
+      h('option', { value: '' }, `All studios (${studios.length})`),
+      studios.map((s) => h('option', { value: s, selected: s === studio }, s)));
+    const sortBtn = (label, key, changes) => h('a', { class: `btn small ${sort === key ? '' : 'ghost'}`, href: withParams(changes) }, label);
+    const grid = h('div', { class: 'media-grid film-grid' });
+    let shown = 0;
+    const more = h('button', { class: 'btn ghost', type: 'button', onclick: () => showMore() }, 'Show more');
+    function showMore() {
+      grid.append(...items.slice(shown, shown + FILM_PAGE).map((it) => filmTile(it, query)));
+      shown = Math.min(items.length, shown + FILM_PAGE);
+      more.hidden = shown >= items.length;
+    }
+    if (items.length) showMore();
+    return [
+      h('h1', null, 'Adflix ', h('span', { class: 'chip adult' }, '18+')),
+      h('p', { class: 'lead' },
+        state.films
+          ? `${state.films.length} films from ${studios.length} studios, read from the film library on this server. Click one to play it.`
+          : 'The 18+ film library, read from its folder on this server.'),
+      h('div', { class: 'toolbar' },
+        h('form', { class: 'ads-search', onsubmit: (e) => { e.preventDefault(); location.hash = withParams({ q: search.value.trim() }); } }, search),
+        studioPick,
+        sortBtn('Newest', '', { sort: '', seed: '' }),
+        sortBtn('Release', 'year', { sort: 'year', seed: '' }),
+        sortBtn('A-Z', 'title', { sort: 'title', seed: '' }),
+        sortBtn(sort === 'shuffle' ? 'Shuffle again' : 'Shuffle', 'shuffle', { sort: '', seed: Math.random().toString(36).slice(2, 8) }),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => { state.films = null; loadFilms(true); render(false); } }, 'Refresh'),
+        q ? h('a', { class: 'chip', href: withParams({ q: '' }), title: 'Clear the search' }, `Search: ${q} x`) : null),
+      state.filmsError
+        ? h('p', { class: 'err' }, state.filmsError)
+        : !state.films
+          ? h('p', { class: 'empty' }, 'Loading ... (the first scan of a large library takes a few seconds)')
+          : !items.length
+            ? h('p', { class: 'empty' }, 'Nothing matches.')
+            : [h('p', { class: 'muted small' }, `${items.length} films`), grid, h('p', null, more)],
+    ];
+  }
+
+  // The film player: one film, its details beside it, previous/next over the
+  // page's current filter and order.
+  const film = { el: null, id: null };
+  function filmClose() {
+    if (viewerPushed) return history.back();
+    const q = new URLSearchParams(route().params);
+    q.delete('open');
+    location.replace(`#/adflix${q.toString() ? '?' + q : ''}`);
+  }
+  function filmGo(it) {
+    if (!it) return;
+    const q = new URLSearchParams(route().params);
+    q.set('open', it.id);
+    location.replace(`#/adflix?${q}`);
+  }
+  function filmNeighbours() {
+    const list = filmList(route().params);
+    const i = list.findIndex((it) => it.id === film.id);
+    return { prev: i > 0 ? list[i - 1] : null, next: i >= 0 && i < list.length - 1 ? list[i + 1] : null };
+  }
+  function syncFilm() {
+    const r = route();
+    const id = r.id === 'adflix' ? r.params.get('open') : null;
+    if (!id || !state.films) {
+      if (film.el && !id) {
+        film.el.querySelectorAll('video').forEach((v) => v.pause());
+        film.el.remove();
+        film.el = null;
+        film.id = null;
+        document.body.classList.remove('viewer-open');
+        viewerPushed = false;
+      }
+      return;
+    }
+    if (film.el && film.id === id) return;
+    film.id = id;
+    const it = state.films.find((x) => x.id === id);
+    const nb = filmNeighbours();
+    const btn = (label, iconName, onclick, attrs) =>
+      h('button', { class: 'icon-btn', type: 'button', 'aria-label': label, title: label, onclick, ...(attrs || {}) }, icon(iconName));
+    const stage = h('div', { class: 'v-stage' });
+    if (!it) {
+      stage.append(h('p', { class: 'bad-t' }, 'This film is not in the library any more.'));
+    } else {
+      const video = h('video', { src: filmFileUrl(it.id, 'video'), controls: true, playsinline: true, preload: 'metadata', poster: filmImage(it), 'data-media-bg': '1' });
+      const err = h('p', { class: 'v-err', hidden: true }, 'This browser cannot play the file (its video codec may be unsupported). Download it to watch it in a player.');
+      video.addEventListener('error', () => { if (video.error) err.hidden = false; });
+      stage.append(video, err);
+    }
+    const kv = (label, value) => (value ? h('div', { class: 'kv' }, h('dt', null, label), h('dd', null, value)) : null);
+    const filterLink = (key, value) => {
+      const q = new URLSearchParams();
+      q.set(key, value);
+      return h('a', { class: 'chip', href: `#/adflix?${q}` }, value);
+    };
+    const info = it
+      ? h('aside', { class: 'v-info' },
+          it.poster ? h('img', { class: 'film-poster', src: filmFileUrl(it.id, 'poster'), alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: (e) => e.currentTarget.remove() }) : null,
+          it.plot ? h('p', { class: 'film-plot' }, it.plot) : null,
+          h('dl', null,
+            kv('Studio', it.studio ? filterLink('studio', it.studio) : null),
+            kv('Released', it.date || (it.year ? String(it.year) : null)),
+            kv('Runtime', it.runtime ? `${it.runtime} min` : null),
+            kv('Size', bytes(it.bytes)),
+            kv('Cast', it.actors && it.actors.length ? h('div', { class: 'chips' }, it.actors.map((a) => filterLink('q', a))) : null),
+            kv('Genres', it.genres && it.genres.length ? h('div', { class: 'chips' }, it.genres.map((g) => filterLink('q', g))) : null),
+            kv('File', h('span', { class: 'break small' }, it.id))),
+          h('p', null, h('a', { class: 'btn small ghost', href: filmFileUrl(it.id, 'video', true) }, 'Download')))
+      : h('aside', { class: 'v-info' });
+    const el = h('div', { class: 'viewer film', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Film player' },
+      h('div', { class: 'v-top' },
+        btn('Close', 'close', filmClose),
+        h('div', { class: 'v-title' },
+          h('strong', null, it ? it.title : 'Film'),
+          h('small', null, it ? [it.studio, it.year].filter(Boolean).join(' - ') : '')),
+        btn('Details', 'info', () => el.classList.toggle('info-open'), { class: 'icon-btn info-btn' })),
+      h('div', { class: 'v-body' },
+        h('div', { class: 'v-media' },
+          btn('Previous', 'prev', () => filmGo(nb.prev), { class: 'icon-btn nav-btn prev', disabled: !nb.prev }),
+          stage,
+          btn('Next', 'next', () => filmGo(nb.next), { class: 'icon-btn nav-btn next', disabled: !nb.next })),
+        info));
+    if (film.el) {
+      film.el.querySelectorAll('video').forEach((v) => v.pause());
+      film.el.replaceWith(el);
+    } else {
+      document.body.append(el);
+    }
+    film.el = el;
+    document.body.classList.add('viewer-open');
+  }
+  // Bubble phase, so a control inside the player can still keep a key.
+  document.addEventListener('keydown', (e) => {
+    if (!film.el || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(tag)) return;
+    if (e.key === 'Escape') { e.preventDefault(); filmClose(); return; }
+    // On a focused video the arrows seek; elsewhere they step through the list.
+    if (tag === 'VIDEO') return;
+    const nb = filmNeighbours();
+    if (e.key === 'ArrowRight') { e.preventDefault(); filmGo(nb.next); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); filmGo(nb.prev); }
+  });
+
   // --- Media viewer --------------------------------------------------------
   // A full-screen layer over the Media page, driven by the `open` parameter:
   // the back button closes it, and a link to it opens the same item. The file
@@ -766,6 +975,7 @@
   }
 
   function syncViewer() {
+    syncFilm();
     const r = route();
     const id = r.id === 'media' || r.id === 'adshortis' ? r.params.get('open') : null;
     if (!id) {

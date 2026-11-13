@@ -386,3 +386,7 @@ pre.raw { max-height: 320px; overflow: auto; font-size: 12px; background: var(--
 .ads-search { display: flex; flex: 1 1 200px; }
 .ads-search .field { width: 100%; }
 a.chip { text-decoration: none; }
+.film-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.film-tile { aspect-ratio: 16 / 9; }
+.film-poster { display: block; max-width: 100%; max-height: 40vh; margin: 0 auto 12px; border-radius: 8px; }
+.film-plot { margin: 0 0 12px; line-height: 1.45; }

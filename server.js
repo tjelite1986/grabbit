@@ -27,6 +27,7 @@ const itemStore = require('./item-store');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
 const adshortisLibrary = require('./adshortis-library');
+const adflixLibrary = require('./adflix-library');
 const { copyInto } = require('./safe-copy');
 const sourceMeta = require('./source-meta');
 const itemMeta = require('./item-meta');
@@ -2854,6 +2855,7 @@ app.get('/api/config', (_req, res) =>
       .map((ch) => ({ channel: ch, app: CHANNEL_LIBRARY[ch], audience: ch === '18plus' ? 'adult' : 'general' })),
     adultBlocked: ADULT_BLOCKED,
     adshortisLibrary: !!ADS_LIBRARY,
+    adflixLibrary: !!ADFLIX_LIBRARY,
   })
 );
 
@@ -4511,6 +4513,48 @@ app.get('/api/hub/adshortis', (req, res) => {
 app.get('/api/hub/adshortis/file', (req, res) => {
   const v = req.query.v === 'poster' ? 'poster' : req.query.v === 'video' || !req.query.v ? 'video' : null;
   const file = ADS_LIBRARY && v ? ADS_LIBRARY.resolve(String(req.query.id || ''), v) : null;
+  if (!file) return res.status(404).json({ ok: false, error: 'Not available' });
+  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+  if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+    if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
+  });
+});
+
+// --- Adflix film library -----------------------------------------------------
+// ADFLIX_LIBRARY: an 18+ film library (`<section>/<studio>/...` with .nfo
+// metadata and posters), mounted read-only. Opt-in: unset, the hub has no
+// Adflix page and these routes answer 404. See adflix-library.js.
+const ADFLIX_LIBRARY = process.env.ADFLIX_LIBRARY ? adflixLibrary.createLibrary(process.env.ADFLIX_LIBRARY) : null;
+
+// GET /api/hub/adflix -> every film with its metadata, newest first.
+app.get('/api/hub/adflix', (req, res) => {
+  if (!ADFLIX_LIBRARY) return res.status(404).json({ ok: false, error: 'The Adflix library is not configured' });
+  const items = ADFLIX_LIBRARY.list({ fresh: req.query.fresh === '1' }).map((i) => ({
+    id: i.id,
+    studio: i.studio,
+    title: i.title,
+    year: i.year,
+    date: i.date,
+    plot: i.plot,
+    runtime: i.runtime,
+    genres: i.genres,
+    actors: i.actors,
+    poster: !!i.poster,
+    thumb: !!i.thumb,
+    bytes: i.bytes,
+    mtime: i.mtime,
+  }));
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json({ ok: true, total: items.length, items });
+});
+
+// GET /api/hub/adflix/file?id=<film id>&v=video|poster|thumb[&download=1]
+// -> the film, its poster or its grid frame, with Range support for seeking.
+app.get('/api/hub/adflix/file', (req, res) => {
+  const v = req.query.v === undefined ? 'video' : ['video', 'poster', 'thumb'].includes(req.query.v) ? req.query.v : null;
+  const file = ADFLIX_LIBRARY && v ? ADFLIX_LIBRARY.resolve(String(req.query.id || ''), v) : null;
   if (!file) return res.status(404).json({ ok: false, error: 'Not available' });
   res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
   if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
