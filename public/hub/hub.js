@@ -131,6 +131,8 @@
     jobs: new Map(),
     review: null,
     inbox: null,
+    ads: null,
+    adsError: null,
   };
   const ACTIVE = new Set(['queued', 'running', 'scheduled']);
   const activeJobs = () => [...state.jobs.values()].filter((j) => ACTIVE.has(j.status)).sort((a, b) => a.createdAt - b.createdAt);
@@ -191,6 +193,8 @@
     { id: 'download', label: 'Download', icon: 'download', view: viewDownload },
     { id: 'queue', label: 'Queue & jobs', icon: 'queue', badge: () => activeJobs().length, live: true, view: viewQueue },
     { id: 'media', label: 'Media', icon: 'media', view: viewMedia },
+    // Listed only when the server has the 18+ app's library mounted.
+    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
     { id: 'review', label: 'Review', icon: 'review', badge: () => (state.review ? state.review.creators.unclassified : 0), view: viewReview },
     { id: 'inbox', label: 'Inbox', icon: 'inbox', badge: () => (state.inbox && state.inbox.counts ? state.inbox.counts.held || 0 : 0), view: viewInbox },
@@ -209,7 +213,7 @@
     const nav = $('#nav');
     nav.replaceChildren(
       ...PAGES.map((p) =>
-        h('a', { href: `#/${p.id}`, 'data-page': p.id }, icon(p.icon), h('span', null, p.label),
+        h('a', { href: `#/${p.id}`, 'data-page': p.id, hidden: p.show ? !p.show() : null }, icon(p.icon), h('span', null, p.label),
           p.badge ? h('span', { class: 'badge', hidden: true }) : null,
           p.planned ? h('span', { class: 'tag' }, 'planned') : null)
       )
@@ -219,6 +223,7 @@
     const cur = route().id;
     for (const a of document.querySelectorAll('#nav a')) {
       const p = PAGES.find((x) => x.id === a.dataset.page);
+      if (p.show) a.hidden = !p.show();
       if (p.id === cur) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
       const b = a.querySelector('.badge');
@@ -623,6 +628,105 @@
     ];
   }
 
+  // --- Adshortis library -----------------------------------------------------
+  // The 18+ app's own library, read from its folder on this server. Every clip
+  // is 18+, so the page is its own place in the menu and never mixes with the
+  // Media page. Clicking a clip opens the same vertical feed, over the page's
+  // current filter and order.
+  const ADS_PAGE = 120;
+  const adsFileUrl = (id, v, download) => `/api/hub/adshortis/file?id=${encodeURIComponent(id)}&v=${v === 'poster' ? 'poster' : 'video'}${download ? '&download=1' : ''}`;
+  let adsLoading = null;
+  function loadAds(fresh) {
+    if (adsLoading) return adsLoading;
+    adsLoading = api(`/api/hub/adshortis${fresh ? '?fresh=1' : ''}`)
+      .then((d) => { state.ads = d.items || []; state.adsError = null; })
+      .catch((e) => { state.adsError = e.message; })
+      .finally(() => {
+        adsLoading = null;
+        if (route().id === 'adshortis') {
+          render(false);
+          syncViewer();
+        }
+      });
+    return adsLoading;
+  }
+  // A stable order for one shuffle: the seed sits in the address, so the feed
+  // and the grid agree and a reload keeps the order.
+  function adsHash(str) {
+    let x = 2166136261;
+    for (let i = 0; i < str.length; i++) x = Math.imul(x ^ str.charCodeAt(i), 16777619);
+    return x >>> 0;
+  }
+  function adsList(params) {
+    const creator = params.get('creator') || '';
+    const q = (params.get('q') || '').toLowerCase();
+    const seed = params.get('seed') || '';
+    const list = (state.ads || [])
+      .filter((it) => !creator || it.creator === creator)
+      .filter((it) => !q || [it.creator, it.title].join(' ').toLowerCase().includes(q));
+    if (seed) return list.map((it) => [adsHash(seed + it.id), it]).sort((a, b) => a[0] - b[0]).map((p) => p[1]);
+    return list;
+  }
+  function adsTile(it, query) {
+    const q = new URLSearchParams(query || '');
+    q.set('open', it.id);
+    return h('a', { class: `tile ads-tile${it.poster ? '' : ' no-thumb'}`, 'data-kind': 'video', href: `#/adshortis?${q}`, title: [it.creator, it.title].filter(Boolean).join(' - ') },
+      it.poster ? h('img', { src: adsFileUrl(it.id, 'poster'), alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null,
+      it.creator ? h('span', { class: 'chip site' }, it.creator) : null,
+      h('span', { class: 'chip adult aud' }, '18+'),
+      h('span', { class: 'play', 'aria-hidden': 'true' }, icon('play')),
+      h('span', { class: 'cap' }, it.title || ''));
+  }
+  function viewAdshortis(params) {
+    if (!state.ads && !state.adsError) loadAds(false);
+    const query = new URLSearchParams(params);
+    query.delete('open');
+    const withParams = (changes) => {
+      const n = new URLSearchParams(query);
+      for (const [k, v] of Object.entries(changes)) {
+        if (v) n.set(k, v);
+        else n.delete(k);
+      }
+      return `#/adshortis${n.toString() ? '?' + n : ''}`;
+    };
+    const creator = params.get('creator') || '';
+    const q = params.get('q') || '';
+    const shuffled = !!params.get('seed');
+    const items = adsList(params);
+    const search = h('input', { class: 'field small', type: 'search', placeholder: 'Search creator or caption', value: q, 'aria-label': 'Search' });
+    const grid = h('div', { class: 'media-grid ads-grid' });
+    let shown = 0;
+    const more = h('button', { class: 'btn ghost', type: 'button', onclick: () => showMore() }, 'Show more');
+    function showMore() {
+      grid.append(...items.slice(shown, shown + ADS_PAGE).map((it) => adsTile(it, query)));
+      shown = Math.min(items.length, shown + ADS_PAGE);
+      more.hidden = shown >= items.length;
+    }
+    if (items.length) showMore();
+    const creators = state.ads ? new Set(state.ads.map((it) => it.creator).filter(Boolean)).size : 0;
+    return [
+      h('h1', null, 'Adshortis ', h('span', { class: 'chip adult' }, '18+')),
+      h('p', { class: 'lead' },
+        state.ads
+          ? `${state.ads.length} clips from ${creators} creators, read from the app's library folder. Click one to play the feed.`
+          : 'The 18+ app\'s library, read from its folder on this server.'),
+      h('div', { class: 'toolbar' },
+        h('form', { class: 'ads-search', onsubmit: (e) => { e.preventDefault(); location.hash = withParams({ q: search.value.trim() }); } }, search),
+        h('a', { class: `btn small ${shuffled ? 'ghost' : ''}`, href: withParams({ seed: '' }) }, 'Newest'),
+        h('a', { class: `btn small ${shuffled ? '' : 'ghost'}`, href: withParams({ seed: Math.random().toString(36).slice(2, 8) }) }, shuffled ? 'Shuffle again' : 'Shuffle'),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => { state.ads = null; loadAds(true); render(false); } }, 'Refresh'),
+        creator ? h('a', { class: 'chip', href: withParams({ creator: '' }), title: 'Show every creator' }, `Creator: ${creator} x`) : null,
+        q ? h('a', { class: 'chip', href: withParams({ q: '' }), title: 'Clear the search' }, `Search: ${q} x`) : null),
+      state.adsError
+        ? h('p', { class: 'err' }, state.adsError)
+        : !state.ads
+          ? h('p', { class: 'empty' }, 'Loading ...')
+          : !items.length
+            ? h('p', { class: 'empty' }, 'Nothing matches.')
+            : [h('p', { class: 'muted small' }, `${items.length} clips`), grid, h('p', null, more)],
+    ];
+  }
+
   // --- Media viewer --------------------------------------------------------
   // A full-screen layer over the Media page, driven by the `open` parameter:
   // the back button closes it, and a link to it opens the same item. The file
@@ -663,7 +767,7 @@
 
   function syncViewer() {
     const r = route();
-    const id = r.id === 'media' ? r.params.get('open') : null;
+    const id = r.id === 'media' || r.id === 'adshortis' ? r.params.get('open') : null;
     if (!id) {
       if (viewer.el) {
         feedTeardown();
@@ -675,15 +779,19 @@
       }
       return;
     }
+    // The library list loads on its own; the feed opens once it is here.
+    if (r.id === 'adshortis' && !state.ads) return;
     // A video opens the vertical feed; pictures and audio the plain viewer.
-    const listed = (state.media || []).find((it) => it.id === id);
-    const mode = listed && listed.kind === 'video' ? 'feed' : 'plain';
-    if (viewer.el && viewer.mode === 'feed' && mode === 'feed' && feed.slides.has(id)) {
+    // Every Adshortis clip is a video.
+    const listed = r.id === 'media' ? (state.media || []).find((it) => it.id === id) : null;
+    const mode = r.id === 'adshortis' || (listed && listed.kind === 'video') ? 'feed' : 'plain';
+    const source = FEED_SOURCES[r.id];
+    if (viewer.el && viewer.mode === 'feed' && mode === 'feed' && feed.src === source && feed.slides.has(id)) {
       if (feed.active !== id) feedScrollTo(id, 'auto');
       return;
     }
     if (viewer.el && viewer.id === id && viewer.mode === mode) return;
-    if (viewer.el && viewer.mode !== mode) {
+    if (viewer.el && (viewer.mode !== mode || (mode === 'feed' && feed.src !== source))) {
       feedTeardown();
       viewer.el.remove();
       viewer.el = null;
@@ -698,7 +806,7 @@
         document.body.append(viewer.el);
         document.body.classList.add('viewer-open');
       }
-      buildFeed(id);
+      buildFeed(id, source);
       return;
     }
     if (!viewer.el) {
@@ -805,7 +913,9 @@
     const cur = (d.variants || []).find((v) => v.variant === viewer.variant);
     const row = (k, ...v) => (v.flat().some((x) => x !== null && x !== undefined && x !== '') ? h('div', { class: 'kv' }, h('dt', null, k), h('dd', null, ...v)) : null);
     const res = cur && cur.width && cur.height ? `${cur.width} x ${cur.height}` : '';
-    const profile = d.profileId
+    const profile = d.creatorHref
+      ? h('a', { href: d.creatorHref }, 'All clips')
+      : d.profileId
       ? h('a', { href: `#/profiles?id=${d.profileId}` }, 'Open profile')
       : d.creator ? h('a', { href: `#/profiles?q=${encodeURIComponent(d.creator)}` }, 'Find profile') : null;
     return [
@@ -836,7 +946,7 @@
               },
             }, v.variant === 'web' ? `Web copy (${bytes(v.bytes)})` : `Original (${bytes(v.bytes)})`)))
         : null,
-      cur ? h('p', null, h('a', { class: 'btn small ghost', href: fileUrl(d.id, cur.variant, true) }, 'Download file')) : null,
+      cur ? h('p', null, h('a', { class: 'btn small ghost', href: feedFileUrl(d.id, cur.variant, true) }, 'Download file')) : null,
     ];
   }
 
@@ -931,13 +1041,58 @@
   // and the video in view plays on a loop. Only the active video and its two
   // neighbours carry a src, so a long list never holds dozens of open streams.
   const FEED_MUTE_KEY = 'grabbit.feedMuted';
-  const feed = { slides: new Map(), order: [], active: null, observer: null, muted: true, details: new Map(), chrome: null };
+  const feed = { slides: new Map(), order: [], active: null, observer: null, muted: true, details: new Map(), chrome: null, src: null };
+  // Where a feed's clips come from. Each source names its page, its list, the
+  // details of one clip and its file URLs; the feed itself is the same.
+  const FEED_SOURCES = {
+    media: {
+      page: 'media',
+      list: (id) => {
+        const list = viewerNeighbours().list.filter((it) => it.kind === 'video');
+        return list.some((it) => it.id === id) ? list : (state.media || []).filter((it) => it.id === id);
+      },
+      detail: (id) => api(`/api/hub/media/${encodeURIComponent(id)}`).then((d) => d.item),
+      fileUrl,
+      poster: (it) => thumbSrc(it.thumbnail),
+      creatorHref: (it) => (it.profileId ? `#/profiles?id=${it.profileId}` : it.creator ? `#/profiles?q=${encodeURIComponent(it.creator)}` : null),
+    },
+    adshortis: {
+      page: 'adshortis',
+      list: () => adsList(route().params),
+      // The list already says all there is; no round trip per clip.
+      detail: (id) => {
+        const it = (state.ads || []).find((x) => x.id === id);
+        if (!it) return Promise.reject(new Error('The clip is not in the library any more.'));
+        const name = id.slice(id.indexOf('/') + 1);
+        return Promise.resolve({
+          id,
+          creator: it.creator,
+          title: it.title,
+          audience: 'adult',
+          place: 'Adshortis library',
+          time: it.mtime,
+          poster: it.poster,
+          creatorHref: it.creator ? `#/adshortis?creator=${encodeURIComponent(it.creator)}` : null,
+          variants: [{ variant: 'web', kind: 'video', name, format: (/\.([a-z0-9]+)$/i.exec(name) || [, 'mp4'])[1], bytes: it.bytes, playable: 'yes' }],
+        });
+      },
+      fileUrl: adsFileUrl,
+      poster: (it) => (it.poster ? adsFileUrl(it.id, 'poster') : null),
+      creatorHref: (it) => (it.creator ? `#/adshortis?creator=${encodeURIComponent(it.creator)}` : null),
+    },
+  };
+  // A feed holds at most this many clips around the one opened, so a library
+  // of thousands does not become thousands of video elements.
+  const FEED_WINDOW = 150;
+  const feedFileUrl = (id, v, download) => (feed.src ? feed.src.fileUrl : fileUrl)(id, v, download);
   try { feed.muted = localStorage.getItem(FEED_MUTE_KEY) !== '0'; } catch { /* storage blocked: start muted */ }
 
-  function buildFeed(id) {
+  function buildFeed(id, source) {
     feedTeardown();
-    let list = viewerNeighbours().list.filter((it) => it.kind === 'video');
-    if (!list.some((it) => it.id === id)) list = (state.media || []).filter((it) => it.id === id);
+    feed.src = source || FEED_SOURCES.media;
+    let list = feed.src.list(id);
+    const at = list.findIndex((it) => it.id === id);
+    if (at >= 0 && list.length > FEED_WINDOW * 2 + 1) list = list.slice(Math.max(0, at - FEED_WINDOW), at + FEED_WINDOW + 1);
     const scroller = h('div', { class: 'f-scroll' });
     // One wheel gesture moves one video. A trackpad sends a burst of events,
     // so the rest of the burst is swallowed until it pauses.
@@ -989,14 +1144,13 @@
   function feedSlide(it) {
     const video = h('video', { playsinline: true, loop: true, preload: 'none', 'data-media-bg': '1' });
     video.muted = feed.muted;
-    const poster = thumbSrc(it.thumbnail);
-    if (poster) video.poster = poster;
+    // The poster is set when the slide loads: a poster attribute fetches at
+    // once, and a long feed would pull every picture up front.
+    const poster = feed.src.poster(it);
     const bar = h('i');
     const progress = h('div', { class: 'f-progress', role: 'slider', 'aria-label': 'Seek' }, h('div', { class: 'f-track' }, bar));
     const note = h('p', { class: 'f-note', hidden: true });
-    const profile = it.profileId
-      ? `#/profiles?id=${it.profileId}`
-      : it.creator ? `#/profiles?q=${encodeURIComponent(it.creator)}` : null;
+    const profile = feed.src.creatorHref(it);
     const el = h('section', { class: 'f-slide paused', 'data-id': it.id },
       video,
       h('span', { class: 'f-paused', 'aria-hidden': 'true' }, icon('play')),
@@ -1006,7 +1160,7 @@
         it.audience === 'adult' ? h('span', { class: 'chip adult' }, '18+') : null,
         it.title ? h('p', { class: 'f-title' }, it.title) : null),
       progress);
-    const slide = { id: it.id, el, video, note, progress, variant: null, loaded: false };
+    const slide = { id: it.id, el, video, note, progress, poster, variant: null, loaded: false };
 
     video.addEventListener('click', () => {
       if (video.paused) feedPlay(it.id);
@@ -1065,13 +1219,14 @@
     // Stepping replaces the history entry, so one back press closes the feed.
     const q = new URLSearchParams(route().params);
     q.set('open', id);
-    location.replace(`#/media?${q}`);
+    location.replace(`#/${feed.src.page}?${q}`);
   }
 
   function feedLoad(id) {
     const s = feed.slides.get(id);
     if (!s || s.loaded) return;
     s.loaded = true;
+    if (s.poster && !s.video.poster) s.video.poster = s.poster;
     const apply = (d) => {
       if (!s.loaded) return;
       const vs = (d && d.variants) || [];
@@ -1081,18 +1236,18 @@
         s.el.classList.add('missing');
         feedNote(s, d && d.error ? d.error : 'The file is not on this server any more.');
       } else {
-        if (d.poster) s.video.poster = fileUrl(id, 'poster');
+        if (d.poster) s.video.poster = feed.src.fileUrl(id, 'poster');
         if (cur.playable === 'no') feedNote(s, `${cur.format.toUpperCase()} with ${cur.videoCodec || 'this codec'} may not play in a browser.`);
         s.video.preload = id === feed.active ? 'auto' : 'metadata';
-        s.video.src = fileUrl(id, cur.variant);
+        s.video.src = feed.src.fileUrl(id, cur.variant);
         if (id === feed.active) feedPlay(id);
       }
       if (id === feed.active) feedInfo();
     };
     const known = feed.details.get(id);
     if (known) return apply(known);
-    api(`/api/hub/media/${encodeURIComponent(id)}`)
-      .then((d) => { feed.details.set(id, d.item); apply(d.item); })
+    feed.src.detail(id)
+      .then((d) => { feed.details.set(id, d); apply(d); })
       .catch((e) => apply({ error: e.message }));
   }
 
@@ -1157,7 +1312,7 @@
     const t = s.video.currentTime;
     s.variant = variant;
     feedNote(s, '');
-    s.video.src = fileUrl(id, variant);
+    s.video.src = feed.src.fileUrl(id, variant);
     s.video.addEventListener('loadedmetadata', () => { s.video.currentTime = t; }, { once: true });
     if (id === feed.active) feedPlay(id);
     feedInfo();
@@ -1196,6 +1351,7 @@
     feed.order = [];
     feed.active = null;
     feed.chrome = null;
+    feed.src = null;
   }
 
   // A horizontal swipe on the stage steps to the next or previous item, unless

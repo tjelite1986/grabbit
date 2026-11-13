@@ -26,6 +26,7 @@ const audience = require('./audience');
 const itemStore = require('./item-store');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
+const adshortisLibrary = require('./adshortis-library');
 const { copyInto } = require('./safe-copy');
 const sourceMeta = require('./source-meta');
 const itemMeta = require('./item-meta');
@@ -2852,6 +2853,7 @@ app.get('/api/config', (_req, res) =>
       .filter((ch) => !!CHANNEL_ROOTS[ch])
       .map((ch) => ({ channel: ch, app: CHANNEL_LIBRARY[ch], audience: ch === '18plus' ? 'adult' : 'general' })),
     adultBlocked: ADULT_BLOCKED,
+    adshortisLibrary: !!ADS_LIBRARY,
   })
 );
 
@@ -4473,6 +4475,43 @@ app.get('/api/hub/media/:id/file', (req, res) => {
   if (!file || !['video', 'image', 'audio'].includes(kind) || (v === 'poster' && kind !== 'image')) {
     return res.status(404).json({ ok: false, error: 'Not available' });
   }
+  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+  if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+    if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
+  });
+});
+
+// --- Adshortis library player ------------------------------------------------
+// ADSHORTIS_LIBRARY: the 18+ app's own media folder (`<creator>/<clip>.web.mp4`
+// plus a `.jpg` poster), mounted read-only. Opt-in: unset, the hub has no
+// Adshortis page and these routes answer 404. Grabbit only reads here; the app
+// owns the folder. See adshortis-library.js for what is listed and served.
+const ADS_LIBRARY = process.env.ADSHORTIS_LIBRARY ? adshortisLibrary.createLibrary(process.env.ADSHORTIS_LIBRARY) : null;
+
+// GET /api/hub/adshortis -> every clip, newest first. The page filters and
+// shuffles in the browser, so this is one compact list.
+app.get('/api/hub/adshortis', (req, res) => {
+  if (!ADS_LIBRARY) return res.status(404).json({ ok: false, error: 'The Adshortis library is not configured' });
+  const items = ADS_LIBRARY.list({ fresh: req.query.fresh === '1' }).map((i) => ({
+    id: i.id,
+    creator: i.creator,
+    title: i.title,
+    poster: !!i.poster,
+    bytes: i.bytes,
+    mtime: i.mtime,
+  }));
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json({ ok: true, total: items.length, items });
+});
+
+// GET /api/hub/adshortis/file?id=<folder>/<file>&v=video|poster[&download=1]
+// -> the clip or its poster, with Range support for seeking.
+app.get('/api/hub/adshortis/file', (req, res) => {
+  const v = req.query.v === 'poster' ? 'poster' : req.query.v === 'video' || !req.query.v ? 'video' : null;
+  const file = ADS_LIBRARY && v ? ADS_LIBRARY.resolve(String(req.query.id || ''), v) : null;
+  if (!file) return res.status(404).json({ ok: false, error: 'Not available' });
   res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
   if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
   res.setHeader('X-Content-Type-Options', 'nosniff');

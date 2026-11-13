@@ -379,3 +379,10 @@ pre.raw { max-height: 320px; overflow: auto; font-size: 12px; background: var(--
 .who { display: inline-flex; align-items: center; gap: 8px; }
 .avatar { flex: none; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: #fff; }
 .avatar.big { width: 56px; height: 56px; font-size: 24px; }
+
+/* Adshortis library page: portrait tiles, two across on a phone. */
+.ads-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.ads-tile { aspect-ratio: 9 / 16; }
+.ads-search { display: flex; flex: 1 1 200px; }
+.ads-search .field { width: 100%; }
+a.chip { text-decoration: none; }

@@ -1003,6 +1003,7 @@ environment variables:
 | `ADSHORTIS_LIBRARY_DIR` / `EGRAM_LIBRARY_DIR` / `PLATFORM_LIBRARY_DIR` | The 18+ shorts app's, the Instagram-style app's and the social app's own media libraries (where their importers file what they took). Used only by the duplicate scan, which reads and never writes; mount them read-only. The Adshortis library counts as an 18+ folder. Unset (the default), they are not scanned. |
 | `HUB_BRAND` | The line under the logo in the Grabbit 2.0 hub (`/`). Default `Media hub`. |
 | `HUB_APP_LINKS` | The hub sidebar's list of connected apps: `Name\|https://app.example.com,Other\|https://other.example.com`. Only https links are shown. Unset, the list is hidden. |
+| `ADSHORTIS_LIBRARY` | Optional. The 18+ shorts app's media folder (`<creator>/<clip>.web.mp4` with a `.jpg` poster), mounted read-only. Set, the hub gets an "Adshortis 18+" page that plays the library in the vertical feed. Folders starting with `_` or `.` are skipped, except `_unsorted`. Unset, the page and its routes do not exist. |
 | `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
 | `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
 
