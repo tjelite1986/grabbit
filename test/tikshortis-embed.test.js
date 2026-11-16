@@ -23,3 +23,11 @@ test('frame path stays inside the embedded app', () => {
     assert.equal(framePath(bad), '/', String(bad));
   }
 });
+
+test('origins are canonical, as MessageEvent.origin reports them', () => {
+  const { parseEmbedUrl } = require('../tikshortis-embed');
+  assert.equal(parseEmbedUrl('https://tik.example.com:443').origin, 'https://tik.example.com');
+  assert.equal(parseEmbedUrl('http://127.0.0.1:80/').origin, 'http://127.0.0.1');
+  assert.equal(parseEmbedUrl('https://tik.example.com:8443').origin, 'https://tik.example.com:8443');
+  assert.equal(parseEmbedUrl('https://tik.example.com:99999'), null);
+});

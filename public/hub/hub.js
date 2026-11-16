@@ -981,6 +981,10 @@
   window.addEventListener('message', (e) => {
     const cfg = tikEmbed();
     if (!cfg || e.origin !== cfg.origin || !e.data || e.data.type !== 'tikshortis:location') return;
+    // Only the frame on this page: another TikShortis window holding a
+    // reference to the hub has the right origin too.
+    const shown = document.querySelector('iframe.tik-frame');
+    if (!shown || e.source !== shown.contentWindow) return;
     if (route().id !== 'tikshortis') return;
     const p = tikPath(e.data.path);
     if (tikPath(route().params.get('path')) === p) return;

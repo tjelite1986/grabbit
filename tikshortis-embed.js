@@ -20,7 +20,11 @@ function parseEmbedUrl(raw) {
   const s = String(raw == null ? '' : raw).trim().replace(/\/$/, '').toLowerCase();
   if (!s) return null;
   if (!ORIGIN_RE.test(s) && !LOCAL_RE.test(s)) return null;
-  return { origin: s, url: `${s}/` };
+  // Canonical form, as the browser reports it in MessageEvent.origin: a default
+  // port (https://host:443) is dropped, an impossible port (:99999) throws.
+  let origin;
+  try { origin = new URL(s).origin; } catch { return null; }
+  return { origin, url: `${origin}/` };
 }
 
 // A path inside TikShortis for the frame, from the hub's address. Anything
