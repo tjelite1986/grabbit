@@ -441,3 +441,5 @@ a.lib-label[aria-current='true'] { background: linear-gradient(90deg, var(--acce
   .lib-item > a.icon-btn { display: none; }
   .lib-thumb { width: 56px; height: 44px; }
 }
+.lib-thumb .play { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 26px; height: 26px; border-radius: 50%; background: rgba(0, 0, 0, 0.55); display: grid; place-items: center; }
+.lib-thumb .play svg { width: 13px; height: 13px; fill: #fff; stroke: none; }

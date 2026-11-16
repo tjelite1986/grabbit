@@ -3905,10 +3905,32 @@ function libraryRoute(fn) {
 }
 const libScope = (req, b) => (req.method === 'GET' ? req.query.scope : b.scope);
 app.get('/api/library/media-tree', libraryRoute((lib, req) => ({ tree: lib.mediaTree(libScope(req)) })));
-app.get('/api/library/items', libraryRoute((lib, req) => lib.listItems({
+// Source metadata rarely holds a thumbnail, but the history log does (and
+// Grabbit keeps a local copy of it). A listed item that matches a history
+// entry by source URL or file name gets that picture, and the entry's id when
+// the hub's media viewer can play it. The item list is already scoped, so
+// this only decorates items the caller may see.
+function withHistory(out) {
+  const history = readHistory();
+  const byUrl = new Map();
+  const byName = new Map();
+  for (const e of history) {
+    if (e.sourceUrl && !byUrl.has(e.sourceUrl)) byUrl.set(e.sourceUrl, e);
+    if (e.filename && !byName.has(e.filename)) byName.set(e.filename, e);
+  }
+  const stem = (f) => String(f || '').replace(/\.[A-Za-z0-9]+$/, '');
+  for (const it of out.items) {
+    const e = (it.sourceUrl && byUrl.get(it.sourceUrl)) || byName.get(it.filename) || byName.get(stem(it.filename));
+    if (!e) continue;
+    if (!it.thumb && /^https?:\/\//i.test(e.thumbnail || '')) it.thumb = e.thumbnail;
+    if (mediaViewer.isPlainName(e.filename)) it.historyId = e.id;
+  }
+  return out;
+}
+app.get('/api/library/items', libraryRoute((lib, req) => withHistory(lib.listItems({
   scope: libScope(req), node: req.query.node, q: req.query.q, uncertain: req.query.uncertain === '1',
   limit: req.query.limit, offset: req.query.offset, store: readProfilesReadOnly().store,
-})));
+}))));
 app.post('/api/library/format', libraryRoute((lib, req, b) => lib.setFormat({ scope: b.scope, ids: b.ids, value: b.value === undefined ? null : b.value, by: actorOf(req) })));
 app.get('/api/library/categories', libraryRoute((lib, req) => lib.categoryTree(libScope(req))));
 app.post('/api/library/categories', libraryRoute((lib, req, b) => ({ category: lib.createCategory({ scope: b.scope, name: b.name, parentId: b.parentId, by: actorOf(req) }) })));

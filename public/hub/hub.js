@@ -95,7 +95,7 @@
     const img = e.currentTarget;
     const parent = img.parentNode;
     img.remove();
-    if (parent && parent.classList && parent.classList.contains('tile')) parent.classList.add('no-thumb');
+    if (parent && parent.classList && (parent.classList.contains('tile') || parent.classList.contains('lib-thumb'))) parent.classList.add('no-thumb');
   };
   function hostOf(u) {
     try { return new URL(u).hostname.replace(/^(www|m|music)\./, '').replace(/\.com$/, ''); } catch { return ''; }
@@ -862,8 +862,10 @@
           e.target.closest('li').classList.toggle('sel', e.target.checked);
           paintBulk();
         } }),
-        h('span', { class: `lib-thumb${src ? '' : ' no-thumb'}`, 'data-kind': it.kind || '' },
-          src ? h('img', { src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null),
+        h(it.historyId ? 'a' : 'span', { class: `lib-thumb${src ? '' : ' no-thumb'}`, 'data-kind': it.kind || '',
+          href: it.historyId ? `#/media?open=${encodeURIComponent(it.historyId)}` : null, title: it.historyId ? 'Play in the media viewer' : null },
+          src ? h('img', { src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null,
+          it.historyId ? h('span', { class: 'play', 'aria-hidden': 'true' }, icon('play')) : null),
         h('span', { class: 'lib-meta' },
           h('b', { class: 'lib-title' }, it.title || it.filename || `Item ${it.id}`),
           h('span', { class: 'muted' }, [it.creator, it.site].filter(Boolean).join(' · ')),
