@@ -191,7 +191,8 @@ function attach(db) {
         COALESCE(i.title_edit, i.title) AS title, COALESCE(i.creator_edit, i.creator) AS creator,
         i.updated_at,
         CASE WHEN json_valid(m.raw) THEN json_extract(m.raw, '$.duration') END AS dur,
-        CASE WHEN json_valid(m.raw) THEN json_extract(m.raw, '$.webpage_url') END AS wurl
+        CASE WHEN json_valid(m.raw) THEN json_extract(m.raw, '$.webpage_url') END AS wurl,
+        CASE WHEN json_valid(m.raw) THEN json_extract(m.raw, '$.thumbnail') END AS thumb
       FROM items i LEFT JOIN item_source_meta m ON m.item_id = i.id
       WHERE i.audience = ?
       ORDER BY i.updated_at DESC, i.id DESC`).all(scope);
@@ -252,11 +253,15 @@ function attach(db) {
         if (b[0] === 'other') return -1;
         return a[0].localeCompare(b[0]);
       };
+      // Unclassified items belong to neither scope. Only their number is
+      // given, so the owner knows how much is waiting in Review.
+      const unclassified = db.prepare("SELECT COUNT(*) AS n FROM items WHERE audience = 'unknown'").get().n;
       return {
         scope,
         id: 'all',
         label: 'All Media',
         count: total,
+        unclassified,
         children: sections.map(([id, label]) => ({
           id,
           label,
@@ -315,6 +320,7 @@ function attach(db) {
           id: r.id, key: r.key, title: r.title, creator: r.creator, site: r.site, kind: r.kind, filename: r.filename,
           audience: r.audience, profileId: r.profile_id, section: p.section, sub: p.sub, formatUncertain: p.uncertain,
           formatOverride: r.format_override, categories: cats.get(r.id) || [],
+          thumb: typeof r.thumb === 'string' && /^https?:\/\//i.test(r.thumb) ? r.thumb : null, sourceUrl: r.source_url || null,
         })),
       };
     },

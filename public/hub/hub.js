@@ -193,6 +193,7 @@
     { id: 'download', label: 'Download', icon: 'download', view: viewDownload },
     { id: 'queue', label: 'Queue & jobs', icon: 'queue', badge: () => activeJobs().length, live: true, view: viewQueue },
     { id: 'media', label: 'Media', icon: 'media', view: viewMedia },
+    { id: 'library', label: 'Library', icon: 'tags', ownData: true, view: viewLibrary },
     // Listed only when the server has the 18+ app's library mounted.
     { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
     // Listed only when the server has the 18+ film library mounted.
@@ -627,6 +628,304 @@
                 h('div', { class: 'media-grid' }, part.map((it) => tile(it, query))))
               : null;
           })),
+    ];
+  }
+
+  // --- Library (Grabbit 2.1) ---------------------------------------------------
+  // Media, Categories and Profiles as collapsible trees over items.db. Every
+  // request names its scope; the 18+ scope is opened on purpose each visit and
+  // is never remembered across reloads. Nothing here moves or copies a file.
+  const LIB_MODES = [['media', 'Media'], ['categories', 'Categories'], ['profiles', 'Profiles']];
+  const LIB_PAGE = 60;
+  const libUi = { open: new Set(['all']), adultOk: false };
+  const FORMAT_LABEL = { short: 'Short', long: 'Long', movie: 'Movie' };
+
+  function libHref(params, changes) {
+    const q = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(changes)) {
+      if (v === null || v === undefined || v === '') q.delete(k);
+      else q.set(k, v);
+    }
+    return `#/library${q.toString() ? '?' + q : ''}`;
+  }
+
+  function libTree(nodes, cur, params, depth = 0) {
+    return h('ul', { class: 'lib-tree', role: depth ? 'group' : 'tree' }, nodes.map((n) => {
+      const kids = n.children || [];
+      const open = libUi.open.has(n.id) || kids.some((k) => k.id === cur || (k.children || []).some((g) => g.id === cur));
+      const link = n.node === undefined
+        ? h('span', { class: 'lib-label' }, n.label)
+        : h('a', { class: 'lib-label', href: libHref(params, { node: n.node, offset: null }), 'aria-current': n.node === cur ? 'true' : null }, n.label);
+      const row = h('div', { class: 'lib-row' },
+        kids.length
+          ? h('button', { class: 'lib-twist', type: 'button', 'aria-expanded': String(open), 'aria-label': `${open ? 'Collapse' : 'Expand'} ${n.label}`, onclick: (e) => {
+            if (libUi.open.has(n.id)) libUi.open.delete(n.id); else libUi.open.add(n.id);
+            const li = e.currentTarget.closest('li');
+            const now = li.classList.toggle('open');
+            e.currentTarget.setAttribute('aria-expanded', String(now));
+          } }, icon('next'))
+          : h('span', { class: 'lib-twist-gap' }),
+        link,
+        n.count !== undefined ? h('span', { class: 'lib-count' }, num(n.count)) : null);
+      return h('li', { class: open ? 'open' : null, role: 'treeitem' }, row, kids.length ? libTree(kids, cur, params, depth + 1) : null);
+    }));
+  }
+
+  // Server trees -> one node shape: { id, label, count, node, children }.
+  const mediaNodes = (t) => [{ id: 'all', label: t.label, count: t.count, node: 'all',
+    children: t.children.map((s) => ({ id: s.id, label: s.label, count: s.count, node: s.id,
+      children: s.children.map((c) => ({ id: c.id, label: c.label, count: c.count, node: c.id })) })) }];
+  const catNodes = (list) => list.map((c) => ({ id: `cat:${c.id}`, label: c.name, count: c.count, node: `cat:${c.id}`, children: catNodes(c.children) }));
+  const profileNodes = (t) => [
+    ...t.children.map((g) => ({ id: g.id, label: g.label, count: g.profiles.length,
+      children: g.profiles.map((p) => ({ id: `${g.id}:${p.id}`, label: p.name, count: p.count, node: `profile:${p.id}` })) })),
+    { id: 'profile:none', label: 'Without a profile', count: t.withoutProfile, node: 'profile:none' },
+  ];
+  function flatCats(list, depth = 0, out = []) {
+    for (const c of list) { out.push({ ...c, depth }); flatCats(c.children, depth + 1, out); }
+    return out;
+  }
+
+  function viewLibrary(params) {
+    const mode = LIB_MODES.some(([m]) => m === params.get('mode')) ? params.get('mode') : 'media';
+    const scope = params.get('scope') === 'adult' ? 'adult' : 'general';
+    const node = params.get('node') || (mode === 'media' ? 'all' : '');
+    const head = [
+      h('h1', null, 'Library'),
+      h('p', { class: 'lead' }, 'Every downloaded item, sorted by media type, your own categories and creator profiles. Views only: no file is moved, copied or deleted.'),
+      h('div', { class: 'toolbar lib-modes' },
+        LIB_MODES.map(([m, label]) => h('a', { class: `btn small ${m === mode ? '' : 'ghost'}`, href: libHref(params, { mode: m === 'media' ? null : m, node: null, offset: null }) }, label)),
+        h('span', { class: 'lib-scope', role: 'group', 'aria-label': 'Audience' },
+          h('a', { class: `btn small ${scope === 'general' ? '' : 'ghost'}`, href: libHref(params, { scope: null, node: null, offset: null }) }, 'General'),
+          h('a', { class: `btn small ${scope === 'adult' ? 'danger' : 'ghost'}`, href: libHref(params, { scope: 'adult', node: null, offset: null }), onclick: (e) => {
+            if (scope === 'adult' || libUi.adultOk) return;
+            if (!confirm('Show the 18+ library? It stays open until you reload the page.')) e.preventDefault();
+            else libUi.adultOk = true;
+          } }, '18+'))),
+    ];
+    if (scope === 'adult' && !libUi.adultOk) {
+      return [...head, h('section', { class: 'card' },
+        h('h2', null, '18+ library'),
+        h('p', null, 'The 18+ part of the library is shown only after you open it on purpose.'),
+        h('div', { class: 'toolbar' },
+          h('button', { class: 'btn danger', type: 'button', onclick: () => { libUi.adultOk = true; render(false); } }, 'Show 18+'),
+          h('a', { class: 'btn ghost', href: libHref(params, { scope: null, node: null }) }, 'Back to general')))];
+    }
+
+    const treeBox = h('div', { class: 'lib-tree-box' }, h('p', { class: 'empty' }, 'Loading ...'));
+    const listBox = h('div', { class: 'lib-list' }, h('p', { class: 'empty' }, node ? 'Loading ...' : ''));
+    const tools = h('div', { class: 'lib-tools' });
+    const picked = new Set();
+    const bulk = h('div', { class: 'mergebar lib-bulk', hidden: true });
+    let cats = [];
+    let items = [];
+    let total = 0;
+
+    const search = h('input', { class: 'field', type: 'search', placeholder: 'Search this branch: title, creator, file', value: params.get('q') || '', 'aria-label': 'Search this branch' });
+    const uncertain = h('input', { type: 'checkbox', checked: params.get('uncertain') === '1' });
+    // Typing filters in place: the address follows without a repaint, so the
+    // field keeps its focus and the tree keeps what is open.
+    let qNow = params.get('q') || '';
+    let timer;
+    search.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        qNow = search.value.trim();
+        history.replaceState(null, '', libHref(params, { q: qNow, offset: null }));
+        renderedKey = pageKey();
+        picked.clear();
+        loadItems(0);
+      }, 350);
+    });
+    uncertain.addEventListener('change', () => { location.hash = libHref(params, { uncertain: uncertain.checked ? '1' : null }); });
+
+    async function loadTree() {
+      try {
+        if (mode === 'media') {
+          const d = await api(`/api/library/media-tree?scope=${scope}`);
+          treeBox.replaceChildren(libTree(mediaNodes(d.tree), node, params),
+            d.tree.unclassified ? h('p', { class: 'muted small' }, `${num(d.tree.unclassified)} unclassified items are in neither General nor 18+. `, h('a', { href: '#/review' }, 'Classify them in Review')) : null);
+        } else if (mode === 'categories') {
+          const d = await api(`/api/library/categories?scope=${scope}`);
+          cats = flatCats(d.roots);
+          treeBox.replaceChildren(
+            d.roots.length ? libTree(catNodes(d.roots), node, params) : h('p', { class: 'empty' }, 'No categories yet. Create the first one below.'),
+            h('p', { class: 'muted small' }, `${num(d.categorised)} items in at least one category.`),
+            categoryForm());
+        } else {
+          const d = await api(`/api/library/profiles?scope=${scope}`);
+          treeBox.replaceChildren(
+            h('p', { class: 'muted small' }, `${num(d.tree.count)} profiles. A creator with accounts on several platforms is listed under each of them.`),
+            libTree(profileNodes(d.tree), node, params));
+        }
+      } catch (e) { treeBox.replaceChildren(h('p', { class: 'empty' }, e.message)); }
+      paintTools();
+    }
+
+    // Create a category (top level or under the selected one); rename, move or
+    // merge the selected one.
+    function categoryForm() {
+      const sel = node.startsWith('cat:') ? cats.find((c) => `cat:${c.id}` === node) : null;
+      const name = h('input', { class: 'field', placeholder: sel ? `New category in ${sel.name}` : 'New top-level category', maxlength: 80, 'aria-label': 'Category name' });
+      const create = h('form', { class: 'inline', onsubmit: async (e) => {
+        e.preventDefault();
+        if (!name.value.trim()) return;
+        try {
+          const d = await jsonPost('/api/library/categories', { scope, name: name.value, parentId: sel ? sel.id : null });
+          if (sel) libUi.open.add(`cat:${sel.id}`);
+          toast(`Created ${d.category.name}`);
+          location.hash = libHref(params, { node: `cat:${d.category.id}`, offset: null });
+        } catch (err) { toast(err.message); }
+      } }, name, h('button', { class: 'btn small', type: 'submit' }, 'Create'));
+      if (!sel) return h('div', { class: 'lib-catform' }, create);
+      const others = cats.filter((c) => c.id !== sel.id);
+      const rename = h('input', { class: 'field', value: sel.name, maxlength: 80, 'aria-label': 'New name' });
+      const moveTo = h('select', { class: 'field', 'aria-label': 'Move under' }, h('option', { value: '' }, 'Top level'),
+        others.map((c) => h('option', { value: c.id, selected: c.id === sel.parentId }, `${'  '.repeat(c.depth)}${c.name}`)));
+      const mergeTo = h('select', { class: 'field', 'aria-label': 'Merge into' }, h('option', { value: '' }, 'Merge into ...'),
+        others.map((c) => h('option', { value: c.id }, `${'  '.repeat(c.depth)}${c.name}`)));
+      const act = (fn) => async (e) => {
+        e.preventDefault();
+        try { await fn(); } catch (err) { toast(err.message); }
+      };
+      return h('div', { class: 'lib-catform' },
+        h('h3', null, sel.name),
+        create,
+        h('form', { class: 'inline', onsubmit: act(async () => {
+          await jsonPost(`/api/library/categories/${sel.id}/rename`, { scope, name: rename.value });
+          toast('Renamed');
+          loadTree();
+        }) }, rename, h('button', { class: 'btn small ghost', type: 'submit' }, 'Rename')),
+        h('form', { class: 'inline', onsubmit: act(async () => {
+          await jsonPost(`/api/library/categories/${sel.id}/move`, { scope, parentId: moveTo.value ? Number(moveTo.value) : null });
+          toast('Moved');
+          loadTree();
+        }) }, moveTo, h('button', { class: 'btn small ghost', type: 'submit' }, 'Move')),
+        h('form', { class: 'inline', onsubmit: act(async () => {
+          if (!mergeTo.value) return;
+          const target = cats.find((c) => c.id === Number(mergeTo.value));
+          if (!confirm(`Merge "${sel.name}" into "${target.name}"? Its items and subcategories move there and "${sel.name}" is removed. No file changes.`)) return;
+          await jsonPost(`/api/library/categories/${sel.id}/merge`, { scope, targetId: target.id });
+          toast('Merged');
+          location.hash = libHref(params, { node: `cat:${target.id}`, offset: null });
+        }) }, mergeTo, h('button', { class: 'btn small danger', type: 'submit' }, 'Merge')),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: act(async () => {
+          const d = await api(`/api/library/suggest?scope=${scope}&categoryId=${sel.id}`);
+          if (!d.items.length) return toast('No item carries a tag with this name.');
+          if (!confirm(`${d.items.length} item(s) carry a tag named like "${sel.name}". Add them to it?`)) return;
+          const r = await jsonPost('/api/library/assign', { scope, ids: d.items.map((x) => x.id), categoryIds: [sel.id] });
+          toast(`Added ${r.changed.length}.`);
+          loadTree();
+          loadItems(0);
+        }) }, 'Suggest from tags'));
+    }
+
+    function paintTools() {
+      tools.replaceChildren(search,
+        mode === 'media' ? h('label', { class: 'chk' }, uncertain, ' Unsure short/long only') : null);
+    }
+
+    function paintBulk() {
+      bulk.hidden = !picked.size;
+      if (!picked.size) return bulk.replaceChildren();
+      const catSel = h('select', { class: 'field', 'aria-label': 'Category' }, h('option', { value: '' }, cats.length ? 'Category ...' : 'No categories'),
+        cats.map((c) => h('option', { value: c.id }, `${'  '.repeat(c.depth)}${c.name}`)));
+      const fmtSel = h('select', { class: 'field', 'aria-label': 'Format' }, h('option', { value: '' }, 'Format ...'),
+        [['short', 'Short'], ['long', 'Long'], ['movie', 'Movie'], ['auto', 'Automatic']].map(([v, l]) => h('option', { value: v }, l)));
+      const ids = () => [...picked];
+      const run = async (fn) => {
+        try {
+          const r = await fn();
+          toast(`${r.changed.length} changed.${r.skipped.length ? ` ${r.skipped.length} skipped.` : ''}`);
+          picked.clear();
+          loadTree();
+          loadItems(0);
+        } catch (e) { toast(e.message); }
+      };
+      bulk.replaceChildren(
+        h('b', null, `${picked.size} selected`),
+        catSel,
+        h('button', { class: 'btn small', type: 'button', onclick: () => catSel.value && run(() => jsonPost('/api/library/assign', { scope, ids: ids(), categoryIds: [Number(catSel.value)] })) }, 'Add'),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => catSel.value && run(() => jsonPost('/api/library/assign', { scope, ids: ids(), categoryIds: [Number(catSel.value)], remove: true })) }, 'Remove'),
+        fmtSel,
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => fmtSel.value && run(() => jsonPost('/api/library/format', { scope, ids: ids(), value: fmtSel.value === 'auto' ? null : fmtSel.value })) }, 'Set'),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => { picked.clear(); paintList(); } }, 'Clear'));
+    }
+
+    function itemRow(it) {
+      const src = thumbSrc(it.thumb);
+      const catNames = it.categories.map((id) => (cats.find((c) => c.id === id) || {}).name).filter(Boolean);
+      const where = [it.section, it.sub].filter(Boolean).join(' / ');
+      return h('li', { class: `lib-item${picked.has(it.id) ? ' sel' : ''}` },
+        h('input', { type: 'checkbox', 'aria-label': `Select ${it.title || it.filename || it.id}`, checked: picked.has(it.id), onchange: (e) => {
+          if (e.target.checked) picked.add(it.id); else picked.delete(it.id);
+          e.target.closest('li').classList.toggle('sel', e.target.checked);
+          paintBulk();
+        } }),
+        h('span', { class: `lib-thumb${src ? '' : ' no-thumb'}`, 'data-kind': it.kind || '' },
+          src ? h('img', { src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null),
+        h('span', { class: 'lib-meta' },
+          h('b', { class: 'lib-title' }, it.title || it.filename || `Item ${it.id}`),
+          h('span', { class: 'muted' }, [it.creator, it.site].filter(Boolean).join(' · ')),
+          h('span', { class: 'lib-chips' },
+            where ? h('span', { class: 'chip' }, where) : null,
+            it.formatOverride ? h('span', { class: 'chip' }, `${FORMAT_LABEL[it.formatOverride]} (set by you)`) : null,
+            it.formatUncertain ? h('span', { class: 'chip unclassified' }, 'Unsure short/long') : null,
+            scope === 'adult' ? h('span', { class: 'chip adult' }, '18+') : null,
+            catNames.map((n) => h('span', { class: 'chip cat' }, n)))),
+        it.sourceUrl && /^https?:\/\//i.test(it.sourceUrl)
+          ? h('a', { class: 'icon-btn', href: it.sourceUrl, target: '_blank', rel: 'noopener noreferrer', title: 'Open the source page', 'aria-label': 'Open the source page' }, icon('link'))
+          : null);
+    }
+
+    function paintList() {
+      if (!node) {
+        listBox.replaceChildren(h('p', { class: 'empty' }, mode === 'categories' ? 'Pick a category, or create one.' : 'Pick a profile or platform in the tree.'));
+        return paintBulk();
+      }
+      const allOnPage = items.length && items.every((it) => picked.has(it.id));
+      listBox.replaceChildren(
+        h('div', { class: 'lib-listhead' },
+          h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!allOnPage, 'aria-label': 'Select all shown', onchange: (e) => {
+            items.forEach((it) => (e.target.checked ? picked.add(it.id) : picked.delete(it.id)));
+            paintList();
+          } }), ` ${num(total)} item${total === 1 ? '' : 's'}`),
+          node.startsWith('profile:') && node !== 'profile:none' ? h('a', { class: 'back', href: `#/profiles?id=${node.slice(8)}` }, 'Open profile') : null),
+        items.length
+          ? h('ul', { class: 'lib-items' }, items.map(itemRow))
+          : h('p', { class: 'empty' }, qNow ? 'Nothing matches the search here.' : 'Nothing here yet.'),
+        items.length < total
+          ? h('button', { class: 'btn ghost small', type: 'button', onclick: () => loadItems(items.length) }, `Show more (${num(total - items.length)} left)`)
+          : null);
+      paintBulk();
+    }
+
+    async function loadItems(offset) {
+      if (!node) return paintList();
+      const q = new URLSearchParams({ scope, node, limit: String(LIB_PAGE), offset: String(offset) });
+      if (qNow) q.set('q', qNow);
+      if (mode === 'media' && params.get('uncertain') === '1') q.set('uncertain', '1');
+      try {
+        const d = await api(`/api/library/items?${q}`);
+        items = offset ? items.concat(d.items) : d.items;
+        total = d.total;
+        paintList();
+      } catch (e) { listBox.replaceChildren(h('p', { class: 'empty' }, e.message)); }
+    }
+
+    // Category names on the item rows need the category list in every mode.
+    const catsReady = mode === 'categories' ? Promise.resolve() : api(`/api/library/categories?scope=${scope}`).then((d) => { cats = flatCats(d.roots); }).catch(() => {});
+    loadTree();
+    catsReady.then(() => loadItems(0));
+    paintTools();
+
+    return [
+      ...head,
+      h('div', { class: 'lib' },
+        h('details', { class: 'lib-side', open: !(node && matchMedia('(max-width: 900px)').matches) },
+          h('summary', null, LIB_MODES.find(([m]) => m === mode)[1], scope === 'adult' ? ' 18+' : ''),
+          treeBox),
+        h('div', { class: 'lib-main' }, tools, bulk, listBox)),
     ];
   }
 

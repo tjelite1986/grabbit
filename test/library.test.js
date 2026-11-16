@@ -233,3 +233,33 @@ test('profile tree: canonical creators per platform, Unlinked, merged ids, 18+ i
   assert.throws(() => L.listItems({ scope: 'adult', node: `profile:${annId}`, store }), /no such profile/);
   assert.equal(L.listItems({ scope: 'general', node: 'profile:none', store }).total, 3); // ytl is resolved; song, mid, yts have none
 });
+
+test('an item that turns 18+ after joining a general category leaves every general view', (t) => {
+  const s = itemStore.open(tmpDb(t));
+  t.after(() => s.close());
+  const it = seed(s);
+  const cat = s.library.createCategory({ scope: 'general', name: 'Dance' });
+  s.library.assign({ scope: 'general', ids: [it.tt.id], categoryIds: [cat.id] });
+  assert.equal(s.library.categoryTree('general').roots[0].count, 1);
+  // The audience only ever tightens to adult; simulate it at the row.
+  s.db.prepare("UPDATE items SET audience = 'adult' WHERE id = ?").run(it.tt.id);
+  assert.equal(s.library.categoryTree('general').roots[0].count, 0);
+  assert.equal(s.library.listItems({ scope: 'general', node: `cat:${cat.id}` }).total, 0);
+  const all = s.library.listItems({ scope: 'general', limit: 200 });
+  assert.ok(!all.items.some((x) => x.id === it.tt.id));
+  assert.ok(!JSON.stringify(s.library.listItems({ scope: 'general', limit: 200 })).includes('tt clip'));
+});
+
+test('list items carry only an http(s) thumbnail, and the tree reports unclassified as a number only', (t) => {
+  const s = itemStore.open(tmpDb(t));
+  t.after(() => s.close());
+  const it = seed(s);
+  s.db.prepare("INSERT INTO item_source_meta (item_id, raw, captured_at, updated_at) VALUES (?, ?, 1, 1)").run(it.pic.id, JSON.stringify({ thumbnail: 'https://cdn.example.com/p.jpg' }));
+  s.db.prepare("INSERT INTO item_source_meta (item_id, raw, captured_at, updated_at) VALUES (?, ?, 1, 1)").run(it.tt.id, JSON.stringify({ thumbnail: 'javascript:alert(1)' }));
+  const items = s.library.listItems({ scope: 'general', limit: 200 }).items;
+  assert.equal(items.find((x) => x.id === it.pic.id).thumb, 'https://cdn.example.com/p.jpg');
+  assert.equal(items.find((x) => x.id === it.tt.id).thumb, null);
+  const g = s.library.mediaTree('general');
+  assert.equal(g.unclassified, 1);
+  assert.ok(!JSON.stringify(g).includes('unk'));
+});
