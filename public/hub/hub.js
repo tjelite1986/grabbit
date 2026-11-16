@@ -639,6 +639,12 @@
   const LIB_PAGE = 60;
   const libUi = { open: new Set(['all']), adultOk: false };
   const FORMAT_LABEL = { short: 'Short', long: 'Long', movie: 'Movie' };
+  const LIB_SECTION_LABEL = {
+    shortis: 'Shortis', videos: 'Videos', music: 'Music', movies: 'Movies', photos: 'Photos',
+    'shortis-adults': 'Shortis Adults', 'videos-adults': 'Videos Adults', 'photos-adults': 'Photos Adults',
+  };
+  const LIB_SUB_LABEL = { tiktok: 'TikTok', youtube: 'YouTube', facebook: 'Facebook', instagram: 'Instagram', other: 'Other' };
+  const libSubLabel = (s) => LIB_SUB_LABEL[s] || s.charAt(0).toUpperCase() + s.slice(1);
 
   function libHref(params, changes) {
     const q = new URLSearchParams(params);
@@ -739,21 +745,39 @@
     });
     uncertain.addEventListener('change', () => { location.hash = libHref(params, { uncertain: uncertain.checked ? '1' : null }); });
 
+    // The folded tree on a phone still says where you are.
+    function showCurrent(nodes) {
+      const find = (list) => {
+        for (const n of list) {
+          if (n.node === node) return n;
+          const hit = find(n.children || []);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      const hit = find(nodes);
+      const el = document.querySelector('.lib-cur');
+      if (el) el.textContent = hit ? ` · ${hit.label} (${num(hit.count)})` : '';
+    }
+
     async function loadTree() {
       try {
         if (mode === 'media') {
           const d = await api(`/api/library/media-tree?scope=${scope}`);
+          showCurrent(mediaNodes(d.tree));
           treeBox.replaceChildren(libTree(mediaNodes(d.tree), node, params),
             d.tree.unclassified ? h('p', { class: 'muted small' }, `${num(d.tree.unclassified)} unclassified items are in neither General nor 18+. `, h('a', { href: '#/review' }, 'Classify them in Review')) : null);
         } else if (mode === 'categories') {
           const d = await api(`/api/library/categories?scope=${scope}`);
           cats = flatCats(d.roots);
+          showCurrent(catNodes(d.roots));
           treeBox.replaceChildren(
             d.roots.length ? libTree(catNodes(d.roots), node, params) : h('p', { class: 'empty' }, 'No categories yet. Create the first one below.'),
             h('p', { class: 'muted small' }, `${num(d.categorised)} items in at least one category.`),
             categoryForm());
         } else {
           const d = await api(`/api/library/profiles?scope=${scope}`);
+          showCurrent(profileNodes(d.tree));
           treeBox.replaceChildren(
             h('p', { class: 'muted small' }, `${num(d.tree.count)} profiles. A creator with accounts on several platforms is listed under each of them.`),
             libTree(profileNodes(d.tree), node, params));
@@ -821,8 +845,8 @@
     }
 
     function paintTools() {
-      tools.replaceChildren(search,
-        mode === 'media' ? h('label', { class: 'chk' }, uncertain, ' Unsure short/long only') : null);
+      tools.replaceChildren(...[search,
+        mode === 'media' ? h('label', { class: 'chk' }, uncertain, ' Unsure short/long only') : null].filter(Boolean));
     }
 
     function paintBulk() {
@@ -855,7 +879,7 @@
     function itemRow(it) {
       const src = thumbSrc(it.thumb);
       const catNames = it.categories.map((id) => (cats.find((c) => c.id === id) || {}).name).filter(Boolean);
-      const where = [it.section, it.sub].filter(Boolean).join(' / ');
+      const where = [LIB_SECTION_LABEL[it.section] || it.section, it.sub ? libSubLabel(it.sub) : null].filter(Boolean).join(' · ');
       return h('li', { class: `lib-item${picked.has(it.id) ? ' sel' : ''}` },
         h('input', { type: 'checkbox', 'aria-label': `Select ${it.title || it.filename || it.id}`, checked: picked.has(it.id), onchange: (e) => {
           if (e.target.checked) picked.add(it.id); else picked.delete(it.id);
@@ -925,7 +949,7 @@
       ...head,
       h('div', { class: 'lib' },
         h('details', { class: 'lib-side', open: !(node && matchMedia('(max-width: 900px)').matches) },
-          h('summary', null, LIB_MODES.find(([m]) => m === mode)[1], scope === 'adult' ? ' 18+' : ''),
+          h('summary', null, LIB_MODES.find(([m]) => m === mode)[1], scope === 'adult' ? ' 18+' : '', h('span', { class: 'lib-cur' })),
           treeBox),
         h('div', { class: 'lib-main' }, tools, bulk, listBox)),
     ];
