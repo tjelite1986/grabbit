@@ -450,3 +450,19 @@ a.lib-label[aria-current='true'] { background: linear-gradient(90deg, var(--acce
   .lib-bulk b { flex: 1 1 100%; }
   .lib-bulk select.field { flex: 1 1 0; min-width: 0; padding: 6px 8px; }
 }
+
+/* TikShortis (Grabbit 2.2): the embedded app fills the view */
+body.embed-page .view { padding: 0; }
+.tik-wrap { display: flex; flex-direction: column; height: calc(100dvh - 71px); }
+.tik-bar { display: flex; align-items: center; gap: 12px; padding: 8px 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tik-bar .muted { flex: 1; }
+.tik-frame { flex: 1; width: 100%; border: 0; background: #121212; display: block; }
+.tik-menu { display: none; }
+@media (max-width: 900px) {
+  body.embed-page .top { display: none; }
+  .tik-wrap { height: 100dvh; }
+  .tik-bar { display: none; }
+  /* The hub's way out sits in a corner, small, over the app's own header. */
+  .tik-menu { display: grid; place-items: center; position: fixed; left: calc(8px + env(safe-area-inset-left)); top: calc(8px + env(safe-area-inset-top)); width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.25); background: rgba(0, 0, 0, 0.45); color: #fff; z-index: 12; padding: 0; }
+  .tik-menu svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; }
+}

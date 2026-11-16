@@ -26,6 +26,7 @@ const profiles = require('./profiles');
 const audience = require('./audience');
 const itemStore = require('./item-store');
 const libraryLib = require('./library');
+const tikshortisEmbed = require('./tikshortis-embed');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
 const adshortisLibrary = require('./adshortis-library');
@@ -2860,8 +2861,17 @@ app.get('/api/config', (_req, res) =>
     adultBlocked: ADULT_BLOCKED,
     adshortisLibrary: !!ADS_LIBRARY,
     adflixLibrary: !!ADFLIX_LIBRARY,
+    // Grabbit 2.2: the TikShortis app shown in a hub frame. Null = off.
+    tikshortisEmbed: TIKSHORTIS_EMBED,
   })
 );
+
+// TIKSHORTIS_EMBED_URL: see tikshortis-embed.js. Off unless it is a plain
+// https origin; TikShortis must list this hub in its EMBED_FRAME_ANCESTORS.
+const TIKSHORTIS_EMBED = tikshortisEmbed.parseEmbedUrl(process.env.TIKSHORTIS_EMBED_URL);
+if (process.env.TIKSHORTIS_EMBED_URL && !TIKSHORTIS_EMBED) {
+  console.warn('[grabbit] TIKSHORTIS_EMBED_URL is not a plain https origin; the TikShortis hub page is off.');
+}
 
 // --- Grabbit 2.0 hub ----------------------------------------------------------
 // HUB_BRAND: the line under the logo. HUB_APP_LINKS: the sidebar's app list,

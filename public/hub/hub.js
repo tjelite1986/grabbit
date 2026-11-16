@@ -53,6 +53,7 @@
     zoomin: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6M11 8v6',
     zoomout: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6',
     fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+    menu: 'M4 6h16M4 12h16M4 18h16',
   };
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -194,6 +195,8 @@
     { id: 'queue', label: 'Queue & jobs', icon: 'queue', badge: () => activeJobs().length, live: true, view: viewQueue },
     { id: 'media', label: 'Media', icon: 'media', view: viewMedia },
     { id: 'library', label: 'Library', icon: 'tags', ownData: true, view: viewLibrary },
+    // Listed only when the server has TIKSHORTIS_EMBED_URL.
+    { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed(), view: viewTikshortis },
     // Listed only when the server has the 18+ app's library mounted.
     { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
     // Listed only when the server has the 18+ film library mounted.
@@ -251,6 +254,8 @@
     const view = $('#view');
     // Views return a node or a list with gaps (null/false) like h() children.
     view.replaceChildren(...[r.view(r.params)].flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
+    // The embedded app fills the view; on a phone the hub's top bar gives way.
+    document.body.classList.toggle('embed-page', r.id === 'tikshortis');
     updateNav();
     if (focus) {
       view.focus({ preventScroll: true });
@@ -953,6 +958,60 @@
           treeBox),
         h('div', { class: 'lib-main' }, tools, bulk, listBox)),
     ];
+  }
+
+  // --- TikShortis (Grabbit 2.2) ----------------------------------------------
+  // The TikShortis app itself, in a frame: its own pages, sign-in, database
+  // and media, so For You, Explore, profiles, likes, comments, playlists,
+  // upload, history and settings are the real ones. The hub keeps its own
+  // navigation around it and follows the frame's path in its address, so a
+  // reload or a shared link opens the same TikShortis page. Off unless the
+  // server has TIKSHORTIS_EMBED_URL (state.config.tikshortisEmbed).
+  const tikEmbed = () => (state.config && state.config.tikshortisEmbed) || null;
+  // Mirrors tikshortis-embed.js framePath(): a plain absolute path or '/'.
+  function tikPath(raw) {
+    const p = String(raw == null ? '' : raw);
+    if (!p.startsWith('/') || p.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(p) || p.length > 2000) return '/';
+    try {
+      const u = new URL(p, 'https://x.invalid');
+      return u.origin === 'https://x.invalid' ? u.pathname + u.search : '/';
+    } catch { return '/'; }
+  }
+  const tikHash = (p) => `#/tikshortis${p !== '/' ? `?path=${encodeURIComponent(p)}` : ''}`;
+  window.addEventListener('message', (e) => {
+    const cfg = tikEmbed();
+    if (!cfg || e.origin !== cfg.origin || !e.data || e.data.type !== 'tikshortis:location') return;
+    if (route().id !== 'tikshortis') return;
+    const p = tikPath(e.data.path);
+    if (tikPath(route().params.get('path')) === p) return;
+    // Follow the frame without rebuilding the page (which would reload it).
+    history.replaceState(null, '', tikHash(p));
+    renderedKey = pageKey();
+    const ext = document.querySelector('.tik-bar a.tik-ext');
+    if (ext) ext.href = cfg.origin + p;
+  });
+  function viewTikshortis(params) {
+    const cfg = tikEmbed();
+    if (!cfg) {
+      return [h('h1', null, 'TikShortis'), h('p', { class: 'empty' }, state.config ? 'TikShortis is not connected to this hub (TIKSHORTIS_EMBED_URL is not set).' : 'Loading ...')];
+    }
+    const path = tikPath(params.get('path'));
+    const frame = h('iframe', {
+      class: 'tik-frame',
+      src: cfg.origin + path,
+      title: 'TikShortis',
+      allow: 'autoplay; fullscreen; picture-in-picture; clipboard-write',
+      allowfullscreen: true,
+    });
+    return h('div', { class: 'tik-wrap' },
+      h('div', { class: 'tik-bar' },
+        h('b', null, 'TikShortis'),
+        h('span', { class: 'muted small' }, 'The TikShortis app, with its own sign-in and data.'),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => { frame.src = cfg.origin + tikPath(route().params.get('path')); } }, 'Reload'),
+        h('a', { class: 'btn small ghost tik-ext', href: cfg.origin + path, target: '_blank', rel: 'noopener' }, 'Open on its own')),
+      frame,
+      h('button', { class: 'tik-menu', type: 'button', 'aria-label': 'Open the Grabbit menu', onclick: () => { $('#side').classList.add('open'); $('#scrim').hidden = false; } },
+        icon('menu')));
   }
 
   // --- Adshortis library -----------------------------------------------------
@@ -3094,7 +3153,10 @@
   // Repaint after the boot loads, except a page that fetches its own data:
   // rebuilding it would throw away what the owner already opened or typed.
   function settle() {
-    if (route().ownData) updateNav();
+    // The TikShortis page needs the config to know the app's address; once
+    // its frame exists it is never rebuilt by a refresh (that would reload it).
+    if (route().id === 'tikshortis' && !document.querySelector('.tik-frame')) render(false);
+    else if (route().ownData) updateNav();
     else render(false);
   }
 
