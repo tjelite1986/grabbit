@@ -463,6 +463,10 @@ body.embed-page .view { padding: 0; }
   .tik-wrap { height: 100dvh; }
   .tik-bar { display: none; }
   /* The hub's way out sits in a corner, small, over the app's own header. */
-  .tik-menu { display: grid; place-items: center; position: fixed; left: calc(8px + env(safe-area-inset-left)); top: calc(8px + env(safe-area-inset-top)); width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.25); background: rgba(0, 0, 0, 0.45); color: #fff; z-index: 12; padding: 0; }
-  .tik-menu svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; }
+  /* A strip above the frame, not a button floating over it: floating, it covered
+     the app's own top-left controls (the Explore "All" chip). Full width and
+     44px tall, so it is easy to hit and clear of the edge back-gesture. */
+  .tik-menu { order: -1; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: env(safe-area-inset-top) 16px 0 calc(16px + env(safe-area-inset-left)); border: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.12); background: #121212; color: #fff; font: inherit; font-size: 14px; text-align: left; }
+  .tik-menu::after { content: 'Grabbit'; opacity: 0.8; }
+  .tik-menu svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; }
 }
