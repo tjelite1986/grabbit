@@ -227,7 +227,8 @@ test('profile tree: canonical creators per platform, Unlinked, merged ids, 18+ i
   assert.equal(L.listItems({ scope: 'general', node: `profile:${annId}`, store }).total, 3);
   assert.throws(() => L.listItems({ scope: 'general', node: `profile:${id('Vixen')}`, store }), /no such profile/);
   const a = L.profileTree('adult', store);
-  assert.deepEqual(a.children.map((c) => c.id), ['profiles:unlinked']);
+  // No linked account: the profile is listed under the site its media came from.
+  assert.deepEqual(a.children.map((c) => c.id), ['profiles:redgifs']);
   assert.equal(a.children[0].profiles[0].count, 1); // the unknown-audience item is not counted
   assert.equal(L.listItems({ scope: 'adult', node: `profile:${id('Vixen')}`, store }).total, 1);
   assert.throws(() => L.listItems({ scope: 'adult', node: `profile:${annId}`, store }), /no such profile/);
@@ -270,4 +271,31 @@ test('short-form-only sites count as an explicit short format, like TikTok', () 
   assert.equal(library.classifyFormat({ url: 'https://www.fikfap.com/post/1', duration: null }).format, 'short');
   assert.equal(library.classifyFormat({ site: 'redgifs.com', duration: 900 }).format, 'uncertain');
   assert.equal(library.classifyFormat({ site: 'xvideos.com', duration: null }).format, 'uncertain');
+});
+
+test('profile tree: an item without profile_id is matched by audience + creator name from the file name', (t) => {
+  const s = itemStore.open(tmpDb(t));
+  t.after(() => s.close());
+  let store = profiles.emptyStore();
+  store = profiles.create(store, { name: 'Loner', audience: 'general' }, 1).store;
+  store = profiles.create(store, { name: 'Loner', audience: 'adult' }, 1).store;
+  const [gen, adu] = store.profiles;
+  // Aliases come from the registry's file names (profiles.sync); a manual
+  // profile gets one only by merge, so set them as sync would.
+  gen.aliases.push({ name: 'Loner', addedAt: 1 });
+  adu.aliases.push({ name: 'loner', addedAt: 1 });
+  s.upsert({ key: 'id:tiktok:9', site: 'tiktok.com', kind: 'video', audience: 'general', filename: 'Loner_-_dance 9.mp4' });
+  s.upsert({ key: 'id:redgifs:9', site: 'redgifs.com', kind: 'video', audience: 'adult', filename: 'loner_-_secret 9.mp4' });
+  const g = s.library.profileTree('general', store);
+  assert.deepEqual(g.children.map((c) => c.id), ['profiles:tiktok']);
+  assert.equal(g.children[0].profiles[0].id, gen.id);
+  assert.equal(g.children[0].profiles[0].count, 1);
+  assert.equal(g.children[0].profiles[0].linked, false);
+  const list = s.library.listItems({ scope: 'general', node: `profile:${gen.id}`, store });
+  assert.equal(list.total, 1);
+  assert.equal(list.items[0].creator, 'Loner');
+  assert.ok(!JSON.stringify(g).includes('secret'));
+  const a = s.library.profileTree('adult', store);
+  assert.equal(a.children[0].profiles[0].id, adu.id);
+  assert.equal(s.library.listItems({ scope: 'adult', node: `profile:${adu.id}`, store }).total, 1);
 });

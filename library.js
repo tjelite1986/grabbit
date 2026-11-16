@@ -23,6 +23,7 @@
 const sourceMeta = require('./source-meta');
 const audience = require('./audience');
 const profilesLib = require('./profiles');
+const hubLib = require('./hub');
 
 const SCOPES = ['general', 'adult'];
 const NAME_MAX = 80;
@@ -163,6 +164,22 @@ function canonicalMap(store) {
   return m;
 }
 
+// Row -> canonical profile id. Most items carry no profile_id: the profile
+// store is built from the creator names in file names (profiles.aliasStats),
+// so an item without one is matched the same way, by audience + creator name.
+// The alias key holds the item's own audience, so an 18+ item never resolves
+// to a general profile of the same name.
+function profileResolver(store) {
+  const canon = canonicalMap(store);
+  const alias = new Map();
+  for (const p of (store && store.profiles) || []) {
+    for (const a of p.aliases || []) alias.set(profilesLib.aliasKey(p.audience, a.name), p.id);
+  }
+  return (r) => (r.profile_id && canon.get(r.profile_id))
+    || (r.creator ? alias.get(profilesLib.aliasKey(r.audience, r.creator)) : null)
+    || null;
+}
+
 function attach(db) {
   const st = {
     cat: db.prepare('SELECT * FROM categories WHERE id = ?'),
@@ -200,7 +217,9 @@ function attach(db) {
         CASE WHEN json_valid(m.raw) THEN json_extract(m.raw, '$.thumbnail') END AS thumb
       FROM items i LEFT JOIN item_source_meta m ON m.item_id = i.id
       WHERE i.audience = ?
-      ORDER BY i.updated_at DESC, i.id DESC`).all(scope);
+      ORDER BY i.updated_at DESC, i.id DESC`).all(scope)
+      // Registry rows keep the creator only in the file name.
+      .map((r) => (r.creator ? r : { ...r, creator: hubLib.creatorOf(r.filename) || null }));
   }
 
   function catIn(scope, id) {
@@ -289,13 +308,13 @@ function attach(db) {
         const inCat = new Set(st.members.all({ adult: scope === 'adult' ? 1 : 0, audience: scope }).filter((m) => ids.has(m.category_id)).map((m) => m.item_id));
         rows = rows.filter((r) => inCat.has(r.id));
       } else if (nodeStr.startsWith('profile:')) {
-        const canon = canonicalMap(store);
+        const profileOf = profileResolver(store);
         const want = nodeStr.slice(8);
-        if (want === 'none') rows = rows.filter((r) => !r.profile_id || !canon.has(r.profile_id));
+        if (want === 'none') rows = rows.filter((r) => !profileOf(r));
         else {
           const p = ((store && store.profiles) || []).find((x) => x.id === Number(want));
           if (!p || profilesLib.effectiveAudience(p) !== scope) throw new LibraryError('no such profile', 404);
-          rows = rows.filter((r) => canon.get(r.profile_id) === p.id);
+          rows = rows.filter((r) => profileOf(r) === p.id);
         }
       }
       let placed = rows.map((r) => ({ r, p: placement(r, scope) }));
@@ -510,13 +529,16 @@ function attach(db) {
     // store; only profiles whose gate audience equals the scope are shown.
     profileTree(scope, store) {
       scopeOf(scope);
-      const canon = canonicalMap(store);
+      const profileOf = profileResolver(store);
       const perProfile = new Map();
+      const seenOn = new Map();
       let noProfile = 0;
       for (const r of scopedRows(scope)) {
-        const pid = r.profile_id ? canon.get(r.profile_id) : null;
+        const pid = profileOf(r);
         if (!pid) { noProfile++; continue; }
         perProfile.set(pid, (perProfile.get(pid) || 0) + 1);
+        if (!seenOn.has(pid)) seenOn.set(pid, new Set());
+        seenOn.get(pid).add(scope === 'adult' ? siteSlug(r.site) : generalPlatform(r.site, r.source_url));
       }
       const visible = ((store && store.profiles) || []).filter((p) => profilesLib.effectiveAudience(p) === scope);
       const groups = new Map();
@@ -531,12 +553,16 @@ function attach(db) {
           count: perProfile.get(p.id) || 0,
           accounts: (p.accounts || []).map((a) => ({ platform: a.platform, handle: a.handle })),
         };
-        const platforms = [...new Set(entry.accounts.map((a) => a.platform))];
+        // A linked account names the platform; without one, the sites its
+        // media came from do. Unlinked = no account and no media here.
+        let platforms = [...new Set(entry.accounts.map((a) => a.platform))];
+        entry.linked = platforms.length > 0;
+        if (!platforms.length) platforms = [...(seenOn.get(p.id) || [])];
         if (!platforms.length) put('unlinked', entry);
         else platforms.forEach((pl) => put(pl, entry));
       }
       const children = [...groups.entries()]
-        .sort((a, b) => (a[0] === 'unlinked') - (b[0] === 'unlinked') || a[0].localeCompare(b[0]))
+        .sort((a, b) => (a[0] === 'unlinked') - (b[0] === 'unlinked') || (a[0] === 'other') - (b[0] === 'other') || a[0].localeCompare(b[0]))
         .map(([key, list]) => ({
           id: `profiles:${key}`,
           label: key === 'unlinked' ? 'Unlinked' : slugLabel(key),
@@ -556,4 +582,4 @@ function attach(db) {
   return api;
 }
 
-module.exports = { attach, LibraryError, classifyFormat, siteSlug, placement, canonicalMap, SCOPES };
+module.exports = { attach, LibraryError, classifyFormat, siteSlug, placement, canonicalMap, profileResolver, SCOPES };
