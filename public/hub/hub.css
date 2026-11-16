@@ -445,3 +445,8 @@ a.lib-label[aria-current='true'] { background: linear-gradient(90deg, var(--acce
 .lib-thumb .play svg { width: 13px; height: 13px; fill: #fff; stroke: none; }
 .lib-cur { color: var(--muted); font-weight: 400; }
 @media (min-width: 901px) { .lib-cur { display: none; } }
+@media (max-width: 560px) {
+  .lib-bulk { gap: 6px; padding: 8px 10px; }
+  .lib-bulk b { flex: 1 1 100%; }
+  .lib-bulk select.field { flex: 1 1 0; min-width: 0; padding: 6px 8px; }
+}
