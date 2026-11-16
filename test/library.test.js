@@ -263,3 +263,11 @@ test('list items carry only an http(s) thumbnail, and the tree reports unclassif
   assert.equal(g.unclassified, 1);
   assert.ok(!JSON.stringify(g).includes('unk'));
 });
+
+test('short-form-only sites count as an explicit short format, like TikTok', () => {
+  assert.equal(library.classifyFormat({ site: 'redgifs.com', duration: null }).format, 'short');
+  assert.equal(library.classifyFormat({ site: 'xxxfollow', duration: 30 }).format, 'short');
+  assert.equal(library.classifyFormat({ url: 'https://www.fikfap.com/post/1', duration: null }).format, 'short');
+  assert.equal(library.classifyFormat({ site: 'redgifs.com', duration: 900 }).format, 'uncertain');
+  assert.equal(library.classifyFormat({ site: 'xvideos.com', duration: null }).format, 'uncertain');
+});

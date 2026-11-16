@@ -31,6 +31,9 @@ const BULK_MAX = 5000;
 const SHORT_MAX_S = 60;
 const SHORT_EXPLICIT_MAX_S = 180;
 const LONG_MIN_S = 240;
+// Sites that only host short vertical clips: their format is explicit, the
+// same way a TikTok address is. Matched on the site slug (siteSlug()).
+const SHORT_FORM_SITES = new Set(['redgifs', 'fikfap', 'xxxfollow', 'reddclips', 'nuditok', 'tikporn', 'tik']);
 
 class LibraryError extends Error {
   constructor(message, status = 400) {
@@ -95,7 +98,9 @@ function classifyFormat({ url, site, duration }) {
     /\/shorts\//.test(path) ||
     (/(^|\.)(instagram|facebook)\.com$/.test(host) && /\/reels?\//.test(path)) ||
     /(^|\.)tiktok\.com$/.test(host) ||
-    audience.platformOfSite(site) === 'tiktok';
+    audience.platformOfSite(site) === 'tiktok' ||
+    SHORT_FORM_SITES.has(siteSlug(site)) ||
+    (host && SHORT_FORM_SITES.has(siteSlug(host)));
   if (explicitShort) {
     if (d === null || d <= SHORT_EXPLICIT_MAX_S) return { format: 'short', reason: 'source format' };
     return { format: 'uncertain', reason: 'short format but long duration' };
