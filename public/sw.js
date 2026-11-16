@@ -6,7 +6,7 @@
 // APK at install time and only rebuilds it when the manifest itself changed,
 // so an icon swapped behind an unchanged URL never reaches the home screen.
 // v8: the hub became the start page (/) and Grabbit 1 moved to /classic/.
-const CACHE = 'grabbit-v8';
+const CACHE = 'grabbit-v9';
 const SHELL = [
   '/',
   '/classic/',

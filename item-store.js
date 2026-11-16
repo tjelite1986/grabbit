@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const itemMeta = require('./item-meta');
+const library = require('./library');
 
 const GENERAL_DESTINATIONS = ['main', 'platform', 'posts', 'egram'];
 const ADULT_DESTINATIONS = ['18plus'];
@@ -285,6 +286,51 @@ const MIGRATIONS = [
     purged_at INTEGER
   );
   CREATE INDEX dupe_trash_held ON dupe_trash (at) WHERE restored_at IS NULL AND purged_at IS NULL;
+  `,
+  // v6: Grabbit 2.1 library. Virtual views only: categories and the owner's
+  // short/long/movie correction live here, no file is moved or copied. A
+  // category is general or adult, and an item joins only a category of its own
+  // audience (trigger); a category never holds a file twice.
+  `
+  ALTER TABLE items ADD COLUMN format_override TEXT CHECK (format_override IN ('short', 'long', 'movie') OR format_override IS NULL);
+
+  CREATE TABLE categories (
+    id INTEGER PRIMARY KEY,
+    parent_id INTEGER REFERENCES categories (id),
+    name TEXT NOT NULL,
+    norm TEXT NOT NULL CHECK (length(norm) > 0),
+    adult INTEGER NOT NULL DEFAULT 0 CHECK (adult IN (0, 1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX categories_sibling ON categories (COALESCE(parent_id, 0), adult, norm);
+
+  CREATE TABLE item_categories (
+    item_id INTEGER NOT NULL REFERENCES items (id),
+    category_id INTEGER NOT NULL REFERENCES categories (id),
+    at INTEGER NOT NULL,
+    by TEXT,
+    PRIMARY KEY (item_id, category_id)
+  );
+  CREATE INDEX item_categories_cat ON item_categories (category_id);
+
+  CREATE TRIGGER item_categories_audience_match
+  BEFORE INSERT ON item_categories
+  WHEN (SELECT adult FROM categories WHERE id = NEW.category_id) = 1
+         AND (SELECT audience FROM items WHERE id = NEW.item_id) IS NOT 'adult'
+    OR (SELECT adult FROM categories WHERE id = NEW.category_id) = 0
+         AND (SELECT audience FROM items WHERE id = NEW.item_id) IS NOT 'general'
+  BEGIN
+    SELECT RAISE(ABORT, 'an item joins only a category of its own audience');
+  END;
+
+  CREATE TABLE library_log (
+    id INTEGER PRIMARY KEY,
+    action TEXT NOT NULL,
+    detail TEXT,
+    by TEXT,
+    at INTEGER NOT NULL
+  );
   `,
 ];
 const CLASSIFY_MAX = 5000;
@@ -660,6 +706,8 @@ function wrap(db, migrationBackup) {
     // Metadata, tags and duplicate records (schema v4): item-meta.js.
     // Only on a v4 database (the migration tests open older schemas).
     ...(db.pragma('user_version', { simple: true }) >= 4 ? itemMeta.attach(db) : {}),
+    // Library views, categories (schema v6): library.js.
+    ...(db.pragma('user_version', { simple: true }) >= 6 ? { library: library.attach(db) } : {}),
   };
 }
 

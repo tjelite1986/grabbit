@@ -265,7 +265,7 @@ test('a v2 store migrates to v3 keeping every delivery, and egram is a general a
   assert.equal(s.deliveredTo(Number(g), 'egram'), true);
   assert.equal(s.deliveredTo(Number(u), 'egram'), false);
   const triggers = s.db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
-  assert.deepEqual(triggers, ['deliveries_adult_takes_no_images', 'deliveries_general_needs_general_item', 'item_tags_never_rewritten', 'item_tags_source_kept', 'items_audience_never_lowered']);
+  assert.deepEqual(triggers, ['deliveries_adult_takes_no_images', 'deliveries_general_needs_general_item', 'item_categories_audience_match', 'item_tags_never_rewritten', 'item_tags_source_kept', 'items_audience_never_lowered']);
 });
 
 test('inbox rows: a media row needs an item, states are checked, purge picks settled rows only', (t) => {

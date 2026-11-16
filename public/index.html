@@ -609,6 +609,31 @@
       #toast.good { border-color: var(--good-dim); }
       #toast.bad { border-color: var(--bad-dim); }
 
+      /* Library (2.1): tree + list, one column on a phone, two on a wide screen */
+      .lib-bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 10px; align-items: center; }
+      .lib-bar .seg { display: inline-flex; background: var(--surface-2); border-radius: 12px; padding: 3px; }
+      .lib-bar .seg button { background: none; border: 0; color: var(--muted); padding: 8px 14px; border-radius: 9px; font: inherit; font-size: 14px; cursor: pointer; }
+      .lib-bar .seg button.on { background: var(--primary-dim); color: var(--text); }
+      .lib-bar input[type=search] { flex: 1; min-width: 140px; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 12px; padding: 9px 12px; font: inherit; font-size: 14px; }
+      .lib-body { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 0 16px 16px; }
+      @media (min-width: 820px) { .lib-body { grid-template-columns: 300px 1fr; align-items: start; } }
+      .lib-tree, .lib-list { background: var(--surface); border-radius: 16px; padding: 8px; min-width: 0; }
+      .lib-tree details { margin-left: 10px; }
+      .lib-tree > details, .lib-tree > .lib-node { margin-left: 0; }
+      .lib-tree summary { list-style: none; cursor: pointer; }
+      .lib-tree summary::-webkit-details-marker { display: none; }
+      .lib-node { display: flex; justify-content: space-between; gap: 8px; width: 100%; background: none; border: 0; color: var(--text); font: inherit; font-size: 14.5px; text-align: left; padding: 9px 10px; border-radius: 10px; cursor: pointer; }
+      .lib-node:hover { background: var(--surface-2); }
+      .lib-node.on { background: var(--primary-dim); }
+      .lib-node .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+      .lib-row { display: flex; gap: 10px; align-items: center; padding: 10px; border-top: 1px solid var(--line); }
+      .lib-row:first-child { border-top: 0; }
+      .lib-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; }
+      .lib-row .d { color: var(--muted); font-size: 12.5px; }
+      .lib-empty { color: var(--muted); text-align: center; padding: 28px 12px; font-size: 14px; }
+      .lib-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 10px 10px; }
+      .lib-actions button, .lib-actions select { background: var(--surface-2); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font: inherit; font-size: 13.5px; cursor: pointer; }
+      .lib-warn { color: var(--warn); font-size: 12px; }
       .hidden { display: none !important; }
 
       /* Result-card description (collapsed by default) */
@@ -780,10 +805,39 @@
       </section>
 
       <!-- ===================== MORE ===================== -->
+      <section id="view-library" class="view">
+        <header class="appbar">
+          <h1>Library</h1>
+        </header>
+        <div class="lib-bar">
+          <div class="seg" id="libMode">
+            <button data-mode="media" class="on">Media</button>
+            <button data-mode="categories">Categories</button>
+            <button data-mode="profiles">Profiles</button>
+          </div>
+          <div class="seg" id="libScope">
+            <button data-scope="general" class="on">General</button>
+            <button data-scope="adult">18+</button>
+          </div>
+          <input type="search" id="libQ" placeholder="Search in this branch" autocomplete="off" />
+        </div>
+        <div class="lib-body">
+          <div class="lib-tree" id="libTree"></div>
+          <div class="lib-list" id="libList"></div>
+        </div>
+      </section>
+
       <section id="view-more" class="view">
         <header class="appbar">
           <h1>More</h1>
         </header>
+
+        <div class="section">
+          <h2>Library</h2>
+          <button id="openLibrary" class="setrow" style="width:100%;text-align:left">
+            <div class="label"><div class="t">Media, categories and profiles</div><div class="d">Browse the library as virtual folders. No file is moved or copied.</div></div>
+          </button>
+        </div>
 
         <div class="section">
           <h2>Default download options</h2>
@@ -1452,6 +1506,123 @@
       // ----------------------------------------------------------------- tab nav
       const nav = $('nav');
       let currentTab = 'home';
+      // ------------------------------------------------------------ library
+      // Virtual views from /api/library/*; the server filters on the audience of
+      // the chosen scope, so the General scope never receives 18+ rows.
+      const lib = { mode: 'media', scope: 'general', node: 'all', tree: null, cats: [], sel: new Set(), items: [], total: 0 };
+      async function libGet(path, params) {
+        const q = new URLSearchParams({ scope: lib.scope, ...(params || {}) });
+        const d = await fetchJson('/api/library/' + path + '?' + q);
+        if (!d.ok) throw new Error(d.error || 'Library request failed');
+        return d;
+      }
+      async function libPost(path, body) {
+        const d = await fetchJson('/api/library/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: lib.scope, ...body }) });
+        if (!d.ok) throw new Error(d.error || 'Library request failed');
+        return d;
+      }
+      const libNodeBtn = (id, label, count, depthCls) =>
+        '<button class="lib-node' + (lib.node === id ? ' on' : '') + '" data-node="' + esc(id) + '"><span>' + esc(label) + '</span><span class="n">' + count + '</span></button>';
+      function libBranch(id, label, count, kids) {
+        const head = libNodeBtn(id, label, count);
+        if (!kids) return head;
+        return '<details open><summary>' + head + '</summary>' + kids + '</details>';
+      }
+      function libCatHtml(c) {
+        return libBranch('cat:' + c.id, c.name, c.count, c.children.length ? c.children.map(libCatHtml).join('') : '');
+      }
+      async function loadLibrary() {
+        const tree = $('libTree');
+        try {
+          if (lib.mode === 'media') {
+            const t = (await libGet('media-tree')).tree;
+            tree.innerHTML = libBranch('all', t.label, t.count, t.children.map((c) => libBranch(c.id, c.label, c.count, c.children.length ? c.children.map((s) => libNodeBtn(s.id, s.label, s.count)).join('') : '')).join(''));
+          } else if (lib.mode === 'categories') {
+            const t = await libGet('categories');
+            lib.cats = [];
+            const flat = (n) => { lib.cats.push(n); n.children.forEach(flat); };
+            t.roots.forEach(flat);
+            tree.innerHTML = libBranch('all', 'All items', '', '') + (t.roots.length ? t.roots.map(libCatHtml).join('') : '<div class="lib-empty">No categories yet.</div>') +
+              '<div class="lib-actions"><button data-act="newcat">New category</button><button data-act="rename">Rename</button><button data-act="move">Move</button><button data-act="merge">Merge into...</button></div>';
+          } else {
+            const t = (await libGet('profiles')).tree;
+            tree.innerHTML = libBranch('all', 'All media', '', '') + libNodeBtn('profile:none', 'Media without a profile', t.withoutProfile) +
+              (t.children.length ? t.children.map((pl) => libBranch(pl.id, pl.label, pl.count, pl.profiles.map((p) => libNodeBtn('profile:' + p.id, p.name, p.count)).join(''))).join('') : '<div class="lib-empty">No profiles in this scope.</div>');
+          }
+        } catch (e) { tree.innerHTML = '<div class="lib-empty">' + esc(e.message) + '</div>'; }
+        loadLibraryItems();
+      }
+      async function loadLibraryItems() {
+        const list = $('libList');
+        lib.sel.clear();
+        try {
+          const params = { node: lib.node, q: $('libQ').value.trim(), limit: 100 };
+          const d = await libGet('items', params);
+          lib.items = d.items; lib.total = d.total;
+          const mediaTools = lib.mode === 'categories' || lib.mode === 'media';
+          let html = '';
+          if (d.items.length && mediaTools) {
+            html += '<div class="lib-actions"><button data-act="selall">Select all</button>' +
+              '<button data-act="addcat">Add to category...</button>' +
+              (lib.node.startsWith('cat:') ? '<button data-act="rmcat">Remove from this category</button>' : '') +
+              (lib.mode === 'media' ? '<button data-act="fmt">Set format...</button><button data-act="unc">Needs review only</button>' : '') + '</div>';
+          }
+          html += d.items.map((it) =>
+            '<label class="lib-row"><input type="checkbox" data-id="' + it.id + '" /><span class="t">' + esc(it.title || it.filename || it.key) +
+            '<div class="d">' + esc([it.creator, it.site, it.kind].filter(Boolean).join(' - ')) + (it.formatUncertain ? ' <span class="lib-warn">format unsure</span>' : '') + '</div></span></label>').join('');
+          if (!d.items.length) html += '<div class="lib-empty">Nothing here' + ($('libQ').value.trim() ? ' for this search' : ' yet') + '.</div>';
+          else if (d.total > d.items.length) html += '<div class="lib-empty">Showing ' + d.items.length + ' of ' + d.total + '. Narrow it with search.</div>';
+          list.innerHTML = html;
+        } catch (e) { list.innerHTML = '<div class="lib-empty">' + esc(e.message) + '</div>'; }
+      }
+      function libPickCategory(msg) {
+        const names = lib.cats.map((c) => c.id + ': ' + c.name).join('\n');
+        const v = prompt(msg + '\n' + names);
+        const id = parseInt(v, 10);
+        return Number.isInteger(id) && lib.cats.some((c) => c.id === id) ? id : null;
+      }
+      async function libAct(act) {
+        const ids = [...document.querySelectorAll('#libList input[data-id]:checked')].map((x) => Number(x.dataset.id));
+        const cur = lib.node.startsWith('cat:') ? Number(lib.node.slice(4)) : null;
+        try {
+          if (act === 'selall') { document.querySelectorAll('#libList input[data-id]').forEach((x) => { x.checked = true; }); return; }
+          if (act === 'unc') { lib.node = 'all'; const d = await libGet('items', { uncertain: '1', limit: 100 }); lib.items = d.items; $('libList').innerHTML = d.items.length ? d.items.map((it) => '<label class="lib-row"><input type="checkbox" data-id="' + it.id + '" /><span class="t">' + esc(it.title || it.key) + '</span></label>').join('') + '<div class="lib-actions"><button data-act="fmt">Set format...</button></div>' : '<div class="lib-empty">Every video has a clear format.</div>'; return; }
+          if (act === 'newcat') { const n = prompt('New category name' + (cur ? ' (inside the selected category)' : '')); if (n) await libPost('categories', { name: n, parentId: cur }); }
+          else if (act === 'rename') { if (!cur) return alert('Select a category first.'); const n = prompt('New name'); if (n) await libPost('categories/' + cur + '/rename', { name: n }); }
+          else if (act === 'move') { if (!cur) return alert('Select a category first.'); const v = prompt('Move into which category id? Empty = top level.\n' + lib.cats.map((c) => c.id + ': ' + c.name).join('\n')); if (v === null) return; await libPost('categories/' + cur + '/move', { parentId: v.trim() === '' ? null : parseInt(v, 10) }); }
+          else if (act === 'merge') { if (!cur) return alert('Select a category first.'); const t = libPickCategory('Merge the selected category into which id? Its items and subcategories move there.'); if (t === null) return; if (!confirm('Merge into the chosen category? The selected category is removed; no item is deleted.')) return; await libPost('categories/' + cur + '/merge', { targetId: t }); lib.node = 'cat:' + t; }
+          else if (act === 'addcat' || act === 'rmcat') {
+            if (!ids.length) return alert('Select items first.');
+            const c = act === 'rmcat' ? cur : libPickCategory('Category id to add the ' + ids.length + ' selected item(s) to:');
+            if (c === null) return;
+            const r = await libPost('assign', { ids, categoryIds: [c], remove: act === 'rmcat' });
+            alert(r.changed.length + ' item(s) changed' + (r.skipped.length ? ', ' + r.skipped.length + ' skipped' : '') + '.');
+          } else if (act === 'fmt') {
+            if (!ids.length) return alert('Select videos first.');
+            const v = prompt('Format for ' + ids.length + ' video(s): short, long, movie, or empty to clear');
+            if (v === null) return;
+            await libPost('format', { ids, value: v.trim() === '' ? null : v.trim() });
+          }
+          loadLibrary();
+        } catch (e) { alert(e.message); }
+      }
+      $('openLibrary').addEventListener('click', () => showTab('library'));
+      $('libMode').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; lib.mode = b.dataset.mode; lib.node = 'all'; document.querySelectorAll('#libMode button').forEach((x) => x.classList.toggle('on', x === b)); loadLibrary(); });
+      $('libScope').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; lib.scope = b.dataset.scope; lib.node = 'all'; document.querySelectorAll('#libScope button').forEach((x) => x.classList.toggle('on', x === b)); loadLibrary(); });
+      $('libTree').addEventListener('click', (e) => {
+        const a = e.target.closest('[data-act]');
+        if (a) return libAct(a.dataset.act);
+        const n = e.target.closest('[data-node]');
+        if (!n) return;
+        e.preventDefault();
+        lib.node = n.dataset.node;
+        document.querySelectorAll('#libTree .lib-node').forEach((x) => x.classList.toggle('on', x === n));
+        loadLibraryItems();
+      });
+      $('libList').addEventListener('click', (e) => { const a = e.target.closest('[data-act]'); if (a) libAct(a.dataset.act); });
+      let libTimer = null;
+      $('libQ').addEventListener('input', () => { clearTimeout(libTimer); libTimer = setTimeout(loadLibraryItems, 250); });
+
       function renderTab(tab) {
         currentTab = tab;
         // A preview left playing in a hidden view keeps streaming through the Pi.
@@ -1463,6 +1634,7 @@
         if (tab === 'downloads') loadHistory();
         if (tab === 'more') { loadMusicStats(); loadHealth(); }
         if (tab === 'playlists') loadPlaylists();
+        if (tab === 'library') loadLibrary();
         // The job stream keeps jobMap current whatever tab is open, but only
         // paints while Queue is the current one — so opening Queue shows
         // whatever was last painted until the next event arrives. Repaint now.

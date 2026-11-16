@@ -24,6 +24,7 @@ const hub = require('./hub');
 const profiles = require('./profiles');
 const audience = require('./audience');
 const itemStore = require('./item-store');
+const libraryLib = require('./library');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
 const adshortisLibrary = require('./adshortis-library');
@@ -3873,6 +3874,49 @@ app.post('/api/hub/review/items', (req, res) => {
     res.status(500).json({ ok: false, error: 'The item store could not be changed. See the server log.' });
   }
 });
+
+// --- Grabbit 2.1 library: media tree, categories, profile tree ---------------------
+// Virtual views over items.db; nothing here touches a media file. Every route
+// names its scope ('general' or 'adult') and library.js filters on the item's
+// audience first, so a general request never sees an adult item or profile.
+function libraryStore(res) {
+  if (!ITEM_STORE || !ITEM_STORE.library) {
+    res.status(503).json({ ok: false, error: `The library is unavailable (${ITEM_STORE_ERROR || 'item store not upgraded to schema 6'}).` });
+    return null;
+  }
+  return ITEM_STORE.library;
+}
+function libraryRoute(fn) {
+  return (req, res) => {
+    const lib = libraryStore(res);
+    if (!lib) return;
+    try {
+      res.json({ ok: true, ...fn(lib, req, req.body || {}) });
+    } catch (e) {
+      if (e instanceof libraryLib.LibraryError) return res.status(e.status).json({ ok: false, error: e.message });
+      if (e instanceof itemStore.StoreError) return res.status(400).json({ ok: false, error: e.message });
+      console.error('library:', e.message);
+      res.status(500).json({ ok: false, error: 'The library could not be read or changed. See the server log.' });
+    }
+  };
+}
+const libScope = (req, b) => (req.method === 'GET' ? req.query.scope : b.scope);
+app.get('/api/library/media-tree', libraryRoute((lib, req) => ({ tree: lib.mediaTree(libScope(req)) })));
+app.get('/api/library/items', libraryRoute((lib, req) => lib.listItems({
+  scope: libScope(req), node: req.query.node, q: req.query.q, uncertain: req.query.uncertain === '1',
+  limit: req.query.limit, offset: req.query.offset, store: readProfilesReadOnly().store,
+})));
+app.post('/api/library/format', libraryRoute((lib, req, b) => lib.setFormat({ scope: b.scope, ids: b.ids, value: b.value === undefined ? null : b.value, by: actorOf(req) })));
+app.get('/api/library/categories', libraryRoute((lib, req) => lib.categoryTree(libScope(req))));
+app.post('/api/library/categories', libraryRoute((lib, req, b) => ({ category: lib.createCategory({ scope: b.scope, name: b.name, parentId: b.parentId, by: actorOf(req) }) })));
+app.post('/api/library/categories/:id/rename', libraryRoute((lib, req, b) => ({ category: lib.renameCategory({ scope: b.scope, id: req.params.id, name: b.name, by: actorOf(req) }) })));
+app.post('/api/library/categories/:id/move', libraryRoute((lib, req, b) => ({ category: lib.moveCategory({ scope: b.scope, id: req.params.id, parentId: b.parentId, by: actorOf(req) }) })));
+app.post('/api/library/categories/:id/merge', libraryRoute((lib, req, b) => ({ category: lib.mergeCategories({ scope: b.scope, sourceId: req.params.id, targetId: b.targetId, by: actorOf(req) }) })));
+app.post('/api/library/assign', libraryRoute((lib, req, b) => lib.assign({ scope: b.scope, ids: b.ids, categoryIds: b.categoryIds, remove: b.remove === true, by: actorOf(req) })));
+app.get('/api/library/suggest', libraryRoute((lib, req) => (req.query.itemId
+  ? { categories: lib.suggestForItem({ scope: libScope(req), itemId: req.query.itemId }) }
+  : lib.suggestForCategory({ scope: libScope(req), categoryId: req.query.categoryId }))));
+app.get('/api/library/profiles', libraryRoute((lib, req) => ({ tree: lib.profileTree(libScope(req), readProfilesReadOnly().store) })));
 
 // --- Grabbit 2.0 duplicates and metadata ------------------------------------------
 // Both pages read and write items.db only. Nothing here touches a file in any
