@@ -27,6 +27,8 @@ const audience = require('./audience');
 const itemStore = require('./item-store');
 const libraryLib = require('./library');
 const tikshortisEmbed = require('./tikshortis-embed');
+const tikGateway = require('./tikshortis-gateway');
+const modules = require('./modules');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
 const adshortisLibrary = require('./adshortis-library');
@@ -2861,8 +2863,13 @@ app.get('/api/config', (_req, res) =>
     adultBlocked: ADULT_BLOCKED,
     adshortisLibrary: !!ADS_LIBRARY,
     adflixLibrary: !!ADFLIX_LIBRARY,
-    // Grabbit 2.2: the TikShortis app shown in a hub frame. Null = off.
-    tikshortisEmbed: TIKSHORTIS_EMBED,
+    // Grabbit 2.2: the TikShortis app shown in a hub frame. Null = off, and
+    // null whenever TIKSHORTIS_MODE picked another mode.
+    tikshortisEmbed: TIKSHORTIS_MODE === 'embed' ? TIKSHORTIS_EMBED : null,
+    // Grabbit 3.0: native | embed | off (see modules.js), and the module list
+    // the hub draws its navigation from.
+    tikshortisMode: TIKSHORTIS_MODE,
+    modules: modules.modulesFor({ tikMode: TIKSHORTIS_MODE }),
   })
 );
 
@@ -2871,6 +2878,66 @@ app.get('/api/config', (_req, res) =>
 const TIKSHORTIS_EMBED = tikshortisEmbed.parseEmbedUrl(process.env.TIKSHORTIS_EMBED_URL);
 if (process.env.TIKSHORTIS_EMBED_URL && !TIKSHORTIS_EMBED) {
   console.warn('[grabbit] TIKSHORTIS_EMBED_URL is not a plain https origin; the TikShortis hub page is off.');
+}
+
+// --- Grabbit 3.0: native TikShortis (tikshortis-gateway.js) ----------------------
+// TIKSHORTIS_MODE=native draws TikShortis in the hub itself and reaches its API
+// through /api/tik/*, a gateway to TIKSHORTIS_API_URL (TikShortis' LAN port).
+// TikShortis keeps its database, accounts and media. Unset mode keeps 2.2's
+// behaviour; a mode whose setting is missing falls back (native -> embed -> off).
+const TIKSHORTIS_API = tikGateway.parseApiUrl(process.env.TIKSHORTIS_API_URL);
+if (process.env.TIKSHORTIS_API_URL && !TIKSHORTIS_API) {
+  console.warn('[grabbit] TIKSHORTIS_API_URL is not a plain http(s) origin; native TikShortis is off.');
+}
+const { mode: TIKSHORTIS_MODE, warnings: TIK_MODE_WARNINGS } = modules.tikshortisMode(process.env, {
+  apiOrigin: TIKSHORTIS_API,
+  embed: TIKSHORTIS_EMBED,
+});
+for (const w of TIK_MODE_WARNINGS) console.warn(`[grabbit] ${w}`);
+
+// Adult source ids from items.db, re-read at most once a minute. If items.db
+// is not open the gateway cannot check, so it refuses every clip that has a
+// source id rather than guess (fail closed).
+const ADULT_IDS_TTL_MS = 60 * 1000;
+let adultIds = { at: 0, set: null };
+function tikClipIsAdult(clip) {
+  const sid = clip && clip.source_id != null ? String(clip.source_id) : '';
+  if (!sid) return false;
+  if (!ITEM_STORE) return true;
+  if (!adultIds.set || Date.now() - adultIds.at > ADULT_IDS_TTL_MS) {
+    try {
+      adultIds = { at: Date.now(), set: ITEM_STORE.adultSourceIds() };
+    } catch (e) {
+      console.warn('[tik] adult id lookup failed:', e.message);
+      return true;
+    }
+  }
+  return adultIds.set.has(sid);
+}
+
+if (TIKSHORTIS_MODE === 'native') {
+  const gateway = tikGateway.createGateway({
+    apiUrl: TIKSHORTIS_API,
+    secret: AUTH_SECRET,
+    isAdult: tikClipIsAdult,
+    clientIp: (req) => req.ip || '',
+  });
+  // Below the auth gate, so only a signed-in browser gets here. App passwords
+  // never reach /api/tik (the gate keeps them to their own paths); the
+  // internal token is refused here, because the gateway acts for a person.
+  app.use('/api/tik', (req, res, next) => {
+    if (req.principal === gda.INTERNAL) return res.status(403).json({ ok: false, error: 'Not for internal callers' });
+    next();
+  }, (req, res) => {
+    gateway.proxy(req, res).catch((e) => {
+      console.warn('[tik] gateway error:', e.message);
+      if (!res.headersSent) res.status(424).json({ ok: false, error: 'TikShortis is not reachable right now' });
+      else res.destroy();
+    });
+  });
+  console.log(`[grabbit] TikShortis: native, API at ${TIKSHORTIS_API}`);
+} else {
+  console.log(`[grabbit] TikShortis: ${TIKSHORTIS_MODE}`);
 }
 
 // --- Grabbit 2.0 hub ----------------------------------------------------------

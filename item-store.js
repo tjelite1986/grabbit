@@ -695,6 +695,12 @@ function wrap(db, migrationBackup) {
     deliveredTo: (itemId, destination) => Boolean(st.deliveredTo.get(itemId, destination)),
     // Any successful delivery of the item, to any app.
     everDelivered: (itemId) => Boolean(st.everDelivered.get(itemId)),
+    // Site-native ids of every item known as adult. Grabbit 3.0's TikShortis
+    // gateway refuses a clip whose source id is in here, whatever channel
+    // TikShortis files it under. Uses the items_audience index.
+    adultSourceIds: () => new Set(
+      db.prepare("SELECT source_id FROM items WHERE audience = 'adult' AND source_id IS NOT NULL").pluck().all().map(String)
+    ),
     // A consistent copy of the database, for the daily state snapshot.
     snapshotTo(file) {
       const part = `${file}.part`;
