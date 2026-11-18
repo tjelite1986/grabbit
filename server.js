@@ -3093,6 +3093,8 @@ if (EGRAM_MODE === 'native') {
     // The Elitogram link is bound to this Grabbit sign-in (a hash, never the cookie itself).
     bindingOf: (req) => crypto.createHash('sha256').update(`egram-link|${parseCookies(req.headers.cookie)[AUTH_COOKIE] || ''}`).digest('base64url').slice(0, 22),
     clientIp: (req) => req.ip || '',
+    // The most one upload may carry in all (default 4096 MB, as Elitogram's per-file limit).
+    uploadMaxBytes: (Number(process.env.EGRAM_UPLOAD_MAX_MB) > 0 ? Number(process.env.EGRAM_UPLOAD_MAX_MB) : 4096) * 1024 * 1024,
   });
   // Writes to Grabbit's own egram routes: Sec-Fetch-Site must say same-origin
   // when present; otherwise an Origin or Referer on this host is required.
@@ -7822,7 +7824,7 @@ async function produceImage(job, meta, params) {
   let libPath = path.join(dir, outName);
   let fileName = outName;
   setJob(job, { phase: 'downloading' });
-  if (!fs.existsSync(libPath)) {
+  if (!imageAlreadySaved(toPosts, dir, stem, libPath, meta)) {
     if (toPosts) {
       // The file actually published (an image under the same stem may be kept).
       const saved = await saveImageToPosts(meta, params.channel);
@@ -9667,6 +9669,16 @@ async function saveImageToPosts(job, channel) {
   return { path: publishedPath, name: published, creator: postsCreator(job.creator) };
 }
 
+// Is this image already saved under its exact name? For Elitogram the name is
+// not proof of the source: another source with the same title and extension
+// gets the same name, so the stem's sidecar must record this source. If it
+// does not, publication runs and gives the new source a name of its own.
+function imageAlreadySaved(toPosts, dir, stem, libPath, job) {
+  if (!fs.existsSync(libPath)) return false;
+  if (!toPosts || !POSTS_TO_EGRAM) return true;
+  return postsPublish.sourceIdOf(path.join(dir, `${stem}.json`)) === postsPublish.sourceId(job);
+}
+
 // One publication at a time per posts drop name (see saveImageToPosts).
 const withPostsNameLock = postsPublish.createNameLock();
 
@@ -9709,7 +9721,7 @@ async function downloadImage(res, job, url, device, dest, channel) {
   const dir = toPosts ? postsImportDir(job.creator) : PHOTOS_DIR;
   let libPath = path.join(dir, outName);
   let fileName = outName;
-  const already = fs.existsSync(libPath);
+  const already = imageAlreadySaved(toPosts, dir, stem, libPath, job);
   try {
     if (!already) {
       if (toPosts) {

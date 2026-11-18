@@ -29,6 +29,8 @@ extractors.resolve = async (url) => {
   job.sourceCreator = job.creator;
   // ?adult=1 stands in for a site's own 18+ flag on the item (yt-dlp age_limit).
   if (u.searchParams.get('adult') === '1') job.audience = 'adult';
+  // ?title= gives two sources the same title (and so the same file name).
+  if (u.searchParams.get('title')) job.title = u.searchParams.get('title');
   return job;
 };
 extractors.isProfile = () => false;

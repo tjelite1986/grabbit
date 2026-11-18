@@ -32,7 +32,8 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const { pipeline } = require('stream');
+const { EventEmitter } = require('events');
+const { pipeline, Transform } = require('stream');
 const { parseApiUrl, sealSession, openSession } = require('./tikshortis-gateway');
 
 // Over HTTPS the cookie is a __Host- cookie (Secure, Path=/, no Domain), so a
@@ -352,14 +353,22 @@ const PASS_HEADERS = ['content-type', 'content-length', 'content-range', 'accept
 // bindingOf(req): a value tied to the caller's Grabbit sign-in. The sealed link
 // carries it and is honoured only alongside the same sign-in, so a link cookie
 // planted from a sibling domain (possible over plain HTTP) is worthless.
-function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () => '', clientIp = (req) => req.ip || '', log = console, timeoutMs = 30000 }) {
+// uploadMaxBytes: the most one upload request may carry in all (files and
+// fields), declared or streamed. Elitogram limits each file and the number of
+// files; this bounds the whole request.
+function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () => '', clientIp = (req) => req.ip || '', log = console, timeoutMs = 30000, identityDeadlineMs = 10000, uploadMaxBytes = 4096 * 1024 * 1024 }) {
   const origin = parseApiUrl(apiUrl);
   if (!origin) throw new Error('EGRAM_API_URL is not a plain http(s) origin');
   const up = new URL(origin);
   const mod = up.protocol === 'https:' ? https : http;
   const agent = new mod.Agent({ keepAlive: true, maxSockets: 32 });
+  // Identity lookups have their own small pool. A media answer holds its socket
+  // in the main pool while its author is checked; with a shared pool a page of
+  // large pictures could take every socket and leave the checks queued behind
+  // the very bodies waiting for them.
+  const identityAgent = new mod.Agent({ keepAlive: true, maxSockets: 8 });
 
-  function upstream(req, { method, path, headers, body, signal, stream, timeout }) {
+  function upstream(req, { method, path, headers, body, signal, stream, timeout, agent: via }) {
     return new Promise((resolve, reject) => {
       const h = {
         host: up.host,
@@ -371,7 +380,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
         'x-real-ip': clientIp(req) || 'unknown',
         ...headers,
       };
-      const rq = mod.request({ agent, protocol: up.protocol, hostname: up.hostname, port: up.port, method, path, headers: h, timeout: timeout || timeoutMs }, (res) => {
+      const rq = mod.request({ agent: via || agent, protocol: up.protocol, hostname: up.hostname, port: up.port, method, path, headers: h, timeout: timeout || timeoutMs }, (res) => {
         res.on('error', (e) => log.warn(`[egram] upstream answer ${method} ${path.split('?')[0]}: ${e.message}`));
         resolve(res);
       });
@@ -409,9 +418,40 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   // the same scope), and a creator is 18+ here when the handle or any of them
   // matches a Grabbit profile classified 18+. Nothing is merged; this only
   // reads. Cached briefly per lane, since the lookup is scoped.
-  const IDENTITY_TTL = 120000;
+  // Kept short: a new alias that ties a creator to an 18+ profile in Grabbit
+  // takes effect within this time.
+  const IDENTITY_TTL = 15000;
   const identityCache = new Map(); // `${session}\u0000${lane}\u0000${handle}` -> { names, at }
-  async function identitiesFor(req, cur, lane, handles) {
+  // One lookup with a deadline that includes the wait for a socket, given up
+  // early when the caller's own answer closes (`downstream`, a response).
+  function identityLookup(req, cur, lane, qs, downstream) {
+    return new Promise((resolve, reject) => {
+      const stop = new EventEmitter();
+      let done = false;
+      const onClose = () => { stop.emit('close'); finish(reject, new Error('the caller went away')); };
+      const timer = setTimeout(() => { stop.emit('close'); finish(reject, new Error('identity lookup took too long')); }, identityDeadlineMs);
+      function finish(fn, v) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (downstream) downstream.removeListener('close', onClose);
+        fn(v);
+      }
+      if (downstream) downstream.once('close', onClose);
+      upstream(req, { method: 'GET', path: `/api/creator-identities?${qs}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) }, agent: identityAgent, signal: stop, timeout: identityDeadlineMs })
+        .then((r) => {
+          if (r.statusCode !== 200) { r.resume(); throw new Error(`identity lookup answered ${r.statusCode}`); }
+          return readJson(r, 1024 * 1024);
+        })
+        .then((d) => finish(resolve, d), (e) => finish(reject, e));
+    });
+  }
+
+  // -> Map handle -> other names. A handle Elitogram did not answer for (a
+  // creator outside the scope, or nothing it knows) is left out of the map,
+  // and the 18+ test below treats it as 18+. An account has no other names:
+  // Elitogram lists it under `accounts`, and it maps to [].
+  async function identitiesFor(req, cur, lane, handles, downstream = null) {
     const out = new Map();
     if (!isAdultHandle || !handles.length) return out;
     const now = Date.now();
@@ -429,15 +469,19 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     for (let i = 0; i < missing.length; i += 100) {
       const part = missing.slice(i, i + 100);
       const qs = part.map((h) => `h=${encodeURIComponent(h)}`).join('&');
-      const r = await upstream(req, { method: 'GET', path: `/api/creator-identities?${qs}`, headers: { accept: 'application/json', ...authHeaders(cur, plainLane) } });
-      if (r.statusCode !== 200) { r.resume(); throw new Error(`identity lookup answered ${r.statusCode}`); }
-      const d = await readJson(r, 1024 * 1024);
+      const d = await identityLookup(req, cur, plainLane, qs, downstream);
       const items = d && typeof d.items === 'object' && d.items && !Array.isArray(d.items) ? d.items : null;
       if (!items) throw new Error('identity lookup sent an unexpected answer');
+      // An Elitogram without the `accounts` list answers only for creators, so
+      // every account author stays unresolved there (and is refused).
+      const accounts = new Set(Array.isArray(d.accounts) ? d.accounts.filter((x) => typeof x === 'string').map(norm) : []);
       if (identityCache.size > 5000) identityCache.clear();
       for (const h of part) {
-        const raw = Object.prototype.hasOwnProperty.call(items, h) && Array.isArray(items[h]) ? items[h] : [];
-        const names = raw.filter((x) => typeof x === 'string').map(norm).filter(Boolean).slice(0, 100);
+        let names;
+        if (Object.prototype.hasOwnProperty.call(items, h) && Array.isArray(items[h])) {
+          names = items[h].filter((x) => typeof x === 'string').map(norm).filter(Boolean).slice(0, 100);
+        } else if (accounts.has(h)) names = [];
+        else continue; // unresolved: not cached, not in the map
         identityCache.set(`${lane}\u0000${h}`, { names, at: now });
         out.set(h, names);
       }
@@ -445,8 +489,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     return out;
   }
   // The 18+ test for one answer: the handle, or any other name it is known by.
-  // A handle that was not looked up (not canonical, say) counts as 18+: the
-  // other names it might be known by are unknown, so it fails closed.
+  // A handle that was not looked up (not canonical, say) or that Elitogram did
+  // not answer for counts as 18+: the other names it might be known by are
+  // unknown, so it fails closed.
   const adultTest = (ids) => (isAdultHandle ? (h) => {
     if (isAdultHandle(h)) return true;
     const names = ids.get(norm(h));
@@ -555,12 +600,12 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   }
 
   // Would the post `id` be passed back in this lane? -> true | false | 401
-  async function parentVerdict(req, cur, lane, id) {
+  async function parentVerdict(req, cur, lane, id, downstream = null) {
     const r = await upstream(req, { method: 'GET', path: `/api/posts/${id}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
     if (r.statusCode === 401) { r.resume(); return 401; }
     if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
     const d = await readJson(r);
-    const ids = await identitiesFor(req, cur, lane, handlesIn(d));
+    const ids = await identitiesFor(req, cur, lane, handlesIn(d), downstream);
     const { value, dropped } = filterAnswer(d, LANES[lane], adultTest(ids));
     return value !== null && dropped === 0 && value.audience === LANES[lane];
   }
@@ -574,12 +619,37 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     const ct = String(req.headers['content-type'] || '');
     if (!/^multipart\/form-data;\s*boundary=/i.test(ct)) return fail(res, 400, 'Send the files as multipart/form-data');
     const h = { ...headers, accept: 'application/json', 'content-type': ct };
-    if (req.headers['content-length']) h['content-length'] = req.headers['content-length'];
-    else h['transfer-encoding'] = 'chunked';
+    const tooLarge = () => {
+      res.set('Connection', 'close');
+      return fail(res, 413, `The upload is larger than ${Math.floor(uploadMaxBytes / (1024 * 1024))} MB in all`);
+    };
+    if (req.headers['content-length']) {
+      const declared = Number(req.headers['content-length']);
+      if (!Number.isSafeInteger(declared) || declared < 0) return fail(res, 400, 'Bad Content-Length');
+      if (declared > uploadMaxBytes) { req.resume(); return tooLarge(); }
+      h['content-length'] = req.headers['content-length'];
+    } else h['transfer-encoding'] = 'chunked';
+    // Counts what actually arrives, declared or chunked. Going over the limit
+    // ends the upstream request mid-body, which Elitogram treats as an aborted
+    // upload and cleans up.
+    let seen = 0;
+    let over = false;
+    const counter = new Transform({
+      transform(chunk, _enc, cb) {
+        seen += chunk.length;
+        if (seen > uploadMaxBytes) { over = true; cb(new Error('upload over the limit')); return; }
+        cb(null, chunk);
+      },
+    });
+    req.on('error', (e) => counter.destroy(e));
+    req.pipe(counter);
     let r;
     try {
-      r = await upstream(req, { method: 'POST', path: '/api/posts', headers: h, stream: req, signal: res, timeout: 10 * 60000 });
+      r = await upstream(req, { method: 'POST', path: '/api/posts', headers: h, stream: counter, signal: res, timeout: 10 * 60000 });
     } catch (e) {
+      req.unpipe(counter);
+      req.resume();
+      if (over) return tooLarge();
       log.warn(`[egram] upload: ${e.message}`);
       return fail(res, 422, 'The upload did not reach Elitogram');
     }
@@ -617,7 +687,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       const pid = route.parent === 'body' ? src.post_id : Number(route.p.exec(rest)[route.parent === 'path2' ? 2 : 1]);
       if (!Number.isInteger(pid) || pid < 1) return fail(res, 400, 'A post id is required');
       let verdict;
-      try { verdict = await parentVerdict(req, cur, lane, pid); } catch (e) {
+      try { verdict = await parentVerdict(req, cur, lane, pid, res); } catch (e) {
         log.warn(`[egram] parent check ${rest}: ${e.message}`);
         return fail(res, 424, 'Elitogram is not reachable right now');
       }
@@ -647,7 +717,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       try {
         let test = isAdultHandle;
         const named = route.picture === 'user' ? null : route.picture ? mediaCreator(r.headers, r.rawHeaders) : mediaAuthor(r.headers, r.rawHeaders);
-        if (named && isAdultHandle) test = adultTest(await identitiesFor(req, cur, lane, [named]));
+        if (named && isAdultHandle) test = adultTest(await identitiesFor(req, cur, lane, [named], res));
         ok = mediaAllowed(route, r.headers, want, test, r.rawHeaders);
       } catch (e) { log.warn(`[egram] media check ${rest}: ${e.message}`); }
       if (!ok) {
@@ -689,7 +759,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     let d;
     try { d = await readJson(r); } catch (e) { return fail(res, 424, e.message); }
     let filtered;
-    try { filtered = filterAnswer(d, want, adultTest(await identitiesFor(req, cur, lane, handlesIn(d)))); } catch (e) {
+    try { filtered = filterAnswer(d, want, adultTest(await identitiesFor(req, cur, lane, handlesIn(d), res))); } catch (e) {
       log.warn(`[egram] filter ${rest}: ${e.message}`);
       return fail(res, 424, 'Grabbit could not check this answer right now');
     }

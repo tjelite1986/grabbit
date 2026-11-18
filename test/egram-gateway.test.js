@@ -13,8 +13,13 @@ const SECRET = 'test-secret';
 // --- Fake Elitogram ----------------------------------------------------------------
 const seen = [];
 const handlers = {};
-// handle -> other names Elitogram knows it by (served at /api/creator-identities)
+// handle -> other names Elitogram knows it by (served at /api/creator-identities).
+// Any other handle is answered as a creator without other names, unless it is
+// in `hidden` (Elitogram leaves it out: outside the scope) or `accountNames`
+// (listed under `accounts`).
 const identities = {};
+const hidden = new Set();
+const accountNames = new Set();
 let upBase;
 const upstream = http.createServer((req, res) => {
   const chunks = [];
@@ -27,9 +32,14 @@ const upstream = http.createServer((req, res) => {
       // Default: the other names each asked handle is known by (identities).
       const q = new URLSearchParams(req.url.slice(req.url.indexOf('?') + 1));
       const items = {};
-      for (const h of q.getAll('h')) if (identities[h]) items[h] = identities[h];
+      const accounts = [];
+      for (const h of q.getAll('h')) {
+        if (hidden.has(h)) continue;
+        if (accountNames.has(h)) accounts.push(h);
+        else items[h] = identities[h] || [];
+      }
       res.setHeader('content-type', 'application/json');
-      return res.end(JSON.stringify({ items }));
+      return res.end(JSON.stringify({ items, accounts }));
     }
     const h = handlers[`${req.method} ${path}`] || handlers[path];
     if (h) return h(req, res, rec);
@@ -55,7 +65,7 @@ const quietLog = { warn: (m) => warnings.push(m), log() {}, error() {} };
 test.before(async () => {
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   upBase = `http://127.0.0.1:${upstream.address().port}`;
-  const g = gw.createGateway({ apiUrl: upBase, secret: SECRET, isAdultHandle: (h) => { if (h === 'boom') throw new Error('lookup failed'); return adultSet.has(String(h).toLowerCase()); }, bindingOf: (req) => req.headers['x-test-signin'] || '', log: quietLog, timeoutMs: 5000 });
+  const g = gw.createGateway({ apiUrl: upBase, secret: SECRET, isAdultHandle: (h) => { if (h === 'boom') throw new Error('lookup failed'); return adultSet.has(String(h).toLowerCase()); }, bindingOf: (req) => req.headers['x-test-signin'] || '', log: quietLog, timeoutMs: 5000, identityDeadlineMs: 1500, uploadMaxBytes: 64 * 1024 });
   const app = express();
   app.use(express.json());
   app.use('/api/egram', (req, res) => {
@@ -74,6 +84,8 @@ test.after(() => {
 });
 
 const linked = () => `${gw.EGRAM_COOKIE}=${gw.seal(SECRET, { t: 'tok123', exp: Date.now() + 60000 })}`;
+// Another Elitogram session: identity answers are cached per session.
+const linkedAs = (t) => `${gw.EGRAM_COOKIE}=${gw.seal(SECRET, { t, exp: Date.now() + 60000 })}`;
 const browser = { 'sec-fetch-site': 'same-origin' };
 function call(method, path, { cookie = linked(), headers = {}, body } = {}) {
   const h = { ...browser, ...headers };
@@ -570,4 +582,131 @@ test('upload: multipart streams upstream; the answer is only the id and refused 
   // Cross-site: refused.
   const cross = await fetch(`${base}/api/egram/api/posts`, { method: 'POST', headers: { 'sec-fetch-site': 'cross-site', cookie: linked() }, body: fd2 });
   assert.equal(cross.status, 403);
+});
+
+// --- Final review (Codex, phase 2 final) ----------------------------------------------
+
+test('a creator Elitogram does not answer for in the identity lookup is refused', async () => {
+  // A post held in review under a creator classified general: Elitogram once
+  // left that creator out of the unknown-scope lookup, and an omitted handle
+  // counted as "no other names".
+  hidden.add('heldcreator');
+  handlers['/api/explore'] = json(200, { items: [
+    { id: 30, media_id: 31, audience: 'unknown', author_handle: 'heldcreator' },
+    { id: 32, media_id: 33, audience: 'unknown', author_handle: 'other' },
+  ], next: null });
+  handlers['/m/31'] = file({ 'x-egram-audience': 'unknown', 'x-egram-creator': 'heldcreator' });
+  handlers['/m/ca/31'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/jpeg', 'x-egram-picture': 'creator', 'x-egram-audience': 'unknown', 'x-egram-creator': 'heldcreator' }); res.end('AVATAR'); };
+  adultSet = new Set(['someone-else']);
+  try {
+    const d = await (await call('GET', '/api/egram/api/explore?lane=review')).json();
+    assert.deepEqual(d.items.map((x) => x.id), [32]);
+    assert.equal((await call('GET', '/api/egram/m/31?lane=review')).status, 404);
+    assert.equal(await (await call('GET', '/api/egram/m/ca/31?lane=review')).text(), gw.NEUTRAL_PICTURE);
+    // Answered later (Elitogram fixed), it passes: an unresolved handle is not cached.
+    hidden.delete('heldcreator');
+    const again = await (await call('GET', '/api/egram/api/explore?lane=review')).json();
+    assert.deepEqual(again.items.map((x) => x.id), [30, 32]);
+  } finally {
+    hidden.delete('heldcreator');
+    adultSet = new Set();
+    delete handlers['/api/explore'];
+  }
+});
+
+test('an account listed under accounts passes; the same name unlisted does not', async () => {
+  handlers['/api/feed'] = json(200, { items: [{ id: 34, audience: 'general', author: { handle: 'someuser' }, caption: 'mine', media: [] }], next: null });
+  handlers['/m/35'] = file({ 'x-egram-audience': 'general', 'x-egram-account': 'someuser' });
+  adultSet = new Set(['someone-else']);
+  try {
+    accountNames.add('someuser');
+    assert.deepEqual((await (await call('GET', '/api/egram/api/feed')).json()).items.map((x) => x.id), [34]);
+    assert.equal((await call('GET', '/api/egram/m/35')).status, 200);
+    // An Elitogram that does not list accounts (or no longer knows the name).
+    accountNames.delete('someuser');
+    hidden.add('someuser');
+    await new Promise((r) => setTimeout(r, 0));
+    const fresh = linkedAs('tok-other');
+    assert.deepEqual((await (await call('GET', '/api/egram/api/feed', { cookie: fresh })).json()).items, []);
+    assert.equal((await call('GET', '/api/egram/m/35', { cookie: fresh })).status, 404);
+  } finally {
+    accountNames.delete('someuser');
+    hidden.delete('someuser');
+    adultSet = new Set();
+  }
+});
+
+test('an identity lookup that never answers is given up at its deadline', async () => {
+  const stalled = [];
+  handlers['/api/creator-identities'] = (req, res) => { stalled.push(res); };
+  handlers['/m/36'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'slowone' });
+  adultSet = new Set(['someone-else']);
+  try {
+    const t0 = Date.now();
+    const r = await call('GET', '/api/egram/m/36', { cookie: linkedAs('tok-slow') });
+    assert.equal(r.status, 404);
+    const took = Date.now() - t0;
+    assert.ok(took >= 1400 && took < 4500, `took ${took} ms`);
+  } finally {
+    delete handlers['/api/creator-identities'];
+    for (const x of stalled) x.destroy();
+    adultSet = new Set();
+  }
+});
+
+test('identity lookups do not wait for sockets held by media answers', async () => {
+  // 40 media answers that send headers and then hold their bodies: with one
+  // shared pool of 32 sockets the identity lookups would queue behind them.
+  // Each by its own creator, so no lookup is answered from the cache.
+  const held = [];
+  for (let i = 0; i < 40; i++) {
+    handlers[`/m/${100 + i}`] = (req, res) => {
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'x-egram-audience': 'general', 'x-egram-creator': `pool${i}` });
+      res.write('JPEG');
+      held.push(res);
+    };
+  }
+  adultSet = new Set(['someone-else']);
+  const cookie = linkedAs('tok-pool');
+  const ctrl = new AbortController();
+  try {
+    const t0 = Date.now();
+    const pending = Array.from({ length: 40 }, (_, i) => fetch(`${base}/api/egram/m/${100 + i}`, { headers: { ...browser, cookie }, signal: ctrl.signal }).then((r) => r.status, () => 'aborted'));
+    // Each one reaches the identity check; the statuses arrive once checked.
+    const statuses = await Promise.race([
+      Promise.all(pending.slice(0, 32)),
+      new Promise((r) => setTimeout(() => r('timeout'), 4000)),
+    ]);
+    assert.notEqual(statuses, 'timeout', 'identity checks stalled behind held media bodies');
+    assert.ok(statuses.every((s) => s === 200));
+    assert.ok(Date.now() - t0 < 4000);
+  } finally {
+    ctrl.abort();
+    for (const x of held) x.destroy();
+    for (let i = 0; i < 40; i++) delete handlers[`/m/${100 + i}`];
+    adultSet = new Set();
+  }
+});
+
+test('upload: over the total limit is refused, declared or chunked, and the upstream request is cut', async () => {
+  let reached = 0;
+  handlers['POST /api/posts'] = (req, res) => { reached++; res.writeHead(201, { 'content-type': 'application/json' }); res.end(JSON.stringify({ id: 1, rejected: [] })); };
+  const big = Buffer.alloc(80 * 1024, 1);
+  const fd = new FormData();
+  fd.append('files', new Blob([big], { type: 'image/jpeg' }), 'big.jpg');
+  const declared = await fetch(`${base}/api/egram/api/posts`, { method: 'POST', headers: { ...browser, cookie: linked() }, body: fd });
+  assert.equal(declared.status, 413);
+  // Chunked: no Content-Length, the limit is counted as the body streams.
+  const boundary = 'xBOUNDARYx';
+  const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="c.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`);
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const chunks = [head, big.subarray(0, 40 * 1024), big.subarray(40 * 1024), tail];
+  const body = new ReadableStream({ pull(c) { const x = chunks.shift(); if (x) c.enqueue(x); else c.close(); } });
+  const chunked = await fetch(`${base}/api/egram/api/posts`, {
+    method: 'POST', duplex: 'half', body,
+    headers: { ...browser, cookie: linked(), 'content-type': `multipart/form-data; boundary=${boundary}` },
+  }).catch((e) => ({ status: `error ${e.message}` }));
+  assert.equal(chunked.status, 413);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(reached, 0);
 });

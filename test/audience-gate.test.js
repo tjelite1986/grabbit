@@ -60,12 +60,12 @@ function filesUnder(dir) {
 
 // Boots a server with every app root configured and these profiles in the
 // store, and returns helpers. `seed` may also hold a downloaded.json.
-async function boot(t, { profileList = [], registry = null, breakItemStore = false, corruptItemStore = false } = {}) {
+async function boot(t, { profileList = [], registry = null, breakItemStore = false, corruptItemStore = false, egram = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-gate-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const media = await mediaServer();
   t.after(() => media.close());
-  const apps = { tik: path.join(root, 'tik'), ads: path.join(root, 'ads'), plat: path.join(root, 'plat'), posts: path.join(root, 'posts') };
+  const apps = { tik: path.join(root, 'tik'), ads: path.join(root, 'ads'), plat: path.join(root, 'plat'), posts: path.join(root, 'posts'), egram: path.join(root, 'egram') };
   for (const d of Object.values(apps)) fs.mkdirSync(d, { recursive: true });
   const dataDir = path.join(root, 'data');
   fs.mkdirSync(dataDir, { recursive: true });
@@ -94,6 +94,7 @@ async function boot(t, { profileList = [], registry = null, breakItemStore = fal
     TIKSHORTIS_ROOT: apps.tik,
     PLATFORM_IMPORT_ROOT: apps.plat,
     ELITE_POSTS_ROOT: apps.posts,
+    ...(egram ? { POSTS_TO_EGRAM: '1', EGRAM_IMPORT_DIR: apps.egram } : {}),
   };
   const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'fake-extractors.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
@@ -580,4 +581,27 @@ test('route preview needs the API login', async (t) => {
   const r = await fetch(`${s.base}/api/hub/route-preview?channel=main&key=x`, { headers: { Accept: 'application/json' }, redirect: 'manual' });
   assert.notEqual(r.status, 200);
   assert.notEqual(r.status, 404);
+});
+
+test('posts to Elitogram: a second source with the same name is published under its own name, by either route', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }], egram: true });
+  const url = (id) => `${s.fakeUrl('image', 'instagram', 'Jane Doe', id)}?title=same`;
+  const first = await s.save(url('a1'), 'main');
+  assert.equal(first.status, 200, JSON.stringify(first.body) + s.logs());
+  assert.equal(first.body.saved, true);
+  // Same title and extension, another source: the exact name already exists.
+  const second = await s.save(url('a2'), 'main');
+  assert.equal(second.status, 200, JSON.stringify(second.body) + s.logs());
+  assert.equal(second.body.saved, true, 'the second source was skipped on the file name alone');
+  assert.notEqual(second.body.filename, first.body.filename);
+  const third = await s.saveJob(url('a3'), 'main');
+  assert.equal(third.job.status, 'done', JSON.stringify(third.job) + s.logs());
+  // The first source again is a no-op.
+  const again = await s.save(url('a1'), 'main');
+  assert.equal(again.body.saved, false);
+  const files = filesUnder(s.apps.egram);
+  const images = files.filter((f) => f.endsWith('.jpg'));
+  const sidecars = files.filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(s.apps.egram, f), 'utf8')));
+  assert.equal(images.length, 3, files.join('\n'));
+  assert.equal(new Set(sidecars.map((x) => x.source_id)).size, 3);
 });
