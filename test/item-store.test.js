@@ -39,6 +39,16 @@ test('a general item becomes adult when an adult signal arrives', (t) => {
   assert.equal(s.upsert({ key: 'k', audience: 'adult' }).audience, 'adult');
 });
 
+test('isAdultSourceId reads a reclassification at once', (t) => {
+  const s = itemStore.open(tmpDb(t));
+  t.after(() => s.close());
+  s.upsert({ key: 'id:x:7', sourceId: 'abc7', audience: 'general' });
+  assert.equal(s.isAdultSourceId('abc7'), false);
+  assert.equal(s.isAdultSourceId('nope'), false);
+  s.upsert({ key: 'id:x:7', sourceId: 'abc7', audience: 'adult' });
+  assert.equal(s.isAdultSourceId('abc7'), true);
+});
+
 test('the database refuses a general delivery of an item that is not general', (t) => {
   const s = itemStore.open(tmpDb(t));
   t.after(() => s.close());

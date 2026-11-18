@@ -374,9 +374,17 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
   function clipOfRequest(req, rest) {
     const m = ONE_CLIP.exec(rest);
     if (m) return Number(m[1]);
-    if (rest === 'shorts/summarize' && req.query && req.query.id != null) {
-      const id = Number(req.query.id);
-      return Number.isInteger(id) && id > 0 ? id : -1;
+    // Read id from the raw query string the same way TikShortis does
+    // (URLSearchParams, first value), not from Express' parsed req.query: qs
+    // stops at 1000 parameters, so a long query could hide id from the gate
+    // while it still reaches TikShortis.
+    if (rest === 'shorts/summarize') {
+      const url = req.originalUrl || req.url || '';
+      const q = new URLSearchParams(url.includes('?') ? url.slice(url.indexOf('?') + 1) : '');
+      if (!q.has('id')) return null;
+      const all = q.getAll('id');
+      const id = Number(all[0]);
+      return all.length === 1 && Number.isInteger(id) && id > 0 ? id : -1;
     }
     return null;
   }
@@ -403,7 +411,7 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
       a = audience.get(id);
     }
     if (a.channel !== 'main') return 'refused';
-    if (isAdult && isAdult({ id, channel: a.channel, source_id: a.sourceId })) return 'refused';
+    if (isAdult && isAdult({ id, channel: a.channel, source_id: a.sourceId }, true)) return 'refused';
     return 'ok';
   }
 

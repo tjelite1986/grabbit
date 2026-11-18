@@ -2902,15 +2902,25 @@ const { mode: TIKSHORTIS_MODE, warnings: TIK_MODE_WARNINGS } = modules.tikshorti
 });
 for (const w of TIK_MODE_WARNINGS) console.warn(`[grabbit] ${w}`);
 
-// Adult source ids from items.db, re-read at most once a minute. If items.db
+// Adult source ids from items.db. Lists are filtered against a set re-read at
+// most once a minute; the per-clip gate (video, poster, any route acting on one
+// clip) passes fresh=true and reads the database on every request. If items.db
 // is not open the gateway cannot check, so it refuses every clip that has a
 // source id rather than guess (fail closed).
 const ADULT_IDS_TTL_MS = 60 * 1000;
 let adultIds = { at: 0, set: null };
-function tikClipIsAdult(clip) {
+function tikClipIsAdult(clip, fresh = false) {
   const sid = clip && clip.source_id != null ? String(clip.source_id) : '';
   if (!sid) return false;
   if (!ITEM_STORE) return true;
+  if (fresh) {
+    try {
+      return ITEM_STORE.isAdultSourceId(sid);
+    } catch (e) {
+      console.warn('[tik] adult id lookup failed:', e.message);
+      return true;
+    }
+  }
   if (!adultIds.set || Date.now() - adultIds.at > ADULT_IDS_TTL_MS) {
     try {
       adultIds = { at: Date.now(), set: ITEM_STORE.adultSourceIds() };

@@ -701,6 +701,12 @@ function wrap(db, migrationBackup) {
     adultSourceIds: () => new Set(
       db.prepare("SELECT source_id FROM items WHERE audience = 'adult' AND source_id IS NOT NULL").pluck().all().map(String)
     ),
+    // Whether one site-native id is known as adult, read fresh from the
+    // database. The gateway's per-clip gate uses this on every request so a
+    // reclassification takes effect at once (the Set above is cached).
+    isAdultSourceId: (sid) => Boolean(
+      db.prepare("SELECT 1 FROM items WHERE audience = 'adult' AND source_id = ? LIMIT 1").pluck().get(String(sid))
+    ),
     // A consistent copy of the database, for the daily state snapshot.
     snapshotTo(file) {
       const part = `${file}.part`;

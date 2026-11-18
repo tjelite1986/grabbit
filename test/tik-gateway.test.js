@@ -466,6 +466,11 @@ test('one clip by id: refused unless it is a general clip Grabbit does not mark 
   handlers['GET /api/shorts/9008'] = json(200, { short: { id: 9008, channel: '18plus', source_id: null } });
   assert.equal((await call('shorts/summarize?id=9008', { method: 'POST' })).status, 404);
   assert.equal((await call('shorts/summarize?id=abc', { method: 'POST' })).status, 404);
+  // Express' query parser stops at 1000 parameters; the gate reads the raw
+  // query like TikShortis does, so a long query cannot hide id from it.
+  const pad = Array.from({ length: 1000 }, (_, i) => `p${i}=1`).join('&');
+  assert.equal((await call(`shorts/summarize?${pad}&id=9008`)).status, 404, 'id after 1000 parameters');
+  assert.equal((await call('shorts/summarize?id=9008&id=1', { method: 'POST' })).status, 404, 'id given twice');
   assert.equal(seen.length, 0);
 
   // A general clip passes, and the decision is not cached: marking it adult
