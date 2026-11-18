@@ -23,6 +23,19 @@ const crypto = require('crypto');
 // Extensions a published posts image may have.
 const POSTS_IMAGE_EXT = /^\.(jpe?g|png|webp|gif|avif|heic|heif|bmp|tiff?)$/i;
 
+// The picture extensions Elitogram's importer takes (its MEDIA_EXT minus the
+// video ones). Anything else would sit in its import folder forever while the
+// job reported it saved: reddclips, for one, labels an HLS playlist (.m3u8)
+// an image.
+const EGRAM_IMAGE_EXT = /^(jpe?g|png|gif|webp|avif)$/i;
+
+// Why Elitogram mode refuses an item with this extension, or null.
+function egramExtRefusal(ext) {
+  const e = String(ext || '').toLowerCase();
+  if (EGRAM_IMAGE_EXT.test(e)) return null;
+  return `This item is not a picture Elitogram can import (.${e || 'unknown'}); the posts destination takes JPEG, PNG, GIF, WebP and AVIF only. Save it to the server library instead.`;
+}
+
 // The image already published under a stem in a drop folder, whatever its
 // extension: a regular file whose name minus its final extension is exactly
 // the stem (titles keep dots, so `shot.2.jpg` is not under `shot`) and whose
@@ -127,6 +140,8 @@ async function publish({ dir, stem, ext, partPath, egram, id, sidecar, lock }) {
   const finalPath = path.join(dir, outName);
   const sidecarPath = egram ? path.join(dir, `${stem}.json`) : `${finalPath}.json`;
   return lock(egram ? sidecarPath : finalPath, () => {
+    const badExt = egram ? egramExtRefusal(ext) : null;
+    if (badExt) throw new Error(badExt);
     let pubStem = stem;
     let pubFinal = finalPath;
     let pubSidecar = sidecarPath;
@@ -153,4 +168,4 @@ async function publish({ dir, stem, ext, partPath, egram, id, sidecar, lock }) {
   });
 }
 
-module.exports = { POSTS_IMAGE_EXT, stemImage, sourceId, sourceIdOf, altStem, writeSidecar, createNameLock, publish };
+module.exports = { POSTS_IMAGE_EXT, EGRAM_IMAGE_EXT, egramExtRefusal, stemImage, sourceId, sourceIdOf, altStem, writeSidecar, createNameLock, publish };

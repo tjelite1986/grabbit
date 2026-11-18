@@ -166,3 +166,31 @@ test('legacy mode (flag off): per-file sidecar <name>.json and exact-name reuse 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('Elitogram mode refuses what its importer cannot take (an .m3u8 playlist labelled an image)', async () => {
+  for (const ok of ['jpg', 'JPEG', 'png', 'gif', 'webp', 'avif']) assert.equal(pp.egramExtRefusal(ok), null, ok);
+  for (const bad of ['m3u8', 'mp4', 'heic', 'bmp', 'tiff', '', null]) assert.match(pp.egramExtRefusal(bad), /not a picture Elitogram can import/, String(bad));
+  const dir = tmpDir();
+  try {
+    const part = stage(dir, '#EXTM3U');
+    let asked = false;
+    await assert.rejects(
+      pp.publish({ dir, stem: 'kit_-_dogs 1x', ext: 'm3u8', partPath: part, egram: true, id: 'aaaaaaaaaaaaaaaa', sidecar: () => { asked = true; return {}; }, lock }),
+      /not a picture Elitogram can import \(\.m3u8\)/,
+    );
+    assert.equal(asked, false, 'no sidecar is built for a refused item');
+    assert.deepEqual(list(dir), [path.basename(part)], 'nothing is published next to the staged file');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('legacy mode (flag off) keeps publishing any extension, as in 3.0.2', async () => {
+  const dir = tmpDir();
+  try {
+    const name = await pp.publish({ dir, stem: 's', ext: 'm3u8', partPath: stage(dir), egram: false, id: null, sidecar: () => ({ description: 'd' }), lock });
+    assert.equal(name, 's.m3u8');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

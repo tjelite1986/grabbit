@@ -9628,6 +9628,10 @@ async function saveImageToPosts(job, channel) {
   // An image saved under the 18+ channel meets Adshortis' videos-only rule
   // here, never the posts library's.
   assertDeliverable(destinationOf(channel, { ...job, mediaType: 'image' }), job);
+  // Elitogram imports only real pictures; refuse anything else before fetching
+  // it (publish() checks again inside the lock).
+  const badExt = POSTS_TO_EGRAM ? postsPublish.egramExtRefusal(ext) : null;
+  if (badExt) throw new Error(badExt);
   makeDropDir(dir);
   // Each attempt downloads into its own staged file, so two saves of the same
   // name never write to one path.
