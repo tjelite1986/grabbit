@@ -910,8 +910,8 @@
         attachTimeline(c);
 
         // Right rail, in TikShortis' order.
-        c.likeBtn = railBtn('heart', '0', () => toggleLike(c, false));
-        c.commentBtn = railBtn('messageCircle', '0', () => openComments(c));
+        c.likeBtn = railBtn('heart', '0', () => toggleLike(c, false), { aria: 'Like' });
+        c.commentBtn = railBtn('messageCircle', '0', () => openComments(c), { aria: 'Comments' });
         c.saveBtn = railBtn('listVideo', 'Playlists', () => openSave(c), { aria: 'Playlists' });
         const shareBtn = railBtn('share2', 'Share', () => openShare(c));
         const dlBtn = railBtn('download', 'Download', null, { href: `${videoOf(s.id)}?download=1` });
