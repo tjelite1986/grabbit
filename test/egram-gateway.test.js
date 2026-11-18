@@ -95,15 +95,21 @@ test('lane: only an exact lane=review is the review lane', () => {
   assert.equal(lane('/api/egram/api/feed?lane=adult'), 'general');
 });
 
-test('allowlist: no auth, 18+ unlock, admin, uploads or deletes of posts', () => {
+test('allowlist: no auth, 18+ unlock, admin, merges, stories or push', () => {
   for (const [m, p] of [
     ['POST', 'api/auth/login'],
     ['POST', 'api/adult/unlock'],
+    ['POST', 'api/adult/lock'],
     ['POST', 'api/me/pin'],
+    ['POST', 'api/me/avatar'],
     ['GET', 'api/me'],
     ['GET', 'api/admin/jobs'],
-    ['POST', 'api/posts'],
-    ['DELETE', 'api/posts/1'],
+    ['POST', 'api/push/subscribe'],
+    ['GET', 'api/stories'],
+    ['DELETE', 'api/comments/1'],
+    ['POST', 'api/posts/1/media'],
+    ['POST', 'api/posts/1/restore'],
+    ['PATCH', 'api/creators/ann'],
     ['POST', 'api/creators-merge'],
     ['POST', 'api/creators-classify'],
     ['GET', 'm/s/1'],
@@ -114,6 +120,10 @@ test('allowlist: no auth, 18+ unlock, admin, uploads or deletes of posts', () =>
   assert.ok(gw.matchRoute('GET', 'api/feed'));
   assert.ok(gw.matchRoute('HEAD', 'm/12'));
   assert.ok(gw.matchRoute('PATCH', 'api/posts/5'));
+  assert.ok(gw.matchRoute('POST', 'api/posts').upload);
+  assert.equal(gw.matchRoute('DELETE', 'api/posts/5').parent, 'path');
+  assert.equal(gw.matchRoute('DELETE', 'api/posts/5/comments/9').parent, 'path');
+  assert.deepEqual(gw.matchRoute('PATCH', 'api/me').body, ['display_name', 'bio']);
 });
 
 test('filter: posts, tiles and creators must carry the lane audience', () => {
@@ -241,7 +251,7 @@ test('a write carries only the keys its route allows', async () => {
   handlers['PATCH /api/posts/5'] = json(200, { id: 5, out_of_scope: true, can_edit: true });
   const r = await call('PATCH', '/api/egram/api/posts/5', { body: { audience: 'general', caption: 'x', adult: false, author: { creator: 'z' } } });
   assert.equal(r.status, 200);
-  assert.deepEqual(JSON.parse(last().body), { audience: 'general' });
+  assert.deepEqual(JSON.parse(last().body), { audience: 'general', caption: 'x' });
   assert.equal((await call('PATCH', '/api/egram/api/posts/5', { body: { audience: 'everyone' } })).status, 400);
 });
 
@@ -407,7 +417,7 @@ test('session: link with user name and password, keep only the sealed token', as
 
   handlers['GET /api/me'] = json(200, { user: { username: 'cc', display_name: 'CC', role: 'admin', permissions: ['profiles'], adult_unlocked: true } });
   const me = await (await call('GET', '/api/egram/session')).json();
-  assert.deepEqual(me.user, { username: 'cc', display_name: 'CC', role: 'admin', can_classify: true });
+  assert.deepEqual(me.user, { username: 'cc', display_name: 'CC', bio: '', role: 'admin', can_classify: true });
   assert.equal(last().headers['x-egram-audience'], 'general');
 
   handlers['GET /api/me'] = json(200, { user: null });
@@ -501,4 +511,53 @@ test('search hits without a handle are dropped', () => {
   const { value, dropped } = gw.filterAnswer({ creators: [{ audience: 'general' }, { audience: 'general', handle: 'ok' }] }, 'general', () => false);
   assert.deepEqual(value.creators.map((c) => c.handle), ['ok']);
   assert.equal(dropped, 1);
+});
+
+test('notifications about a creator or a post author 18+ in Grabbit are dropped', async () => {
+  handlers['/api/notifications'] = json(200, { items: [
+    { id: 1, kind: 'like', text: 'a', post_id: 5, creator_id: null, creator_handle: null, post_author_handle: 'nadult' },
+    { id: 2, kind: 'follow', text: 'b', post_id: null, creator_id: 3, creator_handle: 'nadult2', post_author_handle: null },
+    { id: 3, kind: 'comment', text: 'c', post_id: 6, creator_id: null, creator_handle: null, post_author_handle: 'fine' },
+  ] });
+  adultSet = new Set(['nadult', 'nadult2']);
+  try {
+    const d = await (await call('GET', '/api/egram/api/notifications')).json();
+    assert.deepEqual(d.items.map((n) => n.id), [3]);
+  } finally {
+    adultSet = new Set();
+  }
+});
+
+test('upload: multipart streams upstream; the answer is only the id and refused files', async () => {
+  let got = null;
+  handlers['POST /api/posts'] = (req, res, rec) => {
+    got = rec;
+    res.writeHead(201, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 77, rejected: [{ name: 'x.txt', reason: 'not media' }], audience: 'adult', secret: 'no' }));
+  };
+  const fd = new FormData();
+  fd.append('caption', 'hello #tag');
+  fd.append('audience', 'unknown');
+  fd.append('files', new Blob([Buffer.from('JPEGBYTES')], { type: 'image/jpeg' }), 'a.jpg');
+  const r = await fetch(`${base}/api/egram/api/posts`, { method: 'POST', headers: { ...browser, cookie: linked() }, body: fd });
+  assert.equal(r.status, 201);
+  assert.deepEqual(await r.json(), { ok: true, id: 77, rejected: [{ name: 'x.txt', reason: 'not media' }] });
+  assert.match(got.headers['content-type'], /^multipart\/form-data; boundary=/);
+  assert.ok(got.body.includes('JPEGBYTES') && got.body.includes('hello #tag'));
+  assert.equal(got.headers['x-egram-audience'], 'general');
+  assert.equal(got.headers.cookie, 'eg_session=tok123');
+  // Not multipart: refused before anything goes upstream.
+  const before = seen.length;
+  assert.equal((await call('POST', '/api/egram/api/posts', { body: { caption: 'x' } })).status, 400);
+  assert.equal(seen.length, before);
+  // Elitogram refusing (a general creator for a non-moderator, say) passes its message.
+  handlers['POST /api/posts'] = json(403, { error: 'Only a moderator can classify posts' });
+  const fd2 = new FormData();
+  fd2.append('files', new Blob([Buffer.from('J')], { type: 'image/jpeg' }), 'b.jpg');
+  const no = await fetch(`${base}/api/egram/api/posts`, { method: 'POST', headers: { ...browser, cookie: linked() }, body: fd2 });
+  assert.equal(no.status, 403);
+  assert.equal((await no.json()).error, 'Only a moderator can classify posts');
+  // Cross-site: refused.
+  const cross = await fetch(`${base}/api/egram/api/posts`, { method: 'POST', headers: { 'sec-fetch-site': 'cross-site', cookie: linked() }, body: fd2 });
+  assert.equal(cross.status, 403);
 });

@@ -29,6 +29,7 @@
 // password once, the gateway signs in and keeps only the session, sealed in a
 // Grabbit cookie a page script cannot read.
 
+const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 const { pipeline } = require('stream');
@@ -92,8 +93,8 @@ function laneOf(req) {
 // --- Route allowlist ---------------------------------------------------------------
 // Below /api/ (JSON) or /m/ (media) on Elitogram. Anything else is a 404 from
 // the gateway. Deliberately absent: auth/* (only through /api/egram/session),
-// adult/* (the 18+ unlock), me/pin, admin/*, uploads, post edits other than
-// the audience, deletes, merges, users/* and notifications.
+// adult/* (the 18+ unlock), me/pin, me/avatar, push/*, admin/*, creator
+// edits, merges, stories and users/*.
 //   media   piped as it comes, Range passed through
 //   picture an avatar or banner ('creator' or 'user'): may be Elitogram's generated SVG
 //   body    the JSON keys a write may carry; everything else is dropped
@@ -117,11 +118,17 @@ const ROUTES = [
   r('GET', 'api/hashtags'),
   r('GET', `api/hashtags/${TAG}`),
   r('GET', `api/posts/${ID}`),
-  r('PATCH', `api/posts/${ID}`, { body: ['audience'], parent: 'path' }),
+  r('PATCH', `api/posts/${ID}`, { body: ['audience', 'caption'], parent: 'path' }),
+  r('DELETE', `api/posts/${ID}`, { parent: 'path' }),
+  // A new post: multipart (files, caption, creator, audience, adult), streamed
+  // as it comes. Elitogram decides the audience: unclassified unless a
+  // moderator says general; 18+ leaves the module.
+  r('POST', 'api/posts', { upload: true }),
   r('POST', `api/posts/${ID}/like`, { parent: 'path' }),
   r('DELETE', `api/posts/${ID}/like`, { parent: 'path' }),
   r('GET', `api/posts/${ID}/comments`, { parent: 'path' }),
   r('POST', `api/posts/${ID}/comments`, { body: ['body'], parent: 'path' }),
+  r('DELETE', `api/posts/${ID}/comments/${ID}`, { parent: 'path' }),
   // Creators
   r('GET', 'api/creators'),
   r('GET', `api/creators/${HANDLE}`),
@@ -145,6 +152,11 @@ const ROUTES = [
   r('POST', `api/posts/${ID}/view`, { parent: 'path' }),
   r('GET', 'api/history'),
   r('DELETE', 'api/history'),
+  // The account: notifications (scoped by Elitogram, checked here), own profile, password
+  r('GET', 'api/notifications'),
+  r('POST', 'api/notifications/read'),
+  r('PATCH', 'api/me', { body: ['display_name', 'bio'] }),
+  r('POST', 'api/me/password', { body: ['current', 'password'] }),
   // Media
   r('GET', `m/${ID}`, { media: true }),
   r('GET', `m/${ID}/t`, { media: true }),
@@ -175,6 +187,15 @@ function authorHandle(o) {
   if (typeof o.handle === 'string') return o.handle;
   return null;
 }
+// Every handle an object names: its author or own handle, and for a
+// notification the creator it is about and the author of the post it is about.
+function namedHandles(o) {
+  const out = [];
+  const a = authorHandle(o);
+  if (a) out.push(a);
+  for (const k of ['creator_handle', 'post_author_handle']) if (typeof o[k] === 'string' && o[k]) out.push(o[k]);
+  return out;
+}
 
 const looksLikePost = (o) => Number.isInteger(o.id) && (Array.isArray(o.media) || 'media_id' in o || ('author' in o && 'caption' in o));
 const looksLikePhoto = (o) => Number.isInteger(o.media_id) && Number.isInteger(o.post_id);
@@ -188,10 +209,10 @@ function allowedItem(o, want, isAdultHandle) {
   // A post, tile, photo or creator must name the lane's audience; anything
   // else that names an audience must name that one too.
   if (shaped ? o.audience !== want : 'audience' in o && o.audience !== want) return false;
-  const h = authorHandle(o);
+  const named = namedHandles(o);
   // A post, tile, photo or creator must say whose it is, or it cannot be checked.
-  if (shaped && !h) return false;
-  if (h && isAdultHandle && isAdultHandle(h)) return false;
+  if (shaped && !authorHandle(o)) return false;
+  if (isAdultHandle && named.some((h) => isAdultHandle(h))) return false;
   return true;
 }
 
@@ -239,8 +260,7 @@ function handlesIn(value) {
   const walk = (v) => {
     if (Array.isArray(v)) { for (const x of v) walk(x); return; }
     if (!v || typeof v !== 'object') return;
-    const h = authorHandle(v);
-    if (h) out.add(norm(h));
+    for (const h of namedHandles(v)) out.add(norm(h));
     for (const x of Object.values(v)) walk(x);
   };
   walk(value);
@@ -316,7 +336,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   const mod = up.protocol === 'https:' ? https : http;
   const agent = new mod.Agent({ keepAlive: true, maxSockets: 32 });
 
-  function upstream(req, { method, path, headers, body, signal }) {
+  function upstream(req, { method, path, headers, body, signal, stream, timeout }) {
     return new Promise((resolve, reject) => {
       const h = {
         host: up.host,
@@ -328,14 +348,17 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
         'x-real-ip': clientIp(req) || 'unknown',
         ...headers,
       };
-      const rq = mod.request({ agent, protocol: up.protocol, hostname: up.hostname, port: up.port, method, path, headers: h, timeout: timeoutMs }, (res) => {
+      const rq = mod.request({ agent, protocol: up.protocol, hostname: up.hostname, port: up.port, method, path, headers: h, timeout: timeout || timeoutMs }, (res) => {
         res.on('error', (e) => log.warn(`[egram] upstream answer ${method} ${path.split('?')[0]}: ${e.message}`));
         resolve(res);
       });
       rq.on('timeout', () => rq.destroy(new Error('Elitogram did not answer in time')));
       rq.on('error', reject);
       if (signal) signal.once('close', () => { if (!rq.destroyed) rq.destroy(); });
-      rq.end(body || undefined);
+      if (stream) {
+        stream.on('error', (e) => rq.destroy(e));
+        stream.pipe(rq);
+      } else rq.end(body || undefined);
     });
   }
 
@@ -364,11 +387,16 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   // matches a Grabbit profile classified 18+. Nothing is merged; this only
   // reads. Cached briefly per lane, since the lookup is scoped.
   const IDENTITY_TTL = 120000;
-  const identityCache = new Map(); // `${lane}\u0000${handle}` -> { names, at }
+  const identityCache = new Map(); // `${session}\u0000${lane}\u0000${handle}` -> { names, at }
   async function identitiesFor(req, cur, lane, handles) {
     const out = new Map();
     if (!isAdultHandle || !handles.length) return out;
     const now = Date.now();
+    // Keyed by the caller's Elitogram session too: the answer is scoped by
+    // Elitogram, and one caller's lookup is never served to another.
+    const who = crypto.createHash('sha256').update(String((cur && cur.t) || '')).digest('hex').slice(0, 16);
+    const plainLane = lane;
+    lane = `${who}\u0000${lane}`;
     const missing = [];
     for (const h of handles) {
       const hit = identityCache.get(`${lane}\u0000${h}`);
@@ -378,7 +406,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     for (let i = 0; i < missing.length; i += 100) {
       const part = missing.slice(i, i + 100);
       const qs = part.map((h) => `h=${encodeURIComponent(h)}`).join('&');
-      const r = await upstream(req, { method: 'GET', path: `/api/creator-identities?${qs}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
+      const r = await upstream(req, { method: 'GET', path: `/api/creator-identities?${qs}`, headers: { accept: 'application/json', ...authHeaders(cur, plainLane) } });
       if (r.statusCode !== 200) { r.resume(); throw new Error(`identity lookup answered ${r.statusCode}`); }
       const d = await readJson(r, 1024 * 1024);
       const items = d && typeof d.items === 'object' && d.items && !Array.isArray(d.items) ? d.items : null;
@@ -394,9 +422,12 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     return out;
   }
   // The 18+ test for one answer: the handle, or any other name it is known by.
+  // A handle that was not looked up (not canonical, say) counts as 18+: the
+  // other names it might be known by are unknown, so it fails closed.
   const adultTest = (ids) => (isAdultHandle ? (h) => {
     if (isAdultHandle(h)) return true;
-    const names = ids.get(norm(h)) || [];
+    const names = ids.get(norm(h));
+    if (!names) return true;
     return names.some((n) => isAdultHandle(n));
   } : null);
 
@@ -459,7 +490,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
         const u = d && d.user;
         if (!u || typeof u.username !== 'string') return fail(res, 424, 'Elitogram sent an unexpected answer');
         // Only what the module shows; never the 18+ state or permissions list.
-        const user = { username: u.username, display_name: u.display_name || u.username, role: u.role === 'admin' ? 'admin' : 'user', can_classify: u.role === 'admin' || (Array.isArray(u.permissions) && u.permissions.includes('profiles')) };
+        const user = { username: u.username, display_name: u.display_name || u.username, bio: typeof u.bio === 'string' ? u.bio.slice(0, 1000) : '', role: u.role === 'admin' ? 'admin' : 'user', can_classify: u.role === 'admin' || (Array.isArray(u.permissions) && u.permissions.includes('profiles')) };
         return res.set('Cache-Control', 'no-store').json({ ok: true, linked: true, user });
       }
       if (req.method === 'POST') {
@@ -511,6 +542,35 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     return value !== null && dropped === 0 && value.audience === LANES[lane];
   }
 
+  // A new post. The multipart body goes upstream as it arrives (Elitogram
+  // stores files at original quality). The answer is reduced to the new id and
+  // the files Elitogram refused: whether the post is general, in review or 18+
+  // is not said here; the module asks for the post in each lane, which runs
+  // through the normal checks.
+  async function uploadPost(req, res, cur, lane, headers) {
+    const ct = String(req.headers['content-type'] || '');
+    if (!/^multipart\/form-data;\s*boundary=/i.test(ct)) return fail(res, 400, 'Send the files as multipart/form-data');
+    const h = { ...headers, accept: 'application/json', 'content-type': ct };
+    if (req.headers['content-length']) h['content-length'] = req.headers['content-length'];
+    else h['transfer-encoding'] = 'chunked';
+    let r;
+    try {
+      r = await upstream(req, { method: 'POST', path: '/api/posts', headers: h, stream: req, signal: res, timeout: 10 * 60000 });
+    } catch (e) {
+      log.warn(`[egram] upload: ${e.message}`);
+      return fail(res, 422, 'The upload did not reach Elitogram');
+    }
+    const d = await readJson(r, 1024 * 1024).catch(() => null);
+    if (r.statusCode === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
+    if (r.statusCode !== 201 || !d || !Number.isInteger(d.id)) {
+      return fail(res, r.statusCode >= 400 && r.statusCode < 500 ? r.statusCode : 422, (d && typeof d.error === 'string' && d.error.slice(0, 300)) || `Elitogram answered ${r.statusCode}`);
+    }
+    const rejected = Array.isArray(d.rejected)
+      ? d.rejected.slice(0, 50).map((x) => ({ name: String((x && x.name) || '').slice(0, 200), reason: String((x && x.reason) || '').slice(0, 200) }))
+      : [];
+    return res.status(201).set('Cache-Control', 'no-store').json({ ok: true, id: d.id, rejected });
+  }
+
   async function proxy(req, res) {
     const rest = req.path.replace(/^\/+/, '');
     if (rest === 'session') return session(req, res);
@@ -541,6 +601,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       if (verdict === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
       if (verdict !== true) return fail(res, 404, 'Not found');
     }
+    if (route.upload) return uploadPost(req, res, cur, lane, headers);
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       // Writes carry only the keys this route needs, re-encoded by the gateway.
       const out = {};
