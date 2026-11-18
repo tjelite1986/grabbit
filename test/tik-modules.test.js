@@ -62,7 +62,9 @@ test('modulesFor: TikShortis follows the mode; planned modules stay dark', () =>
     assert.equal(tik.mode, tikMode);
     assert.equal(tik.enabled, tikMode !== 'off');
     assert.equal(tik.audience, 'general');
-    for (const m of list.filter((x) => x.id !== 'tikshortis')) {
+    const social = list.find((m) => m.id === 'social');
+    assert.deepEqual([social.enabled, social.mode], [false, 'off']);
+    for (const m of list.filter((x) => x.id !== 'tikshortis' && x.id !== 'social')) {
       assert.equal(m.enabled, false, m.id);
       assert.equal(m.planned, true, m.id);
       assert.equal(m.mode, undefined, m.id);

@@ -7,7 +7,8 @@
 // list both the server and the hub read, so a module that is off is off
 // everywhere: no menu entry, no API, no config entry.
 //
-// Phase 1 builds one module (TikShortis, native). The later phases are listed
+// Phase 1 built TikShortis (native); phase 2 builds Social & Photos over
+// Elitogram (native, see egram-gateway.js). The later phases are listed
 // with `planned: true` so the navigation, the audience rules and the flags are
 // designed for them now, but nothing of theirs is served: a planned module is
 // never shown and has no routes.
@@ -25,7 +26,7 @@ const AUDIENCES = ['general', 'adult'];
 const MODULES = [
   { id: 'tikshortis', label: 'TikShortis', phase: 1, audience: 'general', group: 'watch' },
   { id: 'videos', label: 'Videos', phase: 2, audience: 'general', group: 'watch', planned: true },
-  { id: 'social', label: 'eGram', phase: 3, audience: 'general', group: 'social', planned: true },
+  { id: 'social', label: 'Social & Photos', phase: 3, audience: 'general', group: 'social' },
   // Adshortis keeps its existing library page (hub #/adshortis) unchanged in
   // phase 1; phase 4 turns it into a module. It is listed for the audience
   // rules only.
@@ -67,16 +68,39 @@ function tikshortisMode(env, { apiOrigin, embed }) {
   return { mode: wanted, warnings };
 }
 
+// Social & Photos has two modes, chosen by EGRAM_MODE:
+//   native  the hub's own pages over Elitogram's API, through Grabbit's gateway
+//           (/api/egram/*). Needs EGRAM_API_URL.
+//   off     no Social & Photos page (the default: unset means off, so a 3.0
+//           image deployed without new settings changes nothing).
+const EGRAM_MODES = ['native', 'off'];
+
+function egramMode(env, { apiOrigin }) {
+  const raw = String(env.EGRAM_MODE || '').trim().toLowerCase();
+  const warnings = [];
+  if (!raw || raw === 'off') return { mode: 'off', warnings };
+  if (!EGRAM_MODES.includes(raw)) {
+    warnings.push(`EGRAM_MODE=${raw} is not one of ${EGRAM_MODES.join(', ')}; Social & Photos is off.`);
+    return { mode: 'off', warnings };
+  }
+  if (!apiOrigin) {
+    warnings.push('EGRAM_MODE=native needs a valid EGRAM_API_URL; Social & Photos is off.');
+    return { mode: 'off', warnings };
+  }
+  return { mode: 'native', warnings };
+}
+
 // What the hub receives in /api/config.modules: only what it needs to draw the
 // navigation. Planned modules are listed as planned (no routes, never shown as
 // a link) so the client can be written against the final shape.
-function modulesFor({ tikMode }) {
+function modulesFor({ tikMode, egramMode: socialMode = 'off' }) {
   return MODULES.map((m) => {
     const out = { id: m.id, label: m.label, phase: m.phase, audience: m.audience, group: m.group };
     if (m.planned) return { ...out, enabled: false, planned: true };
     if (m.id === 'tikshortis') return { ...out, enabled: tikMode !== 'off', mode: tikMode };
+    if (m.id === 'social') return { ...out, enabled: socialMode === 'native', mode: socialMode };
     return { ...out, enabled: false };
   });
 }
 
-module.exports = { MODULES, AUDIENCES, TIK_MODES, tikshortisMode, modulesFor };
+module.exports = { MODULES, AUDIENCES, TIK_MODES, EGRAM_MODES, tikshortisMode, egramMode, modulesFor };

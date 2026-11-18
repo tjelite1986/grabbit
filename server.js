@@ -28,6 +28,7 @@ const itemStore = require('./item-store');
 const libraryLib = require('./library');
 const tikshortisEmbed = require('./tikshortis-embed');
 const tikGateway = require('./tikshortis-gateway');
+const egramGateway = require('./egram-gateway');
 const modules = require('./modules');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
@@ -157,8 +158,17 @@ const CHANNEL_LIBRARY = { main: 'Tikshortis', '18plus': 'Adshortis', platform: '
 // destination name kept, so a saved job still means what it did.
 // Opt-in for the same reason the shorts roots are.
 const POSTS_ROOT = process.env.ELITE_POSTS_ROOT || null;
-const POSTS_IMPORT_DIR =
-  process.env.ELITE_POSTS_IMPORT_DIR || (POSTS_ROOT ? path.join(POSTS_ROOT, '_import') : null);
+// Grabbit 3.0 phase 2: POSTS_TO_EGRAM=1 sends those images to Elitogram's own
+// import folder (EGRAM_IMPORT_DIR/<creator>/) with the sidecar Elitogram reads
+// (<stem>.json: caption, post_key, audience, meta). Opt-in; unset keeps the
+// ELITE_POSTS_ROOT folder and its sidecar exactly as before.
+const POSTS_TO_EGRAM = process.env.POSTS_TO_EGRAM === '1' && !!process.env.EGRAM_IMPORT_DIR;
+if (process.env.POSTS_TO_EGRAM === '1' && !process.env.EGRAM_IMPORT_DIR) {
+  console.warn('[grabbit] POSTS_TO_EGRAM=1 needs EGRAM_IMPORT_DIR; posts keep their old destination.');
+}
+const POSTS_IMPORT_DIR = POSTS_TO_EGRAM
+  ? process.env.EGRAM_IMPORT_DIR
+  : process.env.ELITE_POSTS_IMPORT_DIR || (POSTS_ROOT ? path.join(POSTS_ROOT, '_import') : null);
 const POSTS_ENABLED = !!POSTS_IMPORT_DIR;
 // The Instagram inbox (see the inbox section): where the patched app drops,
 // and egram's import folder. Both opt-in; unset means no inbox and no egram.
@@ -1554,6 +1564,7 @@ app.post('/logout', (_req, res) => {
   // next sign-in in this browser does not inherit it. (The hub ends it upstream
   // first; this clears it even when that call did not get through.)
   res.clearCookie(tikGateway.TIK_COOKIE, { path: '/api/tik' });
+  res.clearCookie(egramGateway.EGRAM_COOKIE, { path: egramGateway.COOKIE_PATH });
   res.redirect('/login');
 });
 
@@ -2876,7 +2887,7 @@ app.get('/api/config', (_req, res) =>
     // Grabbit 3.0: native | embed | off (see modules.js), and the module list
     // the hub draws its navigation from.
     tikshortisMode: TIKSHORTIS_MODE,
-    modules: modules.modulesFor({ tikMode: TIKSHORTIS_MODE }),
+    modules: modules.modulesFor({ tikMode: TIKSHORTIS_MODE, egramMode: EGRAM_MODE }),
   })
 );
 
@@ -2955,6 +2966,153 @@ if (TIKSHORTIS_MODE === 'native') {
   console.log(`[grabbit] TikShortis: native, API at ${TIKSHORTIS_API}`);
 } else {
   console.log(`[grabbit] TikShortis: ${TIKSHORTIS_MODE}`);
+}
+
+// --- Grabbit 3.0 phase 2: Social & Photos over Elitogram (egram-gateway.js) -------
+// EGRAM_MODE=native draws Social & Photos in the hub and reaches Elitogram's API
+// through /api/egram/*, a gateway to EGRAM_API_URL (Elitogram on the internal
+// network). Unset or off: no module, no routes.
+const EGRAM_API = tikGateway.parseApiUrl(process.env.EGRAM_API_URL);
+if (process.env.EGRAM_API_URL && !EGRAM_API) {
+  console.warn('[grabbit] EGRAM_API_URL is not a plain http(s) origin; Social & Photos is off.');
+}
+const { mode: EGRAM_MODE, warnings: EGRAM_MODE_WARNINGS } = modules.egramMode(process.env, { apiOrigin: EGRAM_API });
+for (const w of EGRAM_MODE_WARNINGS) console.warn(`[grabbit] ${w}`);
+
+// Elitogram does not know Grabbit's classification, so the gateway drops every
+// item whose author matches a Grabbit profile classified 18+: its aliases (in
+// file-name spelling) and its account handles on any platform. Rebuilt when
+// the profile store changes. If the store cannot be read, every author counts
+// as 18+ and the module shows nothing (fail closed).
+// The read-only store is the server's cached copy once anything has loaded it;
+// before that it is read from disk, at most once a minute.
+let egramAdultNames = { store: null, set: null, at: 0 };
+function egramAdultSet() {
+  if (egramAdultNames.set && (profilesCache ? egramAdultNames.store === profilesCache : Date.now() - egramAdultNames.at < 60000)) {
+    return egramAdultNames.set;
+  }
+  const { store } = readProfilesReadOnly();
+  {
+    const set = new Set();
+    for (const p of store.profiles) {
+      if (profiles.effectiveAudience(p) !== 'adult') continue;
+      for (const a of p.aliases || []) set.add(creatorKey(a.name).toLowerCase());
+      for (const a of p.accounts || []) set.add(String(a.handle).toLowerCase());
+      if (p.origin === 'manual') set.add(creatorKey(p.name).toLowerCase());
+    }
+    egramAdultNames = { store, set, at: Date.now() };
+  }
+  return egramAdultNames.set;
+}
+function egramIsAdultHandle(handle) {
+  try {
+    const set = egramAdultSet();
+    const h = String(handle || '').toLowerCase();
+    return set.has(h) || set.has(creatorKey(h).toLowerCase());
+  } catch (e) {
+    console.warn('[egram] adult profile lookup failed:', e.message);
+    return true;
+  }
+}
+
+// Mirrors an Elitogram classification into Grabbit's profiles, so the two
+// apps agree: profiles that match the handle (alias, manual name, or an
+// egram/instagram account) are classified; without a match a manual profile
+// is created with the egram account (and the Instagram one Elitogram knows).
+// Returns { changed: [ids], created: id|null }.
+function mirrorEgramClassification(handle, aud, igHandle) {
+  const { store } = readProfiles();
+  const key = creatorKey(handle).toLowerCase();
+  const matches = [
+    ...audience.matchProfiles(store, { creatorKey: key, handle: handle.toLowerCase(), platform: 'egram' }, creatorKey),
+    ...(igHandle ? audience.matchProfiles(store, { creatorKey: '', handle: igHandle.toLowerCase(), platform: 'instagram' }, creatorKey) : []),
+  ];
+  const ids = [...new Set(matches.filter((m) => profiles.effectiveAudience(m.profile) !== aud).map((m) => m.profile.id))];
+  if (matches.length) {
+    if (!ids.length) return { changed: [], created: null };
+    const r = profiles.classifyProfiles(store, ids, aud, Date.now());
+    if (r.changed.length) saveProfiles(r.store);
+    return { changed: r.changed, created: null };
+  }
+  const accounts = [{ platform: 'egram', handle, url: null, source: 'egram' }];
+  if (igHandle) accounts.push({ platform: 'instagram', handle: igHandle, url: `https://www.instagram.com/${igHandle}/`, source: 'egram' });
+  const r = profiles.create(store, { name: handle, audience: aud, note: 'Created when classified in Social & Photos', accounts }, Date.now());
+  saveProfiles(r.store);
+  return { changed: [], created: r.profile.id };
+}
+
+if (EGRAM_MODE === 'native') {
+  const gateway = egramGateway.createGateway({
+    apiUrl: EGRAM_API,
+    secret: AUTH_SECRET,
+    isAdultHandle: egramIsAdultHandle,
+    clientIp: (req) => req.ip || '',
+  });
+  const notInternal = (req, res, next) => {
+    if (req.principal === gda.INTERNAL) return res.status(403).json({ ok: false, error: 'Not for internal callers' });
+    next();
+  };
+
+  // POST /api/egram/creators-classify { handles: [..], audience: general|adult, lane }
+  // Classifies in Elitogram and mirrors the decision into Grabbit's profiles.
+  // A handle that matches a Grabbit 18+ profile is never made general here.
+  app.post('/api/egram/creators-classify', notInternal, async (req, res) => {
+    const b = req.body || {};
+    const aud = b.audience === 'general' || b.audience === 'adult' ? b.audience : null;
+    if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+    const raw = Array.isArray(b.handles) ? b.handles : [];
+    const handles = [...new Set(raw.map((h) => String(h || '').trim().toLowerCase().replace(/^@/, '')).filter((h) => /^[a-z0-9._-]{1,60}$/.test(h)))];
+    if (!handles.length || handles.length > 200 || handles.length !== raw.length) {
+      return res.status(400).json({ ok: false, error: 'Send 1 to 200 valid handles' });
+    }
+    const site = req.headers['sec-fetch-site'];
+    if (site && site !== 'same-origin') return res.status(403).json({ ok: false, error: 'Request not from this site' });
+    const lane = b.lane === 'review' ? 'review' : 'general';
+    const refused = aud === 'general' ? handles.filter((h) => egramIsAdultHandle(h)) : [];
+    const send = handles.filter((h) => !refused.includes(h));
+    const skipped = refused.map((h) => ({ handle: h, reason: 'matches an 18+ profile in Grabbit' }));
+    const mirrored = [];
+    try {
+      if (send.length) {
+        const up = await gateway.callJson(req, 'POST', '/api/creators-classify', { handles: send, audience: aud }, lane);
+        if (!up.linked) return res.status(401).json({ ok: false, error: 'Link your Elitogram account first' });
+        if (up.status !== 200 || !up.json) {
+          const status = up.status >= 500 ? 424 : up.status;
+          return res.status(status).json({ ok: false, error: (up.json && up.json.error) || `Elitogram answered ${up.status}` });
+        }
+        skipped.push(...(up.json.skipped || []));
+        for (const h of up.json.updated || []) {
+          // The Instagram account Elitogram knows for this creator, when one is set.
+          let ig = null;
+          try {
+            const c = await gateway.callJson(req, 'GET', `/api/creators/${encodeURIComponent(h)}`, undefined, aud === 'general' ? 'general' : lane);
+            if (c.status === 200 && c.json && /^[a-z0-9._]{1,30}$/.test(String(c.json.ig_handle || ''))) ig = c.json.ig_handle;
+          } catch { /* the profile is still mirrored without it */ }
+          try {
+            mirrored.push({ handle: h, ...mirrorEgramClassification(h, aud, ig) });
+          } catch (e) {
+            mirrored.push({ handle: h, error: e.message });
+          }
+        }
+      }
+      console.log(`egram: ${mirrored.length} creator(s) classified ${aud} by hand, ${skipped.length} skipped`);
+      res.set('Cache-Control', 'no-store').json({ ok: true, audience: aud, updated: mirrored.map((m) => m.handle), mirrored, skipped });
+    } catch (e) {
+      console.warn('[egram] classify:', e.message);
+      if (!res.headersSent) res.status(424).json({ ok: false, error: 'Elitogram is not reachable right now' });
+    }
+  });
+
+  app.use('/api/egram', notInternal, (req, res) => {
+    gateway.proxy(req, res).catch((e) => {
+      console.warn('[egram] gateway error:', e.message);
+      if (!res.headersSent) res.status(424).json({ ok: false, error: 'Elitogram is not reachable right now' });
+      else res.destroy();
+    });
+  });
+  console.log(`[grabbit] Social & Photos: native, Elitogram API at ${EGRAM_API}`);
+} else {
+  console.log(`[grabbit] Social & Photos: ${EGRAM_MODE}`);
 }
 
 // --- Grabbit 2.0 hub ----------------------------------------------------------
@@ -9276,10 +9434,15 @@ async function saveImageToPosts(job, channel) {
   const partPath = path.join(dir, `.${outName}.part`);
   try {
     await downloadDirect(job, partPath);
-    fs.writeFileSync(
-      `${finalPath}.json`,
-      JSON.stringify({ description: buildCaption(job), post_shortcode: job.albumId || null })
-    );
+    if (POSTS_TO_EGRAM) {
+      const c = classifyJob(destinationOf(channel, { ...job, mediaType: 'image' }), job);
+      fs.writeFileSync(path.join(dir, `${stem}.json`), JSON.stringify(egramSidecar(job, c.audience)));
+    } else {
+      fs.writeFileSync(
+        `${finalPath}.json`,
+        JSON.stringify({ description: buildCaption(job), post_shortcode: job.albumId || null })
+      );
+    }
     fs.renameSync(partPath, finalPath);
   } catch (e) {
     fs.rm(partPath, { force: true }, () => {});
@@ -9287,6 +9450,31 @@ async function saveImageToPosts(job, channel) {
   }
   recordDrop('posts', job, outName, finalPath);
   return { path: finalPath, name: outName, creator: postsCreator(job.creator) };
+}
+
+// The sidecar Elitogram's importer reads next to <stem>.<ext>. `post_key`
+// groups an album into one carousel and makes a re-delivery a no-op
+// (Elitogram stores it as source_key grabbit:<post_key>); `audience` is the
+// item's audience as Grabbit classified it (general only by hand, 18+ sets
+// Elitogram's flag); `meta` is shown on the post.
+function egramSidecar(job, aud) {
+  const site = String(job.site || job.extractor || 'web').toLowerCase().replace(/[^a-z0-9.-]+/g, '').slice(0, 40) || 'web';
+  const own = job.albumId || job.mediaId || null;
+  const postKey = own ? `${site}:${String(own)}`.replace(/[^\w.:-]+/g, '_').slice(0, 200) : null;
+  const postUrl = typeof job.sourceUrl === 'string' && /^https:\/\//.test(job.sourceUrl) ? job.sourceUrl : null;
+  return {
+    source: 'grabbit',
+    caption: buildCaption(job),
+    post_url: postUrl,
+    post_key: postKey,
+    audience: aud === 'general' || aud === 'adult' ? aud : 'unknown',
+    meta: {
+      platform: site,
+      tags: Array.isArray(job.tags) ? job.tags.slice(0, 30).map((t) => String(t).slice(0, 60)) : [],
+      downloaded_at: new Date().toISOString(),
+      origin: 'grabbit',
+    },
+  };
 }
 
 // Single-image handler: save it (posts import or photos library, per dest) and
