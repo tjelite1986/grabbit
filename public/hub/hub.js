@@ -54,6 +54,7 @@
     zoomout: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6',
     fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
     menu: 'M4 6h16M4 12h16M4 18h16',
+    social: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
   };
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -197,6 +198,8 @@
     { id: 'library', label: 'Library', icon: 'tags', ownData: true, view: viewLibrary },
     // Native (Grabbit 3.0, public/hub/tik/) or framed (2.2), from TIKSHORTIS_MODE.
     { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed() || tikIsNative(), view: viewTikshortisPage, subnav: () => (tikIsNative() ? tikNative.subnav(route()) : null) },
+    // Grabbit 3.0 phase 2 (public/hub/social/), from EGRAM_MODE. General only.
+    { id: 'social', label: 'Social & Photos', icon: 'social', ownData: true, show: () => socialOn(), view: viewSocialPage, subnav: () => (socialOn() ? socialNative.subnav(route()) : null) },
     // Listed only when the server has the 18+ app's library mounted.
     { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
     // Listed only when the server has the 18+ film library mounted.
@@ -258,7 +261,8 @@
       box.replaceChildren(...(items || []).map((i) => h('a', { href: i.href, 'aria-current': i.current ? 'page' : null }, i.label)));
     }
     const native = cur === 'tikshortis' && tikIsNative();
-    $('#searchInput').placeholder = native ? 'Search TikShortis tags and creators' : 'Search media and creators';
+    const social = cur === 'social' && socialOn();
+    $('#searchInput').placeholder = native ? 'Search TikShortis tags and creators' : social ? 'Search Social & Photos' : 'Search media and creators';
   }
   // The route without the viewer's `open` parameter.
   function pageKey() {
@@ -272,6 +276,7 @@
     // A module page stops its players, observers and timers before the view
     // under it is replaced (also when it is redrawn in place).
     if (tikNative) tikNative.leave();
+    if (socialNative) socialNative.leave();
     renderedKey = pageKey();
     const r = route();
     const view = $('#view');
@@ -282,6 +287,7 @@
     const native = r.id === 'tikshortis' && tikIsNative();
     document.body.classList.toggle('embed-page', r.id === 'tikshortis' && !native);
     document.body.classList.toggle('tik-page', native);
+    document.body.classList.toggle('sg-page', r.id === 'social' && socialOn());
     updateNav();
     if (focus) {
       view.focus({ preventScroll: true });
@@ -1051,6 +1057,32 @@
   const tikIsNative = () => !!(tikNative && state.config && state.config.tikshortisMode === 'native');
   function viewTikshortisPage(params, r) {
     return tikIsNative() ? tikNative.view(r) : viewTikshortis(params);
+  }
+
+  // --- Social & Photos (Grabbit 3.0 phase 2) ---------------------------------
+  // public/hub/social/social.js draws Elitogram's general posts and photos from
+  // /api/egram/* (the gateway). EGRAM_MODE=native turns it on.
+  const socialDef = (window.GrabbitModules || []).find((m) => m && m.id === 'social');
+  const socialNative = (() => {
+    if (!socialDef) return null;
+    try {
+      return socialDef.create({
+        h, icon, api, toast, num, ago, bytes, $,
+        route,
+        rerender: () => { if (route().id === 'social') render(false); },
+      });
+    } catch (e) {
+      console.error('Social & Photos module failed to start', e);
+      return null;
+    }
+  })();
+  const socialOn = () => {
+    const m = state.config && (state.config.modules || []).find((x) => x.id === 'social');
+    return !!(socialNative && m && m.enabled && m.mode === 'native');
+  };
+  function viewSocialPage(params, r) {
+    if (socialOn()) return socialNative.view(r);
+    return [h('h1', null, 'Social & Photos'), h('p', { class: 'empty' }, state.config ? 'Social & Photos is off on this server (EGRAM_MODE is not native).' : 'Loading ...')];
   }
 
   function viewTikshortis(params) {
@@ -3237,21 +3269,24 @@
   // end it upstream; do that first, then sign out as before (a TikShortis that
   // does not answer within two seconds does not hold up the sign-out).
   const logoutForm = document.querySelector('form.logout');
+  // Social & Photos' Elitogram session ends the same way.
   if (logoutForm) logoutForm.addEventListener('submit', (e) => {
-    if (!tikIsNative() || logoutForm.dataset.tikDone) return;
+    if ((!tikIsNative() && !socialOn()) || logoutForm.dataset.tikDone) return;
     e.preventDefault();
     logoutForm.dataset.tikDone = '1';
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 2000);
-    fetch('/api/tik/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal })
-      .catch(() => {})
-      .finally(() => { clearTimeout(timer); logoutForm.submit(); });
+    const ends = [];
+    if (tikIsNative()) ends.push(fetch('/api/tik/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
+    if (socialOn()) ends.push(fetch('/api/egram/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
+    Promise.all(ends).finally(() => { clearTimeout(timer); logoutForm.submit(); });
   });
 
   $('#searchForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const q = $('#searchInput').value.trim();
     if (route().id === 'tikshortis' && tikIsNative()) location.hash = `#/tikshortis/search${q ? `?q=${encodeURIComponent(q)}` : ''}`;
+    else if (route().id === 'social' && socialOn()) location.hash = socialNative.searchHash(q);
     else location.hash = q ? `#/media?q=${encodeURIComponent(q)}` : '#/media';
   });
   document.addEventListener('keydown', (e) => {
@@ -3279,6 +3314,7 @@
     // The native page is drawn once the config says native, then redraws itself.
     if (route().id === 'tikshortis' && !document.querySelector('.tik-frame, .tik-root')) render(false);
     else if (route().id === 'tikshortis') updateNav();
+    else if (route().id === 'social' && !document.querySelector('.sg-root')) render(false);
     else if (route().ownData) updateNav();
     else render(false);
   }

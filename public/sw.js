@@ -9,7 +9,8 @@
 // v10: the native TikShortis pages (public/hub/tik/) joined the hub shell.
 // v11: Grabbit 3.0.1 restyled the TikShortis player and the hub's menu.
 // v12: Grabbit 3.0.2 (For You resume, sheets above the keyboard).
-const CACHE = 'grabbit-v12';
+// v13: Grabbit 3.0 phase 2, the Social & Photos pages (public/hub/social/).
+const CACHE = 'grabbit-v13';
 const SHELL = [
   '/',
   '/classic/',
@@ -17,6 +18,8 @@ const SHELL = [
   '/hub/hub.css',
   '/hub/tik/tik.js',
   '/hub/tik/tik.css',
+  '/hub/social/social.js',
+  '/hub/social/social.css',
   '/manifest.webmanifest',
   '/favicon-32.png?v=2',
   '/icon-192.png?v=2',

@@ -95,7 +95,8 @@ test('hub.js passes the menu hooks to the module and tik.js calls them', () => {
 
 test('version labels and the service worker cache name moved to 3.0.2', () => {
   assert.match(read('hub/index.html'), /<span id="version">v3\.0\.2<\/span>/);
-  assert.match(read('sw.js'), /const CACHE = 'grabbit-v12';/);
+  // Phase 2 added the Social & Photos files to the shell, so the cache moved on.
+  assert.match(read('sw.js'), /const CACHE = 'grabbit-v13';/);
 });
 
 test('3.0.2: sheets ride on top of the on-screen keyboard (visualViewport)', () => {
