@@ -3250,6 +3250,7 @@ let profilesCache = null;
 // quarantine of a damaged file. Throws when the file cannot be used, and the
 // caller then fails closed.
 function readProfilesReadOnly() {
+  if (profilesDamaged) throw new Error(profilesDamaged);
   if (profilesCache) return { store: profilesCache };
   let raw = null;
   try {
@@ -3262,8 +3263,36 @@ function readProfilesReadOnly() {
   }
   return { store: profiles.normalizeStore(raw === null ? null : JSON.parse(raw)) };
 }
+// Set when profiles.json was damaged and no snapshot restored it. Every read
+// then fails, so the adult filter that depends on the store fails closed until
+// the owner repairs the kept file and restarts.
+let profilesDamaged = null;
+// The store, cached only once it is known good: a missing file (fresh install),
+// a file that parses, or one restored from a snapshot. An unreadable file
+// (EACCES, EIO, ...) is thrown and not cached, so no caller, including the
+// egram gateway that shares the cache, ever sees an empty stand-in.
+function loadProfilesStore() {
+  if (profilesDamaged) throw new Error(profilesDamaged);
+  let raw;
+  try {
+    raw = fs.readFileSync(PROFILES_FILE, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return profiles.normalizeStore(null);
+    throw e;
+  }
+  try {
+    return profiles.normalizeStore(JSON.parse(raw));
+  } catch { /* damaged: quarantine and restore below */ }
+  const unrestored = Symbol('unrestored');
+  const restored = readJsonState(PROFILES_FILE, unrestored);
+  if (restored === unrestored) {
+    profilesDamaged = 'profiles.json is damaged and no snapshot restored it; repair the kept .corrupt file and restart';
+    throw new Error(profilesDamaged);
+  }
+  return profiles.normalizeStore(restored);
+}
 function readProfiles() {
-  if (!profilesCache) profilesCache = profiles.normalizeStore(readJsonState(PROFILES_FILE, null));
+  if (!profilesCache) profilesCache = loadProfilesStore();
   const stats = profiles.aliasStats(readDownloaded());
   const synced = profiles.sync(profilesCache, stats, Date.now());
   if (synced.added) saveProfiles(synced.store);
@@ -9527,12 +9556,20 @@ async function saveImageToPosts(job, channel) {
   // name never write to one path.
   const partPath = path.join(dir, `.${outName}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   const sidecarPath = POSTS_TO_EGRAM ? path.join(dir, `${stem}.json`) : `${finalPath}.json`;
+  let published = outName;
   try {
     await downloadDirect(job, partPath);
     // Publishing a name (existence check, sidecar, image) is one step per name:
     // a concurrent save of the same name waits, then finds the image there.
-    await withPostsNameLock(finalPath, () => {
-      if (fs.existsSync(finalPath)) return;
+    // Elitogram mode keys the sidecar by stem (`<stem>.json`), so the stem is
+    // the name there: a save as `.webp` must not replace the metadata of a
+    // `.jpg` already published under the same stem.
+    await withPostsNameLock(POSTS_TO_EGRAM ? sidecarPath : finalPath, () => {
+      const existing = POSTS_TO_EGRAM ? postsStemImage(dir, stem) : fs.existsSync(finalPath) ? outName : null;
+      if (existing) {
+        published = existing;
+        return;
+      }
       // The creator may have been classified 18+ while the picture downloaded:
       // judge it again before anything becomes visible to an importer.
       const dest = destinationOf(channel, { ...job, mediaType: 'image' });
@@ -9544,16 +9581,28 @@ async function saveImageToPosts(job, channel) {
       try {
         fs.renameSync(partPath, finalPath);
       } catch (e) {
-        // This attempt wrote the sidecar and holds the lock, so it is ours to remove.
-        if (!fs.existsSync(finalPath)) fs.rmSync(sidecarPath, { force: true });
+        // This attempt wrote the sidecar and holds the lock, so it is ours to
+        // remove, unless an image under the stem is there after all.
+        if (!fs.existsSync(finalPath) && !(POSTS_TO_EGRAM && postsStemImage(dir, stem))) fs.rmSync(sidecarPath, { force: true });
         throw e;
       }
     });
   } finally {
     fs.rmSync(partPath, { force: true });
   }
-  recordDrop('posts', job, outName, finalPath);
-  return { path: finalPath, name: outName, creator: postsCreator(job.creator) };
+  const publishedPath = path.join(dir, published);
+  recordDrop('posts', job, published, publishedPath);
+  return { path: publishedPath, name: published, creator: postsCreator(job.creator) };
+}
+
+// The image already published under a stem in a posts drop folder, whatever
+// its extension (sidecars, dotfiles and staged parts are not images).
+function postsStemImage(dir, stem) {
+  try {
+    return fs.readdirSync(dir).find((f) => f.startsWith(`${stem}.`) && f !== `${stem}.json` && !f.endsWith('.json') && !f.startsWith('.')) || null;
+  } catch {
+    return null;
+  }
 }
 
 // One publication at a time per posts drop name (see saveImageToPosts).

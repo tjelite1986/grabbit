@@ -249,6 +249,11 @@ test('reads below a post and writes to it need the post itself to pass', async (
   handlers['/api/posts/7'] = json(200, { id: 7, caption: '', media: [], audience: 'general' });
   assert.equal((await call('POST', '/api/egram/api/collections/1/items', { body: { post_id: 7 } })).status, 404);
   assert.equal((await call('POST', '/api/egram/api/collections/1/items', { body: { post_id: 'x' } })).status, 400);
+  // Removing a saved post from a collection is judged on the post (the second id), not the collection.
+  handlers['DELETE /api/collections/1/items/6'] = json(200, { ok: true });
+  const del = seen.length;
+  assert.equal((await call('DELETE', '/api/egram/api/collections/1/items/6')).status, 404);
+  assert.ok(seen.slice(del).every((q) => q.method === 'GET' && q.url === '/api/posts/6'));
   adultSet = new Set();
 });
 

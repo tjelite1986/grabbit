@@ -98,7 +98,7 @@ function laneOf(req) {
 //   picture an avatar or banner ('creator' or 'user'): may be Elitogram's generated SVG
 //   body    the JSON keys a write may carry; everything else is dropped
 //   parent  the post this request reads below or writes to ('path': the first
-//           id in the path, 'body': post_id). The gateway first fetches that
+//           id in the path, 'path2': the second, 'body': post_id). The gateway first fetches that
 //           post in the lane and passes the request on only if the post itself
 //           would be passed back; a comment or a like never carries enough to
 //           be judged on its own.
@@ -137,7 +137,7 @@ const ROUTES = [
   r('DELETE', `api/collections/${ID}`),
   r('GET', `api/collections/${ID}/posts`),
   r('POST', `api/collections/${ID}/items`, { body: ['post_id'], parent: 'body' }),
-  r('DELETE', `api/collections/${ID}/items/${ID}`),
+  r('DELETE', `api/collections/${ID}/items/${ID}`, { parent: 'path2' }),
   r('GET', `api/posts/${ID}/collections`, { parent: 'path' }),
   r('POST', `api/posts/${ID}/favorite`, { parent: 'path' }),
   r('DELETE', `api/posts/${ID}/favorite`, { parent: 'path' }),
@@ -448,7 +448,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       return fail(res, 400, 'audience must be general, unknown or adult');
     }
     if (route.parent) {
-      const pid = route.parent === 'body' ? src.post_id : Number(route.p.exec(rest)[1]);
+      const pid = route.parent === 'body' ? src.post_id : Number(route.p.exec(rest)[route.parent === 'path2' ? 2 : 1]);
       if (!Number.isInteger(pid) || pid < 1) return fail(res, 400, 'A post id is required');
       let verdict;
       try { verdict = await parentVerdict(req, cur, lane, pid); } catch (e) {

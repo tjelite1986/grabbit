@@ -300,6 +300,9 @@ test('an unreadable profile store on a cold start hides every author instead of 
   });
   assert.equal(link.status, 200);
   const eg = (link.headers.getSetCookie() || []).map((v) => v.split(';')[0]).find((v) => v.startsWith('grabbit_egram='));
+  // A hub read of the store fails too, and must not leave an empty store cached for the gateway.
+  const hub = await fetch(`${s.base}/api/hub/profiles`, { headers: { Cookie: a, 'Sec-Fetch-Site': 'same-origin' } });
+  assert.equal(hub.status, 500);
   const feed = await (await fetch(`${s.base}/api/egram/api/feed`, { headers: { Cookie: `${a}; ${eg}`, 'Sec-Fetch-Site': 'same-origin' } })).json();
   assert.deepEqual(feed.items, []);
 });
