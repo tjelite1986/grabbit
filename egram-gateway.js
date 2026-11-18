@@ -97,7 +97,14 @@ function laneOf(req) {
 //   media   piped as it comes, Range passed through
 //   picture an avatar or banner ('creator' or 'user'): may be Elitogram's generated SVG
 //   body    the JSON keys a write may carry; everything else is dropped
+//   parent  the post this request reads below or writes to ('path': the first
+//           id in the path, 'body': post_id). The gateway first fetches that
+//           post in the lane and passes the request on only if the post itself
+//           would be passed back; a comment or a like never carries enough to
+//           be judged on its own.
 const ID = '(\\d{1,12})';
+// What a post's audience may be set to through the gateway (PATCH api/posts/:id).
+const AUDIENCE_WRITES = ['general', 'unknown', 'adult'];
 const HANDLE = '([a-z0-9._~-]{1,100})';
 const TAG = '([^/?#]{1,100})';
 const r = (m, path, opts = {}) => ({ m, p: new RegExp(`^${path}$`), ...opts });
@@ -110,11 +117,11 @@ const ROUTES = [
   r('GET', 'api/hashtags'),
   r('GET', `api/hashtags/${TAG}`),
   r('GET', `api/posts/${ID}`),
-  r('PATCH', `api/posts/${ID}`, { body: ['audience'] }),
-  r('POST', `api/posts/${ID}/like`),
-  r('DELETE', `api/posts/${ID}/like`),
-  r('GET', `api/posts/${ID}/comments`),
-  r('POST', `api/posts/${ID}/comments`, { body: ['body'] }),
+  r('PATCH', `api/posts/${ID}`, { body: ['audience'], parent: 'path' }),
+  r('POST', `api/posts/${ID}/like`, { parent: 'path' }),
+  r('DELETE', `api/posts/${ID}/like`, { parent: 'path' }),
+  r('GET', `api/posts/${ID}/comments`, { parent: 'path' }),
+  r('POST', `api/posts/${ID}/comments`, { body: ['body'], parent: 'path' }),
   // Creators
   r('GET', 'api/creators'),
   r('GET', `api/creators/${HANDLE}`),
@@ -129,13 +136,13 @@ const ROUTES = [
   r('PATCH', `api/collections/${ID}`, { body: ['name'] }),
   r('DELETE', `api/collections/${ID}`),
   r('GET', `api/collections/${ID}/posts`),
-  r('POST', `api/collections/${ID}/items`, { body: ['post_id'] }),
+  r('POST', `api/collections/${ID}/items`, { body: ['post_id'], parent: 'body' }),
   r('DELETE', `api/collections/${ID}/items/${ID}`),
-  r('GET', `api/posts/${ID}/collections`),
-  r('POST', `api/posts/${ID}/favorite`),
-  r('DELETE', `api/posts/${ID}/favorite`),
+  r('GET', `api/posts/${ID}/collections`, { parent: 'path' }),
+  r('POST', `api/posts/${ID}/favorite`, { parent: 'path' }),
+  r('DELETE', `api/posts/${ID}/favorite`, { parent: 'path' }),
   r('GET', 'api/favorites'),
-  r('POST', `api/posts/${ID}/view`),
+  r('POST', `api/posts/${ID}/view`, { parent: 'path' }),
   r('GET', 'api/history'),
   r('DELETE', 'api/history'),
   // Media
@@ -179,6 +186,8 @@ function allowedItem(o, want, isAdultHandle) {
   // else that names an audience must name that one too.
   if (shaped ? o.audience !== want : 'audience' in o && o.audience !== want) return false;
   const h = authorHandle(o);
+  // A post, tile, photo or creator must say whose it is, or it cannot be checked.
+  if (shaped && !h) return false;
   if (h && isAdultHandle && isAdultHandle(h)) return false;
   return true;
 }
@@ -235,11 +244,14 @@ function allowedType(ct, route) {
 //     and names the lane's audience and the creator. Elitogram answers a
 //     creator outside the scope with an unlabelled neutral picture, which the
 //     gateway replaces with its own;
-//   - an account's avatar says it is one (X-Egram-Picture: user).
+//   - an account's avatar says it is one (X-Egram-Picture: user) and is the
+//     generated initials picture; an uploaded account picture is not passed.
 // The creator must not be 18+ in Grabbit. Applies to 200, 206 and 304 alike.
 function mediaAllowed(route, headers, want, isAdultHandle) {
   const one = (k) => (typeof headers[k] === 'string' ? headers[k] : null);
-  if (route.picture === 'user') return one('x-egram-picture') === 'user';
+  // An account's own upload says nothing about its audience, so only the
+  // generated initials (SVG) pass; an uploaded account picture is replaced.
+  if (route.picture === 'user') return one('x-egram-picture') === 'user' && /^image\/svg\+xml\b/i.test(one('content-type') || '');
   if (route.picture && one('x-egram-picture') !== 'creator') return false;
   if (one('x-egram-audience') !== want) return false;
   const creator = one('x-egram-creator');
@@ -256,7 +268,10 @@ const PASS_HEADERS = ['content-type', 'content-length', 'content-range', 'accept
 
 // --- The gateway ---------------------------------------------------------------
 
-function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) => req.ip || '', log = console, timeoutMs = 30000 }) {
+// bindingOf(req): a value tied to the caller's Grabbit sign-in. The sealed link
+// carries it and is honoured only alongside the same sign-in, so a link cookie
+// planted from a sibling domain (possible over plain HTTP) is worthless.
+function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () => '', clientIp = (req) => req.ip || '', log = console, timeoutMs = 30000 }) {
   const origin = parseApiUrl(apiUrl);
   if (!origin) throw new Error('EGRAM_API_URL is not a plain http(s) origin');
   const up = new URL(origin);
@@ -321,7 +336,10 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
     return req.method === 'GET' || req.method === 'HEAD';
   }
 
-  const sessionOf = (req) => unseal(secret, sessionCookieOf(req));
+  const sessionOf = (req) => {
+    const s = unseal(secret, sessionCookieOf(req));
+    return s && (s.b || '') === String(bindingOf(req) || '') ? s : null;
+  };
   const authHeaders = (cur, lane) => ({ 'x-egram-audience': LANES[lane], ...(cur ? { cookie: `${UPSTREAM_COOKIE}=${cur.t}` } : {}) });
 
   // One JSON call for Grabbit's own routes (classification): scoped and
@@ -381,7 +399,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
           return fail(res, status, (d && d.error) || 'Elitogram refused the sign-in');
         }
         const exp = Date.now() + SESSION_DAYS * 86400000;
-        res.setHeader('Set-Cookie', cookieHeader(req, seal(secret, { t: token[1], exp }), SESSION_DAYS * 86400));
+        res.setHeader('Set-Cookie', cookieHeader(req, seal(secret, { t: token[1], exp, b: String(bindingOf(req) || '') }), SESSION_DAYS * 86400));
         return res.set('Cache-Control', 'no-store').json({ ok: true, linked: true });
       }
       if (req.method === 'DELETE') {
@@ -400,6 +418,16 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
     }
   }
 
+  // Would the post `id` be passed back in this lane? -> true | false | 401
+  async function parentVerdict(req, cur, lane, id) {
+    const r = await upstream(req, { method: 'GET', path: `/api/posts/${id}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
+    if (r.statusCode === 401) { r.resume(); return 401; }
+    if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
+    const d = await readJson(r);
+    const { value, dropped } = filterAnswer(d, LANES[lane], isAdultHandle);
+    return value !== null && dropped === 0 && value.audience === LANES[lane];
+  }
+
   async function proxy(req, res) {
     const rest = req.path.replace(/^\/+/, '');
     if (rest === 'session') return session(req, res);
@@ -415,9 +443,23 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
     if (route.media && req.headers.range) headers.range = req.headers.range;
     for (const k of ['if-none-match', 'if-modified-since']) if (req.headers[k]) headers[k] = req.headers[k];
     let body = null;
+    const src = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    if ('audience' in src && (route.body || []).includes('audience') && !AUDIENCE_WRITES.includes(src.audience)) {
+      return fail(res, 400, 'audience must be general, unknown or adult');
+    }
+    if (route.parent) {
+      const pid = route.parent === 'body' ? src.post_id : Number(route.p.exec(rest)[1]);
+      if (!Number.isInteger(pid) || pid < 1) return fail(res, 400, 'A post id is required');
+      let verdict;
+      try { verdict = await parentVerdict(req, cur, lane, pid); } catch (e) {
+        log.warn(`[egram] parent check ${rest}: ${e.message}`);
+        return fail(res, 424, 'Elitogram is not reachable right now');
+      }
+      if (verdict === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
+      if (verdict !== true) return fail(res, 404, 'Not found');
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       // Writes carry only the keys this route needs, re-encoded by the gateway.
-      const src = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
       const out = {};
       for (const k of route.body || []) if (k in src) out[k] = src[k];
       body = JSON.stringify(out);

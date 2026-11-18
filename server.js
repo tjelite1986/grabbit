@@ -1590,7 +1590,8 @@ app.use((req, res, next) => {
   if (req.path === '/api/health/release' && (req.method === 'GET' || req.method === 'HEAD')) return next();
   // Refused before the session is consulted: a cross-site caller must not be
   // able to act as the signed-in user just because the cookie came along.
-  if (req.path.startsWith('/api/') && isCrossSite(req)) {
+  // Express routes ignore case, so this check must too (/API/... reaches /api/...).
+  if (req.path.toLowerCase().startsWith('/api/') && isCrossSite(req)) {
     return res.status(403).json({ ok: false, error: 'Cross-site request blocked' });
   }
   const who = principalOf(req);
@@ -3071,8 +3072,22 @@ if (EGRAM_MODE === 'native') {
     apiUrl: EGRAM_API,
     secret: AUTH_SECRET,
     isAdultHandle: egramIsAdultHandle,
+    // The Elitogram link is bound to this Grabbit sign-in (a hash, never the cookie itself).
+    bindingOf: (req) => crypto.createHash('sha256').update(`egram-link|${parseCookies(req.headers.cookie)[AUTH_COOKIE] || ''}`).digest('base64url').slice(0, 22),
     clientIp: (req) => req.ip || '',
   });
+  // Writes to Grabbit's own egram routes: Sec-Fetch-Site must say same-origin
+  // when present; otherwise an Origin or Referer on this host is required.
+  const egramWriteFromOwnPage = (req) => {
+    const site = req.headers['sec-fetch-site'];
+    if (site) return site === 'same-origin';
+    const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+    for (const v of [req.headers.origin, req.headers.referer]) {
+      if (!v || v === 'null') continue;
+      try { return !!host && new URL(v).host.toLowerCase() === host; } catch { return false; }
+    }
+    return false;
+  };
   const notInternal = (req, res, next) => {
     if (req.principal === gda.INTERNAL) return res.status(403).json({ ok: false, error: 'Not for internal callers' });
     next();
@@ -3083,7 +3098,8 @@ if (EGRAM_MODE === 'native') {
   async function egramCreatorOf(req, handle) {
     for (const lane of ['review', 'general']) {
       const c = await gateway.callJson(req, 'GET', `/api/creators/${encodeURIComponent(handle)}`, undefined, lane);
-      if (!c.linked) return { linked: false };
+      // A revoked Elitogram session answers 401: that is "relink", not "creator missing".
+      if (!c.linked || c.status === 401) return { linked: false };
       if (c.status === 200 && c.json && typeof c.json.handle === 'string' && !c.json.out_of_scope) return { linked: true, creator: c.json };
       if (c.status >= 500) throw new Error(`Elitogram answered ${c.status}`);
     }
@@ -3111,22 +3127,31 @@ if (EGRAM_MODE === 'native') {
       }
       const handles = [...new Set(raw.map((h) => h.trim().toLowerCase().replace(/^@/, '')).filter((h) => /^[a-z0-9._-]{1,60}$/.test(h)))];
       if (handles.length !== raw.length) return res.status(400).json({ ok: false, error: 'Send 1 to 200 valid handles' });
-      const site = req.headers['sec-fetch-site'];
-      if (site && site !== 'same-origin') return res.status(403).json({ ok: false, error: 'Request not from this site' });
+      // A write: it must come from one of Grabbit's own pages. With Fetch Metadata
+      // that is Sec-Fetch-Site: same-origin; without it, an Origin (or Referer)
+      // on this host. A request with neither is refused, unlike a read.
+      if (!egramWriteFromOwnPage(req)) return res.status(403).json({ ok: false, error: 'Request not from this site' });
       const lane = b.lane === 'review' ? 'review' : 'general';
 
-      const send = [];
+      let send = [];
       const skipped = [];
       const igOf = new Map();
+      const creatorOf = new Map();
       for (const h of handles) {
         const r = await egramCreatorOf(req, h);
-        if (!r.linked) return res.status(401).json({ ok: false, error: 'Link your Elitogram account first' });
+        if (!r.linked) return res.status(401).json({ ok: false, error: 'Link your Elitogram account first', relink: true });
         igOf.set(h, egramIgOf(r.creator));
-        if (aud === 'general') {
-          if (!r.creator) { skipped.push({ handle: h, reason: 'not found in Elitogram' }); continue; }
-          if (egramNamesOf(h, r.creator).some((n) => egramIsAdultHandle(n))) { skipped.push({ handle: h, reason: 'matches an 18+ profile in Grabbit' }); continue; }
-        }
+        creatorOf.set(h, r.creator);
+        if (aud === 'general' && !r.creator) { skipped.push({ handle: h, reason: 'not found in Elitogram' }); continue; }
         send.push(h);
+      }
+      // Checked against Grabbit's 18+ profiles as they are now, after every lookup
+      // above has finished: a creator marked 18+ while a later lookup was pending
+      // is not promoted. Nothing awaits between this check and the dispatch.
+      if (aud === 'general') {
+        const adult = new Set(send.filter((h) => egramNamesOf(h, creatorOf.get(h)).some((n) => egramIsAdultHandle(n))));
+        for (const h of adult) skipped.push({ handle: h, reason: 'matches an 18+ profile in Grabbit' });
+        send = send.filter((h) => !adult.has(h));
       }
       const mirrored = [];
       if (send.length) {
@@ -3146,8 +3171,19 @@ if (EGRAM_MODE === 'native') {
           }
         }
       }
-      console.log(`egram: ${mirrored.length} creator(s) classified ${aud} by hand, ${skipped.length} skipped`);
-      res.set('Cache-Control', 'no-store').json({ ok: true, audience: aud, updated: mirrored.map((m) => m.handle), mirrored, skipped });
+      // Elitogram accepted these; a failed local mirror is reported apart, so the
+      // two apps never silently disagree. Classifying again retries the mirror.
+      const failed = mirrored.filter((m) => m.error);
+      for (const m of failed) console.warn(`[egram] classified ${m.handle} ${aud} in Elitogram but not in Grabbit's profiles: ${m.error}`);
+      console.log(`egram: ${mirrored.length - failed.length} creator(s) classified ${aud} by hand, ${failed.length} not mirrored, ${skipped.length} skipped`);
+      res.set('Cache-Control', 'no-store').json({
+        ok: true,
+        audience: aud,
+        updated: mirrored.filter((m) => !m.error).map((m) => m.handle),
+        mirror_failed: failed.map((m) => ({ handle: m.handle, error: 'Saved in Elitogram, but Grabbit could not record it. Classify again to retry.' })),
+        mirrored: mirrored.filter((m) => !m.error),
+        skipped,
+      });
     } catch (e) {
       console.warn('[egram] classify:', e.message);
       if (!res.headersSent) res.status(424).json({ ok: false, error: 'Elitogram is not reachable right now' });
@@ -9487,34 +9523,61 @@ async function saveImageToPosts(job, channel) {
   assertDeliverable(destinationOf(channel, { ...job, mediaType: 'image' }), job);
   makeDropDir(dir);
   const finalPath = path.join(dir, outName);
-  const partPath = path.join(dir, `.${outName}.part`);
+  // Each attempt downloads into its own staged file, so two saves of the same
+  // name never write to one path.
+  const partPath = path.join(dir, `.${outName}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   const sidecarPath = POSTS_TO_EGRAM ? path.join(dir, `${stem}.json`) : `${finalPath}.json`;
-  let sidecarWritten = false;
   try {
     await downloadDirect(job, partPath);
-    // The creator may have been classified 18+ while the picture downloaded:
-    // judge it again before anything becomes visible to an importer.
-    const dest = destinationOf(channel, { ...job, mediaType: 'image' });
-    assertDeliverable(dest, job);
-    const sidecar = POSTS_TO_EGRAM
-      ? egramSidecar(job, classifyJob(dest, job).audience)
-      : { description: buildCaption(job), post_shortcode: job.albumId || null };
-    writeDropSidecar(sidecarPath, sidecar);
-    sidecarWritten = true;
-    fs.renameSync(partPath, finalPath);
-  } catch (e) {
+    // Publishing a name (existence check, sidecar, image) is one step per name:
+    // a concurrent save of the same name waits, then finds the image there.
+    await withPostsNameLock(finalPath, () => {
+      if (fs.existsSync(finalPath)) return;
+      // The creator may have been classified 18+ while the picture downloaded:
+      // judge it again before anything becomes visible to an importer.
+      const dest = destinationOf(channel, { ...job, mediaType: 'image' });
+      assertDeliverable(dest, job);
+      const sidecar = POSTS_TO_EGRAM
+        ? egramSidecar(job, classifyJob(dest, job).audience)
+        : { description: buildCaption(job), post_shortcode: job.albumId || null };
+      writeDropSidecar(sidecarPath, sidecar);
+      try {
+        fs.renameSync(partPath, finalPath);
+      } catch (e) {
+        // This attempt wrote the sidecar and holds the lock, so it is ours to remove.
+        if (!fs.existsSync(finalPath)) fs.rmSync(sidecarPath, { force: true });
+        throw e;
+      }
+    });
+  } finally {
     fs.rmSync(partPath, { force: true });
-    if (sidecarWritten) fs.rmSync(sidecarPath, { force: true });
-    throw e;
   }
   recordDrop('posts', job, outName, finalPath);
   return { path: finalPath, name: outName, creator: postsCreator(job.creator) };
 }
 
+// One publication at a time per posts drop name (see saveImageToPosts).
+const postsNameLocks = new Map();
+async function withPostsNameLock(name, fn) {
+  const prev = postsNameLocks.get(name) || Promise.resolve();
+  let release;
+  const mine = new Promise((r) => { release = r; });
+  const tail = prev.then(() => mine);
+  postsNameLocks.set(name, tail);
+  await prev;
+  try {
+    return fn();
+  } finally {
+    release();
+    if (postsNameLocks.get(name) === tail) postsNameLocks.delete(name);
+  }
+}
+
 // A drop sidecar, written whole or not at all: a dot-named temp file (both
-// importers skip dotfiles), fsynced, then renamed into place.
+// importers skip dotfiles), fsynced, then renamed into place. The temp name is
+// unique per write, so two writers never share it.
 function writeDropSidecar(file, value) {
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp-${process.pid}`);
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   try {
     const fd = fs.openSync(tmp, 'w');
     try {

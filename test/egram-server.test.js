@@ -227,10 +227,27 @@ test('classify: general is refused before the write for a creator 18+ in Grabbit
   assert.equal(r.status, 200, JSON.stringify(d));
   assert.deepEqual(d.updated, []);
   assert.deepEqual(d.skipped, [
-    { handle: 'shady', reason: 'matches an 18+ profile in Grabbit' },
     { handle: 'ghost', reason: 'not found in Elitogram' },
+    { handle: 'shady', reason: 'matches an 18+ profile in Grabbit' },
   ]);
   assert.equal(upSeen.filter((x) => x.url === '/api/creators-classify').length, before, 'nothing written upstream');
+});
+
+test('classify: a write without Fetch Metadata needs an Origin on this host', async () => {
+  const headers = hub({ 'Content-Type': 'application/json' });
+  delete headers['Sec-Fetch-Site'];
+  delete headers['sec-fetch-site'];
+  delete headers.Origin;
+  delete headers.origin;
+  const r = await fetch(`${native.base}/api/egram/creators-classify`, { method: 'POST', headers, body: JSON.stringify({ handles: ['linky'], audience: 'adult' }) });
+  assert.equal(r.status, 403);
+  // The cross-site check covers every spelling Express routes.
+  const r2 = await fetch(`${native.base}/API/egram/creators-classify`, {
+    method: 'POST',
+    headers: { ...headers, Origin: 'https://evil.example.com' },
+    body: JSON.stringify({ handles: ['linky'], audience: 'adult' }),
+  });
+  assert.equal(r2.status, 403);
 });
 
 test('classify: a profile found only by Instagram gets the egram account', async () => {

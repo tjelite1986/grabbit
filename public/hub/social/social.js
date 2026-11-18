@@ -704,7 +704,8 @@
           const d = await r.json().catch(() => null);
           if (!r.ok || !d || d.ok === false) throw new Error((d && d.error) || `HTTP ${r.status}`);
           const skipped = (d.skipped || []).length;
-          say(`${d.updated.length} classified ${aud === 'adult' ? '18+' : 'general'}${skipped ? `, ${skipped} skipped` : ''}`);
+          const unsaved = (d.mirror_failed || []).length;
+          say(`${d.updated.length} classified ${aud === 'adult' ? '18+' : 'general'}${skipped ? `, ${skipped} skipped` : ''}${unsaved ? `, ${unsaved} not saved in Grabbit (try again)` : ''}`);
           if (after) after(d);
         } catch (err) { fail(err); } finally { btn.disabled = false; }
       };

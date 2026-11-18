@@ -45,7 +45,7 @@ const quietLog = { warn: (m) => warnings.push(m), log() {}, error() {} };
 test.before(async () => {
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   upBase = `http://127.0.0.1:${upstream.address().port}`;
-  const g = gw.createGateway({ apiUrl: upBase, secret: SECRET, isAdultHandle: (h) => { if (h === 'boom') throw new Error('lookup failed'); return adultSet.has(String(h).toLowerCase()); }, log: quietLog, timeoutMs: 5000 });
+  const g = gw.createGateway({ apiUrl: upBase, secret: SECRET, isAdultHandle: (h) => { if (h === 'boom') throw new Error('lookup failed'); return adultSet.has(String(h).toLowerCase()); }, bindingOf: (req) => req.headers['x-test-signin'] || '', log: quietLog, timeoutMs: 5000 });
   const app = express();
   app.use(express.json());
   app.use('/api/egram', (req, res) => {
@@ -175,7 +175,10 @@ test('media: audience and creator headers decide, and a missing one refuses', ()
   assert.equal(gw.mediaAllowed(pic, { ...cp, 'x-egram-creator': 'evil' }, 'general', evil), false);
   assert.equal(gw.mediaAllowed(pic, { 'x-egram-picture': 'creator', 'x-egram-audience': 'general' }, 'general', null), false, 'no creator');
   // An account's avatar must say it is one.
-  assert.equal(gw.mediaAllowed(user, { 'x-egram-picture': 'user' }, 'general', null), true);
+  assert.equal(gw.mediaAllowed(user, { 'x-egram-picture': 'user', 'content-type': 'image/svg+xml' }, 'general', null), true);
+  // An uploaded account picture says nothing about its audience: replaced.
+  assert.equal(gw.mediaAllowed(user, { 'x-egram-picture': 'user', 'content-type': 'image/jpeg' }, 'general', null), false);
+  assert.equal(gw.mediaAllowed(user, { 'x-egram-picture': 'user' }, 'general', null), false);
   assert.equal(gw.mediaAllowed(user, {}, 'general', null), false);
   assert.equal(gw.mediaAllowed(user, { 'x-egram-picture': 'creator' }, 'general', null), false);
   assert.equal(gw.allowedType('image/svg+xml', pic), true);
@@ -223,10 +226,30 @@ test('cross-site and same-site requests are refused', async () => {
 });
 
 test('a write carries only the keys its route allows', async () => {
+  handlers['/api/posts/5'] = json(200, { id: 5, caption: '', author: { handle: 'ann' }, media: [], audience: 'general' });
   handlers['PATCH /api/posts/5'] = json(200, { id: 5, out_of_scope: true, can_edit: true });
   const r = await call('PATCH', '/api/egram/api/posts/5', { body: { audience: 'general', caption: 'x', adult: false, author: { creator: 'z' } } });
   assert.equal(r.status, 200);
   assert.deepEqual(JSON.parse(last().body), { audience: 'general' });
+  assert.equal((await call('PATCH', '/api/egram/api/posts/5', { body: { audience: 'everyone' } })).status, 400);
+});
+
+test('reads below a post and writes to it need the post itself to pass', async () => {
+  adultSet = new Set(['secretly18']);
+  // Elitogram calls post 6 general, but Grabbit has its author as 18+.
+  handlers['/api/posts/6'] = json(200, { id: 6, caption: '', author: { handle: 'secretly18' }, media: [], audience: 'general' });
+  handlers['/api/posts/6/comments'] = json(200, { items: [{ id: 1, body: 'hi', user: { username: 'u' } }] });
+  handlers['POST /api/posts/6/like'] = json(200, { liked: true });
+  const before = seen.length;
+  assert.equal((await call('GET', '/api/egram/api/posts/6/comments')).status, 404);
+  assert.equal((await call('POST', '/api/egram/api/posts/6/like')).status, 404);
+  // Only the parent lookups reached Elitogram, never the comment read or the like.
+  assert.ok(seen.slice(before).every((q) => q.method === 'GET' && q.url === '/api/posts/6'));
+  // A post without an owner cannot be judged either.
+  handlers['/api/posts/7'] = json(200, { id: 7, caption: '', media: [], audience: 'general' });
+  assert.equal((await call('POST', '/api/egram/api/collections/1/items', { body: { post_id: 7 } })).status, 404);
+  assert.equal((await call('POST', '/api/egram/api/collections/1/items', { body: { post_id: 'x' } })).status, 400);
+  adultSet = new Set();
 });
 
 test('answers are filtered against the lane and Grabbit 18+ profiles', async () => {
@@ -375,4 +398,14 @@ test('session: link with user name and password, keep only the sealed token', as
   const gone = await call('GET', '/api/egram/session');
   assert.deepEqual(await gone.json(), { ok: true, linked: false, expired: true });
   assert.match(gone.headers.get('set-cookie'), /Max-Age=0/);
+});
+
+test('a link counts only alongside the Grabbit sign-in it was made under', async () => {
+  handlers['/api/feed'] = json(200, { items: [], next: null });
+  assert.equal((await call('GET', '/api/egram/api/feed')).status, 200);
+  // The same sealed link under another sign-in (e.g. planted from a sibling domain).
+  assert.equal((await call('GET', '/api/egram/api/feed', { headers: { 'x-test-signin': 'someone-else' } })).status, 401);
+  const bound = `${gw.EGRAM_COOKIE}=${gw.seal(SECRET, { t: 'tok123', exp: Date.now() + 60000, b: 'me' })}`;
+  assert.equal((await call('GET', '/api/egram/api/feed', { cookie: bound, headers: { 'x-test-signin': 'me' } })).status, 200);
+  assert.equal((await call('GET', '/api/egram/api/feed', { cookie: bound })).status, 401);
 });
