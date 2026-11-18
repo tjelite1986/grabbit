@@ -6,12 +6,15 @@
 // APK at install time and only rebuilds it when the manifest itself changed,
 // so an icon swapped behind an unchanged URL never reaches the home screen.
 // v8: the hub became the start page (/) and Grabbit 1 moved to /classic/.
-const CACHE = 'grabbit-v9';
+// v10: the native TikShortis pages (public/hub/tik/) joined the hub shell.
+const CACHE = 'grabbit-v10';
 const SHELL = [
   '/',
   '/classic/',
   '/hub/hub.js',
   '/hub/hub.css',
+  '/hub/tik/tik.js',
+  '/hub/tik/tik.css',
   '/manifest.webmanifest',
   '/favicon-32.png?v=2',
   '/icon-192.png?v=2',

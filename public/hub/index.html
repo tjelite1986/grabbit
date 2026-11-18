@@ -7,6 +7,7 @@
     <title>Grabbit 2.0</title>
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2" />
     <link rel="stylesheet" href="/hub/hub.css" />
+    <link rel="stylesheet" href="/hub/tik/tik.css" />
   </head>
   <body>
     <div class="app">
@@ -50,6 +51,8 @@
       </div>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <!-- Modules register themselves before the hub boots. -->
+    <script src="/hub/tik/tik.js"></script>
     <script src="/hub/hub.js"></script>
   </body>
 </html>

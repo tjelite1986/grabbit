@@ -46,6 +46,10 @@ button, input, select { font: inherit; color: inherit; }
 .nav a:hover { background: var(--panel-2); }
 .nav a[aria-current='page'] { background: linear-gradient(90deg, var(--accent), #6a3df0); color: #fff; }
 .nav .badge { margin-left: auto; }
+/* A module's own sections, listed under it while it is open (Grabbit 3.0). */
+.nav .nav-sub { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 26px; padding-left: 8px; border-left: 1px solid var(--line); }
+.nav .nav-sub a { min-height: 40px; padding: 8px 12px; font-size: 14px; }
+.nav .nav-sub a[aria-current='page'] { background: var(--panel-2); color: #fff; box-shadow: inset 3px 0 0 var(--accent); }
 .badge {
   min-width: 24px; padding: 1px 8px; border-radius: 999px; text-align: center;
   background: #3a2e7a; color: #fff; font-size: 12px; font-weight: 600;

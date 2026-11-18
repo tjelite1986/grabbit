@@ -195,8 +195,8 @@
     { id: 'queue', label: 'Queue & jobs', icon: 'queue', badge: () => activeJobs().length, live: true, view: viewQueue },
     { id: 'media', label: 'Media', icon: 'media', view: viewMedia },
     { id: 'library', label: 'Library', icon: 'tags', ownData: true, view: viewLibrary },
-    // Listed only when the server has TIKSHORTIS_EMBED_URL.
-    { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed(), view: viewTikshortis },
+    // Native (Grabbit 3.0, public/hub/tik/) or framed (2.2), from TIKSHORTIS_MODE.
+    { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed() || tikIsNative(), view: viewTikshortisPage, subnav: () => (tikIsNative() ? tikNative.subnav(route()) : null) },
     // Listed only when the server has the 18+ app's library mounted.
     { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
     // Listed only when the server has the 18+ film library mounted.
@@ -210,24 +210,31 @@
     { id: 'distribution', label: 'Distribution', icon: 'share', view: viewDistribution },
     { id: 'settings', label: 'Settings', icon: 'settings', view: viewSettings },
   ];
+  // #/<page>[/<sub>/<sub>][?query]. Only a module page (TikShortis native)
+  // uses the sub path; the other pages ignore it.
+  const decodeSeg = (x) => { try { return decodeURIComponent(x); } catch { return ''; } };
   function route() {
-    const [id, query] = location.hash.replace(/^#\/?/, '').split('?');
+    const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
+    const [id, ...sub] = path.split('/');
     const page = PAGES.find((p) => p.id === id) || PAGES[0];
-    return { ...page, params: new URLSearchParams(query || '') };
+    return { ...page, sub: page.id === id ? sub.filter(Boolean).map(decodeSeg) : [], params: new URLSearchParams(query || '') };
   }
   function buildNav() {
     const nav = $('#nav');
     nav.replaceChildren(
-      ...PAGES.map((p) =>
+      ...PAGES.map((p) => [
         h('a', { href: `#/${p.id}`, 'data-page': p.id, hidden: p.show ? !p.show() : null }, icon(p.icon), h('span', null, p.label),
           p.badge ? h('span', { class: 'badge', hidden: true }) : null,
-          p.planned ? h('span', { class: 'tag' }, 'planned') : null)
-      )
+          p.planned ? h('span', { class: 'tag' }, 'planned') : null),
+        // A module's own sections, listed under it while it is open.
+        p.subnav ? h('div', { class: 'nav-sub', 'data-sub': p.id, hidden: true }) : null,
+      ]).flat().filter(Boolean)
     );
   }
   function updateNav() {
     const cur = route().id;
-    for (const a of document.querySelectorAll('#nav a')) {
+    // Page links only: a module's sub links (.nav-sub) are painted below.
+    for (const a of document.querySelectorAll('#nav > a[data-page]')) {
       const p = PAGES.find((x) => x.id === a.dataset.page);
       if (p.show) a.hidden = !p.show();
       if (p.id === cur) a.setAttribute('aria-current', 'page');
@@ -239,23 +246,42 @@
         b.hidden = !n;
       }
     }
+    for (const box of document.querySelectorAll('#nav .nav-sub')) {
+      const p = PAGES.find((x) => x.id === box.dataset.sub);
+      const items = p.id === cur && (!p.show || p.show()) ? p.subnav() : null;
+      box.hidden = !items || !items.length;
+      // Repainted many times a second during a download: touch the DOM only
+      // when the list or the current entry changed.
+      const key = items ? items.map((i) => `${i.href}${i.current ? '*' : ''}`).join('|') : '';
+      if (box.dataset.key === key) continue;
+      box.dataset.key = key;
+      box.replaceChildren(...(items || []).map((i) => h('a', { href: i.href, 'aria-current': i.current ? 'page' : null }, i.label)));
+    }
+    const native = cur === 'tikshortis' && tikIsNative();
+    $('#searchInput').placeholder = native ? 'Search TikShortis tags and creators' : 'Search media and creators';
   }
   // The route without the viewer's `open` parameter.
   function pageKey() {
     const r = route();
     const q = new URLSearchParams(r.params);
     q.delete('open');
-    return `${r.id}?${q}`;
+    return `${r.id}/${r.sub.join('/')}?${q}`;
   }
   let renderedKey = null;
   function render(focus = true) {
+    // A module page stops its players, observers and timers before the view
+    // under it is replaced (also when it is redrawn in place).
+    if (tikNative) tikNative.leave();
     renderedKey = pageKey();
     const r = route();
     const view = $('#view');
     // Views return a node or a list with gaps (null/false) like h() children.
-    view.replaceChildren(...[r.view(r.params)].flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
-    // The embedded app fills the view; on a phone the hub's top bar gives way.
-    document.body.classList.toggle('embed-page', r.id === 'tikshortis');
+    view.replaceChildren(...[r.view(r.params, r)].flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
+    // The embedded app fills the view; on a phone the hub's top bar gives way
+    // (the native pages bring their own bottom bar, whose Menu is this drawer).
+    const native = r.id === 'tikshortis' && tikIsNative();
+    document.body.classList.toggle('embed-page', r.id === 'tikshortis' && !native);
+    document.body.classList.toggle('tik-page', native);
     updateNav();
     if (focus) {
       view.focus({ preventScroll: true });
@@ -994,6 +1020,35 @@
     const ext = document.querySelector('.tik-bar a.tik-ext');
     if (ext) ext.href = cfg.origin + p;
   });
+  // --- TikShortis, native (Grabbit 3.0) -------------------------------------
+  // public/hub/tik/tik.js registers itself in window.GrabbitModules before this
+  // file runs; it draws every TikShortis page from /api/tik/* (the gateway).
+  // TIKSHORTIS_MODE=native turns it on; any other mode keeps the frame above.
+  const tikDef = (window.GrabbitModules || []).find((m) => m && m.id === 'tikshortis');
+  // A module that fails to start must not take the hub down with it: the page
+  // then falls back to the frame (or stays hidden without one).
+  const tikNative = (() => {
+    if (!tikDef) return null;
+    try {
+      return tikDef.create({
+        h, icon, api, toast, num, ago, bytes, $,
+        route,
+        // Redraw the TikShortis page, if it is still the one shown.
+        rerender: () => { if (route().id === 'tikshortis') render(false); },
+        // Change the address without a redraw (the feed's current clip).
+        replaceHash: (hash) => { history.replaceState(history.state, '', hash); renderedKey = pageKey(); updateNav(); },
+        openMenu: () => { $('#side').classList.add('open'); $('#scrim').hidden = false; },
+      });
+    } catch (e) {
+      console.error('TikShortis module failed to start', e);
+      return null;
+    }
+  })();
+  const tikIsNative = () => !!(tikNative && state.config && state.config.tikshortisMode === 'native');
+  function viewTikshortisPage(params, r) {
+    return tikIsNative() ? tikNative.view(r) : viewTikshortis(params);
+  }
+
   function viewTikshortis(params) {
     const cfg = tikEmbed();
     if (!cfg) {
@@ -3137,7 +3192,8 @@
   $('#searchForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const q = $('#searchInput').value.trim();
-    location.hash = q ? `#/media?q=${encodeURIComponent(q)}` : '#/media';
+    if (route().id === 'tikshortis' && tikIsNative()) location.hash = `#/tikshortis/search${q ? `?q=${encodeURIComponent(q)}` : ''}`;
+    else location.hash = q ? `#/media?q=${encodeURIComponent(q)}` : '#/media';
   });
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
@@ -3159,7 +3215,9 @@
   function settle() {
     // The TikShortis page needs the config to know the app's address; once
     // its frame exists it is never rebuilt by a refresh (that would reload it).
-    if (route().id === 'tikshortis' && !document.querySelector('.tik-frame')) render(false);
+    // The native page is drawn once the config says native, then redraws itself.
+    if (route().id === 'tikshortis' && !document.querySelector('.tik-frame, .tik-root')) render(false);
+    else if (route().id === 'tikshortis') updateNav();
     else if (route().ownData) updateNav();
     else render(false);
   }

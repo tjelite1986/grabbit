@@ -1617,6 +1617,9 @@ const REVALIDATE = new Set([
   // The hub's own shell (public/hub/), same reason.
   'hub.js',
   'hub.css',
+  // Grabbit 3.0 native TikShortis pages (public/hub/tik/).
+  'tik.js',
+  'tik.css',
 ]);
 
 // The hub is the start page. Grabbit 1's interface lives on at /classic/; it

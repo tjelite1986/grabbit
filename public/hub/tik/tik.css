@@ -1,0 +1,423 @@
+/* Grabbit 3.0 phase 1: the native TikShortis pages (public/hub/tik/tik.js).
+   Uses the hub's tokens (hub.css :root). Every class here starts with tik- or
+   tf- (the feed) so nothing leaks into the other hub pages. The design
+   reference is docs/grabbit-3.0/design/reference.html (local only). */
+
+:root {
+  --like: #ff4f7b;
+  --tik-top: 71px; /* the hub's top bar on wide screens */
+  --tik-tabbar: 56px; /* the bottom bar on phones, without the safe area */
+}
+
+/* ---------- Page frame ---------- */
+.tik-root { position: relative; min-width: 0; }
+.tik-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 6px 0 14px; }
+.tik-head h1 { margin: 0; }
+.tik-who { margin-left: auto; font-size: 12px; color: var(--muted); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tik-who:hover { color: var(--text); border-color: var(--accent); }
+.tik-banner { margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--warn); border-radius: 12px; color: var(--warn); background: rgba(242, 184, 75, 0.08); font-size: 14px; }
+.tik-empty { padding: 40px 0; text-align: center; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.tik-root .linkish, .tik-sheet .linkish, .tik-toast .linkish { background: none; border: 0; padding: 0; color: var(--accent-2); cursor: pointer; font: inherit; text-decoration: underline; }
+.tik-root p.err, .tik-sheet p.err, .tik-root .err { color: var(--bad); }
+.tik-root .card { margin-bottom: 16px; }
+.tik-root .card > h2, .tik-root form > h2 { margin: 0 0 12px; font-size: 18px; }
+
+/* ---------- Inputs, forms, pills ---------- */
+.tik-root input[type='text'], .tik-root input[type='search'], .tik-root input[type='url'], .tik-root input[type='email'],
+.tik-root input[type='password'], .tik-root input[type='number'], .tik-root textarea, .tik-root select,
+.tik-sheet input[type='text'], .tik-sheet input[type='search'], .tik-sheet input[type='url'], .tik-sheet textarea, .tik-sheet select {
+  width: 100%; min-height: 44px; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; color: var(--text); outline: 0; font: inherit;
+}
+.tik-root textarea, .tik-sheet textarea { resize: vertical; }
+.tik-root input:focus, .tik-root textarea:focus, .tik-root select:focus, .tik-sheet input:focus, .tik-sheet textarea:focus { border-color: var(--accent); }
+.tik-form { display: flex; flex-direction: column; gap: 12px; max-width: 640px; }
+.tik-form label:not(.tik-check) { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
+.tik-form label:not(.tik-check) > :is(input, textarea, select) { color: var(--text); font-size: 15px; }
+.tik-form .btn { align-self: flex-start; min-height: 44px; }
+.tik-field { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+.tik-inline-form { display: flex; gap: 8px; margin: 10px 0 14px; }
+.tik-inline-form input { flex: 1; min-width: 0; }
+.tik-inline-form .btn { flex: none; min-height: 44px; }
+.tik-check { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 2px; cursor: pointer; }
+.tik-check input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; margin: 0; }
+.tik-check small { margin-left: auto; }
+.tik-row-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.tik-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.tik-controls > input { flex: 1 1 260px; max-width: 480px; }
+.tik-pills { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.tik-pill {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 14px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; text-decoration: none; font-size: 14px;
+}
+.tik-pill:hover { border-color: var(--accent); }
+.tik-pill[aria-pressed='true'], .tik-pill[aria-current='page'] { background: linear-gradient(90deg, var(--accent), #6a3df0); border-color: transparent; color: #fff; }
+.tik-tabs-row { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 14px; scrollbar-width: thin; }
+.tik-tabs-row .tik-pill { flex: none; }
+.tik-root .btn.danger, .tik-sheet .btn.danger { background: transparent; border: 1px solid var(--bad); color: var(--bad); }
+.tik-x {
+  width: 44px; height: 44px; flex: none; display: grid; place-items: center; border-radius: 50%;
+  background: transparent; border: 0; color: var(--text); cursor: pointer;
+}
+.tik-x:hover { background: var(--panel-2); }
+.tik-x.small { width: 32px; height: 32px; }
+.tik-x.small svg { width: 14px; height: 14px; }
+
+/* ---------- Avatars ---------- */
+.tik-av {
+  position: relative; width: 36px; height: 36px; flex: none; border-radius: 50%; overflow: hidden;
+  display: inline-grid; place-items: center; font-weight: 700; color: #fff;
+  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+}
+.tik-av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+/* ---------- Grids of clips ---------- */
+.tik-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.tik-tile-wrap { position: relative; min-width: 0; }
+.tik-tile {
+  position: relative; display: block; aspect-ratio: 9 / 16; border-radius: 12px; overflow: hidden;
+  background: linear-gradient(160deg, #2b1f5c 0%, #10324d 55%, #0a0a12 100%); color: #fff; text-decoration: none;
+}
+.tik-tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.tik-tile:hover, .tik-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tik-tile-meta { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+.tik-badge { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 6px; background: rgba(0, 0, 0, 0.6); font-size: 11px; }
+.tik-badge svg { width: 12px; height: 12px; }
+.tik-badge.seen { background: rgba(124, 77, 255, 0.75); }
+.tik-tile-cap {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 28px 8px 8px; font-size: 13px; line-height: 1.3;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+  display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere;
+}
+.tik-tile-t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tik-tile-wrap:has(.tik-tile-act) .tik-tile-cap { padding-right: 52px; }
+.tik-tile-cap small { display: inline-flex; align-items: center; gap: 4px; color: #ddd; }
+.tik-tile-cap small svg { width: 12px; height: 12px; }
+.tik-tile-act {
+  position: absolute; right: 4px; bottom: 4px; width: 44px; height: 44px; border-radius: 50%;
+  display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); border: 0; color: #fff; cursor: pointer;
+}
+.tik-tile-act svg { width: 18px; height: 18px; }
+.tik-grid-status { padding: 16px 0; color: var(--muted); text-align: center; min-height: 20px; }
+.tf-sentinel { height: 1px; }
+
+/* Tags, creators, playlists */
+.tik-tags { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.tik-tagcard {
+  position: relative; display: flex; align-items: flex-end; min-height: 96px; border-radius: 12px; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--line); text-decoration: none; color: #fff;
+}
+.tik-tagcard img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.45; }
+.tik-tagcard span { position: relative; padding: 10px 12px; display: flex; flex-direction: column; }
+.tik-tagcard small { color: #ddd; }
+.tik-tagcard:hover { border-color: var(--accent); }
+.tik-tags > .btn, .tik-tags > p { grid-column: 1 / -1; justify-self: center; }
+.tik-taglist { display: flex; flex-wrap: wrap; gap: 8px; }
+.tik-creators, .tik-playlists { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px 10px; }
+.tik-creators > p, .tik-playlists > p { grid-column: 1 / -1; }
+.tik-creator { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tik-creator .tik-tile { aspect-ratio: 3 / 4; margin-bottom: 4px; }
+.tik-creator-name { font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 24px; }
+.tik-creator-name:hover { color: var(--accent-2); }
+.tik-creator .tik-row-btns { margin-top: 4px; }
+
+/* Profile head */
+.tik-profile { display: flex; gap: 18px; align-items: center; margin: 6px 0 16px; flex-wrap: wrap; }
+.tik-profile .tik-av { font-size: 32px; }
+.tik-profile-main { min-width: 0; flex: 1; }
+.tik-profile-main h1 { margin: 0 0 4px; overflow-wrap: anywhere; }
+.tik-stats { display: flex; gap: 16px; color: var(--muted); }
+.tik-stats b { color: var(--text); }
+.tik-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+.tik-link { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; }
+.tik-link a { color: var(--accent-2); text-decoration: none; }
+
+/* Lists: source videos, analysis, reports, duplicates */
+.tik-cands, .tik-analysis { display: flex; flex-direction: column; gap: 8px; }
+.tik-cand, .tik-an, .tik-report {
+  display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: inherit; text-decoration: none;
+}
+.tik-an { grid-template-columns: 64px minmax(0, 1fr); align-items: start; }
+.tik-an:hover { border-color: var(--accent); }
+.tik-an p { margin: 4px 0; font-size: 14px; color: #d6d4e8; }
+.tik-report { grid-template-columns: 64px minmax(0, 1fr); align-items: start; margin-bottom: 8px; }
+.tik-report ul { margin: 6px 0; padding-left: 18px; font-size: 14px; }
+.tik-cand img, .tik-an img, .tik-report img, .tik-cand-ph {
+  width: 64px; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 8px; background: var(--panel-2); display: block;
+}
+.tik-cand b, .tik-an b, .tik-report b { display: block; overflow-wrap: anywhere; }
+.tik-dupes { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.tik-dupe { border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.tik-dupe-row { display: flex; gap: 10px; overflow-x: auto; padding: 6px 0; }
+.tik-dupe-m { flex: none; width: 120px; display: flex; flex-direction: column; gap: 2px; text-decoration: none; color: inherit; font-size: 12px; }
+.tik-dupe-m img, .tik-dupe-m .tik-cand-ph { width: 120px; }
+.tik-dupe-m.best img { outline: 2px solid var(--ok); }
+.tik-merge-list { max-height: 320px; overflow-y: auto; margin: 8px 0 12px; border: 1px solid var(--line); border-radius: 12px; padding: 4px 10px; }
+.tik-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tik-table th, .tik-table td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.tik-table th.num, .tik-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tik-table .tik-row-btns { margin: 0; flex-wrap: nowrap; }
+.tik-ai:empty { display: none; }
+
+/* Library (phone tab) */
+.tik-lib { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.tik-libitem {
+  display: flex; flex-direction: column; justify-content: center; gap: 2px; min-height: 64px; padding: 12px 16px;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--panel); text-decoration: none;
+}
+.tik-libitem:hover { border-color: var(--accent); }
+
+/* Upload and account */
+.tik-upload-pv { display: flex; flex-direction: column; gap: 6px; }
+.tik-upload-pv video { max-width: 240px; max-height: 360px; border-radius: 12px; background: #000; }
+.tik-upload progress { width: 100%; height: 10px; accent-color: var(--accent); }
+.tik-link-card { max-width: 560px; }
+
+/* ---------- Sheets (dialogs) ---------- */
+.tik-scrim { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.55); }
+.tik-sheet {
+  position: fixed; z-index: 51; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(520px, calc(100vw - 32px)); max-height: min(80dvh, 720px); display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.tik-sheet.wide { width: min(760px, calc(100vw - 32px)); }
+.tik-sheet-grab { display: none; }
+.tik-sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px 4px 18px; border-bottom: 1px solid var(--line); }
+.tik-sheet-head h3 { margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tik-sheet-body { padding: 14px 18px 18px; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.tik-sheet-body > p { margin: 0; }
+.tik-menulist { display: flex; flex-direction: column; margin: -8px -10px; }
+.tik-menu-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; padding: 8px 12px;
+  border: 0; border-radius: 10px; background: transparent; color: var(--text); text-align: left; text-decoration: none; cursor: pointer; font: inherit;
+}
+.tik-menu-row:hover, .tik-menu-row:focus-visible { background: var(--panel-2); }
+.tik-menu-row.danger { color: var(--bad); }
+.tik-menu-row small { color: var(--muted); }
+.tik-list { display: flex; flex-direction: column; max-height: 50dvh; overflow-y: auto; }
+
+/* Comments (sheet on phones, side panel on wide screens) */
+.tik-comments-box { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.tik-comments { flex: 1; overflow-y: auto; min-height: 120px; overscroll-behavior: contain; }
+.tik-cm { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid #201d35; }
+.tik-cm .tik-av { width: 32px; height: 32px; font-size: 13px; }
+.tik-cm b { font-size: 14px; }
+.tik-cm small { color: var(--muted); }
+.tik-cm p { margin: 2px 0 0; font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.tik-compose { display: flex; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tik-compose textarea { flex: 1; min-height: 44px; max-height: 140px; resize: none; }
+.tik-compose .btn { min-height: 44px; flex: none; }
+
+/* Toast with an action */
+.tik-toast {
+  position: fixed; z-index: 60; left: 50%; transform: translateX(-50%); bottom: calc(24px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 32px);
+  padding: 10px 14px; border-radius: 12px; background: #23203a; border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+/* ---------- The feed ---------- */
+body.tik-feed { overflow: hidden; }
+body.tik-feed .view { padding: 0; }
+.tik-root.is-feed { height: calc(100dvh - var(--tik-top)); }
+.tik-root.is-feed > .tik-banner { position: absolute; z-index: 4; top: 8px; left: 16px; right: 16px; margin: 0; background: #1d1a10; }
+.tf { display: flex; height: 100%; min-height: 0; }
+.tf-main { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.tf-top { flex: none; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 6px 16px; }
+.tf-modes { display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+.tf-modes::-webkit-scrollbar { display: none; }
+.tf-modes a {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px;
+  color: var(--muted); font-weight: 700; text-decoration: none; border-bottom: 2px solid transparent;
+}
+.tf-modes a:hover { color: var(--text); }
+.tf-modes a[aria-current='page'] { color: #fff; border-bottom-color: #fff; }
+.tf-modes.scoped a { color: #fff; }
+.tf-len { flex: none; min-height: 32px; padding: 2px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; font-size: 13px; }
+.tf-round {
+  width: 44px; height: 44px; flex: none; display: grid; place-items: center; border-radius: 50%;
+  background: var(--panel); border: 1px solid var(--line); color: var(--text); cursor: pointer;
+}
+.tf-round:hover { border-color: var(--accent); }
+.tf-scroll {
+  position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; outline: 0;
+  scroll-snap-type: y mandatory; scrollbar-width: none;
+}
+.tf-scroll::-webkit-scrollbar { display: none; }
+.tf-card {
+  position: relative; height: 100%; scroll-snap-align: start; scroll-snap-stop: always;
+  display: flex; align-items: center; justify-content: center; gap: 16px; padding: 8px 76px 16px 16px;
+}
+.tf-player {
+  position: relative; height: 100%; aspect-ratio: 9 / 16; max-width: 100%; border-radius: 18px; overflow: hidden;
+  background: #000; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.tf-stage { position: absolute; inset: 0; touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.tf-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+.tf-paused, .tf-burst { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+.tf-paused { width: 72px; height: 72px; border-radius: 50%; background: rgba(0, 0, 0, 0.45); display: grid; place-items: center; }
+.tf-paused svg { width: 34px; height: 34px; fill: #fff; stroke: none; }
+.tf-burst svg { width: 110px; height: 110px; fill: var(--like); stroke: none; filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.4)); }
+.tf-burst.go { animation: tf-burst 0.7s ease-out forwards; }
+@keyframes tf-burst {
+  0% { transform: translate(-50%, -50%) scale(0.4); opacity: 0; }
+  25% { transform: translate(-50%, -50%) scale(1.1); opacity: 1; }
+  100% { transform: translate(-50%, -60%) scale(1); opacity: 0; }
+}
+.tf-meta {
+  position: absolute; left: 0; right: 0; bottom: 22px; padding: 60px 14px 10px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75)); color: #fff; pointer-events: none;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.tf-meta a, .tf-meta button, .tf-title { pointer-events: auto; }
+.tf-by { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tf-author { font-weight: 700; color: #fff; text-decoration: none; min-height: 32px; display: inline-flex; align-items: center; }
+.tf-author:hover { text-decoration: underline; }
+.tf-lock { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 8px; border-radius: 999px; background: rgba(0, 0, 0, 0.5); }
+.tf-lock svg { width: 12px; height: 12px; }
+.tf-title { margin: 0; font-size: 14px; color: #eee; overflow-wrap: anywhere; cursor: pointer; }
+.tf-title.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 0; }
+.tf-src { font-size: 13px; color: #c9c4ff; align-self: flex-start; }
+.tf-tags { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 14px; }
+.tf-tags a { color: #b9a6ff; text-decoration: none; min-height: 28px; display: inline-flex; align-items: center; }
+.tf-tags a:hover { text-decoration: underline; }
+.tf-tags .linkish { color: #ddd; }
+.tf-seekbar { position: absolute; left: 0; right: 0; bottom: 0; height: 24px; display: flex; align-items: flex-end; gap: 8px; }
+.tf-seek {
+  flex: 1; height: 24px; margin: 0; background: transparent; cursor: pointer; accent-color: #fff; touch-action: none;
+  -webkit-appearance: none; appearance: none;
+}
+.tf-seek::-webkit-slider-runnable-track { height: 3px; background: rgba(255, 255, 255, 0.3); border-radius: 3px; }
+.tf-seek::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border-radius: 50%; background: #fff; }
+.tf-seek::-moz-range-track { height: 3px; background: rgba(255, 255, 255, 0.3); border-radius: 3px; }
+.tf-seek::-moz-range-progress { height: 3px; background: #fff; }
+.tf-seek::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #fff; }
+.tf-time { position: absolute; right: 10px; bottom: 26px; font-size: 11px; color: #ddd; font-variant-numeric: tabular-nums; pointer-events: none; text-shadow: 0 1px 2px #000; }
+.tf-rail { display: flex; flex-direction: column; align-items: center; gap: 14px; align-self: flex-end; padding-bottom: 40px; }
+.tf-r { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 12px; color: #ddd; }
+.tf-rb {
+  width: 52px; height: 52px; display: grid; place-items: center; border-radius: 50%;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text); cursor: pointer;
+}
+.tf-rb svg { width: 24px; height: 24px; }
+.tf-rb:hover { border-color: var(--accent); }
+.tf-rb.on { color: var(--like); }
+.tf-rb.on svg { fill: var(--like); }
+.tf-rb.saved { color: var(--warn); }
+.tf-rb.saved svg { fill: var(--warn); }
+.tf-count { min-height: 16px; }
+.tf-rail-av { display: block; border-radius: 50%; border: 2px solid #fff; text-decoration: none; }
+.tf-rail-av .tik-av { display: grid; }
+.tf-step { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 10px; z-index: 2; }
+.tf-status {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--muted); max-width: 360px;
+}
+.tf-status p { margin: 0; }
+.tf-resume {
+  position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 3;
+  display: flex; align-items: center; gap: 4px; padding: 4px 4px 4px 8px; border-radius: 999px; background: rgba(20, 18, 31, 0.92); border: 1px solid var(--line);
+}
+.tf-panel { flex: none; width: 380px; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line); background: var(--panel); }
+.tf-panel > .tik-comments-box { padding: 0 16px 12px; }
+
+/* Clear display: only the video, the More button and the top bar stay. */
+.tf.clean .tf-meta, .tf.clean .tf-r:not(:last-child), .tf.clean .tf-rail-av, .tf.clean .tf-time { display: none; }
+
+/* Full screen: the feed root fills the screen, comments out of the way. */
+.tf:fullscreen { background: #000; }
+.tf:fullscreen .tf-panel { display: none; }
+.tf:fullscreen .tf-card { padding: 0 76px 0 0; }
+.tf:fullscreen .tf-player { border-radius: 0; box-shadow: none; }
+
+/* ---------- Bottom bar (phones only) ---------- */
+.tik-tabbar { display: none; }
+
+/* ---------- Narrow tablet and phone ---------- */
+@media (max-width: 900px) {
+  /* One navigation: the hub's top bar gives way to the bottom bar, whose Menu
+     opens the hub drawer. */
+  body.tik-page .top { display: none; }
+  body.tik-page .view { padding: calc(6px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right)) calc(var(--tik-tabbar) + 24px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left)); }
+  body.tik-feed .view { padding: 0; }
+  .tik-tabbar {
+    position: fixed; z-index: 12; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(5, 1fr);
+    height: calc(var(--tik-tabbar) + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    background: #0b0a14; border-top: 1px solid var(--line);
+  }
+  .tik-tabbar a, .tik-tabbar button {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 44px; min-width: 0;
+    font-size: 11px; color: var(--muted); text-decoration: none; background: none; border: 0; cursor: pointer; font-family: inherit;
+  }
+  .tik-tabbar svg { width: 22px; height: 22px; }
+  .tik-tabbar [aria-current='page'] { color: #fff; }
+  .tik-tabbar [aria-current='page'] svg { color: var(--accent); }
+  .tik-plus { width: 46px; height: 30px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+  .tik-tabbar [aria-current='page'] .tik-plus svg { color: #fff; }
+  .tik-toast { bottom: calc(var(--tik-tabbar) + 16px + env(safe-area-inset-bottom)); }
+
+  /* The feed fills the screen above the bottom bar. */
+  .tik-root.is-feed {
+    position: fixed; z-index: 6; left: 0; right: 0; top: 0; bottom: calc(var(--tik-tabbar) + env(safe-area-inset-bottom));
+    height: auto; background: #000;
+  }
+  .tik-root.is-feed > .tik-banner { top: calc(56px + env(safe-area-inset-top)); }
+  .tf-top {
+    position: absolute; z-index: 3; left: 0; right: 0; top: 0; padding: env(safe-area-inset-top) calc(4px + env(safe-area-inset-right)) 0 calc(4px + env(safe-area-inset-left));
+    justify-content: space-between; background: linear-gradient(rgba(0, 0, 0, 0.55), transparent); pointer-events: none;
+  }
+  .tf-top > * { pointer-events: auto; }
+  .tf-top .tf-round { background: transparent; border: 0; color: #fff; }
+  .tf-modes { flex: 1; justify-content: safe center; }
+  .tf-modes a { color: #ccc; padding: 0 8px; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }
+  .tf-len { background: rgba(0, 0, 0, 0.35); border-color: rgba(255, 255, 255, 0.25); color: #fff; }
+  .tf-card { padding: 0; gap: 0; display: block; }
+  .tf-player { height: 100%; width: 100%; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
+  .tf-meta { right: 72px; bottom: 24px; padding-left: calc(14px + env(safe-area-inset-left)); }
+  .tf-time { right: 80px; }
+  .tf-rail {
+    position: absolute; z-index: 2; right: calc(8px + env(safe-area-inset-right)); bottom: 40px; padding: 0; gap: 12px;
+  }
+  .tf-rb { width: 48px; height: 48px; background: rgba(0, 0, 0, 0.35); border: 0; color: #fff; }
+  .tf-rb svg { filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5)); }
+  .tf-r { text-shadow: 0 1px 2px #000; }
+  .tf-step, .tf-panel { display: none; }
+  .tf-status { color: #ccc; }
+  .tf-resume { bottom: 96px; }
+
+  /* Sheets come up from the bottom. */
+  .tik-sheet {
+    left: 0; right: 0; top: auto; bottom: 0; transform: none; width: auto; max-height: 75dvh;
+    border-radius: 18px 18px 0 0; border-width: 1px 0 0;
+    padding-bottom: env(safe-area-inset-bottom);
+    animation: tik-up 0.18s ease-out;
+  }
+  .tik-sheet.wide { width: auto; }
+  .tik-sheet-grab { display: block; width: 40px; height: 4px; border-radius: 4px; background: #555; margin: 8px auto 0; flex: none; }
+  .tik-head .tik-who { margin-left: 0; }
+  .tik-table { font-size: 13px; }
+}
+@keyframes tik-up { from { transform: translateY(30%); opacity: 0.4; } to { transform: none; opacity: 1; } }
+@media (max-width: 560px) {
+  .tik-grid { grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  .tik-tile { border-radius: 6px; }
+  .tik-tile-cap { font-size: 12px; padding: 20px 6px 6px; }
+  /* Three narrow columns: the likes only; the title is in the player. */
+  .tik-tile-t { display: none; }
+  .tik-tile-act { right: 2px; bottom: 2px; }
+  .tik-creators, .tik-playlists { grid-template-columns: repeat(2, 1fr); }
+  .tik-tags { grid-template-columns: repeat(2, 1fr); }
+  .tik-pill { min-height: 44px; }
+  .tik-table thead { display: none; }
+  .tik-table tr { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .tik-table td { border: 0; padding: 2px 0; }
+  .tik-table td.num { text-align: left; }
+  .tik-table .tik-row-btns { grid-column: 1 / -1; flex-wrap: wrap; }
+}
+@media (pointer: coarse) {
+  .tik-x.small { width: 44px; height: 44px; }
+  .tf-step { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tf-burst.go, .tik-sheet { animation: none; }
+  .tf-scroll { scroll-behavior: auto; }
+}
