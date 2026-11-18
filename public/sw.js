@@ -10,7 +10,8 @@
 // v11: Grabbit 3.0.1 restyled the TikShortis player and the hub's menu.
 // v12: Grabbit 3.0.2 (For You resume, sheets above the keyboard).
 // v13: Grabbit 3.0 phase 2, the Social & Photos pages (public/hub/social/).
-const CACHE = 'grabbit-v13';
+// v14: phase 2 final: comments, share, upload, notifications, settings, the full-screen viewer.
+const CACHE = 'grabbit-v14';
 const SHELL = [
   '/',
   '/classic/',
