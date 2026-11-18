@@ -394,13 +394,18 @@
       try {
         const [cols, mine] = await Promise.all([call('collections', { lane }), call(`posts/${postId}/collections`, { lane })]);
         const inSet = new Set(mine.items || []);
+        const pid = intOf(postId);
+        if (!pid) throw new Error('No such post');
         const rows = (cols.items || []).map((c) => {
+          // Ids from Elitogram go into a path only as validated integers.
+          const cid = intOf(c.id);
+          if (!cid) return null;
           const box = h('input', { type: 'checkbox', checked: inSet.has(c.id) });
           box.addEventListener('change', async () => {
             box.disabled = true;
             try {
-              if (box.checked) await call(`collections/${c.id}/items`, { method: 'POST', body: { post_id: postId }, lane });
-              else await call(`collections/${c.id}/items/${postId}`, { method: 'DELETE', lane });
+              if (box.checked) await call(`collections/${cid}/items`, { method: 'POST', body: { post_id: postId }, lane });
+              else await call(`collections/${cid}/items/${postId}`, { method: 'DELETE', lane });
             } catch (e) { box.checked = !box.checked; fail(e); } finally { box.disabled = false; }
           });
           return h('label', { class: 'sg-row' }, box, h('span', null, c.name), h('span', { class: 'muted small' }, num(c.count)));
@@ -412,12 +417,15 @@
           if (!n) return;
           try {
             const c = await call('collections', { method: 'POST', body: { name: n }, lane });
-            await call(`collections/${c.id}/items`, { method: 'POST', body: { post_id: postId }, lane });
+            const cid = intOf(c.id);
+            if (!cid) throw new Error('Elitogram sent an unexpected answer');
+            await call(`collections/${cid}/items`, { method: 'POST', body: { post_id: postId }, lane });
             say(`Saved to ${n}`);
             closeSheet();
           } catch (err) { fail(err); }
         } }, name, h('button', { type: 'submit', class: 'btn small' }, 'Create and save'));
-        fill(body, rows.length ? rows : h('p', { class: 'muted' }, 'No collections yet.'), form);
+        const shown = rows.filter(Boolean);
+        fill(body, shown.length ? shown : h('p', { class: 'muted' }, 'No collections yet.'), form);
       } catch (e) {
         fill(body, h('p', { class: 'muted' }, e.message));
       }
