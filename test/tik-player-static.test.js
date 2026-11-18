@@ -93,9 +93,30 @@ test('hub.js passes the menu hooks to the module and tik.js calls them', () => {
   }
 });
 
-test('version labels and the service worker cache name moved to 3.0.1', () => {
-  assert.match(read('hub/index.html'), /<span id="version">v3\.0\.1<\/span>/);
-  assert.match(read('sw.js'), /const CACHE = 'grabbit-v11';/);
+test('version labels and the service worker cache name moved to 3.0.2', () => {
+  assert.match(read('hub/index.html'), /<span id="version">v3\.0\.2<\/span>/);
+  assert.match(read('sw.js'), /const CACHE = 'grabbit-v12';/);
+});
+
+test('3.0.2: sheets ride on top of the on-screen keyboard (visualViewport)', () => {
+  assert.match(js, /window\.innerHeight - vvp\.height - vvp\.offsetTop/);
+  assert.match(js, /vvp\.addEventListener\('resize', syncKeyboard\)/);
+  assert.match(js, /vvp\.addEventListener\('scroll', syncKeyboard\)/);
+  assert.match(cssCode, /\.tik-sheet \{[^}]*bottom: var\(--tik-kb, 0px\)/);
+  assert.match(cssCode, /\.tik-sheet\.tf-sheet-comments[^{]*\{[^}]*max-height: min\(70dvh, calc\(var\(--tik-vvh, 100dvh\) - 16px\)\)/);
+});
+
+test('3.0.2: For You and Random continue the saved shuffle instead of reshuffling', () => {
+  assert.match(js, /function savedShuffle\(sort, length, focus\)/);
+  assert.match(js, /const restore = mainFeed && SEEDED\.has\(sort\) \? savedShuffle\(sort, length, focus\) : null;/);
+  // Only a focus that is not the saved clip falls back to New.
+  assert.match(js, /if \(focus && SEEDED\.has\(sort\) && !restore\) sort = 'new';/);
+  assert.match(js, /let seed = restore \? restore\.seed :/);
+  assert.match(js, /cursor: restore \? restore\.cursor :/);
+  // The saved place carries the seed and the page offset of the clip.
+  assert.match(js, /Object\.assign\(saved, \{ sort, length, seed, cursor: c\.pageAt \}\)/);
+  // A reshuffle resets in place even though the order did not change.
+  assert.match(js, /if \(!reshuffle && nextSort === sort && nextLength === length\) return;/);
 });
 
 test('confirmSheet() puts the focus on Cancel, not on the destructive button', () => {
