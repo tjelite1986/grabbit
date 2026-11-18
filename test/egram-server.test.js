@@ -54,6 +54,7 @@ const upstream = http.createServer((req, res) => {
       return send(200, { audience: b.audience, updated: b.handles, skipped: [] });
     }
     const one = /^\/api\/creators\/([a-z0-9._-]+)$/.exec(req.url);
+    if (one && one[1] === 'ghost') return send(404, { error: 'Profile not found' });
     if (one) return send(200, { id: 7, handle: one[1], ig_handle: `ig.${one[1]}`, post_count: 1, audience: 'general' });
     send(404, { error: 'Not found' });
   });
@@ -103,14 +104,25 @@ async function login(base) {
 
 const config = async (base) => (await fetch(`${base}/api/config`, { headers: { 'X-Grabbit-Token': INTERNAL } })).json();
 
-// One adult profile, known to Grabbit only: Elitogram has no idea.
+// Profiles known to Grabbit only: Elitogram has no idea. `naughty` is 18+ by
+// its alias; the 18+ `shady` profile is known only by the Instagram account
+// Elitogram links to its creator `shady`; `Linda Kay` is a general profile known
+// only by the Instagram account of the creator `linky`.
 const PROFILES = {
   version: 1,
-  nextId: 2,
+  nextId: 4,
   profiles: [
     {
       id: 1, name: 'naughty', audience: 'adult', note: '', accounts: [], aliases: [{ name: 'naughty', addedAt: 1 }],
       mergedFrom: [], origin: 'registry', classifiedAs: null, classifiedAt: null, createdAt: 1, updatedAt: 1,
+    },
+    {
+      id: 2, name: 'Shady Lady', audience: 'adult', note: '', accounts: [{ platform: 'instagram', handle: 'ig.shady', url: null, source: 'manual', addedAt: 1 }], aliases: [],
+      mergedFrom: [], origin: 'manual', classifiedAs: null, classifiedAt: null, createdAt: 1, updatedAt: 1,
+    },
+    {
+      id: 3, name: 'Linda Kay', audience: 'general', note: '', accounts: [{ platform: 'instagram', handle: 'ig.linky', url: null, source: 'manual', addedAt: 1 }], aliases: [],
+      mergedFrom: [], origin: 'manual', classifiedAs: null, classifiedAt: null, createdAt: 1, updatedAt: 1,
     },
   ],
   log: [],
@@ -201,11 +213,51 @@ test('classify: an 18+ Grabbit profile is never made general; others are mirrore
     headers: hub({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ handles: ['newbie'], audience: 'general' }),
   })).json();
-  assert.deepEqual(again.mirrored, [{ handle: 'newbie', changed: [], created: null }]);
+  assert.deepEqual(again.mirrored, [{ handle: 'newbie', changed: [], created: null, linked: null }]);
+});
+
+test('classify: general is refused before the write for a creator 18+ in Grabbit by Instagram, or unknown to Elitogram', async () => {
+  const before = upSeen.filter((x) => x.url === '/api/creators-classify').length;
+  const r = await fetch(`${native.base}/api/egram/creators-classify`, {
+    method: 'POST',
+    headers: hub({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ handles: ['shady', 'ghost'], audience: 'general' }),
+  });
+  const d = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(d));
+  assert.deepEqual(d.updated, []);
+  assert.deepEqual(d.skipped, [
+    { handle: 'shady', reason: 'matches an 18+ profile in Grabbit' },
+    { handle: 'ghost', reason: 'not found in Elitogram' },
+  ]);
+  assert.equal(upSeen.filter((x) => x.url === '/api/creators-classify').length, before, 'nothing written upstream');
+});
+
+test('classify: a profile found only by Instagram gets the egram account', async () => {
+  const r = await fetch(`${native.base}/api/egram/creators-classify`, {
+    method: 'POST',
+    headers: hub({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ handles: ['linky'], audience: 'adult' }),
+  });
+  const d = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(d));
+  assert.deepEqual(d.mirrored, [{ handle: 'linky', changed: [3], created: null, linked: 3 }]);
+  const store = JSON.parse(fs.readFileSync(path.join(native.data, 'profiles.json'), 'utf8'));
+  const p = store.profiles.find((x) => x.id === 3);
+  assert.deepEqual(p.accounts.map((a) => `${a.platform}:${a.handle}`), ['instagram:ig.linky', 'egram:linky']);
 });
 
 test('classify: bad input is refused', async () => {
-  for (const body of [{ handles: ['x'], audience: 'unknown' }, { handles: [], audience: 'general' }, { handles: ['../x'], audience: 'general' }]) {
+  const evil = { toString: 1 };
+  for (const body of [
+    { handles: ['x'], audience: 'unknown' },
+    { handles: [], audience: 'general' },
+    { handles: ['../x'], audience: 'general' },
+    { handles: [evil], audience: 'general' },
+    { handles: [['a']], audience: 'general' },
+    { handles: 'abc', audience: 'general' },
+    { handles: Array.from({ length: 201 }, (_, i) => `h${i}`), audience: 'general' },
+  ]) {
     const r = await fetch(`${native.base}/api/egram/creators-classify`, { method: 'POST', headers: hub({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     assert.equal(r.status, 400, JSON.stringify(body));
   }
@@ -213,5 +265,24 @@ test('classify: bad input is refused', async () => {
 
 test('/logout also clears the linked Elitogram session cookie', async () => {
   const r = await fetch(`${native.base}/logout`, { method: 'POST', headers: hub(), redirect: 'manual' });
-  assert.ok((r.headers.getSetCookie() || []).some((c) => /^grabbit_egram=;/.test(c) && /Path=\/api\/egram/.test(c)));
+  const set = r.headers.getSetCookie() || [];
+  assert.ok(set.some((c) => /^grabbit_egram=;/.test(c) && /Path=\/api\/egram/.test(c)));
+  assert.ok(set.some((c) => /^__Host-grabbit_egram=;/.test(c) && /Path=\/;/.test(c) && /Secure/.test(c)));
+});
+
+test('an unreadable profile store on a cold start hides every author instead of none', async () => {
+  const data = path.join(root, 'unreadable');
+  // A directory where the file should be: reading it fails with EISDIR, not ENOENT.
+  fs.mkdirSync(path.join(data, 'profiles.json'), { recursive: true });
+  const s = await boot('unreadable', { EGRAM_MODE: 'native', EGRAM_API_URL: `http://127.0.0.1:${upstream.address().port}` });
+  const a = await login(s.base);
+  const link = await fetch(`${s.base}/api/egram/session`, {
+    method: 'POST',
+    headers: { Cookie: a, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'cc', password: 'pw' }),
+  });
+  assert.equal(link.status, 200);
+  const eg = (link.headers.getSetCookie() || []).map((v) => v.split(';')[0]).find((v) => v.startsWith('grabbit_egram='));
+  const feed = await (await fetch(`${s.base}/api/egram/api/feed`, { headers: { Cookie: `${a}; ${eg}`, 'Sec-Fetch-Site': 'same-origin' } })).json();
+  assert.deepEqual(feed.items, []);
 });

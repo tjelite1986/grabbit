@@ -1565,6 +1565,7 @@ app.post('/logout', (_req, res) => {
   // first; this clears it even when that call did not get through.)
   res.clearCookie(tikGateway.TIK_COOKIE, { path: '/api/tik' });
   res.clearCookie(egramGateway.EGRAM_COOKIE, { path: egramGateway.COOKIE_PATH });
+  res.clearCookie(egramGateway.EGRAM_COOKIE_SECURE, { path: '/', secure: true, httpOnly: true, sameSite: 'strict' });
   res.redirect('/login');
 });
 
@@ -3019,20 +3020,44 @@ function egramIsAdultHandle(handle) {
 // apps agree: profiles that match the handle (alias, manual name, or an
 // egram/instagram account) are classified; without a match a manual profile
 // is created with the egram account (and the Instagram one Elitogram knows).
-// Returns { changed: [ids], created: id|null }.
+// A profile found only through the Instagram account gets the egram account
+// added, so later reads and media checks find it under the egram handle too.
+// Returns { changed: [ids], created: id|null, linked: id|null }.
 function mirrorEgramClassification(handle, aud, igHandle) {
   const { store } = readProfiles();
   const key = creatorKey(handle).toLowerCase();
-  const matches = [
-    ...audience.matchProfiles(store, { creatorKey: key, handle: handle.toLowerCase(), platform: 'egram' }, creatorKey),
-    ...(igHandle ? audience.matchProfiles(store, { creatorKey: '', handle: igHandle.toLowerCase(), platform: 'instagram' }, creatorKey) : []),
-  ];
+  const own = audience.matchProfiles(store, { creatorKey: key, handle: handle.toLowerCase(), platform: 'egram' }, creatorKey);
+  const viaIg = igHandle
+    ? audience.matchProfiles(store, { creatorKey: '', handle: igHandle.toLowerCase(), platform: 'instagram' }, creatorKey).filter((m) => !own.some((o) => o.profile.id === m.profile.id))
+    : [];
+  const matches = [...own, ...viaIg];
   const ids = [...new Set(matches.filter((m) => profiles.effectiveAudience(m.profile) !== aud).map((m) => m.profile.id))];
   if (matches.length) {
-    if (!ids.length) return { changed: [], created: null };
-    const r = profiles.classifyProfiles(store, ids, aud, Date.now());
-    if (r.changed.length) saveProfiles(r.store);
-    return { changed: r.changed, created: null };
+    const now = Date.now();
+    let next = store;
+    let dirty = false;
+    let changed = [];
+    if (ids.length) {
+      const r = profiles.classifyProfiles(next, ids, aud, now);
+      next = r.store;
+      changed = r.changed;
+      dirty = r.changed.length > 0;
+    }
+    let linked = null;
+    if (!own.length && viaIg.length) {
+      const p = next.profiles.find((x) => x.id === viaIg[0].profile.id);
+      try {
+        const r = profiles.update(next, p.id, { accounts: [...p.accounts, { platform: 'egram', handle, url: null, source: 'egram' }] }, now);
+        next = r.store;
+        dirty = true;
+        linked = p.id;
+      } catch (e) {
+        // The egram account belongs to another profile already; leave it there.
+        console.warn(`[egram] could not add egram @${handle} to profile #${p.id}: ${e.message}`);
+      }
+    }
+    if (dirty) saveProfiles(next);
+    return { changed, created: null, linked };
   }
   const accounts = [{ platform: 'egram', handle, url: null, source: 'egram' }];
   if (igHandle) accounts.push({ platform: 'instagram', handle: igHandle, url: `https://www.instagram.com/${igHandle}/`, source: 'egram' });
@@ -3053,43 +3078,69 @@ if (EGRAM_MODE === 'native') {
     next();
   };
 
+  // Who a handle is in Elitogram, read before any write: the creator as the
+  // review lane sees it, else as the general lane does. -> creator | null
+  async function egramCreatorOf(req, handle) {
+    for (const lane of ['review', 'general']) {
+      const c = await gateway.callJson(req, 'GET', `/api/creators/${encodeURIComponent(handle)}`, undefined, lane);
+      if (!c.linked) return { linked: false };
+      if (c.status === 200 && c.json && typeof c.json.handle === 'string' && !c.json.out_of_scope) return { linked: true, creator: c.json };
+      if (c.status >= 500) throw new Error(`Elitogram answered ${c.status}`);
+    }
+    return { linked: true, creator: null };
+  }
+  // The names a creator goes by in Elitogram: its handle, its Instagram account
+  // and its aliases. Each of them is checked against Grabbit's 18+ profiles.
+  const egramNamesOf = (handle, c) =>
+    [handle, c && c.ig_handle, ...(c && Array.isArray(c.aliases) ? c.aliases : [])].filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim().toLowerCase());
+  const egramIgOf = (c) => (c && /^[a-z0-9._]{1,30}$/.test(String(c.ig_handle || '')) ? c.ig_handle : null);
+
   // POST /api/egram/creators-classify { handles: [..], audience: general|adult, lane }
   // Classifies in Elitogram and mirrors the decision into Grabbit's profiles.
-  // A handle that matches a Grabbit 18+ profile is never made general here.
+  // A creator is made general only when Elitogram knows it and none of the
+  // names it goes by matches a Grabbit 18+ profile; that is checked before
+  // Elitogram is written to.
   app.post('/api/egram/creators-classify', notInternal, async (req, res) => {
-    const b = req.body || {};
-    const aud = b.audience === 'general' || b.audience === 'adult' ? b.audience : null;
-    if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
-    const raw = Array.isArray(b.handles) ? b.handles : [];
-    const handles = [...new Set(raw.map((h) => String(h || '').trim().toLowerCase().replace(/^@/, '')).filter((h) => /^[a-z0-9._-]{1,60}$/.test(h)))];
-    if (!handles.length || handles.length > 200 || handles.length !== raw.length) {
-      return res.status(400).json({ ok: false, error: 'Send 1 to 200 valid handles' });
-    }
-    const site = req.headers['sec-fetch-site'];
-    if (site && site !== 'same-origin') return res.status(403).json({ ok: false, error: 'Request not from this site' });
-    const lane = b.lane === 'review' ? 'review' : 'general';
-    const refused = aud === 'general' ? handles.filter((h) => egramIsAdultHandle(h)) : [];
-    const send = handles.filter((h) => !refused.includes(h));
-    const skipped = refused.map((h) => ({ handle: h, reason: 'matches an 18+ profile in Grabbit' }));
-    const mirrored = [];
     try {
+      const b = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+      const aud = b.audience === 'general' || b.audience === 'adult' ? b.audience : null;
+      if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+      const raw = b.handles;
+      if (!Array.isArray(raw) || raw.length < 1 || raw.length > 200 || !raw.every((h) => typeof h === 'string' && h.length <= 101)) {
+        return res.status(400).json({ ok: false, error: 'Send 1 to 200 valid handles' });
+      }
+      const handles = [...new Set(raw.map((h) => h.trim().toLowerCase().replace(/^@/, '')).filter((h) => /^[a-z0-9._-]{1,60}$/.test(h)))];
+      if (handles.length !== raw.length) return res.status(400).json({ ok: false, error: 'Send 1 to 200 valid handles' });
+      const site = req.headers['sec-fetch-site'];
+      if (site && site !== 'same-origin') return res.status(403).json({ ok: false, error: 'Request not from this site' });
+      const lane = b.lane === 'review' ? 'review' : 'general';
+
+      const send = [];
+      const skipped = [];
+      const igOf = new Map();
+      for (const h of handles) {
+        const r = await egramCreatorOf(req, h);
+        if (!r.linked) return res.status(401).json({ ok: false, error: 'Link your Elitogram account first' });
+        igOf.set(h, egramIgOf(r.creator));
+        if (aud === 'general') {
+          if (!r.creator) { skipped.push({ handle: h, reason: 'not found in Elitogram' }); continue; }
+          if (egramNamesOf(h, r.creator).some((n) => egramIsAdultHandle(n))) { skipped.push({ handle: h, reason: 'matches an 18+ profile in Grabbit' }); continue; }
+        }
+        send.push(h);
+      }
+      const mirrored = [];
       if (send.length) {
         const up = await gateway.callJson(req, 'POST', '/api/creators-classify', { handles: send, audience: aud }, lane);
         if (!up.linked) return res.status(401).json({ ok: false, error: 'Link your Elitogram account first' });
         if (up.status !== 200 || !up.json) {
           const status = up.status >= 500 ? 424 : up.status;
-          return res.status(status).json({ ok: false, error: (up.json && up.json.error) || `Elitogram answered ${up.status}` });
+          return res.status(status).json({ ok: false, error: (up.json && typeof up.json.error === 'string' && up.json.error) || `Elitogram answered ${up.status}` });
         }
-        skipped.push(...(up.json.skipped || []));
-        for (const h of up.json.updated || []) {
-          // The Instagram account Elitogram knows for this creator, when one is set.
-          let ig = null;
+        if (Array.isArray(up.json.skipped)) skipped.push(...up.json.skipped);
+        for (const h of Array.isArray(up.json.updated) ? up.json.updated : []) {
+          if (typeof h !== 'string' || !send.includes(h)) continue;
           try {
-            const c = await gateway.callJson(req, 'GET', `/api/creators/${encodeURIComponent(h)}`, undefined, aud === 'general' ? 'general' : lane);
-            if (c.status === 200 && c.json && /^[a-z0-9._]{1,30}$/.test(String(c.json.ig_handle || ''))) ig = c.json.ig_handle;
-          } catch { /* the profile is still mirrored without it */ }
-          try {
-            mirrored.push({ handle: h, ...mirrorEgramClassification(h, aud, ig) });
+            mirrored.push({ handle: h, ...mirrorEgramClassification(h, aud, igOf.get(h) || null) });
           } catch (e) {
             mirrored.push({ handle: h, error: e.message });
           }
@@ -3167,7 +3218,12 @@ function readProfilesReadOnly() {
   let raw = null;
   try {
     raw = fs.readFileSync(PROFILES_FILE, 'utf8');
-  } catch { /* missing file: a fresh install, empty store */ }
+  } catch (e) {
+    // Only a missing file is a fresh install. Any other failure is thrown, so
+    // a caller such as the egram gateway fails closed instead of reading an
+    // empty store.
+    if (e.code !== 'ENOENT') throw e;
+  }
   return { store: profiles.normalizeStore(raw === null ? null : JSON.parse(raw)) };
 }
 function readProfiles() {
@@ -9432,24 +9488,46 @@ async function saveImageToPosts(job, channel) {
   makeDropDir(dir);
   const finalPath = path.join(dir, outName);
   const partPath = path.join(dir, `.${outName}.part`);
+  const sidecarPath = POSTS_TO_EGRAM ? path.join(dir, `${stem}.json`) : `${finalPath}.json`;
+  let sidecarWritten = false;
   try {
     await downloadDirect(job, partPath);
-    if (POSTS_TO_EGRAM) {
-      const c = classifyJob(destinationOf(channel, { ...job, mediaType: 'image' }), job);
-      fs.writeFileSync(path.join(dir, `${stem}.json`), JSON.stringify(egramSidecar(job, c.audience)));
-    } else {
-      fs.writeFileSync(
-        `${finalPath}.json`,
-        JSON.stringify({ description: buildCaption(job), post_shortcode: job.albumId || null })
-      );
-    }
+    // The creator may have been classified 18+ while the picture downloaded:
+    // judge it again before anything becomes visible to an importer.
+    const dest = destinationOf(channel, { ...job, mediaType: 'image' });
+    assertDeliverable(dest, job);
+    const sidecar = POSTS_TO_EGRAM
+      ? egramSidecar(job, classifyJob(dest, job).audience)
+      : { description: buildCaption(job), post_shortcode: job.albumId || null };
+    writeDropSidecar(sidecarPath, sidecar);
+    sidecarWritten = true;
     fs.renameSync(partPath, finalPath);
   } catch (e) {
-    fs.rm(partPath, { force: true }, () => {});
+    fs.rmSync(partPath, { force: true });
+    if (sidecarWritten) fs.rmSync(sidecarPath, { force: true });
     throw e;
   }
   recordDrop('posts', job, outName, finalPath);
   return { path: finalPath, name: outName, creator: postsCreator(job.creator) };
+}
+
+// A drop sidecar, written whole or not at all: a dot-named temp file (both
+// importers skip dotfiles), fsynced, then renamed into place.
+function writeDropSidecar(file, value) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp-${process.pid}`);
+  try {
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(value));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
 }
 
 // The sidecar Elitogram's importer reads next to <stem>.<ext>. `post_key`

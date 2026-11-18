@@ -782,6 +782,10 @@
         const btn = form.querySelector('button');
         btn.disabled = true;
         msg.textContent = '';
+        // Where the page was when the form was sent. The re-render after a link
+        // starts a new generation, so live(gen) cannot tell whether the user
+        // went elsewhere meanwhile; the address can.
+        const from = location.hash;
         try {
           const r = await fetch('/api/egram/session', {
             method: 'POST',
@@ -794,7 +798,7 @@
           pass.value = '';
           S.session = undefined;
           await loadSession(true);
-          location.hash = BASE;
+          if (location.hash === from) location.hash = BASE;
         } catch (err) { msg.textContent = err.message; btn.disabled = false; }
       } },
         h('label', null, 'User name', user),

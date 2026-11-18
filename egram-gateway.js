@@ -34,7 +34,11 @@ const https = require('https');
 const { pipeline } = require('stream');
 const { parseApiUrl, sealSession, openSession } = require('./tikshortis-gateway');
 
+// Over HTTPS the cookie is a __Host- cookie (Secure, Path=/, no Domain), so a
+// sibling subdomain cannot plant one. Plain HTTP (a LAN install) cannot use
+// the prefix and keeps the old name, scoped to the gateway's path.
 const EGRAM_COOKIE = 'grabbit_egram';
+const EGRAM_COOKIE_SECURE = '__Host-grabbit_egram';
 const COOKIE_PATH = '/api/egram';
 const SESSION_DAYS = 30;
 const UPSTREAM_COOKIE = 'eg_session';
@@ -51,18 +55,30 @@ function unseal(secret, raw) {
   return openSession(`${secret}\u0000${SEAL_PURPOSE}`, raw);
 }
 
+const isSecure = (req) => !!req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+
 function cookieHeader(req, value, maxAgeSec) {
-  const secure = req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
-  return [`${EGRAM_COOKIE}=${value}`, `Path=${COOKIE_PATH}`, 'HttpOnly', 'SameSite=Strict', `Max-Age=${maxAgeSec}`, ...(secure ? ['Secure'] : [])].join('; ');
+  if (isSecure(req)) return [`${EGRAM_COOKIE_SECURE}=${value}`, 'Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${maxAgeSec}`, 'Secure'].join('; ');
+  return [`${EGRAM_COOKIE}=${value}`, `Path=${COOKIE_PATH}`, 'HttpOnly', 'SameSite=Strict', `Max-Age=${maxAgeSec}`].join('; ');
 }
 
+// The value of a cookie sent exactly once. A name sent twice (one of them
+// planted for a parent domain, say) counts as no cookie at all.
 function readCookie(req, name) {
+  let found = null;
   for (const part of String(req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
-    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+    if (i > 0 && part.slice(0, i).trim() === name) {
+      if (found !== null) return null;
+      found = part.slice(i + 1).trim();
+    }
   }
-  return null;
+  return found;
 }
+
+// The session cookie this request may use: the __Host- one over HTTPS, the
+// plain one over HTTP.
+const sessionCookieOf = (req) => readCookie(req, isSecure(req) ? EGRAM_COOKIE_SECURE : EGRAM_COOKIE);
 
 // --- Lane ------------------------------------------------------------------------
 // Read from the raw query string, first value only, like the TikShortis gate
@@ -79,7 +95,7 @@ function laneOf(req) {
 // adult/* (the 18+ unlock), me/pin, admin/*, uploads, post edits other than
 // the audience, deletes, merges, users/* and notifications.
 //   media   piped as it comes, Range passed through
-//   picture an avatar or banner: may be Elitogram's generated SVG
+//   picture an avatar or banner ('creator' or 'user'): may be Elitogram's generated SVG
 //   body    the JSON keys a write may carry; everything else is dropped
 const ID = '(\\d{1,12})';
 const HANDLE = '([a-z0-9._~-]{1,100})';
@@ -125,9 +141,9 @@ const ROUTES = [
   // Media
   r('GET', `m/${ID}`, { media: true }),
   r('GET', `m/${ID}/t`, { media: true }),
-  r('GET', `m/ca/${ID}`, { media: true, picture: true }),
-  r('GET', `m/cb/${ID}`, { media: true, picture: true }),
-  r('GET', `m/ua/${ID}`, { media: true, picture: true }),
+  r('GET', `m/ca/${ID}`, { media: true, picture: 'creator' }),
+  r('GET', `m/cb/${ID}`, { media: true, picture: 'creator' }),
+  r('GET', `m/ua/${ID}`, { media: true, picture: 'user' }),
 ];
 
 function matchRoute(method, rest) {
@@ -139,7 +155,8 @@ function matchRoute(method, rest) {
 // Objects that are a post, a grid tile, a photo or a creator must carry an
 // `audience` equal to the lane's, and their author must not be 18+ in Grabbit.
 // Something that looks like one of them without an audience is dropped (fail
-// closed). Search and mention hits (handle, no audience) are checked by handle.
+// closed). Every entry of a `creators` list (search hits) must name the lane's
+// audience too, however little else it carries.
 const norm = (s) => String(s == null ? '' : s).trim().toLowerCase();
 
 function authorHandle(o) {
@@ -168,7 +185,8 @@ function allowedItem(o, want, isAdultHandle) {
 
 // Walks a JSON value and removes everything not allowed. A dropped array entry
 // disappears; a dropped property becomes null. Returns the value and how many
-// objects were dropped.
+// objects were dropped. When anything was dropped, a top-level `total` counted
+// upstream would include it, so it becomes null rather than a wrong number.
 function filterAnswer(value, want, isAdultHandle) {
   let dropped = 0;
   const walk = (v) => {
@@ -184,6 +202,12 @@ function filterAnswer(value, want, isAdultHandle) {
       const out = {};
       for (const [k, x] of Object.entries(v)) {
         if (!allowedItem(x, want, isAdultHandle)) { dropped++; out[k] = null; continue; }
+        if (k === 'creators' && Array.isArray(x)) {
+          const kept = x.filter((c) => c && typeof c === 'object' && !Array.isArray(c) && c.audience === want);
+          dropped += x.length - kept.length;
+          out[k] = walk(kept);
+          continue;
+        }
         out[k] = walk(x);
       }
       return out;
@@ -191,7 +215,9 @@ function filterAnswer(value, want, isAdultHandle) {
     return v;
   };
   if (!allowedItem(value, want, isAdultHandle)) return { value: null, dropped: 1 };
-  return { value: walk(value), dropped };
+  const out = walk(value);
+  if (dropped && out && typeof out === 'object' && !Array.isArray(out) && 'total' in out) out.total = null;
+  return { value: out, dropped };
 }
 
 // Content types passed back. Elitogram's generated avatars and banners are
@@ -203,16 +229,28 @@ function allowedType(ct, route) {
   return /^(video|audio)\/[a-z0-9.+-]+$/.test(t) || /^image\/(jpeg|png|webp|gif|avif)$/.test(t);
 }
 
-// A post's file must name the lane's audience and a creator who is not 18+ in
-// Grabbit. Pictures (avatars, banners) carry neither; Elitogram already serves
-// a neutral picture for a creator outside the scope.
+// Every file must say whose it is, and fails closed when it does not:
+//   - a post's file names the lane's audience and its creator;
+//   - a creator's avatar or banner says it is one (X-Egram-Picture: creator)
+//     and names the lane's audience and the creator. Elitogram answers a
+//     creator outside the scope with an unlabelled neutral picture, which the
+//     gateway replaces with its own;
+//   - an account's avatar says it is one (X-Egram-Picture: user).
+// The creator must not be 18+ in Grabbit. Applies to 200, 206 and 304 alike.
 function mediaAllowed(route, headers, want, isAdultHandle) {
-  if (route.picture) return true;
-  if (headers['x-egram-audience'] !== want) return false;
-  const creator = headers['x-egram-creator'];
-  if (creator && isAdultHandle && isAdultHandle(String(creator))) return false;
+  const one = (k) => (typeof headers[k] === 'string' ? headers[k] : null);
+  if (route.picture === 'user') return one('x-egram-picture') === 'user';
+  if (route.picture && one('x-egram-picture') !== 'creator') return false;
+  if (one('x-egram-audience') !== want) return false;
+  const creator = one('x-egram-creator');
+  if (!creator) return false;
+  if (isAdultHandle && isAdultHandle(creator)) return false;
   return true;
 }
+
+// Grabbit's own stand-in for a picture it will not pass on: a plain tile with
+// nothing from Elitogram in it.
+const NEUTRAL_PICTURE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice"><rect width="100" height="100" fill="#3a3a3c"/></svg>';
 
 const PASS_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'content-disposition'];
 
@@ -283,7 +321,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
     return req.method === 'GET' || req.method === 'HEAD';
   }
 
-  const sessionOf = (req) => unseal(secret, readCookie(req, EGRAM_COOKIE));
+  const sessionOf = (req) => unseal(secret, sessionCookieOf(req));
   const authHeaders = (cur, lane) => ({ 'x-egram-audience': LANES[lane], ...(cur ? { cookie: `${UPSTREAM_COOKIE}=${cur.t}` } : {}) });
 
   // One JSON call for Grabbit's own routes (classification): scoped and
@@ -395,10 +433,18 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
     }
     const status = r.statusCode >= 500 ? 424 : r.statusCode;
     if (status === 401) res.setHeader('Set-Cookie', cookieHeader(req, '', 0));
-    if (route.media && status < 400 && !mediaAllowed(route, r.headers, want, isAdultHandle)) {
-      r.resume();
-      log.warn(`[egram] refused ${rest}: audience ${r.headers['x-egram-audience'] || 'missing'} in the ${lane} lane`);
-      return fail(res, 404, 'Not found');
+    if (route.media && status < 400) {
+      let ok = false;
+      try { ok = mediaAllowed(route, r.headers, want, isAdultHandle); } catch (e) { log.warn(`[egram] media check ${rest}: ${e.message}`); }
+      if (!ok) {
+        r.resume();
+        if (route.picture) {
+          res.status(200).set({ 'Content-Type': 'image/svg+xml', 'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'" });
+          return req.method === 'HEAD' ? res.end() : res.end(NEUTRAL_PICTURE);
+        }
+        log.warn(`[egram] refused ${rest}: audience ${r.headers['x-egram-audience'] || 'missing'}, creator ${r.headers['x-egram-creator'] ? 'named' : 'missing'} in the ${lane} lane`);
+        return fail(res, 404, 'Not found');
+      }
     }
     if (status === 304 || req.method === 'HEAD' || status === 204) {
       r.resume();
@@ -428,7 +474,12 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
     }
     let d;
     try { d = await readJson(r); } catch (e) { return fail(res, 424, e.message); }
-    const { value, dropped } = filterAnswer(d, want, isAdultHandle);
+    let filtered;
+    try { filtered = filterAnswer(d, want, isAdultHandle); } catch (e) {
+      log.warn(`[egram] filter ${rest}: ${e.message}`);
+      return fail(res, 424, 'Grabbit could not check this answer right now');
+    }
+    const { value, dropped } = filtered;
     if (dropped) log.warn(`[egram] dropped ${dropped} item(s) outside the ${lane} lane from ${rest}`);
     if (value === null) return fail(res, 404, 'Not found');
     res.status(status).set('Cache-Control', 'private, no-store');
@@ -440,6 +491,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, clientIp = (req) 
 
 module.exports = {
   EGRAM_COOKIE,
+  EGRAM_COOKIE_SECURE,
+  NEUTRAL_PICTURE,
+  readCookie,
   COOKIE_PATH,
   LANES,
   ROUTES,

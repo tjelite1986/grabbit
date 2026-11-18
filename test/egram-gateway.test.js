@@ -45,7 +45,7 @@ const quietLog = { warn: (m) => warnings.push(m), log() {}, error() {} };
 test.before(async () => {
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   upBase = `http://127.0.0.1:${upstream.address().port}`;
-  const g = gw.createGateway({ apiUrl: upBase, secret: SECRET, isAdultHandle: (h) => adultSet.has(String(h).toLowerCase()), log: quietLog, timeoutMs: 5000 });
+  const g = gw.createGateway({ apiUrl: upBase, secret: SECRET, isAdultHandle: (h) => { if (h === 'boom') throw new Error('lookup failed'); return adultSet.has(String(h).toLowerCase()); }, log: quietLog, timeoutMs: 5000 });
   const app = express();
   app.use(express.json());
   app.use('/api/egram', (req, res) => {
@@ -124,21 +124,60 @@ test('filter: posts, tiles and creators must carry the lane audience', () => {
   assert.deepEqual(gw.filterAnswer(answer, 'unknown', null).value.items.map((x) => x.id), [2]);
   // A single post outside the lane is not an answer at all.
   assert.equal(gw.filterAnswer({ id: 2, caption: 'b', author: { handle: 'bob' }, media: [], audience: 'unknown' }, 'general', null).value, null);
-  // Search hits carry no audience and are judged by handle.
-  const s = gw.filterAnswer({ creators: [{ id: 1, handle: 'ok' }, { id: 2, handle: 'evil' }], tags: [{ tag: 'x', n: 1 }] }, 'general', (h) => h === 'evil');
+  // Search hits must name the lane's audience, and are judged by handle too.
+  const s = gw.filterAnswer({
+    creators: [
+      { id: 1, handle: 'ok', audience: 'general' },
+      { id: 2, handle: 'evil', audience: 'general' },
+      { id: 3, handle: 'bare' },
+      { id: 4, handle: 'rev', audience: 'unknown' },
+    ],
+    tags: [{ tag: 'x', n: 1 }],
+  }, 'general', (h) => h === 'evil');
   assert.deepEqual(s.value.creators.map((c) => c.handle), ['ok']);
+  assert.equal(s.dropped, 3);
   assert.equal(s.value.tags.length, 1);
 });
 
-test('media: audience and creator headers decide, pictures pass', () => {
+test('filter: a total counted upstream is withdrawn when anything was dropped', () => {
+  const post = (id, handle) => ({ id, caption: '', author: { handle }, media: [], audience: 'general' });
+  const kept = gw.filterAnswer({ tag: 'x', total: 2, items: [post(1, 'ann'), post(2, 'bob')] }, 'general', () => false);
+  assert.equal(kept.value.total, 2);
+  const cut = gw.filterAnswer({ tag: 'x', total: 2, items: [post(1, 'ann'), post(2, 'evil')] }, 'general', (h) => h === 'evil');
+  assert.equal(cut.value.total, null);
+  assert.equal(cut.value.items.length, 1);
+});
+
+test('filter: a failing 18+ lookup refuses the answer instead of passing it', async () => {
+  handlers['/api/explore'] = json(200, { items: [{ id: 1, caption: '', author: { handle: 'boom' }, media: [], audience: 'general' }] });
+  const r = await call('GET', '/api/egram/api/explore');
+  assert.equal(r.status, 424);
+});
+
+test('media: audience and creator headers decide, and a missing one refuses', () => {
   const post = { media: true };
-  const pic = { media: true, picture: true };
+  const pic = { media: true, picture: 'creator' };
+  const user = { media: true, picture: 'user' };
+  const evil = (h) => h === 'evil';
   assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-creator': 'ann' }, 'general', null), true);
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general' }, 'general', null), false, 'no creator');
   assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'unknown' }, 'general', null), false);
   assert.equal(gw.mediaAllowed(post, {}, 'general', null), false);
   assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'adult' }, 'general', null), false);
-  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-creator': 'evil' }, 'general', (h) => h === 'evil'), false);
-  assert.equal(gw.mediaAllowed(pic, {}, 'general', null), true);
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-creator': 'evil' }, 'general', evil), false);
+  // A creator's picture must say so, name the lane and a creator not 18+ in Grabbit.
+  const cp = { 'x-egram-picture': 'creator', 'x-egram-audience': 'general', 'x-egram-creator': 'ann' };
+  assert.equal(gw.mediaAllowed(pic, cp, 'general', evil), true);
+  assert.equal(gw.mediaAllowed(pic, {}, 'general', null), false, 'unlabelled');
+  assert.equal(gw.mediaAllowed(pic, { ...cp, 'x-egram-picture': 'user' }, 'general', null), false);
+  assert.equal(gw.mediaAllowed(pic, { ...cp, 'x-egram-audience': 'any' }, 'general', null), false);
+  assert.equal(gw.mediaAllowed(pic, { ...cp, 'x-egram-audience': 'unknown' }, 'general', null), false);
+  assert.equal(gw.mediaAllowed(pic, { ...cp, 'x-egram-creator': 'evil' }, 'general', evil), false);
+  assert.equal(gw.mediaAllowed(pic, { 'x-egram-picture': 'creator', 'x-egram-audience': 'general' }, 'general', null), false, 'no creator');
+  // An account's avatar must say it is one.
+  assert.equal(gw.mediaAllowed(user, { 'x-egram-picture': 'user' }, 'general', null), true);
+  assert.equal(gw.mediaAllowed(user, {}, 'general', null), false);
+  assert.equal(gw.mediaAllowed(user, { 'x-egram-picture': 'creator' }, 'general', null), false);
   assert.equal(gw.allowedType('image/svg+xml', pic), true);
   assert.equal(gw.allowedType('image/svg+xml', post), false);
   assert.equal(gw.allowedType('text/html', post), false);
@@ -237,12 +276,65 @@ test('media: a HEAD or 304 is judged by its headers too', async () => {
 });
 
 test('a generated SVG avatar passes; SVG or HTML for a post file does not', async () => {
-  handlers['/m/ca/1'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/svg+xml' }); res.end('<svg/>'); };
-  handlers['/m/15'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/svg+xml', 'x-egram-audience': 'general' }); res.end('<svg/>'); };
-  handlers['/m/16'] = (req, res) => { res.writeHead(200, { 'content-type': 'text/html', 'x-egram-audience': 'general' }); res.end('<b>'); };
-  assert.equal((await call('GET', '/api/egram/m/ca/1')).status, 200);
+  handlers['/m/ca/1'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/svg+xml', 'x-egram-picture': 'creator', 'x-egram-audience': 'general', 'x-egram-creator': 'ann' }); res.end('<svg id="up"/>'); };
+  handlers['/m/15'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/svg+xml', 'x-egram-audience': 'general', 'x-egram-creator': 'ann' }); res.end('<svg/>'); };
+  handlers['/m/16'] = (req, res) => { res.writeHead(200, { 'content-type': 'text/html', 'x-egram-audience': 'general', 'x-egram-creator': 'ann' }); res.end('<b>'); };
+  const ok = await call('GET', '/api/egram/m/ca/1');
+  assert.equal(ok.status, 200);
+  assert.equal(await ok.text(), '<svg id="up"/>');
   assert.equal((await call('GET', '/api/egram/m/15')).status, 424);
   assert.equal((await call('GET', '/api/egram/m/16')).status, 424);
+});
+
+test('pictures that do not say whose they are become Grabbit\'s neutral picture', async () => {
+  handlers['/m/ca/2'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/jpeg', etag: '"p2"' }); res.end('UPSTREAM'); };
+  handlers['/m/cb/3'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/jpeg', 'x-egram-picture': 'creator', 'x-egram-audience': 'general', 'x-egram-creator': 'evil' }); res.end('UPSTREAM'); };
+  handlers['/m/ca/4'] = (req, res) => { res.writeHead(304, { 'x-egram-picture': 'creator', 'x-egram-audience': 'unknown', 'x-egram-creator': 'ann', etag: '"p4"' }); res.end(); };
+  handlers['/m/ua/5'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/jpeg' }); res.end('UPSTREAM'); };
+  adultSet = new Set(['evil']);
+  for (const p of ['/api/egram/m/ca/2', '/api/egram/m/cb/3', '/api/egram/m/ua/5']) {
+    const r = await call('GET', p);
+    assert.equal(r.status, 200, p);
+    assert.equal(r.headers.get('content-type'), 'image/svg+xml', p);
+    assert.equal(r.headers.get('etag'), null, p);
+    assert.equal(await r.text(), gw.NEUTRAL_PICTURE, p);
+  }
+  const cached = await call('GET', '/api/egram/m/ca/4', { headers: { 'if-none-match': '"p4"' } });
+  assert.equal(cached.status, 200, 'a 304 for a picture outside the lane is not confirmed');
+  assert.equal(await cached.text(), gw.NEUTRAL_PICTURE);
+  const head = await call('HEAD', '/api/egram/m/ca/2');
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get('content-type'), 'image/svg+xml');
+  adultSet = new Set();
+});
+
+test('post media without a creator is refused, partial content too', async () => {
+  handlers['/m/17'] = (req, res) => { res.writeHead(206, { 'content-type': 'video/mp4', 'content-range': 'bytes 0-3/10', 'x-egram-audience': 'general' }); res.end('DATA'); };
+  assert.equal((await call('GET', '/api/egram/m/17', { headers: { range: 'bytes=0-3' } })).status, 404);
+  handlers['/m/18'] = (req, res) => { res.writeHead(304, { 'x-egram-audience': 'general', etag: '"e18"' }); res.end(); };
+  assert.equal((await call('GET', '/api/egram/m/18', { headers: { 'if-none-match': '"e18"' } })).status, 404);
+});
+
+test('cookie: __Host- over HTTPS, the plain name over HTTP, and a duplicate counts as none', async () => {
+  const sealed = gw.seal(SECRET, { t: 'tok123', exp: Date.now() + 60000 });
+  // Over HTTPS (behind the proxy) only the __Host- cookie is read.
+  const https = { 'x-forwarded-proto': 'https' };
+  assert.equal((await call('GET', '/api/egram/api/feed', { headers: https })).status, 401, 'plain cookie ignored over https');
+  assert.equal((await call('GET', '/api/egram/api/feed', { headers: https, cookie: `${gw.EGRAM_COOKIE_SECURE}=${sealed}` })).status, 200);
+  // Two cookies of the same name: one could be planted for a parent domain.
+  assert.equal((await call('GET', '/api/egram/api/feed', { cookie: `${gw.EGRAM_COOKIE}=${sealed}; ${gw.EGRAM_COOKIE}=${sealed}` })).status, 401);
+  assert.equal(gw.readCookie({ headers: { cookie: 'a=1; b=2' } }, 'a'), '1');
+  assert.equal(gw.readCookie({ headers: { cookie: 'a=1; a=2' } }, 'a'), null);
+  // Linking over HTTPS sets the __Host- cookie for the whole site.
+  handlers['POST /api/auth/login'] = (req, res) => { res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'eg_session=up9; Path=/' }); res.end('{}'); };
+  const r = await call('POST', '/api/egram/session', { cookie: null, headers: https, body: { username: 'cc', password: 'pw' } });
+  assert.equal(r.status, 200);
+  const c = r.headers.get('set-cookie');
+  assert.match(c, /^__Host-grabbit_egram=/);
+  assert.match(c, /Path=\/;/);
+  assert.match(c, /Secure/);
+  assert.doesNotMatch(c, /Domain=/i);
+  delete handlers['POST /api/auth/login'];
 });
 
 test('an upstream 5xx becomes 424; an expired session unlinks', async () => {
