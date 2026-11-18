@@ -188,16 +188,16 @@ body.side-collapsed, body.tik-immersive { --tik-left: 0px; }
 .tik-scrim { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.5); }
 .tik-scrim.clear { background: transparent; }
 .tik-sheet {
-  position: fixed; z-index: 51; left: var(--tik-left); right: 0; bottom: 0; margin: 0 auto;
-  width: min(560px, calc(100vw - var(--tik-left))); max-height: 85dvh; display: flex; flex-direction: column;
+  position: fixed; z-index: 51; left: var(--tik-left); right: 0; bottom: var(--tik-kb, 0px); margin: 0 auto;
+  width: min(560px, calc(100vw - var(--tik-left))); max-height: min(85dvh, calc(var(--tik-vvh, 100dvh) - 16px)); display: flex; flex-direction: column;
   background: #171717; color: #fff; border-radius: 16px 16px 0 0; box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.45);
   padding-bottom: env(safe-area-inset-bottom);
   animation: tik-up 0.18s ease-out;
 }
-.tik-sheet.narrow { width: min(448px, calc(100vw - var(--tik-left))); max-height: 75dvh; }
+.tik-sheet.narrow { width: min(448px, calc(100vw - var(--tik-left))); max-height: min(75dvh, calc(var(--tik-vvh, 100dvh) - 16px)); }
 .tik-sheet.wide { width: auto; }
 /* Comments, playlists and share run the full width, at most 70 % high. */
-.tik-sheet.tf-sheet-comments, .tik-sheet.tf-sheet-save, .tik-sheet.tf-sheet-share { width: auto; max-height: 70dvh; }
+.tik-sheet.tf-sheet-comments, .tik-sheet.tf-sheet-save, .tik-sheet.tf-sheet-share { width: auto; max-height: min(70dvh, calc(var(--tik-vvh, 100dvh) - 16px)); }
 .tik-sheet-grab { display: none; }
 .tik-sheet-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 6px 2px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
 .tik-sheet-head h3 { margin: 0; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

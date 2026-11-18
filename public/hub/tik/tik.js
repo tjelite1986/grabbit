@@ -82,6 +82,7 @@
       eyeOff: [["path",{"d":"M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"}],["path",{"d":"M14.084 14.158a3 3 0 0 1-4.242-4.242"}],["path",{"d":"M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"}],["path",{"d":"m2 2 20 20"}]],
       link2: [["path",{"d":"M9 17H7A5 5 0 0 1 7 7h2"}],["path",{"d":"M15 7h2a5 5 0 1 1 0 10h-2"}],["line",{"x1":"8","x2":"16","y1":"12","y2":"12"}]],
       lock: [["rect",{"width":"18","height":"11","x":"3","y":"11","rx":"2","ry":"2"}],["path",{"d":"M7 11V7a5 5 0 0 1 10 0v4"}]],
+      shuffle: [["path",{"d":"m18 14 4 4-4 4"}],["path",{"d":"m18 2 4 4-4 4"}],["path",{"d":"M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-7.6a4 4 0 0 1 3.3-1.7H22"}],["path",{"d":"M2 6h1.972a4 4 0 0 1 3.27 1.7l.5.7"}],["path",{"d":"M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"}]],
       history: [["path",{"d":"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"}],["path",{"d":"M3 3v5h5"}],["path",{"d":"M12 7v5l4 2"}]],
       undo2: [["path",{"d":"M9 14 4 9l5-5"}],["path",{"d":"M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"}]],
       sparkles: [["path",{"d":"M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"}],["path",{"d":"M20 2v4"}],["path",{"d":"M22 4h-4"}],["circle",{"cx":"4","cy":"20","r":"2"}]],
@@ -348,6 +349,24 @@
     // often closes and the next opens in the same click (More -> Edit), and a
     // history.back() per sheet would land late and close the new one.
     const sheets = [];
+    // The on-screen keyboard. Android Chrome only shrinks the visual
+    // viewport, so a sheet pinned to bottom: 0 ends up behind the keyboard
+    // (the comment field could not be seen while typing). --tik-kb is the
+    // height the keyboard takes off the bottom of the layout viewport and
+    // --tik-vvh the height still visible; the sheets ride on top of it.
+    const vvp = window.visualViewport;
+    function syncKeyboard() {
+      const root = document.documentElement.style;
+      if (!vvp) return;
+      const kb = Math.max(0, Math.round(window.innerHeight - vvp.height - vvp.offsetTop));
+      root.setProperty('--tik-kb', `${kb}px`);
+      root.setProperty('--tik-vvh', `${Math.round(vvp.height)}px`);
+    }
+    if (vvp) {
+      vvp.addEventListener('resize', syncKeyboard);
+      vvp.addEventListener('scroll', syncKeyboard);
+      syncKeyboard();
+    }
     let guard = false; // our history entry is on top
     let ignorePop = 0; // pops we caused ourselves
     //
@@ -481,6 +500,20 @@
     const SEEK_SECONDS = 10;
     const SPEEDS = [0.5, 1, 1.5, 2];
     const newSeed = () => 1 + Math.floor(Math.random() * 2147483645);
+    const RESUME_MAX_AGE = 7 * 86400000;
+    // The shuffle the main feed was last in, when it matches this visit: the
+    // same order and length, saved within RESUME_MAX_AGE, and (when the
+    // address names a clip) the very clip saved. A Back or reload carries
+    // ?focus; a fresh visit has none.
+    function savedShuffle(sort, length, focus) {
+      let saved = null;
+      try { saved = JSON.parse(store.get(KEYS.resume) || 'null'); } catch { saved = null; }
+      if (!saved || typeof saved !== 'object' || saved.sort !== sort || (saved.length || 'all') !== length) return null;
+      if (!intOf(saved.focus) || !intOf(saved.seed) || !(Date.now() - saved.at < RESUME_MAX_AGE)) return null;
+      if (saved.cursor !== null && !(Number.isInteger(saved.cursor) && saved.cursor >= 0)) return null;
+      if (focus && focus !== saved.focus) return null;
+      return { focus: saved.focus, seed: saved.seed, cursor: saved.cursor };
+    }
     const labelOf = (list, v) => (list.find(([k]) => k === v) || list[0])[1];
     // Same rules as short-card.tsx: the creator profile when the clip has one,
     // else the uploader; two initials in the round avatar.
@@ -549,17 +582,21 @@
       if (tag) scope.tag = tag;
       const focus = intOf(p.get('focus'));
       let sort = MODES.some(([m]) => m === p.get('sort')) ? p.get('sort') : 'foryou';
-      // TikShortis rules: a tag or a scoped feed is newest first; a focus
-      // cannot anchor in a seeded (offset) order, so it reads as New.
+      // TikShortis rules: a tag or a scoped feed is newest first.
       if (scoped || tag) sort = 'new';
-      if (focus && SEEDED.has(sort)) sort = 'new';
       let length = ['short', 'long'].includes(p.get('length')) ? p.get('length') : 'all';
-      let seed = SEEDED.has(sort) ? newSeed() : null;
+      const mainFeed = !scoped && !tag;
+      // Grabbit's own rule: For You and Random continue where the viewer
+      // left off (same shuffle, same place) instead of reshuffling on every
+      // visit. Otherwise a focus cannot anchor in a seeded (offset) order,
+      // so it reads as New, as in TikShortis.
+      const restore = mainFeed && SEEDED.has(sort) ? savedShuffle(sort, length, focus) : null;
+      if (focus && SEEDED.has(sort) && !restore) sort = 'new';
+      let seed = restore ? restore.seed : SEEDED.has(sort) ? newSeed() : null;
       // New, Following and Liked page by clip id, so a deep link can also
       // load the clips above it (`after`); the others page by offset.
       let byId = !SEEDED.has(sort);
       const inPlaylist = !!scope.playlist;
-      const mainFeed = !scoped && !tag;
       // The address the feed keeps up to date (the current clip goes in
       // `focus`); a mode switch replaces it.
       let baseParams = new URLSearchParams(p);
@@ -571,7 +608,7 @@
         items: [],
         cards: [],
         ids: new Set(),
-        cursor: focus ? focus + 1 : null,
+        cursor: restore ? restore.cursor : focus ? focus + 1 : null,
         hasMore: true,
         loading: false,
         errors: 0,
@@ -583,6 +620,8 @@
         soundBlocked: false,
         fullscreen: false,
         firstPage: true,
+        // The clip to start on when a saved shuffle is continued.
+        restoreFocus: restore ? restore.focus : null,
       };
       document.body.classList.add('tik-feed');
 
@@ -768,19 +807,29 @@
       async function loadMore() {
         if (F.loading || !F.hasMore || Date.now() < F.retryAt) return;
         const tok = F.token;
+        const pageAt = F.cursor;
         F.loading = true;
         paintStatus();
         try {
-          const d = await call(feedQuery({ cursor: F.cursor }));
+          const d = await call(feedQuery({ cursor: pageAt }));
           if (!current(tok)) return;
           F.errors = 0;
-          const fresh = (d.items || []).filter((s) => s && Number.isInteger(s.id) && !F.ids.has(s.id));
-          for (const s of fresh) addCard(s, false);
+          let fresh = (d.items || []).filter((s) => s && Number.isInteger(s.id) && !F.ids.has(s.id));
+          if (F.restoreFocus !== null) {
+            // Continuing a saved shuffle: start on the clip the viewer was
+            // on (the ones before it on that page were already watched). A
+            // shuffle that no longer reaches that far starts over.
+            const at = fresh.findIndex((s) => s.id === F.restoreFocus);
+            F.restoreFocus = null;
+            if (!fresh.length && !F.cards.length) { switchFeed(sort, length, true); return; }
+            if (at > 0) fresh = fresh.slice(at);
+          }
+          for (const s of fresh) addCard(s, false, pageAt);
           F.cursor = d.nextCursor;
           F.hasMore = d.nextCursor !== null && d.nextCursor !== undefined;
           if (F.active < 0 && F.cards.length) {
             pickActive();
-            if (F.firstPage) offerResume();
+            if (F.firstPage) { if (restore) offerReshuffle(); else offerResume(); }
             F.firstPage = false;
             // The top sentinel was already in view before the first page
             // came, so its observer will not fire again: ask once here.
@@ -835,13 +884,13 @@
       // A new order or length, in place: no navigation, so fullscreen and the
       // sheets' history entry survive, and the address is replaced (Back
       // leaves the feed, as in TikShortis).
-      function switchFeed(nextSort, nextLength) {
-        if (nextSort === sort && nextLength === length) return;
+      function switchFeed(nextSort, nextLength, reshuffle) {
+        if (!reshuffle && nextSort === sort && nextLength === length) return;
         F.token++;
         const c = F.cards[F.active];
         if (c) deactivate(c);
         for (const x of F.cards) { unload(x); activeObserver.unobserve(x.el); x.el.remove(); }
-        Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1 });
+        Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1, restoreFocus: null });
         sort = nextSort;
         length = nextLength;
         seed = SEEDED.has(sort) ? newSeed() : null;
@@ -858,9 +907,12 @@
       }
 
       // ---- Cards ----
-      function addCard(s, atTop) {
+      function addCard(s, atTop, pageAt) {
         F.ids.add(s.id);
         const c = buildCard(s);
+        // The offset cursor of the page the clip came in (seeded orders), so
+        // the saved place can load that page again.
+        c.pageAt = Number.isInteger(pageAt) ? pageAt : null;
         if (atTop) {
           F.items.unshift(s);
           F.cards.unshift(c);
@@ -1186,7 +1238,11 @@
         const q = new URLSearchParams(baseParams);
         q.set('focus', String(c.s.id));
         hub.replaceHash(`${BASE}${subPath}?${q}`);
-        if (mainFeed) store.set(KEYS.resume, JSON.stringify({ focus: c.s.id, at: Date.now() }));
+        if (mainFeed) {
+          const saved = { focus: c.s.id, at: Date.now() };
+          if (SEEDED.has(sort)) Object.assign(saved, { sort, length, seed, cursor: c.pageAt });
+          store.set(KEYS.resume, JSON.stringify(saved));
+        }
         if (i >= F.cards.length - 3) loadMore();
       }
       function play(c) {
@@ -1607,12 +1663,20 @@
       };
       document.addEventListener('visibilitychange', onVis);
 
+      // ---- Continued shuffle: a way to start a fresh one ----
+      function offerReshuffle() {
+        fill(resumeBox, h('button', { type: 'button', class: 'tf-resume-btn', onclick: () => { resumeBox.hidden = true; switchFeed(sort, length, true); } }, lu('shuffle', 16), 'Shuffle again'));
+        resumeBox.hidden = false;
+        const t = setTimeout(() => { resumeBox.hidden = true; }, 15000);
+        onLeave(() => clearTimeout(t));
+      }
+
       // ---- Resume offer (main feed, no deep link) ----
       function offerResume() {
         if (!mainFeed || focus) return;
         let saved = null;
         try { saved = JSON.parse(store.get(KEYS.resume) || 'null'); } catch { saved = null; }
-        if (!saved || !intOf(saved.focus) || !(Date.now() - saved.at < 7 * 86400000)) return;
+        if (!saved || !intOf(saved.focus) || !(Date.now() - saved.at < RESUME_MAX_AGE)) return;
         if (F.items[0] && F.items[0].id === saved.focus) return;
         fill(resumeBox, h('a', { class: 'tf-resume-btn', href: link('', { focus: saved.focus, sort: 'new' }), onclick: () => { resumeBox.hidden = true; } }, lu('history', 16), 'Continue where you left off'));
         resumeBox.hidden = false;
