@@ -306,3 +306,20 @@ test('an unreadable profile store on a cold start hides every author instead of 
   const feed = await (await fetch(`${s.base}/api/egram/api/feed`, { headers: { Cookie: `${a}; ${eg}`, 'Sec-Fetch-Site': 'same-origin' } })).json();
   assert.deepEqual(feed.items, []);
 });
+
+test('a profile store holding JSON null is refused, not read as a fresh install', async () => {
+  const s = await boot('nullstore', { EGRAM_MODE: 'native', EGRAM_API_URL: `http://127.0.0.1:${upstream.address().port}` }, { 'profiles.json': null });
+  const a = await login(s.base);
+  const link = await fetch(`${s.base}/api/egram/session`, {
+    method: 'POST',
+    headers: { Cookie: a, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'cc', password: 'pw' }),
+  });
+  assert.equal(link.status, 200);
+  const eg = (link.headers.getSetCookie() || []).map((v) => v.split(';')[0]).find((v) => v.startsWith('grabbit_egram='));
+  // A hub read of the store fails too, and must not leave an empty store cached for the gateway.
+  const hub = await fetch(`${s.base}/api/hub/profiles`, { headers: { Cookie: a, 'Sec-Fetch-Site': 'same-origin' } });
+  assert.equal(hub.status, 500);
+  const feed = await (await fetch(`${s.base}/api/egram/api/feed`, { headers: { Cookie: `${a}; ${eg}`, 'Sec-Fetch-Site': 'same-origin' } })).json();
+  assert.deepEqual(feed.items, []);
+});

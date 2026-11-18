@@ -3067,10 +3067,27 @@ function mirrorEgramClassification(handle, aud, igHandle) {
   return { changed: [], created: r.profile.id };
 }
 
+// The key that seals Elitogram session tokens into the link cookie. With no
+// GRABBIT_SECRET and no password, AUTH_SECRET is the public 'grabbit-dev'
+// literal, so a random key is generated once and kept in DATA_DIR instead.
+function egramSealSecret() {
+  if (process.env.GRABBIT_SECRET || GRABBIT_PASSWORD) return AUTH_SECRET;
+  const file = path.join(DATA_DIR, 'egram-seal.key');
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(file, crypto.randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+  }
+  const key = fs.readFileSync(file, 'utf8').trim();
+  if (!/^[0-9a-f]{64}$/.test(key)) throw new Error(`${file} does not hold a 64-hex-digit key; remove it to generate a new one`);
+  return key;
+}
+
 if (EGRAM_MODE === 'native') {
   const gateway = egramGateway.createGateway({
     apiUrl: EGRAM_API,
-    secret: AUTH_SECRET,
+    secret: egramSealSecret(),
     isAdultHandle: egramIsAdultHandle,
     // The Elitogram link is bound to this Grabbit sign-in (a hash, never the cookie itself).
     bindingOf: (req) => crypto.createHash('sha256').update(`egram-link|${parseCookies(req.headers.cookie)[AUTH_COOKIE] || ''}`).digest('base64url').slice(0, 22),
@@ -3261,7 +3278,14 @@ function readProfilesReadOnly() {
     // empty store.
     if (e.code !== 'ENOENT') throw e;
   }
-  return { store: profiles.normalizeStore(raw === null ? null : JSON.parse(raw)) };
+  if (raw === null) return { store: profiles.normalizeStore(null) };
+  const parsed = JSON.parse(raw);
+  if (!isProfileStoreShape(parsed)) throw new Error('profiles.json does not hold a profile store');
+  return { store: profiles.normalizeStore(parsed) };
+}
+// An existing profiles.json must hold a store object; only a missing file is a fresh install.
+function isProfileStoreShape(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
 }
 // Set when profiles.json was damaged and no snapshot restored it. Every read
 // then fails, so the adult filter that depends on the store fails closed until
@@ -3280,12 +3304,20 @@ function loadProfilesStore() {
     if (e.code === 'ENOENT') return profiles.normalizeStore(null);
     throw e;
   }
+  let parsed;
   try {
-    return profiles.normalizeStore(JSON.parse(raw));
+    parsed = JSON.parse(raw);
   } catch { /* damaged: quarantine and restore below */ }
+  if (parsed !== undefined) {
+    // JSON that parses but is not a store (null, an array, a number) is not a
+    // fresh install: refuse it instead of starting empty.
+    if (isProfileStoreShape(parsed)) return profiles.normalizeStore(parsed);
+    profilesDamaged = 'profiles.json does not hold a profile store; repair it and restart';
+    throw new Error(profilesDamaged);
+  }
   const unrestored = Symbol('unrestored');
   const restored = readJsonState(PROFILES_FILE, unrestored);
-  if (restored === unrestored) {
+  if (restored === unrestored || !isProfileStoreShape(restored)) {
     profilesDamaged = 'profiles.json is damaged and no snapshot restored it; repair the kept .corrupt file and restart';
     throw new Error(profilesDamaged);
   }
@@ -7746,22 +7778,27 @@ async function produceImage(job, meta, params) {
   const ext = safeExt(meta.ext, 'jpg');
   const outName = `${stem}.${ext}`;
   const dir = toPosts ? postsImportDir(meta.creator) : PHOTOS_DIR;
-  const libPath = path.join(dir, outName);
+  let libPath = path.join(dir, outName);
+  let fileName = outName;
   setJob(job, { phase: 'downloading' });
   if (!fs.existsSync(libPath)) {
-    if (toPosts) await saveImageToPosts(meta, params.channel);
-    else {
+    if (toPosts) {
+      // The file actually published (an image under the same stem may be kept).
+      const saved = await saveImageToPosts(meta, params.channel);
+      libPath = saved.path;
+      fileName = saved.name;
+    } else {
       fs.mkdirSync(PHOTOS_DIR, { recursive: true });
       await downloadDirect(meta, libPath);
     }
   }
-  recordJobHistory(meta, params, toPosts ? 'elite/posts' : 'server/photos', outName, toPosts);
+  recordJobHistory(meta, params, toPosts ? 'elite/posts' : 'server/photos', fileName, toPosts);
   finishJob(job, {
     saved: true,
     dest: toPosts ? 'elite' : 'server',
     dir: toPosts ? 'posts' : 'photos',
-    filename: outName,
-    mime: imageMime(ext),
+    filename: fileName,
+    mime: imageMime(path.extname(fileName).slice(1)),
     deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
     message: toPosts ? 'Saved to the posts import folder.' : 'Saved to photos.',
   });
@@ -9596,10 +9633,22 @@ async function saveImageToPosts(job, channel) {
 }
 
 // The image already published under a stem in a posts drop folder, whatever
-// its extension (sidecars, dotfiles and staged parts are not images).
+// its extension: a regular file whose name minus its final extension is
+// exactly the stem (titles keep dots, so `shot.2.jpg` is not under `shot`).
+// Sidecars, dotfiles and staged parts are not images.
 function postsStemImage(dir, stem) {
   try {
-    return fs.readdirSync(dir).find((f) => f.startsWith(`${stem}.`) && f !== `${stem}.json` && !f.endsWith('.json') && !f.startsWith('.')) || null;
+    return (
+      fs.readdirSync(dir).find((f) => {
+        const dot = f.lastIndexOf('.');
+        if (dot <= 0 || f.startsWith('.') || f.slice(0, dot) !== stem || f.slice(dot) === '.json') return false;
+        try {
+          return fs.lstatSync(path.join(dir, f)).isFile();
+        } catch {
+          return false;
+        }
+      }) || null
+    );
   } catch {
     return null;
   }
@@ -9675,12 +9724,18 @@ async function downloadImage(res, job, url, device, dest, channel) {
   const ext = safeExt(job.ext, 'jpg');
   const outName = `${stem}.${ext}`;
   const dir = toPosts ? postsImportDir(job.creator) : PHOTOS_DIR;
-  const libPath = path.join(dir, outName);
+  let libPath = path.join(dir, outName);
+  let fileName = outName;
   const already = fs.existsSync(libPath);
   try {
     if (!already) {
-      if (toPosts) await saveImageToPosts(job, channel);
-      else {
+      if (toPosts) {
+        // Publication may keep an image already there under the same stem with
+        // another extension; report and stream the file that is actually there.
+        const saved = await saveImageToPosts(job, channel);
+        libPath = saved.path;
+        fileName = saved.name;
+      } else {
         fs.mkdirSync(PHOTOS_DIR, { recursive: true });
         await downloadDirect(job, libPath);
       }
@@ -9689,7 +9744,7 @@ async function downloadImage(res, job, url, device, dest, channel) {
       creator: job.creator || null,
       title: job.title || null,
       channel: toPosts ? 'elite/posts' : 'server/photos',
-      filename: outName,
+      filename: fileName,
       sourceUrl: job.sourceUrl || url,
       thumbnail: job.thumbnail || null,
       extractor: job.extractor || null,
@@ -9699,17 +9754,18 @@ async function downloadImage(res, job, url, device, dest, channel) {
     if (!device) {
       return res.json(
         toPosts
-          ? { ok: true, saved: !already, dest: 'elite', dir: 'posts', creator: postsCreator(job.creator), filename: outName }
-          : { ok: true, saved: !already, dest: 'server', dir: 'photos', filename: outName }
+          ? { ok: true, saved: !already, dest: 'elite', dir: 'posts', creator: postsCreator(job.creator), filename: fileName }
+          : { ok: true, saved: !already, dest: 'server', dir: 'photos', filename: fileName }
       );
     }
-    res.setHeader('Content-Disposition', contentDisposition(outName));
-    res.setHeader('Content-Type', imageMime(ext));
+    res.setHeader('Content-Disposition', contentDisposition(fileName));
+    res.setHeader('Content-Type', imageMime(path.extname(fileName).slice(1)));
     res.setHeader('Content-Length', fs.statSync(libPath).size);
     await pipeline(fs.createReadStream(libPath), res);
   } catch (e) {
     console.error('image download failed:', e);
-    if (!res.headersSent) res.status(502).send('Image download failed: ' + String(e.message || e));
+    // 422, never 5xx: a proxy such as Cloudflare would replace a 5xx body with its own page.
+    if (!res.headersSent) res.status(422).send('Image download failed: ' + String(e.message || e));
     else res.destroy();
   }
 }
