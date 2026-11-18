@@ -13,6 +13,8 @@ const SECRET = 'test-secret';
 // --- Fake Elitogram ----------------------------------------------------------------
 const seen = [];
 const handlers = {};
+// handle -> other names Elitogram knows it by (served at /api/creator-identities)
+const identities = {};
 let upBase;
 const upstream = http.createServer((req, res) => {
   const chunks = [];
@@ -21,6 +23,14 @@ const upstream = http.createServer((req, res) => {
     const rec = { method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') };
     seen.push(rec);
     const path = req.url.split('?')[0];
+    if (path === '/api/creator-identities' && !handlers[path]) {
+      // Default: the other names each asked handle is known by (identities).
+      const q = new URLSearchParams(req.url.slice(req.url.indexOf('?') + 1));
+      const items = {};
+      for (const h of q.getAll('h')) if (identities[h]) items[h] = identities[h];
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify({ items }));
+    }
     const h = handlers[`${req.method} ${path}`] || handlers[path];
     if (h) return h(req, res, rec);
     res.setHeader('content-type', 'application/json');
@@ -71,7 +81,8 @@ function call(method, path, { cookie = linked(), headers = {}, body } = {}) {
   if (body !== undefined) h['content-type'] = 'application/json';
   return fetch(base + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
 }
-const last = () => seen[seen.length - 1];
+// The last request the gateway forwarded, not counting identity lookups.
+const last = () => seen.filter((x) => !x.url.startsWith('/api/creator-identities')).pop();
 
 // --- Pure parts ------------------------------------------------------------------
 
@@ -244,7 +255,7 @@ test('reads below a post and writes to it need the post itself to pass', async (
   assert.equal((await call('GET', '/api/egram/api/posts/6/comments')).status, 404);
   assert.equal((await call('POST', '/api/egram/api/posts/6/like')).status, 404);
   // Only the parent lookups reached Elitogram, never the comment read or the like.
-  assert.ok(seen.slice(before).every((q) => q.method === 'GET' && q.url === '/api/posts/6'));
+  assert.ok(seen.slice(before).every((q) => q.method === 'GET' && (q.url === '/api/posts/6' || q.url.startsWith('/api/creator-identities'))));
   // A post without an owner cannot be judged either.
   handlers['/api/posts/7'] = json(200, { id: 7, caption: '', media: [], audience: 'general' });
   assert.equal((await call('POST', '/api/egram/api/collections/1/items', { body: { post_id: 7 } })).status, 404);
@@ -253,7 +264,7 @@ test('reads below a post and writes to it need the post itself to pass', async (
   handlers['DELETE /api/collections/1/items/6'] = json(200, { ok: true });
   const del = seen.length;
   assert.equal((await call('DELETE', '/api/egram/api/collections/1/items/6')).status, 404);
-  assert.ok(seen.slice(del).every((q) => q.method === 'GET' && q.url === '/api/posts/6'));
+  assert.ok(seen.slice(del).every((q) => q.method === 'GET' && (q.url === '/api/posts/6' || q.url.startsWith('/api/creator-identities'))));
   adultSet = new Set();
 });
 
@@ -413,4 +424,81 @@ test('a link counts only alongside the Grabbit sign-in it was made under', async
   const bound = `${gw.EGRAM_COOKIE}=${gw.seal(SECRET, { t: 'tok123', exp: Date.now() + 60000, b: 'me' })}`;
   assert.equal((await call('GET', '/api/egram/api/feed', { cookie: bound, headers: { 'x-test-signin': 'me' } })).status, 200);
   assert.equal((await call('GET', '/api/egram/api/feed', { cookie: bound })).status, 401);
+});
+
+// --- Other identities (brief item 6) -------------------------------------------------
+
+test('a creator 18+ in Grabbit under another identity is dropped from answers and media', async () => {
+  // Elitogram knows "zed" also as the Instagram account "zed.ig" and the alias "zedalias".
+  identities.zed = ['zed.ig', 'zedalias'];
+  identities.yan = [];
+  handlers['/api/feed'] = json(200, { items: [
+    { id: 1, audience: 'general', author: { handle: 'zed' }, caption: 'a', media: [] },
+    { id: 2, audience: 'general', author: { handle: 'yan' }, caption: 'b', media: [] },
+  ], next: null });
+  handlers['/m/40'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'zed' });
+  handlers['/m/40/t'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'zed' });
+  handlers['/m/ca/40'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/jpeg', 'x-egram-picture': 'creator', 'x-egram-audience': 'general', 'x-egram-creator': 'zed' }); res.end('AVATAR'); };
+  // Grabbit has the Instagram account classified 18+, not the Elitogram handle.
+  adultSet = new Set(['zed.ig']);
+  try {
+    const d = await (await call('GET', '/api/egram/api/feed')).json();
+    assert.deepEqual(d.items.map((p) => p.id), [2]);
+    assert.equal((await call('GET', '/api/egram/m/40')).status, 404);
+    assert.equal((await call('GET', '/api/egram/m/40/t')).status, 404);
+    const av = await call('GET', '/api/egram/m/ca/40');
+    assert.equal(await av.text(), gw.NEUTRAL_PICTURE);
+    // The same through an alias, and in the review lane too.
+    adultSet = new Set(['zedalias']);
+    handlers['/api/explore'] = json(200, { items: [{ id: 3, media_id: 9, audience: 'unknown', author_handle: 'zed' }], next: null });
+    const rv = await (await call('GET', '/api/egram/api/explore?lane=review')).json();
+    assert.deepEqual(rv.items, []);
+    // Writes below such a post are refused by the parent check.
+    handlers['/api/posts/1'] = json(200, { id: 1, audience: 'general', author: { handle: 'zed' }, caption: 'a', media: [] });
+    assert.equal((await call('POST', '/api/egram/api/posts/1/comments', { body: { body: 'hi' } })).status, 404);
+  } finally {
+    adultSet = new Set();
+    delete handlers['/api/explore'];
+  }
+});
+
+test('a failing identity lookup refuses the answer and the file', async () => {
+  identities.quo = [];
+  handlers['/api/creator-identities'] = json(500, { error: 'down' });
+  handlers['/api/feed'] = json(200, { items: [{ id: 5, audience: 'general', author: { handle: 'quo' }, caption: 'c', media: [] }], next: null });
+  handlers['/m/41'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'quo' });
+  adultSet = new Set(['someone-else']);
+  try {
+    assert.equal((await call('GET', '/api/egram/api/feed')).status, 424);
+    assert.equal((await call('GET', '/api/egram/m/41')).status, 404);
+  } finally {
+    delete handlers['/api/creator-identities'];
+    adultSet = new Set();
+  }
+});
+
+test('media naming two creators, or a joined handle, is refused', async () => {
+  handlers['/m/42'] = (req, res) => {
+    // Two X-Egram-Creator headers: Node would join them as "adultone, other".
+    res.writeHead(200, [['content-type', 'image/jpeg'], ['x-egram-audience', 'general'], ['x-egram-creator', 'adultone'], ['x-egram-creator', 'other']]);
+    res.end('JPEGDATA');
+  };
+  handlers['/m/43'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'adultone, other' });
+  adultSet = new Set(['adultone']);
+  try {
+    assert.equal((await call('GET', '/api/egram/m/42')).status, 404);
+    assert.equal((await call('GET', '/api/egram/m/42', { headers: { range: 'bytes=0-3' } })).status, 404);
+    assert.equal((await call('GET', '/api/egram/m/43')).status, 404);
+  } finally {
+    adultSet = new Set();
+  }
+  assert.equal(gw.singleHeader(['X-Egram-Creator', 'a', 'x-egram-creator', 'b'], 'x-egram-creator'), null);
+  assert.equal(gw.singleHeader(['X-Egram-Creator', 'a'], 'x-egram-creator'), 'a');
+  assert.equal(gw.mediaCreator({}, ['x-egram-creator', 'a b']), null);
+});
+
+test('search hits without a handle are dropped', () => {
+  const { value, dropped } = gw.filterAnswer({ creators: [{ audience: 'general' }, { audience: 'general', handle: 'ok' }] }, 'general', () => false);
+  assert.deepEqual(value.creators.map((c) => c.handle), ['ok']);
+  assert.equal(dropped, 1);
 });

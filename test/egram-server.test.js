@@ -40,6 +40,19 @@ const upstream = http.createServer((req, res) => {
       res.end(JSON.stringify(obj));
     };
     if (req.url === '/api/auth/login') return send(200, { ok: true }, { 'set-cookie': 'eg_session=up-token; Path=/; HttpOnly' });
+    if (req.url.startsWith('/api/explore')) {
+      return send(200, {
+        items: [
+          { id: 3, media_id: 30, author_handle: 'shady', audience: 'general' },
+          { id: 4, media_id: 40, author_handle: 'sunny', audience: 'general' },
+        ],
+        next: null,
+      });
+    }
+    if (req.url.startsWith('/m/30')) {
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'x-egram-audience': 'general', 'x-egram-creator': 'shady' });
+      return res.end('JPEG');
+    }
     if (req.url.startsWith('/api/feed')) {
       return send(200, {
         items: [
@@ -48,6 +61,13 @@ const upstream = http.createServer((req, res) => {
         ],
         next: null,
       });
+    }
+    if (req.url.startsWith('/api/creator-identities')) {
+      // The creator "shady" is also known by the Instagram account "ig.shady".
+      const q = new URLSearchParams(req.url.slice(req.url.indexOf('?') + 1));
+      const items = {};
+      for (const h of q.getAll('h')) items[h] = h === 'shady' ? ['ig.shady'] : [];
+      return send(200, { items });
     }
     if (req.url === '/api/creators-classify') {
       const b = JSON.parse(body);
@@ -322,4 +342,44 @@ test('a profile store holding JSON null is refused, not read as a fresh install'
   assert.equal(hub.status, 500);
   const feed = await (await fetch(`${s.base}/api/egram/api/feed`, { headers: { Cookie: `${a}; ${eg}`, 'Sec-Fetch-Site': 'same-origin' } })).json();
   assert.deepEqual(feed.items, []);
+});
+
+test('a creator 18+ in Grabbit only by its Instagram account is hidden from answers and files', async () => {
+  const h = { Cookie: `${auth}; ${egramCookie}`, 'Sec-Fetch-Site': 'same-origin' };
+  const ex = await (await fetch(`${native.base}/api/egram/api/explore`, { headers: h })).json();
+  assert.deepEqual(ex.items.map((t) => t.author_handle), ['sunny']);
+  assert.equal((await fetch(`${native.base}/api/egram/m/30`, { headers: h })).status, 404);
+});
+
+test('a failed profile recovery keeps the adult filter closed after a restart', async () => {
+  const name = 'damaged-restart';
+  const data = path.join(root, name);
+  fs.mkdirSync(data, { recursive: true });
+  fs.writeFileSync(path.join(data, 'profiles.json'), '{ not json');
+  const env = { EGRAM_MODE: 'native', EGRAM_API_URL: `http://127.0.0.1:${upstream.address().port}` };
+  const feedVia = async (s) => {
+    const a = await login(s.base);
+    const link = await fetch(`${s.base}/api/egram/session`, {
+      method: 'POST',
+      headers: { Cookie: a, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'cc', password: 'pw' }),
+    });
+    const eg = (link.headers.getSetCookie() || []).map((v) => v.split(';')[0]).find((v) => v.startsWith('grabbit_egram='));
+    // The hub read triggers the quarantine and the failed recovery.
+    await fetch(`${s.base}/api/hub/profiles`, { headers: { Cookie: a, 'Sec-Fetch-Site': 'same-origin' } });
+    return (await fetch(`${s.base}/api/egram/api/feed`, { headers: { Cookie: `${a}; ${eg}`, 'Sec-Fetch-Site': 'same-origin' } })).json();
+  };
+  const first = await boot(name, env);
+  assert.deepEqual((await feedVia(first)).items, []);
+  assert.ok(!fs.existsSync(path.join(data, 'profiles.json')), 'the damaged file was moved aside');
+  assert.ok(fs.existsSync(path.join(data, 'profiles.json.damaged')), 'the damage is recorded on disk');
+  procs[procs.length - 1].kill();
+  // A new process finds no profiles.json, but must not take that for a fresh install.
+  const second = await boot(name, env);
+  assert.deepEqual((await feedVia(second)).items, []);
+  // Without the marker, a missing store next to a kept .corrupt copy still counts as damage.
+  procs[procs.length - 1].kill();
+  fs.rmSync(path.join(data, 'profiles.json.damaged'));
+  const third = await boot(name, env);
+  assert.deepEqual((await feedVia(third)).items, []);
 });

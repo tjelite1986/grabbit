@@ -165,6 +165,9 @@ function matchRoute(method, rest) {
 // closed). Every entry of a `creators` list (search hits) must name the lane's
 // audience too, however little else it carries.
 const norm = (s) => String(s == null ? '' : s).trim().toLowerCase();
+// A creator handle as Elitogram writes it. Anything else (two handles joined by
+// a comma, say) is no handle at all.
+const CANONICAL_HANDLE = /^[a-z0-9._~-]{1,100}$/;
 
 function authorHandle(o) {
   if (o.author && typeof o.author === 'object' && typeof o.author.handle === 'string') return o.author.handle;
@@ -212,7 +215,7 @@ function filterAnswer(value, want, isAdultHandle) {
       for (const [k, x] of Object.entries(v)) {
         if (!allowedItem(x, want, isAdultHandle)) { dropped++; out[k] = null; continue; }
         if (k === 'creators' && Array.isArray(x)) {
-          const kept = x.filter((c) => c && typeof c === 'object' && !Array.isArray(c) && c.audience === want);
+          const kept = x.filter((c) => c && typeof c === 'object' && !Array.isArray(c) && c.audience === want && typeof c.handle === 'string' && c.handle !== '');
           dropped += x.length - kept.length;
           out[k] = walk(kept);
           continue;
@@ -227,6 +230,21 @@ function filterAnswer(value, want, isAdultHandle) {
   const out = walk(value);
   if (dropped && out && typeof out === 'object' && !Array.isArray(out) && 'total' in out) out.total = null;
   return { value: out, dropped };
+}
+
+// Every handle an answer names as an author or creator, for the identity
+// lookup below.
+function handlesIn(value) {
+  const out = new Set();
+  const walk = (v) => {
+    if (Array.isArray(v)) { for (const x of v) walk(x); return; }
+    if (!v || typeof v !== 'object') return;
+    const h = authorHandle(v);
+    if (h) out.add(norm(h));
+    for (const x of Object.values(v)) walk(x);
+  };
+  walk(value);
+  return [...out].filter((h) => CANONICAL_HANDLE.test(h));
 }
 
 // Content types passed back. Elitogram's generated avatars and banners are
@@ -247,14 +265,34 @@ function allowedType(ct, route) {
 //   - an account's avatar says it is one (X-Egram-Picture: user) and is the
 //     generated initials picture; an uploaded account picture is not passed.
 // The creator must not be 18+ in Grabbit. Applies to 200, 206 and 304 alike.
-function mediaAllowed(route, headers, want, isAdultHandle) {
+// The value of a header the answer sent exactly once (counted on the raw
+// headers, since Node joins repeats of unknown headers with a comma).
+function singleHeader(rawHeaders, name) {
+  if (!Array.isArray(rawHeaders)) return undefined;
+  let found;
+  for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+    if (String(rawHeaders[i]).toLowerCase() !== name) continue;
+    if (found !== undefined) return null;
+    found = String(rawHeaders[i + 1]);
+  }
+  return found === undefined ? null : found;
+}
+
+// The creator a media answer names: exactly one header holding one canonical
+// handle, else null.
+function mediaCreator(headers, rawHeaders) {
+  const v = rawHeaders ? singleHeader(rawHeaders, 'x-egram-creator') : typeof headers['x-egram-creator'] === 'string' ? headers['x-egram-creator'] : null;
+  return typeof v === 'string' && CANONICAL_HANDLE.test(v) ? v : null;
+}
+
+function mediaAllowed(route, headers, want, isAdultHandle, rawHeaders) {
   const one = (k) => (typeof headers[k] === 'string' ? headers[k] : null);
   // An account's own upload says nothing about its audience, so only the
   // generated initials (SVG) pass; an uploaded account picture is replaced.
   if (route.picture === 'user') return one('x-egram-picture') === 'user' && /^image\/svg\+xml\b/i.test(one('content-type') || '');
   if (route.picture && one('x-egram-picture') !== 'creator') return false;
   if (one('x-egram-audience') !== want) return false;
-  const creator = one('x-egram-creator');
+  const creator = mediaCreator(headers, rawHeaders);
   if (!creator) return false;
   if (isAdultHandle && isAdultHandle(creator)) return false;
   return true;
@@ -317,6 +355,50 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       res.on('error', reject);
     });
   }
+
+  // --- Other identities of a creator ---------------------------------------
+  // Grabbit's 18+ profiles may know a creator by another name than the
+  // Elitogram handle: an Instagram or TikTok account, a linked account, an
+  // alias. Elitogram lists those names per handle (api/creator-identities, in
+  // the same scope), and a creator is 18+ here when the handle or any of them
+  // matches a Grabbit profile classified 18+. Nothing is merged; this only
+  // reads. Cached briefly per lane, since the lookup is scoped.
+  const IDENTITY_TTL = 120000;
+  const identityCache = new Map(); // `${lane}\u0000${handle}` -> { names, at }
+  async function identitiesFor(req, cur, lane, handles) {
+    const out = new Map();
+    if (!isAdultHandle || !handles.length) return out;
+    const now = Date.now();
+    const missing = [];
+    for (const h of handles) {
+      const hit = identityCache.get(`${lane}\u0000${h}`);
+      if (hit && now - hit.at < IDENTITY_TTL) out.set(h, hit.names);
+      else missing.push(h);
+    }
+    for (let i = 0; i < missing.length; i += 100) {
+      const part = missing.slice(i, i + 100);
+      const qs = part.map((h) => `h=${encodeURIComponent(h)}`).join('&');
+      const r = await upstream(req, { method: 'GET', path: `/api/creator-identities?${qs}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
+      if (r.statusCode !== 200) { r.resume(); throw new Error(`identity lookup answered ${r.statusCode}`); }
+      const d = await readJson(r, 1024 * 1024);
+      const items = d && typeof d.items === 'object' && d.items && !Array.isArray(d.items) ? d.items : null;
+      if (!items) throw new Error('identity lookup sent an unexpected answer');
+      if (identityCache.size > 5000) identityCache.clear();
+      for (const h of part) {
+        const raw = Object.prototype.hasOwnProperty.call(items, h) && Array.isArray(items[h]) ? items[h] : [];
+        const names = raw.filter((x) => typeof x === 'string').map(norm).filter(Boolean).slice(0, 100);
+        identityCache.set(`${lane}\u0000${h}`, { names, at: now });
+        out.set(h, names);
+      }
+    }
+    return out;
+  }
+  // The 18+ test for one answer: the handle, or any other name it is known by.
+  const adultTest = (ids) => (isAdultHandle ? (h) => {
+    if (isAdultHandle(h)) return true;
+    const names = ids.get(norm(h)) || [];
+    return names.some((n) => isAdultHandle(n));
+  } : null);
 
   const fail = (res, status, error) => {
     if (res.headersSent) { res.destroy(); return; }
@@ -424,7 +506,8 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     if (r.statusCode === 401) { r.resume(); return 401; }
     if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
     const d = await readJson(r);
-    const { value, dropped } = filterAnswer(d, LANES[lane], isAdultHandle);
+    const ids = await identitiesFor(req, cur, lane, handlesIn(d));
+    const { value, dropped } = filterAnswer(d, LANES[lane], adultTest(ids));
     return value !== null && dropped === 0 && value.audience === LANES[lane];
   }
 
@@ -477,7 +560,12 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     if (status === 401) res.setHeader('Set-Cookie', cookieHeader(req, '', 0));
     if (route.media && status < 400) {
       let ok = false;
-      try { ok = mediaAllowed(route, r.headers, want, isAdultHandle); } catch (e) { log.warn(`[egram] media check ${rest}: ${e.message}`); }
+      try {
+        let test = isAdultHandle;
+        const named = route.picture === 'user' ? null : mediaCreator(r.headers, r.rawHeaders);
+        if (named && isAdultHandle) test = adultTest(await identitiesFor(req, cur, lane, [named]));
+        ok = mediaAllowed(route, r.headers, want, test, r.rawHeaders);
+      } catch (e) { log.warn(`[egram] media check ${rest}: ${e.message}`); }
       if (!ok) {
         r.resume();
         if (route.picture) {
@@ -517,7 +605,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     let d;
     try { d = await readJson(r); } catch (e) { return fail(res, 424, e.message); }
     let filtered;
-    try { filtered = filterAnswer(d, want, isAdultHandle); } catch (e) {
+    try { filtered = filterAnswer(d, want, adultTest(await identitiesFor(req, cur, lane, handlesIn(d)))); } catch (e) {
       log.warn(`[egram] filter ${rest}: ${e.message}`);
       return fail(res, 424, 'Grabbit could not check this answer right now');
     }
@@ -528,7 +616,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     return res.json(value);
   }
 
-  return { origin, proxy, session, callJson, routes: ROUTES };
+  return { origin, proxy, session, callJson, identitiesFor, adultTest, routes: ROUTES };
 }
 
 module.exports = {
@@ -544,6 +632,9 @@ module.exports = {
   filterAnswer,
   allowedType,
   mediaAllowed,
+  mediaCreator,
+  singleHeader,
+  handlesIn,
   seal,
   unseal,
   createGateway,
