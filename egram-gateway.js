@@ -29,7 +29,6 @@
 // password once, the gateway signs in and keeps only the session, sealed in a
 // Grabbit cookie a page script cannot read.
 
-const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 const { EventEmitter } = require('events');
@@ -155,7 +154,9 @@ const ROUTES = [
   r('DELETE', 'api/history'),
   // The account: notifications (scoped by Elitogram, checked here), own profile, password
   r('GET', 'api/notifications'),
-  r('POST', 'api/notifications/read'),
+  // Marks only the notifications the module showed (`ids`, required): the list
+  // it was given may have been filtered here.
+  r('POST', 'api/notifications/read', { body: ['ids'], ids: true }),
   r('PATCH', 'api/me', { body: ['display_name', 'bio'] }),
   r('POST', 'api/me/password', { body: ['current', 'password'] }),
   // Media
@@ -188,19 +189,28 @@ function authorHandle(o) {
   if (typeof o.handle === 'string') return o.handle;
   return null;
 }
-// Every handle an object names: its author or own handle, and for a
-// notification the creator it is about and the author of the post it is about.
+// Creators and accounts are separate namespaces in Elitogram (a creator and an
+// account may share a handle), so a handle is checked with its type: 'c' a
+// creator, 'u' an account, '?' when the answer does not say.
+const typeOf = (v) => (v === 'creator' ? 'c' : v === 'user' ? 'u' : '?');
+// Every handle an object names, with its type: its author or own handle, and
+// for a notification the creator it is about and the author of the post it is
+// about. -> [{ h, t }]
 function namedHandles(o) {
   const out = [];
-  const a = authorHandle(o);
-  if (a) out.push(a);
-  for (const k of ['creator_handle', 'post_author_handle']) if (typeof o[k] === 'string' && o[k]) out.push(o[k]);
+  if (o.author && typeof o.author === 'object' && typeof o.author.handle === 'string') out.push({ h: o.author.handle, t: typeOf(o.author.type) });
+  else if (typeof o.author_handle === 'string') out.push({ h: o.author_handle, t: typeOf(o.author_type) });
+  else if (typeof o.handle === 'string') out.push({ h: o.handle, t: o.type !== undefined ? typeOf(o.type) : looksLikeCreator(o) ? 'c' : '?' });
+  if (typeof o.creator_handle === 'string' && o.creator_handle) out.push({ h: o.creator_handle, t: 'c' });
+  if (typeof o.post_author_handle === 'string' && o.post_author_handle) out.push({ h: o.post_author_handle, t: typeOf(o.post_author_type) });
   return out;
 }
 
 const looksLikePost = (o) => Number.isInteger(o.id) && (Array.isArray(o.media) || 'media_id' in o || ('author' in o && 'caption' in o));
 const looksLikePhoto = (o) => Number.isInteger(o.media_id) && Number.isInteger(o.post_id);
-const looksLikeCreator = (o) => Number.isInteger(o.id) && typeof o.handle === 'string' && ('post_count' in o || 'follower_count' in o);
+function looksLikeCreator(o) {
+  return Number.isInteger(o.id) && typeof o.handle === 'string' && ('post_count' in o || 'follower_count' in o);
+}
 
 function allowedItem(o, want, isAdultHandle) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return true;
@@ -213,7 +223,7 @@ function allowedItem(o, want, isAdultHandle) {
   const named = namedHandles(o);
   // A post, tile, photo or creator must say whose it is, or it cannot be checked.
   if (shaped && !authorHandle(o)) return false;
-  if (isAdultHandle && named.some((h) => isAdultHandle(h))) return false;
+  if (isAdultHandle && named.some(({ h, t }) => isAdultHandle(h, t))) return false;
   return true;
 }
 
@@ -237,7 +247,8 @@ function filterAnswer(value, want, isAdultHandle) {
       for (const [k, x] of Object.entries(v)) {
         if (!allowedItem(x, want, isAdultHandle)) { dropped++; out[k] = null; continue; }
         if (k === 'creators' && Array.isArray(x)) {
-          const kept = x.filter((c) => c && typeof c === 'object' && !Array.isArray(c) && c.audience === want && typeof c.handle === 'string' && c.handle !== '');
+          const kept = x.filter((c) => c && typeof c === 'object' && !Array.isArray(c) && c.audience === want && typeof c.handle === 'string' && c.handle !== ''
+            && !(isAdultHandle && isAdultHandle(c.handle, 'c')));
           dropped += x.length - kept.length;
           out[k] = walk(kept);
           continue;
@@ -254,18 +265,21 @@ function filterAnswer(value, want, isAdultHandle) {
   return { value: out, dropped };
 }
 
-// Every handle an answer names as an author or creator, for the identity
-// lookup below.
+// Every handle an answer names as an author or creator, typed ('c:ann',
+// 'u:bob', '?:sam'), for the identity lookup below. A `creators` list names
+// creators.
 function handlesIn(value) {
   const out = new Set();
+  const add = (h, t) => { const n = norm(h); if (CANONICAL_HANDLE.test(n)) out.add(`${t}:${n}`); };
   const walk = (v) => {
     if (Array.isArray(v)) { for (const x of v) walk(x); return; }
     if (!v || typeof v !== 'object') return;
-    for (const h of namedHandles(v)) out.add(norm(h));
+    for (const { h, t } of namedHandles(v)) add(h, t);
+    if (Array.isArray(v.creators)) for (const c of v.creators) if (c && typeof c === 'object' && typeof c.handle === 'string') add(c.handle, 'c');
     for (const x of Object.values(v)) walk(x);
   };
   walk(value);
-  return [...out].filter((h) => CANONICAL_HANDLE.test(h));
+  return [...out];
 }
 
 // Content types passed back. Elitogram's generated avatars and banners are
@@ -319,14 +333,27 @@ function headerCount(headers, rawHeaders, name) {
   }
   return headers[name] === undefined ? 0 : 1;
 }
+// -> { h, t } with t 'c' (creator) or 'u' (account), or null.
 function mediaAuthor(headers, rawHeaders) {
   const c = headerCount(headers, rawHeaders, 'x-egram-creator');
   const a = headerCount(headers, rawHeaders, 'x-egram-account');
   if (c + a !== 1) return null;
-  if (c) return mediaCreator(headers, rawHeaders);
+  if (c) {
+    const h = mediaCreator(headers, rawHeaders);
+    return h ? { h, t: 'c' } : null;
+  }
   const v = rawHeaders ? singleHeader(rawHeaders, 'x-egram-account') : headers['x-egram-account'];
   const account = typeof v === 'string' ? norm(v) : '';
-  return CANONICAL_HANDLE.test(account) ? account : null;
+  return CANONICAL_HANDLE.test(account) ? { h: account, t: 'u' } : null;
+}
+// The typed author a media answer names (a creator for a picture). -> { h, t } | null
+function mediaNamed(route, headers, rawHeaders) {
+  if (route.picture === 'user') return null;
+  if (route.picture) {
+    const h = mediaCreator(headers, rawHeaders);
+    return h ? { h, t: 'c' } : null;
+  }
+  return mediaAuthor(headers, rawHeaders);
 }
 
 function mediaAllowed(route, headers, want, isAdultHandle, rawHeaders) {
@@ -336,9 +363,9 @@ function mediaAllowed(route, headers, want, isAdultHandle, rawHeaders) {
   if (route.picture === 'user') return one('x-egram-picture') === 'user' && /^image\/svg\+xml\b/i.test(one('content-type') || '');
   if (route.picture && one('x-egram-picture') !== 'creator') return false;
   if (one('x-egram-audience') !== want) return false;
-  const creator = route.picture ? mediaCreator(headers, rawHeaders) : mediaAuthor(headers, rawHeaders);
-  if (!creator) return false;
-  if (isAdultHandle && isAdultHandle(creator)) return false;
+  const named = mediaNamed(route, headers, rawHeaders);
+  if (!named) return false;
+  if (isAdultHandle && isAdultHandle(named.h, named.t)) return false;
   return true;
 }
 
@@ -414,14 +441,11 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   // --- Other identities of a creator ---------------------------------------
   // Grabbit's 18+ profiles may know a creator by another name than the
   // Elitogram handle: an Instagram or TikTok account, a linked account, an
-  // alias. Elitogram lists those names per handle (api/creator-identities, in
-  // the same scope), and a creator is 18+ here when the handle or any of them
-  // matches a Grabbit profile classified 18+. Nothing is merged; this only
-  // reads. Cached briefly per lane, since the lookup is scoped.
-  // Kept short: a new alias that ties a creator to an 18+ profile in Grabbit
-  // takes effect within this time.
-  const IDENTITY_TTL = 15000;
-  const identityCache = new Map(); // `${session}\u0000${lane}\u0000${handle}` -> { names, at }
+  // alias. Elitogram lists those names per creator handle (api/creator-
+  // identities, in the same scope), and a creator is 18+ here when the handle
+  // or any of them matches a Grabbit profile classified 18+. Nothing is merged;
+  // this only reads. Asked afresh for every answer (no cache across requests),
+  // so a new alias that ties a creator to an 18+ profile takes effect at once.
   // One lookup with a deadline that includes the wait for a socket, given up
   // early when the caller's own answer closes (`downstream`, a response).
   function identityLookup(req, cur, lane, qs, downstream) {
@@ -447,56 +471,57 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     });
   }
 
-  // -> Map handle -> other names. A handle Elitogram did not answer for (a
-  // creator outside the scope, or nothing it knows) is left out of the map,
-  // and the 18+ test below treats it as 18+. An account has no other names:
-  // Elitogram lists it under `accounts`, and it maps to [].
-  async function identitiesFor(req, cur, lane, handles, downstream = null) {
+  // `refs` are typed handles from handlesIn() ('c:ann', 'u:bob', '?:sam').
+  // -> Map 'c:<handle>' -> other names, 'u:<handle>' -> [] for an account that
+  // exists. A creator Elitogram did not answer for (outside the scope, or
+  // unknown) and an account it did not list are left out, and the 18+ test
+  // below treats them as 18+. An untyped handle is asked as both.
+  async function identitiesFor(req, cur, lane, refs, downstream = null) {
     const out = new Map();
-    if (!isAdultHandle || !handles.length) return out;
-    const now = Date.now();
-    // Keyed by the caller's Elitogram session too: the answer is scoped by
-    // Elitogram, and one caller's lookup is never served to another.
-    const who = crypto.createHash('sha256').update(String((cur && cur.t) || '')).digest('hex').slice(0, 16);
-    const plainLane = lane;
-    lane = `${who}\u0000${lane}`;
-    const missing = [];
-    for (const h of handles) {
-      const hit = identityCache.get(`${lane}\u0000${h}`);
-      if (hit && now - hit.at < IDENTITY_TTL) out.set(h, hit.names);
-      else missing.push(h);
+    if (!isAdultHandle || !refs.length) return out;
+    const creators = new Set();
+    const accounts = new Set();
+    for (const ref of refs) {
+      const t = ref.slice(0, 1);
+      const h = ref.slice(2);
+      if (t === 'c' || t === '?') creators.add(h);
+      if (t === 'u' || t === '?') accounts.add(h);
     }
-    for (let i = 0; i < missing.length; i += 100) {
-      const part = missing.slice(i, i + 100);
-      const qs = part.map((h) => `h=${encodeURIComponent(h)}`).join('&');
-      const d = await identityLookup(req, cur, plainLane, qs, downstream);
+    const cs = [...creators];
+    const as = [...accounts];
+    for (let i = 0; i < Math.max(cs.length, as.length); i += 100) {
+      const cPart = cs.slice(i, i + 100);
+      const aPart = as.slice(i, i + 100);
+      const qs = [...cPart.map((h) => `h=${encodeURIComponent(h)}`), ...aPart.map((h) => `a=${encodeURIComponent(h)}`)].join('&');
+      const d = await identityLookup(req, cur, lane, qs, downstream);
       const items = d && typeof d.items === 'object' && d.items && !Array.isArray(d.items) ? d.items : null;
       if (!items) throw new Error('identity lookup sent an unexpected answer');
-      // An Elitogram without the `accounts` list answers only for creators, so
-      // every account author stays unresolved there (and is refused).
-      const accounts = new Set(Array.isArray(d.accounts) ? d.accounts.filter((x) => typeof x === 'string').map(norm) : []);
-      if (identityCache.size > 5000) identityCache.clear();
-      for (const h of part) {
-        let names;
+      // An Elitogram without the typed `accounts` answer lists none, so every
+      // account author stays unresolved there (and is refused).
+      const listed = new Set(Array.isArray(d.accounts) ? d.accounts.filter((x) => typeof x === 'string').map(norm) : []);
+      for (const h of cPart) {
         if (Object.prototype.hasOwnProperty.call(items, h) && Array.isArray(items[h])) {
-          names = items[h].filter((x) => typeof x === 'string').map(norm).filter(Boolean).slice(0, 100);
-        } else if (accounts.has(h)) names = [];
-        else continue; // unresolved: not cached, not in the map
-        identityCache.set(`${lane}\u0000${h}`, { names, at: now });
-        out.set(h, names);
+          out.set(`c:${h}`, items[h].filter((x) => typeof x === 'string').map(norm).filter(Boolean).slice(0, 100));
+        }
       }
+      for (const h of aPart) if (listed.has(h)) out.set(`u:${h}`, []);
     }
     return out;
   }
   // The 18+ test for one answer: the handle, or any other name it is known by.
   // A handle that was not looked up (not canonical, say) or that Elitogram did
   // not answer for counts as 18+: the other names it might be known by are
-  // unknown, so it fails closed.
-  const adultTest = (ids) => (isAdultHandle ? (h) => {
+  // unknown, so it fails closed. An untyped handle passes only when at least
+  // one of creator and account resolved and no resolved creator is 18+.
+  const adultTest = (ids) => (isAdultHandle ? (h, t = '?') => {
     if (isAdultHandle(h)) return true;
-    const names = ids.get(norm(h));
-    if (!names) return true;
-    return names.some((n) => isAdultHandle(n));
+    const n = norm(h);
+    const c = ids.get(`c:${n}`);
+    const isAdultCreator = (names) => names.some((x) => isAdultHandle(x));
+    if (t === 'c') return !c || isAdultCreator(c);
+    if (t === 'u') return !ids.has(`u:${n}`);
+    if (!c && !ids.has(`u:${n}`)) return true;
+    return !!c && isAdultCreator(c);
   } : null);
 
   const fail = (res, status, error) => {
@@ -683,6 +708,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     if ('audience' in src && (route.body || []).includes('audience') && !AUDIENCE_WRITES.includes(src.audience)) {
       return fail(res, 400, 'audience must be general, unknown or adult');
     }
+    if (route.ids && !(Array.isArray(src.ids) && src.ids.length >= 1 && src.ids.length <= 500 && src.ids.every((x) => Number.isInteger(x) && x > 0))) {
+      return fail(res, 400, 'ids must list 1 to 500 notification ids');
+    }
     if (route.parent) {
       const pid = route.parent === 'body' ? src.post_id : Number(route.p.exec(rest)[route.parent === 'path2' ? 2 : 1]);
       if (!Number.isInteger(pid) || pid < 1) return fail(res, 400, 'A post id is required');
@@ -716,8 +744,8 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       let ok = false;
       try {
         let test = isAdultHandle;
-        const named = route.picture === 'user' ? null : route.picture ? mediaCreator(r.headers, r.rawHeaders) : mediaAuthor(r.headers, r.rawHeaders);
-        if (named && isAdultHandle) test = adultTest(await identitiesFor(req, cur, lane, [named], res));
+        const named = mediaNamed(route, r.headers, r.rawHeaders);
+        if (named && isAdultHandle) test = adultTest(await identitiesFor(req, cur, lane, [`${named.t}:${named.h}`], res));
         ok = mediaAllowed(route, r.headers, want, test, r.rawHeaders);
       } catch (e) { log.warn(`[egram] media check ${rest}: ${e.message}`); }
       if (!ok) {

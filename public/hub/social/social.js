@@ -1312,7 +1312,9 @@
             ? h('a', { class: `sg-note${n.read_at ? '' : ' sg-unread'}`, href }, body)
             : h('div', { class: `sg-note${n.read_at ? '' : ' sg-unread'}` }, body);
         }) : empty('No notifications.'));
-        if (items.some((n) => !n.read_at)) call('notifications/read', { method: 'POST' }).catch(() => {});
+        // Only the ones shown here: the gateway may have left some out of the list.
+        const unread = items.filter((n) => !n.read_at).map((n) => intOf(n.id)).filter(Boolean).slice(0, 500);
+        if (unread.length) call('notifications/read', { method: 'POST', body: { ids: unread } }).catch(() => {});
       }).catch((e) => { if (live(gen)) fill(box, empty(e.message)); });
       return [pageHead('Notifications'), box];
     }

@@ -20,6 +20,8 @@ const handlers = {};
 const identities = {};
 const hidden = new Set();
 const accountNames = new Set();
+// Names that are both an account and a (visible) creator.
+const creatorNames = new Set();
 let upBase;
 const upstream = http.createServer((req, res) => {
   const chunks = [];
@@ -33,11 +35,12 @@ const upstream = http.createServer((req, res) => {
       const q = new URLSearchParams(req.url.slice(req.url.indexOf('?') + 1));
       const items = {};
       const accounts = [];
+      // `h` asks for creators, `a` for accounts (separate namespaces).
       for (const h of q.getAll('h')) {
-        if (hidden.has(h)) continue;
-        if (accountNames.has(h)) accounts.push(h);
-        else items[h] = identities[h] || [];
+        if (hidden.has(h) || (accountNames.has(h) && !creatorNames.has(h))) continue;
+        items[h] = identities[h] || [];
       }
+      for (const a of q.getAll('a')) if (accountNames.has(a)) accounts.push(a);
       res.setHeader('content-type', 'application/json');
       return res.end(JSON.stringify({ items, accounts }));
     }
@@ -84,7 +87,7 @@ test.after(() => {
 });
 
 const linked = () => `${gw.EGRAM_COOKIE}=${gw.seal(SECRET, { t: 'tok123', exp: Date.now() + 60000 })}`;
-// Another Elitogram session: identity answers are cached per session.
+// Another Elitogram session.
 const linkedAs = (t) => `${gw.EGRAM_COOKIE}=${gw.seal(SECRET, { t, exp: Date.now() + 60000 })}`;
 const browser = { 'sec-fetch-site': 'same-origin' };
 function call(method, path, { cookie = linked(), headers = {}, body } = {}) {
@@ -709,4 +712,103 @@ test('upload: over the total limit is refused, declared or chunked, and the upst
   assert.equal(chunked.status, 413);
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(reached, 0);
+});
+
+test('an account and a creator sharing a handle are checked each as itself', async () => {
+  // Account `sam` wrote a post; a creator `sam` exists too, hidden from this
+  // scope (or 18+ in Elitogram). The account's post and file pass; anything
+  // naming the creator `sam` is refused.
+  accountNames.add('sam');
+  hidden.add('sam');
+  handlers['/api/feed'] = json(200, { items: [
+    { id: 50, audience: 'general', author: { type: 'user', handle: 'sam' }, caption: 'mine', media: [] },
+    { id: 51, audience: 'general', author: { type: 'creator', handle: 'sam' }, caption: 'theirs', media: [] },
+  ], next: null });
+  handlers['/m/52'] = file({ 'x-egram-audience': 'general', 'x-egram-account': 'sam' });
+  handlers['/m/53'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'sam' });
+  adultSet = new Set(['someone-else']);
+  try {
+    assert.deepEqual((await (await call('GET', '/api/egram/api/feed')).json()).items.map((x) => x.id), [50]);
+    assert.equal((await call('GET', '/api/egram/m/52')).status, 200);
+    assert.equal((await call('GET', '/api/egram/m/53')).status, 404);
+    const looks = seen.filter((x) => x.url.startsWith('/api/creator-identities')).slice(-2).map((q) => new URLSearchParams(q.url.slice(q.url.indexOf('?') + 1)));
+    assert.deepEqual([looks[0].getAll('a'), looks[0].getAll('h')], [['sam'], []], 'the account file asks for an account only');
+    assert.deepEqual([looks[1].getAll('a'), looks[1].getAll('h')], [[], ['sam']], 'the creator file asks for a creator only');
+    // Now the creator is visible, general and linked to an 18+ profile; the
+    // account's post still passes, the creator's does not.
+    hidden.delete('sam');
+    creatorNames.add('sam');
+    identities.sam = ['adultalias'];
+    adultSet = new Set(['adultalias']);
+    assert.deepEqual((await (await call('GET', '/api/egram/api/feed')).json()).items.map((x) => x.id), [50]);
+    assert.equal((await call('GET', '/api/egram/m/52')).status, 200);
+    assert.equal((await call('GET', '/api/egram/m/53')).status, 404);
+  } finally {
+    accountNames.delete('sam');
+    creatorNames.delete('sam');
+    hidden.delete('sam');
+    delete identities.sam;
+    adultSet = new Set();
+    delete handlers['/api/feed'];
+  }
+});
+
+test('photos and notifications carry the author type; an untyped handle needs a resolved, clean identity', async () => {
+  accountNames.add('pat');
+  hidden.add('pat');
+  handlers['/api/photos'] = json(200, { items: [
+    { media_id: 60, post_id: 61, audience: 'general', author_handle: 'pat', author_type: 'user' },
+    { media_id: 62, post_id: 63, audience: 'general', author_handle: 'pat', author_type: 'creator' },
+    { media_id: 64, post_id: 65, audience: 'general', author_handle: 'pat' },
+    { media_id: 66, post_id: 67, audience: 'general', author_handle: 'nobody' },
+  ], next: null });
+  handlers['/api/notifications'] = json(200, { items: [
+    { id: 1, kind: 'like', text: 'a', post_id: 61, creator_handle: null, post_author_handle: 'pat', post_author_type: 'user' },
+    { id: 2, kind: 'like', text: 'b', post_id: 63, creator_handle: null, post_author_handle: 'pat', post_author_type: 'creator' },
+  ] });
+  adultSet = new Set(['someone-else']);
+  hidden.add('nobody');
+  try {
+    // Untyped `pat` resolves as an account only: passes. `nobody` resolves as neither: refused.
+    assert.deepEqual((await (await call('GET', '/api/egram/api/photos')).json()).items.map((x) => x.media_id), [60, 64]);
+    assert.deepEqual((await (await call('GET', '/api/egram/api/notifications')).json()).items.map((x) => x.id), [1]);
+  } finally {
+    accountNames.delete('pat');
+    hidden.delete('pat');
+    hidden.delete('nobody');
+    adultSet = new Set();
+    delete handlers['/api/photos'];
+    delete handlers['/api/notifications'];
+  }
+});
+
+test('identities are asked afresh for every answer: a new 18+ alias applies at once', async () => {
+  handlers['/api/feed'] = json(200, { items: [{ id: 70, audience: 'general', author: { type: 'creator', handle: 'fresh' }, caption: 'c', media: [] }], next: null });
+  handlers['/m/71'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'fresh' });
+  adultSet = new Set(['fresh18']);
+  try {
+    assert.deepEqual((await (await call('GET', '/api/egram/api/feed')).json()).items.map((x) => x.id), [70]);
+    assert.equal((await call('GET', '/api/egram/m/71')).status, 200);
+    identities.fresh = ['fresh18'];
+    assert.deepEqual((await (await call('GET', '/api/egram/api/feed')).json()).items, []);
+    assert.equal((await call('GET', '/api/egram/m/71')).status, 404);
+  } finally {
+    delete identities.fresh;
+    adultSet = new Set();
+    delete handlers['/api/feed'];
+  }
+});
+
+test('notifications/read forwards only the ids the module showed', async () => {
+  handlers['POST /api/notifications/read'] = json(200, { ok: true });
+  try {
+    assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: {} })).status, 400, 'no ids');
+    assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: { ids: [] } })).status, 400);
+    assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: { ids: ['1'] } })).status, 400);
+    const r = await call('POST', '/api/egram/api/notifications/read', { body: { ids: [3, 4], extra: 1 } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(last().body), { ids: [3, 4] });
+  } finally {
+    delete handlers['POST /api/notifications/read'];
+  }
 });

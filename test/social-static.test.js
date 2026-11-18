@@ -132,11 +132,12 @@ test('upload: multipart XHR to the gateway, files in order, classification choic
 
 test('notifications, settings and post editing use only allowlisted gateway routes', () => {
   const gw = fs.readFileSync(path.join(__dirname, '..', 'egram-gateway.js'), 'utf8');
-  for (const route of ["r('GET', 'api/notifications')", "r('POST', 'api/notifications/read')", "r('PATCH', 'api/me', { body: ['display_name', 'bio'] })", "r('POST', 'api/me/password', { body: ['current', 'password'] })", "r('POST', 'api/posts', { upload: true })"]) {
+  for (const route of ["r('GET', 'api/notifications')", "r('POST', 'api/notifications/read', { body: ['ids'], ids: true })", "r('PATCH', 'api/me', { body: ['display_name', 'bio'] })", "r('POST', 'api/me/password', { body: ['current', 'password'] })", "r('POST', 'api/posts', { upload: true })"]) {
     assert.ok(gw.includes(route), route);
   }
   assert.match(js, /call\('notifications'\)/);
-  assert.match(js, /call\('notifications\/read', \{ method: 'POST' \}\)/);
+  // Marks only the notifications it showed.
+  assert.match(js, /call\('notifications\/read', \{ method: 'POST', body: \{ ids: unread \} \}\)/);
   assert.match(js, /call\('me', \{ method: 'PATCH', body: \{ display_name: name\.value\.trim\(\), bio: bio\.value \} \}\)/);
   assert.match(js, /call\('me\/password', \{ method: 'POST', body: \{ current: cur\.value, password: next\.value \} \}\)/);
   assert.match(js, /single && p\.can_edit \? ownerBar\(p, lane, caption\)/);
