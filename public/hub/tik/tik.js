@@ -56,6 +56,79 @@
       svg.append(p);
       return svg;
     }
+    // The player's icons are TikShortis' own: Lucide 0.577.0 (ISC licence,
+    // https://lucide.dev), the version TikShortis ships, copied element by
+    // element so the strokes, sizes and shapes are the original ones.
+    const LUCIDE = {
+      heart: [["path",{"d":"M2 9.5a5.5 5.5 0 0 1 9.591-3.676.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5"}]],
+      messageCircle: [["path",{"d":"M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"}]],
+      listVideo: [["path",{"d":"M21 5H3"}],["path",{"d":"M10 12H3"}],["path",{"d":"M10 19H3"}],["path",{"d":"M15 12.003a1 1 0 0 1 1.517-.859l4.997 2.997a1 1 0 0 1 0 1.718l-4.997 2.997a1 1 0 0 1-1.517-.86z"}]],
+      share2: [["circle",{"cx":"18","cy":"5","r":"3"}],["circle",{"cx":"6","cy":"12","r":"3"}],["circle",{"cx":"18","cy":"19","r":"3"}],["line",{"x1":"8.59","x2":"15.42","y1":"13.51","y2":"17.49"}],["line",{"x1":"15.41","x2":"8.59","y1":"6.51","y2":"10.49"}]],
+      download: [["path",{"d":"M12 15V3"}],["path",{"d":"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"}],["path",{"d":"m7 10 5 5 5-5"}]],
+      volume2: [["path",{"d":"M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"}],["path",{"d":"M16 9a5 5 0 0 1 0 6"}],["path",{"d":"M19.364 18.364a9 9 0 0 0 0-12.728"}]],
+      volumeX: [["path",{"d":"M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"}],["line",{"x1":"22","x2":"16","y1":"9","y2":"15"}],["line",{"x1":"16","x2":"22","y1":"9","y2":"15"}]],
+      moreVertical: [["circle",{"cx":"12","cy":"12","r":"1"}],["circle",{"cx":"12","cy":"5","r":"1"}],["circle",{"cx":"12","cy":"19","r":"1"}]],
+      play: [["path",{"d":"M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"}]],
+      compass: [["circle",{"cx":"12","cy":"12","r":"10"}],["path",{"d":"m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"}]],
+      users: [["path",{"d":"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"}],["path",{"d":"M16 3.128a4 4 0 0 1 0 7.744"}],["path",{"d":"M22 21v-2a4 4 0 0 0-3-3.87"}],["circle",{"cx":"9","cy":"7","r":"4"}]],
+      menu: [["path",{"d":"M4 5h16"}],["path",{"d":"M4 12h16"}],["path",{"d":"M4 19h16"}]],
+      chevronDown: [["path",{"d":"m6 9 6 6 6-6"}]],
+      chevronsDown: [["path",{"d":"m7 6 5 5 5-5"}],["path",{"d":"m7 13 5 5 5-5"}]],
+      chevronsUp: [["path",{"d":"m17 11-5-5-5 5"}],["path",{"d":"m17 18-5-5-5 5"}]],
+      chevronLeft: [["path",{"d":"m15 18-6-6 6-6"}]],
+      maximize: [["path",{"d":"M8 3H5a2 2 0 0 0-2 2v3"}],["path",{"d":"M21 8V5a2 2 0 0 0-2-2h-3"}],["path",{"d":"M3 16v3a2 2 0 0 0 2 2h3"}],["path",{"d":"M16 21h3a2 2 0 0 0 2-2v-3"}]],
+      minimize: [["path",{"d":"M8 3v3a2 2 0 0 1-2 2H3"}],["path",{"d":"M21 8h-3a2 2 0 0 1-2-2V3"}],["path",{"d":"M3 16h3a2 2 0 0 1 2 2v3"}],["path",{"d":"M16 21v-3a2 2 0 0 1 2-2h3"}]],
+      eye: [["path",{"d":"M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"}],["circle",{"cx":"12","cy":"12","r":"3"}]],
+      eyeOff: [["path",{"d":"M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"}],["path",{"d":"M14.084 14.158a3 3 0 0 1-4.242-4.242"}],["path",{"d":"M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"}],["path",{"d":"m2 2 20 20"}]],
+      link2: [["path",{"d":"M9 17H7A5 5 0 0 1 7 7h2"}],["path",{"d":"M15 7h2a5 5 0 1 1 0 10h-2"}],["line",{"x1":"8","x2":"16","y1":"12","y2":"12"}]],
+      lock: [["rect",{"width":"18","height":"11","x":"3","y":"11","rx":"2","ry":"2"}],["path",{"d":"M7 11V7a5 5 0 0 1 10 0v4"}]],
+      history: [["path",{"d":"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"}],["path",{"d":"M3 3v5h5"}],["path",{"d":"M12 7v5l4 2"}]],
+      undo2: [["path",{"d":"M9 14 4 9l5-5"}],["path",{"d":"M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"}]],
+      sparkles: [["path",{"d":"M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"}],["path",{"d":"M20 2v4"}],["path",{"d":"M22 4h-4"}],["circle",{"cx":"4","cy":"20","r":"2"}]],
+      image: [["rect",{"width":"18","height":"18","x":"3","y":"3","rx":"2","ry":"2"}],["circle",{"cx":"9","cy":"9","r":"2"}],["path",{"d":"m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"}]],
+      hash: [["line",{"x1":"4","x2":"20","y1":"9","y2":"9"}],["line",{"x1":"4","x2":"20","y1":"15","y2":"15"}],["line",{"x1":"10","x2":"8","y1":"3","y2":"21"}],["line",{"x1":"16","x2":"14","y1":"3","y2":"21"}]],
+      clapperboard: [["path",{"d":"m12.296 3.464 3.02 3.956"}],["path",{"d":"M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3z"}],["path",{"d":"M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"}],["path",{"d":"m6.18 5.276 3.1 3.899"}]],
+      upload: [["path",{"d":"M12 3v12"}],["path",{"d":"m17 8-5-5-5 5"}],["path",{"d":"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"}]],
+      settings: [["path",{"d":"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"}],["circle",{"cx":"12","cy":"12","r":"3"}]],
+      logOut: [["path",{"d":"m16 17 5-5-5-5"}],["path",{"d":"M21 12H9"}],["path",{"d":"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"}]],
+      x: [["path",{"d":"M18 6 6 18"}],["path",{"d":"m6 6 12 12"}]],
+      send: [["path",{"d":"M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"}],["path",{"d":"m21.854 2.147-10.94 10.939"}]],
+      plus: [["path",{"d":"M5 12h14"}],["path",{"d":"M12 5v14"}]],
+      bookmark: [["path",{"d":"M17 3a2 2 0 0 1 2 2v15a1 1 0 0 1-1.496.868l-4.512-2.578a2 2 0 0 0-1.984 0l-4.512 2.578A1 1 0 0 1 5 20V5a2 2 0 0 1 2-2z"}]],
+      gauge: [["path",{"d":"m12 14 4-4"}],["path",{"d":"M3.34 19a10 10 0 1 1 17.32 0"}]],
+      minimize2: [["path",{"d":"m14 10 7-7"}],["path",{"d":"M20 10h-6V4"}],["path",{"d":"m3 21 7-7"}],["path",{"d":"M4 14h6v6"}]],
+      pip: [["path",{"d":"M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h4"}],["rect",{"width":"10","height":"7","x":"12","y":"13","rx":"2"}]],
+      globe: [["circle",{"cx":"12","cy":"12","r":"10"}],["path",{"d":"M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"}],["path",{"d":"M2 12h20"}]],
+      pencil: [["path",{"d":"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"}],["path",{"d":"m15 5 4 4"}]],
+      type: [["path",{"d":"M12 4v16"}],["path",{"d":"M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"}],["path",{"d":"M9 20h6"}]],
+      arrowRightLeft: [["path",{"d":"m16 3 4 4-4 4"}],["path",{"d":"M20 7H4"}],["path",{"d":"m8 21-4-4 4-4"}],["path",{"d":"M4 17h16"}]],
+      trash2: [["path",{"d":"M10 11v6"}],["path",{"d":"M14 11v6"}],["path",{"d":"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"}],["path",{"d":"M3 6h18"}],["path",{"d":"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"}]],
+      flag: [["path",{"d":"M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.528"}]],
+      info: [["circle",{"cx":"12","cy":"12","r":"10"}],["path",{"d":"M12 16v-4"}],["path",{"d":"M12 8h.01"}]],
+      fastForward: [["path",{"d":"M12 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 12 18z"}],["path",{"d":"M2 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 2 18z"}]],
+      rewind: [["path",{"d":"M12 6a2 2 0 0 0-3.414-1.414l-6 6a2 2 0 0 0 0 2.828l6 6A2 2 0 0 0 12 18z"}],["path",{"d":"M22 6a2 2 0 0 0-3.414-1.414l-6 6a2 2 0 0 0 0 2.828l6 6A2 2 0 0 0 22 18z"}]],
+      panelLeft: [["rect",{"width":"18","height":"18","x":"3","y":"3","rx":"2"}],["path",{"d":"M9 3v18"}]],
+      panelLeftClose: [["rect",{"width":"18","height":"18","x":"3","y":"3","rx":"2"}],["path",{"d":"M9 3v18"}],["path",{"d":"m16 15-3-3 3-3"}]],
+      search: [["path",{"d":"m21 21-4.34-4.34"}],["circle",{"cx":"11","cy":"11","r":"8"}]],
+      check: [["path",{"d":"M20 6 9 17l-5-5"}]],
+      userRound: [["circle",{"cx":"12","cy":"8","r":"5"}],["path",{"d":"M20 21a8 8 0 0 0-16 0"}]],
+    };
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    // lu('heart', 22) -> a 22 px Lucide icon. The size is set inline because
+    // the hub's stylesheet gives every svg 20 px.
+    function lu(name, size = 24, stroke = 2, cls) {
+      const svg = document.createElementNS(SVGNS, 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.setAttribute('class', `lu lu-${name}${cls ? ` ${cls}` : ''}`);
+      svg.setAttribute('style', `width:${size}px;height:${size}px;stroke-width:${stroke}`);
+      for (const [tag, attrs] of LUCIDE[name] || LUCIDE.play) {
+        const el = document.createElementNS(SVGNS, tag);
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+        svg.append(el);
+      }
+      return svg;
+    }
 
     // --- Addresses ---------------------------------------------------------
     const BASE = '#/tikshortis';
@@ -237,7 +310,9 @@
         document.body.append(toastEl);
       }
       clearTimeout(toastTimer);
-      fill(toastEl, h('span', null, msg), action ? h('button', { type: 'button', class: 'btn small', onclick: () => { toastEl.hidden = true; action.run(); } }, action.label) : null);
+      // TikShortis' undo pill: the text, then a round button with its icon.
+      fill(toastEl, h('span', null, msg), action ? h('button', { type: 'button', class: 'tik-toast-act', onclick: () => { toastEl.hidden = true; action.run(); } }, action.label === 'Undo' ? lu('undo2', 14) : null, action.label) : null);
+      toastEl.classList.toggle('with-act', !!action);
       toastEl.hidden = false;
       toastTimer = setTimeout(() => { toastEl.hidden = true; }, action ? 5000 : 3500);
     }
@@ -275,21 +350,28 @@
     const sheets = [];
     let guard = false; // our history entry is on top
     let ignorePop = 0; // pops we caused ourselves
+    //
+    // The look is TikShortis' bottom sheet: full width with a title row and
+    // an X (comments, playlists, share, the menu). opts.size 'narrow' is the
+    // player menu and its confirmations (at most 448 px wide), 'form' a sheet
+    // with inputs. opts.bare drops the title row, as TikShortis' player menu
+    // has none; opts.clear leaves the page behind undimmed.
     function openSheet(title, body, opts = {}) {
       const close = () => closeSheet(entry, true);
-      const panel = h('div', { class: `tik-sheet${opts.wide ? ' wide' : ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
-        h('div', { class: 'tik-sheet-grab', 'aria-hidden': 'true' }),
-        h('div', { class: 'tik-sheet-head' }, h('h3', null, title), h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Close', onclick: close }, ic('close'))),
+      const cls = ['tik-sheet', opts.size || (opts.wide ? 'wide' : 'form'), opts.bare ? 'bare' : null, opts.cls || null].filter(Boolean).join(' ');
+      const panel = h('div', { class: cls, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        opts.bare ? null : h('div', { class: 'tik-sheet-head' }, h('h3', null, title), h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Close', onclick: close }, lu('x', 20))),
         h('div', { class: 'tik-sheet-body' }, body));
-      const scrim = h('div', { class: 'tik-scrim', onclick: close });
+      const scrim = h('div', { class: `tik-scrim${opts.clear ? ' clear' : ''}`, onclick: close });
       const entry = { panel, scrim, onClose: opts.onClose, back: document.activeElement };
       document.body.append(scrim, panel);
       sheets.push(entry);
       if (!guard) {
         try { history.pushState({ ...(history.state || {}), tikSheet: 1 }, '', location.href); guard = true; } catch { /* ignore */ }
       }
-      const first = panel.querySelector('input, textarea, select, button:not(.tik-x)');
-      (first || panel.querySelector('.tik-x')).focus({ preventScroll: true });
+      const first = panel.querySelector('input, textarea, select, button:not(.tik-x), a[href]');
+      const target = first || panel.querySelector('.tik-x');
+      if (target) target.focus({ preventScroll: true });
       return { close, panel, body: panel.querySelector('.tik-sheet-body') };
     }
     function closeSheet(entry, viaUi) {
@@ -337,13 +419,16 @@
         else if (!e.shiftKey && (!inside || document.activeElement === lastEl)) { e.preventDefault(); firstEl.focus(); }
       }
     });
+    // TikShortis' confirmation sheet (the clip's "Delete this clip?"): a title,
+    // one line, then the action in red and Cancel side by side.
     function confirmSheet(title, text, label, run) {
       const s = openSheet(title, [
-        h('p', null, text),
-        h('div', { class: 'tik-row-btns' },
-          h('button', { type: 'button', class: 'btn ghost', onclick: () => s.close() }, 'Cancel'),
-          h('button', { type: 'button', class: 'btn danger', onclick: async (e) => { e.currentTarget.disabled = true; try { await run(); s.close(); } catch (err) { fail(err); e.currentTarget.disabled = false; } } }, label)),
-      ]);
+        h('p', { class: 'tf-sheet-title' }, title),
+        h('p', { class: 'tf-sheet-sub' }, text),
+        h('div', { class: 'tf-sheet-btns' },
+          h('button', { type: 'button', class: 'tf-sbtn danger', onclick: async (e) => { e.currentTarget.disabled = true; try { await run(); s.close(); } catch (err) { fail(err); e.currentTarget.disabled = false; } } }, label),
+          h('button', { type: 'button', class: 'tf-sbtn', onclick: () => s.close() }, 'Cancel')),
+      ], { size: 'narrow', bare: true });
     }
 
     // --- Watch history (the view beacon) ----------------------------------
@@ -372,10 +457,72 @@
     // =======================================================================
     // Feed: the vertical player
     // =======================================================================
-    const MODES = [['foryou', 'For You'], ['following', 'Following'], ['new', 'New'], ['liked', 'Liked'], ['random', 'Random']];
+    // Grabbit 3.0.1: drawn after TikShortis' own player (components/
+    // shorts-feed.tsx and short-card.tsx at 79e8a3b): the same overlay layout,
+    // icons, order, sizes and colours, with its controls doing the same things.
+    // Grabbit adds one button of its own (top left: show or hide the Grabbit
+    // menu) and a back pill on scoped feeds.
+    // Mode order and labels as in TikShortis' selector (SORT_ORDER).
+    const MODES = [['foryou', 'For You'], ['new', 'New'], ['following', 'Following'], ['liked', 'Liked'], ['random', 'Random']];
     const SEEDED = new Set(['foryou', 'random']);
     const NEAR = 2; // cards around the active one that keep their video source
+    const SEEK_SECONDS = 10;
+    const SPEEDS = [0.5, 1, 1.5, 2];
     const newSeed = () => 1 + Math.floor(Math.random() * 2147483645);
+    const labelOf = (list, v) => (list.find(([k]) => k === v) || list[0])[1];
+    // Same rules as short-card.tsx: the creator profile when the clip has one,
+    // else the uploader; two initials in the round avatar.
+    const authorLabel = (s) => (s.profile_id && s.profile_name ? s.profile_name : s.uploader_name || s.profile_name || 'unknown');
+    const initials2 = (name) => (String(name || '?').replace(/[^a-zA-Z0-9]/g, '').slice(0, 2) || '?').toUpperCase();
+    function hostLabel(href) {
+      try { return new URL(href).hostname.replace(/^www\./, ''); } catch { return null; }
+    }
+    // linkify-text.tsx: http(s) and www. links and @mentions become links.
+    const TOKEN_RE = /(https?:\/\/[^\s<]+[^\s<.,:;!?"')\]}]|www\.[^\s<]+[^\s<.,:;!?"')\]}])|@([a-zA-Z0-9_.]{1,30})/gi;
+    function linkify(text) {
+      const out = [];
+      let last = 0;
+      let m;
+      TOKEN_RE.lastIndex = 0;
+      while ((m = TOKEN_RE.exec(text)) !== null) {
+        if (m[2] && m.index > 0 && !/\s/.test(text[m.index - 1])) continue;
+        if (m.index > last) out.push(text.slice(last, m.index));
+        if (m[1]) {
+          const href = safeHref(m[1].startsWith('http') ? m[1] : `https://${m[1]}`);
+          out.push(href ? h('a', { class: 'tf-link', href, target: '_blank', rel: 'noopener noreferrer nofollow' }, m[1]) : m[1]);
+        } else {
+          out.push(h('a', { class: 'tf-mention', href: link(`person/${enc(handleOf(m[2]))}`) }, `@${m[2]}`));
+        }
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) out.push(text.slice(last));
+      return out;
+    }
+    // post-avatar.tsx: initials on a rose-to-purple disc; the creator's
+    // picture on top when the profile has one.
+    function discAvatar(name, pid, size) {
+      const box = h('span', { class: 'tf-av', style: `width:${size}px;height:${size}px` }, initials2(name));
+      if (pid) box.append(h('img', { alt: '', src: avatarOf(pid), loading: 'lazy', 'data-media-bg': '1', onerror: (e) => e.currentTarget.remove() }));
+      return box;
+    }
+    // One button of the right rail: icon over a small label, no disc.
+    function railBtn(name, label, onclick, extra) {
+      const iconBox = h('span', { class: 'tf-rb-ic' }, lu(name, 22));
+      const text = h('span', { class: 'tf-rb-l' }, label);
+      const el = h(extra && extra.href ? 'a' : 'button', { class: 'tf-rb', type: extra && extra.href ? null : 'button', 'aria-label': (extra && extra.aria) || label, href: extra && extra.href, download: extra && extra.href ? '' : null, onclick, 'data-sound-toggle': extra && extra.sound ? '1' : null }, iconBox, text);
+      return { el, iconBox, text };
+    }
+    // One row of the player menu: an icon on a small disc, the label, and an
+    // optional control at the right edge.
+    function moreRow(name, label, onclick, opts = {}) {
+      const body = [h('span', { class: 'tf-row-ic' }, opts.icon || lu(name, 18)), h('span', { class: 'tf-row-l' }, label), opts.trailing ? h('span', { class: 'tf-row-t' }, opts.trailing) : null];
+      return opts.href
+        ? h('a', { class: `tf-row${opts.danger ? ' danger' : ''}`, href: opts.href, download: '', onclick }, body)
+        : h('button', { type: 'button', class: `tf-row${opts.danger ? ' danger' : ''}`, onclick }, body);
+    }
+    function switchEl(on) {
+      return h('span', { class: `tf-switch${on ? ' on' : ''}`, role: 'switch', 'aria-checked': String(!!on) }, h('span'));
+    }
 
     function viewFeed(r, scoped) {
       const gen = generation;
@@ -394,16 +541,21 @@
       // cannot anchor in a seeded (offset) order, so it reads as New.
       if (scoped || tag) sort = 'new';
       if (focus && SEEDED.has(sort)) sort = 'new';
-      const length = ['short', 'long'].includes(p.get('length')) ? p.get('length') : 'all';
-      const seed = SEEDED.has(sort) ? newSeed() : null;
+      let length = ['short', 'long'].includes(p.get('length')) ? p.get('length') : 'all';
+      let seed = SEEDED.has(sort) ? newSeed() : null;
       // New, Following and Liked page by clip id, so a deep link can also
       // load the clips above it (`after`); the others page by offset.
-      const byId = !SEEDED.has(sort) && sort !== 'history';
+      let byId = !SEEDED.has(sort);
       const inPlaylist = !!scope.playlist;
       const mainFeed = !scoped && !tag;
-      const showModes = mainFeed;
+      // The address the feed keeps up to date (the current clip goes in
+      // `focus`); a mode switch replaces it.
+      let baseParams = new URLSearchParams(p);
+      baseParams.delete('path');
+      const subPath = r.sub.length ? `/${r.sub.map(enc).join('/')}` : '';
 
       const F = {
+        token: 0, // bumps when the feed is reset in place: late pages are dropped
         items: [],
         cards: [],
         ids: new Set(),
@@ -417,6 +569,8 @@
         loadingPrev: false,
         active: -1,
         soundBlocked: false,
+        fullscreen: false,
+        firstPage: true,
       };
       document.body.classList.add('tik-feed');
 
@@ -425,14 +579,13 @@
       const topSentinel = h('div', { class: 'tf-sentinel tf-sentinel-top', 'aria-hidden': 'true' });
       const bottomSentinel = h('div', { class: 'tf-sentinel', 'aria-hidden': 'true' });
       scroller.append(topSentinel, bottomSentinel);
-      const panel = h('aside', { class: 'tf-panel', hidden: true, 'aria-label': 'Comments' });
-      const muteBtn = h('button', { type: 'button', class: 'tf-round tf-mute', 'data-sound-toggle': '1', 'aria-label': S.muted ? 'Turn sound on' : 'Mute', onclick: () => setMuted(!S.muted) }, ic(S.muted ? 'muted' : 'sound'));
+
+      // ---- Sound ----
       function setMuted(m) {
         S.muted = m;
         F.soundBlocked = false;
         store.set(KEYS.soundLast, m ? 'muted' : 'on');
-        fill(muteBtn, ic(m ? 'muted' : 'sound'));
-        muteBtn.setAttribute('aria-label', m ? 'Turn sound on' : 'Mute');
+        for (const c of F.cards) paintSound(c);
         const c = F.cards[F.active];
         if (c) c.video.muted = m;
       }
@@ -447,26 +600,134 @@
       document.addEventListener('pointerdown', unblock, true);
       onLeave(() => document.removeEventListener('pointerdown', unblock, true));
 
-      const modeBar = showModes
-        ? h('nav', { class: 'tf-modes', 'aria-label': 'Feed' },
-          MODES.map(([m, label]) => h('a', { href: link('', { sort: m === 'foryou' ? null : m, length: length === 'all' ? null : length }), 'aria-current': m === sort ? 'page' : null }, label)),
-          h('button', { type: 'button', class: 'tf-len', title: 'Clip length', onclick: () => {
-            const next = LENGTHS[(LENGTHS.findIndex(([v]) => v === length) + 1) % LENGTHS.length][0];
-            location.hash = link('', { sort: sort === 'foryou' ? null : sort, length: next === 'all' ? null : next });
-          } }, LENGTHS.find(([v]) => v === length)[1]))
-        : h('nav', { class: 'tf-modes scoped' },
-          h('a', { href: scopeBackHref(scope), class: 'tf-back' }, ic('back'), h('span', null, scopeLabel(scope))));
-      const head = h('div', { class: 'tf-top' },
-        muteBtn,
-        modeBar,
-        h('a', { class: 'tf-round tf-search', href: link('search'), 'aria-label': 'Search tags and creators' }, ic('search')));
-      const stepper = h('div', { class: 'tf-step' },
-        h('button', { type: 'button', class: 'tf-round', 'aria-label': 'Previous clip', onclick: () => step(-1) }, ic('up')),
-        h('button', { type: 'button', class: 'tf-round', 'aria-label': 'Next clip', onclick: () => step(1) }, ic('down')));
+      // ---- Top left: the Grabbit menu (Grabbit's own control) ----
+      const sideBtn = h('button', { type: 'button', class: 'tf-cbtn tf-side', onclick: () => hub.toggleSide() });
+      function paintSide() {
+        const open = hub.sideOpen();
+        fill(sideBtn, lu(open ? 'panelLeftClose' : 'panelLeft', 18));
+        sideBtn.setAttribute('aria-label', open ? 'Hide the Grabbit menu' : 'Show the Grabbit menu');
+        sideBtn.setAttribute('aria-expanded', String(open));
+      }
+      paintSide();
+      window.addEventListener('grabbit:side', paintSide);
+      onLeave(() => window.removeEventListener('grabbit:side', paintSide));
+
+      // ---- Top centre: the feed selector ("For You v") ----
+      const menus = []; // open-state closers for Escape and outside clicks
+      let modeBox;
+      let paintMode = () => {};
+      if (mainFeed) {
+        const btn = h('button', { type: 'button', class: 'tf-pill tf-mode-btn', 'aria-haspopup': 'menu', 'aria-expanded': 'false' });
+        const menu = h('div', { class: 'tf-mode-menu', role: 'menu', hidden: true });
+        modeBox = h('div', { class: 'tf-modebox' }, btn, menu);
+        const setOpen = (v) => {
+          menu.hidden = !v;
+          btn.setAttribute('aria-expanded', String(v));
+          modeBox.classList.toggle('open', v);
+        };
+        menus.push(() => { if (!menu.hidden) { setOpen(false); return true; } return false; });
+        btn.addEventListener('click', () => setOpen(menu.hidden));
+        const item = (label, cur, pick) => h('button', { type: 'button', class: 'tf-mode-item', role: 'menuitemradio', 'aria-checked': String(cur), onclick: () => { setOpen(false); pick(); } }, label);
+        paintMode = () => {
+          fill(btn, h('span', null, labelOf(MODES, sort)), length !== 'all' ? h('span', { class: 'tf-mode-len' }, `· ${labelOf(LENGTHS, length)}`) : null, lu('chevronDown', 15, 2, 'tf-chev'));
+          btn.setAttribute('aria-label', `Feed: ${labelOf(MODES, sort)}${length !== 'all' ? `, ${labelOf(LENGTHS, length)}` : ''}`);
+          // Length is a second axis that narrows whichever order is picked,
+          // so it sits below its own divider (as in TikShortis).
+          fill(menu,
+            MODES.map(([m, label]) => item(label, m === sort, () => switchFeed(m, length))),
+            h('div', { class: 'tf-mode-sep', role: 'separator' }),
+            LENGTHS.map(([l, label]) => item(label, l === length, () => switchFeed(sort, l))));
+        };
+        paintMode();
+      } else {
+        // A tag, profile or playlist feed: no selector, a way back instead.
+        modeBox = h('div', { class: 'tf-modebox' },
+          h('a', { class: 'tf-pill tf-back', href: scopeBackHref(scope) }, lu('chevronLeft', 15), h('span', null, scopeLabel(scope))));
+      }
+
+      // ---- Top right: the view controls, collapsed to one chevron ----
+      let ctlOpen = false;
+      const ctlToggle = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => { ctlOpen = !ctlOpen; paintCtl(); } });
+      const fsBtn = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => toggleFullscreen() });
+      const chromeBtn = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => toggleChrome() });
+      const autoBtn = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => toggleAutoScroll() });
+      const ctlBox = h('div', { class: 'tf-ctl' }, ctlToggle, fsBtn, chromeBtn, autoBtn);
+      function paintCtl() {
+        fill(ctlToggle, lu(ctlOpen ? 'chevronsUp' : 'chevronsDown', 18));
+        ctlToggle.setAttribute('aria-label', ctlOpen ? 'Collapse controls' : 'Expand controls');
+        ctlToggle.setAttribute('aria-expanded', String(ctlOpen));
+        fsBtn.hidden = chromeBtn.hidden = autoBtn.hidden = !ctlOpen;
+        fill(fsBtn, lu(F.fullscreen ? 'minimize' : 'maximize', 18));
+        fsBtn.setAttribute('aria-label', F.fullscreen ? 'Exit fullscreen' : 'Fullscreen');
+        fill(chromeBtn, lu(S.chromeHidden ? 'eyeOff' : 'eye', 18));
+        chromeBtn.setAttribute('aria-label', S.chromeHidden ? 'Show overlay' : 'Clear display');
+        fill(autoBtn, lu('chevronsDown', 18));
+        autoBtn.classList.toggle('on', S.autoScroll);
+        autoBtn.setAttribute('aria-label', S.autoScroll ? 'Auto-scroll off' : 'Auto-scroll on');
+        autoBtn.setAttribute('aria-pressed', String(S.autoScroll));
+      }
+      paintCtl();
+
       const resumeBox = h('div', { class: 'tf-resume', hidden: true });
-      const root = h('div', { class: `tf${S.chromeHidden ? ' clean' : ''}` },
-        h('div', { class: 'tf-main' }, head, scroller, status, stepper, resumeBox),
-        panel);
+      const hintEl = h('div', { class: 'tf-hint', hidden: true, role: 'status' }, 'Long-press a clip for the menu');
+      const root = h('div', { class: `tf${S.chromeHidden ? ' clean' : ''}` }, scroller, status, sideBtn, modeBox, ctlBox, resumeBox, hintEl);
+
+      const onDocDown = (e) => {
+        if (modeBox.contains(e.target)) return;
+        for (const close of menus) close();
+      };
+      document.addEventListener('pointerdown', onDocDown, true);
+      onLeave(() => document.removeEventListener('pointerdown', onDocDown, true));
+
+      // ---- View toggles ----
+      function toggleChrome() {
+        S.chromeHidden = !S.chromeHidden;
+        store.set(KEYS.chrome, S.chromeHidden ? '1' : null);
+        root.classList.toggle('clean', S.chromeHidden);
+        if (S.chromeHidden) {
+          hintEl.hidden = false;
+          setTimeout(() => { hintEl.hidden = true; }, 2500);
+        }
+        paintCtl();
+      }
+      function toggleAutoScroll() {
+        S.autoScroll = !S.autoScroll;
+        store.set(KEYS.autoScroll, S.autoScroll ? '1' : null);
+        for (const x of F.cards) x.video.loop = !S.autoScroll;
+        paintCtl();
+      }
+      // Fullscreen is the whole document, as in TikShortis: the sheets,
+      // menus and toasts are children of <body>, and a fullscreen element
+      // only shows what sits inside it. The page itself hides the Grabbit
+      // menu, the top bar and the bottom bar (body.tik-immersive) and puts
+      // them back as they were on the way out.
+      function setImmersive(on) {
+        F.fullscreen = on;
+        document.body.classList.toggle('tik-immersive', on);
+        if (on) hub.closeMenu();
+        paintCtl();
+        window.dispatchEvent(new Event('grabbit:side'));
+      }
+      function toggleFullscreen() {
+        const de = document.documentElement;
+        if (!F.fullscreen) {
+          setImmersive(true);
+          // Best effort: iPhone Safari has no element fullscreen; the page
+          // still fills the screen without the browser's own bars hidden.
+          const req = de.requestFullscreen || de.webkitRequestFullscreen;
+          if (req) { try { const pr = req.call(de); if (pr && pr.catch) pr.catch(() => {}); } catch { /* not allowed */ } }
+        } else {
+          setImmersive(false);
+          const el = document.fullscreenElement || document.webkitFullscreenElement;
+          const exit = document.exitFullscreen || document.webkitExitFullscreen;
+          if (el && exit) { try { const pr = exit.call(document); if (pr && pr.catch) pr.catch(() => {}); } catch { /* ignore */ } }
+        }
+      }
+      // Leaving fullscreen through the browser (Esc, the Back gesture) ends
+      // the immersive view too.
+      const onFs = () => { if (!(document.fullscreenElement || document.webkitFullscreenElement) && F.fullscreen) setImmersive(false); };
+      document.addEventListener('fullscreenchange', onFs);
+      document.addEventListener('webkitfullscreenchange', onFs);
 
       // ---- Loading pages ----
       function feedQuery(extra) {
@@ -478,13 +739,15 @@
         for (const [k, v] of Object.entries(extra || {})) if (v != null) q.set(k, String(v));
         return `shorts/feed?${q}`;
       }
+      const current = (tok) => live(gen) && tok === F.token;
       async function loadMore() {
         if (F.loading || !F.hasMore || Date.now() < F.retryAt) return;
+        const tok = F.token;
         F.loading = true;
         paintStatus();
         try {
           const d = await call(feedQuery({ cursor: F.cursor }));
-          if (!live(gen)) return;
+          if (!current(tok)) return;
           F.errors = 0;
           const fresh = (d.items || []).filter((s) => s && Number.isInteger(s.id) && !F.ids.has(s.id));
           for (const s of fresh) addCard(s, false);
@@ -492,27 +755,29 @@
           F.hasMore = d.nextCursor !== null && d.nextCursor !== undefined;
           if (F.active < 0 && F.cards.length) {
             pickActive();
-            offerResume();
+            if (F.firstPage) offerResume();
+            F.firstPage = false;
             // The top sentinel was already in view before the first page
             // came, so its observer will not fire again: ask once here.
             loadPrev();
           }
         } catch (e) {
-          if (!live(gen)) return;
+          if (!current(tok)) return;
           F.errors++;
           F.retryAt = Date.now() + Math.min(30000, 2 ** F.errors * 1000);
           F.lastError = e.message;
         } finally {
-          if (live(gen)) { F.loading = false; paintStatus(); }
+          if (current(tok)) { F.loading = false; paintStatus(); }
         }
       }
       // Clips above the top one, after a focus deep link (id-paged orders).
       async function loadPrev() {
         if (!byId || F.loadingPrev || !F.hasPrev || F.prev === null || !F.cards.length) return;
+        const tok = F.token;
         F.loadingPrev = true;
         try {
           const d = await call(feedQuery({ after: F.prev }));
-          if (!live(gen)) return;
+          if (!current(tok)) return;
           const firstCard = F.cards[0];
           const delta = firstCard.el.offsetTop - scroller.scrollTop;
           const fresh = (d.items || []).filter((s) => s && Number.isInteger(s.id) && !F.ids.has(s.id));
@@ -523,22 +788,48 @@
           scroller.scrollTop = firstCard.el.offsetTop - delta;
           pickActive();
         } catch {
-          F.hasPrev = false;
+          if (current(tok)) F.hasPrev = false;
         } finally {
-          F.loadingPrev = false;
+          if (current(tok)) F.loadingPrev = false;
         }
       }
       function paintStatus() {
         if (F.cards.length) {
           status.hidden = !(F.loading || (F.errors && F.hasMore));
-          fill(status, F.loading ? 'Loading ...' : h('span', null, 'Could not load more. ', h('button', { type: 'button', class: 'linkish', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again')));
+          status.classList.add('more');
+          fill(status, F.loading ? h('span', { class: 'tf-spin', 'aria-label': 'Loading' }) : h('span', null, 'Could not load more. ', h('button', { type: 'button', class: 'linkish', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again')));
           return;
         }
         status.hidden = false;
-        if (F.loading) fill(status, h('p', null, 'Loading ...'));
-        else if (F.errors) fill(status, h('p', null, `Could not load the feed: ${F.lastError || ''}`), h('button', { type: 'button', class: 'btn', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again'));
-        else if (sort === 'following') fill(status, h('p', null, 'Nothing from creators you follow.'), h('p', { class: 'muted small' }, 'TikShortis has no follow button yet; this list only holds follows carried over from the old app.'));
-        else fill(status, h('p', null, 'No clips yet.'), h('a', { class: 'btn', href: link('upload') }, 'Upload a clip'));
+        status.classList.remove('more');
+        if (F.loading) fill(status, h('span', { class: 'tf-spin', 'aria-label': 'Loading' }));
+        else if (F.errors) fill(status, h('p', null, 'Could not load the feed.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => { F.retryAt = 0; F.errors = 0; loadMore(); } }, 'Try again'));
+        else if (sort === 'following') fill(status, h('p', null, 'Nothing from creators you follow.'), h('p', { class: 'small' }, 'TikShortis has no follow button yet; this list only holds follows carried over from the old app.'));
+        else fill(status, h('p', null, 'No clips yet.'), h('a', { class: 'tf-sbtn rose', href: link('upload') }, 'Upload the first one'));
+      }
+      // A new order or length, in place: no navigation, so fullscreen and the
+      // sheets' history entry survive, and the address is replaced (Back
+      // leaves the feed, as in TikShortis).
+      function switchFeed(nextSort, nextLength) {
+        if (nextSort === sort && nextLength === length) return;
+        F.token++;
+        const c = F.cards[F.active];
+        if (c) deactivate(c);
+        for (const x of F.cards) { unload(x); activeObserver.unobserve(x.el); x.el.remove(); }
+        Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1 });
+        sort = nextSort;
+        length = nextLength;
+        seed = SEEDED.has(sort) ? newSeed() : null;
+        byId = !SEEDED.has(sort);
+        resumeBox.hidden = true;
+        baseParams = new URLSearchParams();
+        if (sort !== 'foryou') baseParams.set('sort', sort);
+        if (length !== 'all') baseParams.set('length', length);
+        hub.replaceHash(`${BASE}${subPath}${baseParams.toString() ? `?${baseParams}` : ''}`);
+        scroller.scrollTop = 0;
+        paintMode();
+        paintStatus();
+        loadMore();
       }
 
       // ---- Cards ----
@@ -598,42 +889,72 @@
           'aria-label': parts.title || 'Clip',
         });
         video.muted = true;
-        const seek = h('input', { class: 'tf-seek', type: 'range', min: '0', max: '1000', value: '0', step: '1', 'aria-label': 'Seek' });
-        const time = h('span', { class: 'tf-time' });
-        const burst = h('span', { class: 'tf-burst', hidden: true, 'aria-hidden': 'true' }, ic('heart'));
-        const playIcon = h('span', { class: 'tf-paused', hidden: true, 'aria-hidden': 'true' }, ic('play'));
-        const likeBtn = railBtn('heart', 'Like', () => toggleLike(c, false));
-        const commentBtn = railBtn('chat', 'Comments', () => openComments(c));
-        const saveBtn = railBtn('bookmark', 'Save', () => openSave(c));
-        const shareBtn = railBtn('share', 'Share', () => share(c));
-        const moreBtn = railBtn('more', 'More', () => openMore(c));
-        const author = s.profile_id && s.profile_name
-          ? h('a', { class: 'tf-author', href: link(`person/${enc(handleOf(s.profile_name))}`) }, `@${s.profile_name}`)
-          : h('span', { class: 'tf-author' }, s.uploader_name ? `@${s.uploader_name}` : '');
-        const titleEl = h('p', { class: 'tf-title' }, parts.title);
-        if (parts.title.length > 40) {
-          titleEl.classList.add('clamp');
-          titleEl.append(' ');
-          titleEl.addEventListener('click', () => titleEl.classList.toggle('clamp'));
+        const c = { s, video, maxTime: 0, lastTime: 0, completed: false, scrubbing: false, wantPlay: false };
+
+        // Overlays in the middle of the clip.
+        c.burst = h('span', { class: 'tf-burst', hidden: true, 'aria-hidden': 'true' }, lu('heart', 96));
+        c.seekHint = h('div', { class: 'tf-seekhint', hidden: true, 'aria-hidden': 'true' });
+        c.playIcon = h('span', { class: 'tf-paused', hidden: true, 'aria-hidden': 'true' }, h('span', null, lu('play', 40)));
+
+        // Timeline: drag anywhere on the strip; the time shows while dragging.
+        c.tlFill = h('div', { class: 'tf-tl-fill' });
+        c.tlKnob = h('div', { class: 'tf-tl-knob' });
+        c.tlBar = h('div', { class: 'tf-tl-bar' }, c.tlFill, c.tlKnob);
+        c.tlTime = h('div', { class: 'tf-tl-time', hidden: true });
+        c.timeline = h('div', { class: 'tf-tl', role: 'slider', tabindex: '0', 'aria-label': 'Seek', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' }, c.tlTime, c.tlBar);
+        attachTimeline(c);
+
+        // Right rail, in TikShortis' order.
+        c.likeBtn = railBtn('heart', '0', () => toggleLike(c, false));
+        c.commentBtn = railBtn('messageCircle', '0', () => openComments(c));
+        c.saveBtn = railBtn('listVideo', 'Playlists', () => openSave(c), { aria: 'Playlists' });
+        const shareBtn = railBtn('share2', 'Share', () => openShare(c));
+        const dlBtn = railBtn('download', 'Download', null, { href: `${videoOf(s.id)}?download=1` });
+        c.soundBtn = railBtn(S.muted ? 'volumeX' : 'volume2', S.muted ? 'Muted' : 'Sound', () => setMuted(!S.muted), { sound: true });
+        const moreBtn = railBtn('moreVertical', 'More', () => openMore(c));
+        const rail = h('div', { class: 'tf-rail' }, c.likeBtn.el, c.commentBtn.el, c.saveBtn.el, shareBtn.el, dlBtn.el, c.soundBtn.el, moreBtn.el);
+
+        // Bottom left: who, the title, where it came from, the tags.
+        const name = authorLabel(s);
+        const who = s.profile_id && s.profile_name
+          ? h('a', { class: 'tf-who', href: link(`person/${enc(handleOf(s.profile_name))}`) }, discAvatar(name, s.profile_id, 40), h('span', { class: 'tf-name' }, name))
+          : h('div', { class: 'tf-who' }, discAvatar(s.uploader_name || 'Unknown', null, 40), h('span', { class: 'tf-name' }, name));
+        let titleEl = null;
+        if (parts.title) {
+          const long = parts.title.length > 40;
+          const more = long ? h('span', { class: 'tf-more' }, '… more') : null;
+          titleEl = h('p', { class: `tf-title${long ? ' long' : ''}` }, linkify(parts.title), more);
+          if (long) titleEl.addEventListener('click', (e) => {
+            if (e.target.closest('a')) return;
+            const open = titleEl.classList.toggle('open');
+            more.textContent = open ? ' less' : '… more';
+          });
         }
         const src = sourceLink(s, parts);
-        const tagsShown = parts.tags.slice(0, 3);
-        const tagRow = h('div', { class: 'tf-tags' },
-          tagsShown.map((t) => h('a', { href: tagHref(t) }, t)),
-          parts.tags.length > 3 ? h('button', { type: 'button', class: 'linkish', onclick: (e) => {
-            e.currentTarget.replaceWith(...parts.tags.slice(3).map((t) => h('a', { href: tagHref(t) }, t)));
-          } }, `+${parts.tags.length - 3} more`) : null);
-        const meta = h('div', { class: 'tf-meta' },
-          h('div', { class: 'tf-by' }, author, s.is_private && (isOwner(s) || isAdmin()) ? h('span', { class: 'tf-lock', title: 'Private' }, ic('lock'), 'Private') : null),
-          parts.title ? titleEl : null,
-          src ? h('a', { class: 'tf-src', href: src, target: '_blank', rel: 'noopener noreferrer nofollow' }, 'Source') : null,
-          parts.tags.length ? tagRow : null);
-        const stage = h('div', { class: 'tf-stage' }, video, playIcon, burst, meta, h('div', { class: 'tf-seekbar' }, seek, time));
-        const rail = h('div', { class: 'tf-rail' },
-          s.profile_id ? h('a', { class: 'tf-rail-av', href: link(`profile/${s.profile_id}`), 'aria-label': `Profile ${s.profile_name || ''}` }, avatar(s.profile_name, s.profile_id, null, 48)) : null,
-          likeBtn.el, commentBtn.el, saveBtn.el, shareBtn.el, moreBtn.el);
-        const el = h('section', { class: 'tf-card', 'data-id': String(s.id) }, h('div', { class: 'tf-player' }, stage), rail);
-        const c = { s, el, video, seek, time, likeBtn, commentBtn, saveBtn, stage, burst, playIcon, maxTime: 0, lastTime: 0, completed: false, seeking: false, wantPlay: false };
+        const srcLabel = src && hostLabel(src);
+        const srcEl = src && srcLabel ? h('a', { class: 'tf-src', href: src, target: '_blank', rel: 'noopener noreferrer nofollow', title: src }, lu('link2', 12), h('span', null, srcLabel)) : null;
+        let tagsEl = null;
+        if (parts.tags.length) {
+          tagsEl = h('div', { class: 'tf-tags' });
+          const paintTags = (all) => fill(tagsEl,
+            (all ? parts.tags : parts.tags.slice(0, 3)).map((t) => h('a', { class: 'tf-tag', href: tagHref(t) }, t)),
+            parts.tags.length > 3 ? h('button', { type: 'button', class: 'tf-tag tf-tag-more', 'aria-expanded': String(all), onclick: () => paintTags(!all) }, all ? 'less' : `+${parts.tags.length - 3} more`) : null);
+          paintTags(false);
+        }
+        const info = h('div', { class: 'tf-info' }, who, titleEl, srcEl, tagsEl);
+
+        // Admin: describe with AI and take the cover from this frame, up by the
+        // view controls; the private badge top left.
+        const admin = isAdmin()
+          ? [h('button', { type: 'button', class: 'tf-cbtn tf-adm describe', title: 'Describe this clip with AI', 'aria-label': 'Describe this clip with AI', onclick: () => describeHere(c) }, lu('sparkles', 18)),
+            h('button', { type: 'button', class: 'tf-cbtn tf-adm cover', title: 'Thumbnail: use current frame', 'aria-label': 'Set thumbnail from current frame', onclick: () => setCover(c) }, lu('image', 18))]
+          : [];
+        c.privateEl = h('div', { class: 'tf-private', hidden: !(s.is_private && (isOwner(s) || isAdmin())) }, lu('lock', 12), 'Private');
+        c.aiEl = h('div', { class: 'tf-ai', hidden: true, onclick: () => { c.aiEl.hidden = true; } });
+
+        c.el = h('section', { class: 'tf-card', 'data-id': String(s.id) },
+          video, ...admin, c.privateEl, c.aiEl, c.burst, c.seekHint, c.playIcon,
+          h('div', { class: 'tf-scrim', 'aria-hidden': 'true' }), c.timeline, rail, info);
         paintCounts(c);
 
         video.addEventListener('timeupdate', () => {
@@ -644,8 +965,7 @@
             if (t >= d * 0.95) c.completed = true;
             // A loop wrap from near the end counts as watched through.
             if (c.lastTime >= d * 0.9 && t < c.lastTime - 1) c.completed = true;
-            if (!c.seeking) seek.value = String(Math.round((t / d) * 1000));
-            time.textContent = `${clock(t)} / ${clock(d)}`;
+            if (!c.scrubbing) paintProgress(c, t / d);
           }
           c.lastTime = t;
         });
@@ -653,31 +973,73 @@
           c.completed = true;
           if (S.autoScroll && F.cards[F.active] === c) step(1);
         });
-        video.addEventListener('play', () => { playIcon.hidden = true; });
-        video.addEventListener('pause', () => { playIcon.hidden = F.cards[F.active] !== c; });
-        seek.addEventListener('input', () => {
-          c.seeking = true;
-          const d = video.duration;
-          if (Number.isFinite(d) && d > 0) video.currentTime = (Number(seek.value) / 1000) * d;
-        });
-        seek.addEventListener('change', () => { c.seeking = false; });
+        video.addEventListener('play', () => { c.playIcon.hidden = true; });
+        video.addEventListener('pause', () => { c.playIcon.hidden = F.cards[F.active] !== c; });
         attachGestures(c);
         return c;
       }
-      function railBtn(name, label, onclick) {
-        const count = h('span', { class: 'tf-count' }, label);
-        const btn = h('button', { type: 'button', class: 'tf-rb', 'aria-label': label, onclick }, ic(name));
-        return { el: h('div', { class: 'tf-r' }, btn, count), btn, count };
-      }
       function paintCounts(c) {
         const s = c.s;
-        c.likeBtn.btn.classList.toggle('on', !!s.viewer_liked);
-        c.likeBtn.btn.setAttribute('aria-pressed', String(!!s.viewer_liked));
-        c.likeBtn.btn.setAttribute('aria-label', s.viewer_liked ? 'Unlike' : 'Like');
-        c.likeBtn.count.textContent = num(s.like_count);
-        c.commentBtn.count.textContent = num(s.comment_count);
-        c.saveBtn.btn.classList.toggle('saved', !!s.viewer_saved);
-        c.saveBtn.count.textContent = s.viewer_saved ? 'Saved' : 'Save';
+        c.likeBtn.el.classList.toggle('liked', !!s.viewer_liked);
+        c.likeBtn.el.setAttribute('aria-pressed', String(!!s.viewer_liked));
+        c.likeBtn.el.setAttribute('aria-label', `${s.viewer_liked ? 'Unlike' : 'Like'} (${num(s.like_count)})`);
+        c.likeBtn.text.textContent = String(s.like_count || 0);
+        c.commentBtn.text.textContent = String(s.comment_count || 0);
+        c.commentBtn.el.setAttribute('aria-label', `Comments (${num(s.comment_count)})`);
+        c.saveBtn.el.classList.toggle('saved', !!s.viewer_saved);
+      }
+      function paintSound(c) {
+        fill(c.soundBtn.iconBox, lu(S.muted ? 'volumeX' : 'volume2', 22));
+        c.soundBtn.text.textContent = S.muted ? 'Muted' : 'Sound';
+        c.soundBtn.el.setAttribute('aria-label', S.muted ? 'Turn sound on' : 'Mute');
+      }
+      function paintProgress(c, frac) {
+        const pct = Math.max(0, Math.min(1, frac || 0)) * 100;
+        c.tlFill.style.width = `${pct}%`;
+        c.tlKnob.style.left = `${pct}%`;
+        c.timeline.setAttribute('aria-valuenow', String(Math.round(pct)));
+        const d = c.video.duration;
+        if (Number.isFinite(d) && d > 0) c.timeline.setAttribute('aria-valuetext', `${clock((pct / 100) * d)} of ${clock(d)}`);
+        if (c.scrubbing && Number.isFinite(d) && d > 0) c.tlTime.textContent = `${clock((pct / 100) * d)} / ${clock(d)}`;
+      }
+      function attachTimeline(c) {
+        const tl = c.timeline;
+        const seekTo = (clientX) => {
+          const v = c.video;
+          const d = v.duration;
+          const rect = c.tlBar.getBoundingClientRect();
+          const frac = rect.width ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) : 0;
+          if (Number.isFinite(d) && d > 0) v.currentTime = frac * d;
+          paintProgress(c, frac);
+        };
+        const end = (e) => {
+          if (!c.scrubbing) return;
+          c.scrubbing = false;
+          tl.classList.remove('scrub');
+          c.tlTime.hidden = true;
+          if (e) e.stopPropagation();
+        };
+        tl.addEventListener('pointerdown', (e) => {
+          e.stopPropagation();
+          c.scrubbing = true;
+          tl.classList.add('scrub');
+          c.tlTime.hidden = !(Number.isFinite(c.video.duration) && c.video.duration > 0);
+          try { tl.setPointerCapture(e.pointerId); } catch { /* old browser */ }
+          seekTo(e.clientX);
+        });
+        tl.addEventListener('pointermove', (e) => { if (c.scrubbing) { e.stopPropagation(); seekTo(e.clientX); } });
+        tl.addEventListener('pointerup', end);
+        tl.addEventListener('pointercancel', end);
+        // Keyboard: Left and Right step five seconds.
+        tl.addEventListener('keydown', (e) => {
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+          e.preventDefault();
+          e.stopPropagation();
+          const v = c.video;
+          if (!(Number.isFinite(v.duration) && v.duration > 0)) return;
+          v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + (e.key === 'ArrowRight' ? 5 : -5)));
+          paintProgress(c, v.currentTime / v.duration);
+        });
       }
 
       // ---- Gestures: tap, double tap, long press ----
@@ -687,33 +1049,35 @@
         let press = null;
         let long = false;
         let start = null;
-        const onControl = (e) => !!(e.target.closest && e.target.closest('a, button, input, .tf-meta'));
-        c.stage.addEventListener('pointerdown', (e) => {
+        const onControl = (e) => !!(e.target.closest && e.target.closest('a, button, input, .tf-info, .tf-tl, .tf-rail, .tf-ai'));
+        c.el.addEventListener('pointerdown', (e) => {
           if (onControl(e) || e.button > 0) return;
           start = { x: e.clientX, y: e.clientY };
           long = false;
           press = setTimeout(() => { press = null; long = true; }, 550);
         });
-        c.stage.addEventListener('pointermove', (e) => {
+        c.el.addEventListener('pointermove', (e) => {
           if (!start) return;
           if (Math.abs(e.clientX - start.x) > 10 || Math.abs(e.clientY - start.y) > 10) { clearTimeout(press); press = null; start = null; }
         });
-        c.stage.addEventListener('pointercancel', () => { clearTimeout(press); press = null; start = null; });
-        c.stage.addEventListener('contextmenu', (e) => { if (!onControl(e)) e.preventDefault(); });
-        c.stage.addEventListener('pointerup', (e) => {
+        c.el.addEventListener('pointercancel', () => { clearTimeout(press); press = null; start = null; });
+        c.el.addEventListener('contextmenu', (e) => { if (!onControl(e)) e.preventDefault(); });
+        c.el.addEventListener('pointerup', (e) => {
           if (!start) return;
           start = null;
           clearTimeout(press);
           press = null;
+          // The player menu opens on release, as in TikShortis.
           if (long) { long = false; openMore(c); return; }
-          const rect = c.stage.getBoundingClientRect();
-          const x = (e.clientX - rect.left) / rect.width;
+          const rect = c.el.getBoundingClientRect();
+          const x = rect.width ? (e.clientX - rect.left) / rect.width : 0.5;
           const now = Date.now();
           if (tapTimer && now - lastTap < 260) {
             clearTimeout(tapTimer);
             tapTimer = null;
-            if (x > 0.65) skip(c, 10);
-            else if (x < 0.35) skip(c, -10);
+            // Outer thirds seek, the middle likes.
+            if (x > 0.65) skip(c, SEEK_SECONDS);
+            else if (x < 0.35) skip(c, -SEEK_SECONDS);
             else toggleLike(c, true);
             return;
           }
@@ -725,7 +1089,12 @@
         const v = c.video;
         const d = Number.isFinite(v.duration) ? v.duration : Infinity;
         v.currentTime = Math.max(0, Math.min(d - 0.1, v.currentTime + by));
-        say(by > 0 ? '+10 s' : '-10 s');
+        fill(c.seekHint, lu(by > 0 ? 'fastForward' : 'rewind', 28), h('span', null, `${by > 0 ? '+' : '-'}${Math.abs(by)}s`));
+        c.seekHint.classList.toggle('fwd', by > 0);
+        c.seekHint.classList.toggle('back', by < 0);
+        c.seekHint.hidden = false;
+        clearTimeout(c.seekTimer);
+        c.seekTimer = setTimeout(() => { c.seekHint.hidden = true; }, 600);
       }
       function togglePlay(c) {
         if (F.cards[F.active] !== c) return;
@@ -749,6 +1118,17 @@
       }, { root: scroller, rootMargin: '600px 0px 400px 0px' });
       edgeObserver.observe(bottomSentinel);
       edgeObserver.observe(topSentinel);
+      // The sidebar opening or closing, fullscreen and a rotation change the
+      // feed's size: keep the current clip snapped in place.
+      let lastHeight = 0;
+      const resizeObserver = new ResizeObserver(() => {
+        const hgt = scroller.clientHeight;
+        if (hgt === lastHeight) return;
+        lastHeight = hgt;
+        const c = F.cards[F.active];
+        if (c) scroller.scrollTop = c.el.offsetTop;
+      });
+      resizeObserver.observe(scroller);
       function pickActive() {
         const top = scroller.getBoundingClientRect().top;
         let best = -1;
@@ -775,19 +1155,17 @@
         play(c);
         for (const x of F.cards) x.playIcon.hidden = true;
         // Keep the current clip in the address (a reload or Back lands here).
-        const q = new URLSearchParams(r.params);
+        const q = new URLSearchParams(baseParams);
         q.set('focus', String(c.s.id));
-        q.delete('path');
-        const sub = r.sub.length ? `/${r.sub.map(enc).join('/')}` : '';
-        hub.replaceHash(`${BASE}${sub}?${q}`);
-        if (mainFeed && sort !== 'history') store.set(KEYS.resume, JSON.stringify({ focus: c.s.id, at: Date.now() }));
+        hub.replaceHash(`${BASE}${subPath}?${q}`);
+        if (mainFeed) store.set(KEYS.resume, JSON.stringify({ focus: c.s.id, at: Date.now() }));
         if (i >= F.cards.length - 3) loadMore();
-        if (panel.dataset.open === '1') openComments(c, true);
       }
       function play(c) {
         const v = c.video;
         if (!v.getAttribute('src')) v.src = videoOf(c.s.id);
         v.muted = S.muted;
+        v.defaultPlaybackRate = S.speed;
         v.playbackRate = S.speed;
         v.loop = !S.autoScroll;
         c.wantPlay = true;
@@ -812,6 +1190,7 @@
         c.lastTime = 0;
         c.completed = false;
         c.playIcon.hidden = true;
+        paintProgress(c, 0);
       }
       // Drops the video source to free the decoder and the memory it holds.
       function unload(c) {
@@ -825,14 +1204,14 @@
         if (next) next.el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
       }
 
-      // ---- Like, comments, save, share ----
+      // ---- Like, comments, playlists, share ----
       async function toggleLike(c, onlyLike) {
         const s = c.s;
-        heartBurst(c);
-        if (onlyLike && s.viewer_liked) return;
+        if (onlyLike && s.viewer_liked) { heartBurst(c); return; }
         const was = { liked: s.viewer_liked, count: s.like_count };
         s.viewer_liked = !was.liked;
-        s.like_count = Math.max(0, was.count + (s.viewer_liked ? 1 : -1));
+        s.like_count = Math.max(0, (was.count || 0) + (s.viewer_liked ? 1 : -1));
+        if (s.viewer_liked) heartBurst(c);
         paintCounts(c);
         try {
           const d = await call(`shorts/${s.id}/like`, { method: 'POST' });
@@ -850,119 +1229,123 @@
         c.burst.classList.remove('go');
         void c.burst.offsetWidth;
         c.burst.classList.add('go');
-        setTimeout(() => { c.burst.hidden = true; }, 700);
+        clearTimeout(c.burstTimer);
+        c.burstTimer = setTimeout(() => { c.burst.hidden = true; c.burst.classList.remove('go'); }, 700);
       }
-      // Wide screens: a panel beside the video. Narrow: a bottom sheet.
-      const widePanel = () => matchMedia('(min-width: 1101px)').matches;
-      function openComments(c, follow) {
-        if (follow && panel.dataset.open !== '1') return;
-        const box = commentsBox(c);
-        if (widePanel()) {
-          panel.hidden = false;
-          panel.dataset.open = '1';
-          root.classList.add('with-panel');
-          fill(panel, 
-            h('div', { class: 'tik-sheet-head' }, h('h3', null, `Comments (${num(c.s.comment_count)})`), h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Close comments', onclick: closePanel }, ic('close'))),
-            box);
-        } else if (!follow) {
-          openSheet(`Comments (${num(c.s.comment_count)})`, box);
-        }
-      }
-      function closePanel() {
-        panel.hidden = true;
-        panel.dataset.open = '';
-        root.classList.remove('with-panel');
-        fill(panel, );
-      }
-      function commentsBox(c) {
+      // TikShortis' comments sheet: "N comments", "@name text" rows, and a
+      // round field with a send button.
+      function openComments(c) {
         const s = c.s;
-        const listEl = h('div', { class: 'tik-comments' }, h('p', { class: 'muted' }, 'Loading ...'));
-        const input = h('textarea', { rows: '1', maxlength: '2000', placeholder: 'Add a comment', 'aria-label': 'Comment' });
-        const send = h('button', { type: 'submit', class: 'btn' }, 'Post');
-        const form = h('form', { class: 'tik-compose', onsubmit: async (e) => {
+        let list = [];
+        const listEl = h('div', { class: 'tf-cm-list' }, h('p', { class: 'tf-dim' }, 'Loading…'));
+        const errEl = h('p', { class: 'tf-cm-err', role: 'alert', hidden: true });
+        const input = h('input', { type: 'text', maxlength: '2000', placeholder: 'Add a comment…', 'aria-label': 'Comment' });
+        const send = h('button', { type: 'submit', class: 'tf-round-btn', 'aria-label': 'Post comment' }, lu('send', 18));
+        const headTitle = () => `${list.length} comment${list.length === 1 ? '' : 's'}`;
+        const row = (m) => h('div', { class: 'tf-cm' }, h('b', null, `@${m.author_name || 'Unknown'}`), ' ', h('span', null, m.body));
+        const paint = () => {
+          fill(listEl, ...(list.length ? list.map(row) : [h('p', { class: 'tf-dim' }, 'Be the first to comment.')]));
+          const t = sheet.panel.querySelector('.tik-sheet-head h3');
+          if (t) t.textContent = headTitle();
+        };
+        const form = h('form', { class: 'tf-cm-form', onsubmit: async (e) => {
           e.preventDefault();
           const body = input.value.trim();
-          if (!body) return;
+          if (!body || send.disabled) return;
           send.disabled = true;
+          errEl.hidden = true;
           try {
             const d = await call(`shorts/${s.id}/comments`, { method: 'POST', body: { body } });
             input.value = '';
-            s.comment_count = (s.comment_count || 0) + 1;
+            if (d.comment) list.push(d.comment);
+            s.comment_count = list.length;
             paintCounts(c);
-            if (listEl.querySelector('.muted')) fill(listEl, );
-            if (d.comment) listEl.append(commentRow(d.comment));
-            const head = form.closest('.tik-sheet, .tf-panel');
-            const h3 = head && head.querySelector('h3');
-            if (h3) h3.textContent = `Comments (${num(s.comment_count)})`;
+            paint();
             listEl.scrollTop = listEl.scrollHeight;
           } catch (err) {
-            // The text stays in the box on failure.
-            say(err.status === 401 ? 'Signed out of TikShortis: link your account again to comment.' : err.message);
+            // The text stays in the field on failure.
+            errEl.textContent = err.status === 401 ? 'Signed out of TikShortis: link your account again to comment.' : 'Could not post.';
+            errEl.hidden = false;
           } finally { send.disabled = false; }
         } }, input, send);
+        const sheet = openSheet(`${num(s.comment_count)} comments`, h('div', { class: 'tf-cm-box' }, listEl, errEl, form), { clear: true, cls: 'tf-sheet-comments' });
         call(`shorts/${s.id}/comments`).then((d) => {
-          const list = d.comments || [];
-          fill(listEl, ...(list.length ? list.map(commentRow) : [h('p', { class: 'muted' }, 'No comments yet.')]));
-        }).catch((e) => fill(listEl, h('p', { class: 'err' }, e.message)));
-        return h('div', { class: 'tik-comments-box' }, listEl, form);
+          list = d.comments || [];
+          paint();
+        }).catch((e) => fill(listEl, h('p', { class: 'tf-cm-err' }, e.message)));
       }
-      function commentRow(m) {
-        return h('div', { class: 'tik-cm' }, avatar(m.author_name), h('div', null, h('b', null, m.author_name || 'Someone'), ' ', h('small', null, when(m.created_at)), h('p', null, m.body)));
-      }
+      // Save to playlist: a new-playlist field on top, then every playlist
+      // with a bookmark that is filled when the clip is in it.
       function openSave(c) {
         const s = c.s;
-        const listEl = h('div', { class: 'tik-list' }, h('p', { class: 'muted' }, 'Loading ...'));
-        const name = h('input', { type: 'text', maxlength: '120', placeholder: 'New playlist', 'aria-label': 'New playlist name' });
-        const form = h('form', { class: 'tik-inline-form', onsubmit: async (e) => {
+        let pls = [];
+        const listEl = h('div', { class: 'tf-pl-list' }, h('p', { class: 'tf-dim' }, 'Loading…'));
+        const name = h('input', { type: 'text', maxlength: '120', placeholder: 'New playlist…', 'aria-label': 'New playlist name' });
+        const setSaved = () => { s.viewer_saved = pls.some((x) => Number(x.contains) === 1); paintCounts(c); };
+        const paint = () => {
+          fill(listEl, ...(pls.length ? pls.map(row) : [h('p', { class: 'tf-dim' }, 'No playlists yet — create one above.')]));
+        };
+        function row(pl) {
+          const inIt = Number(pl.contains) === 1;
+          return h('button', { type: 'button', class: 'tf-pl', 'aria-pressed': String(inIt), onclick: async () => {
+            const before = pls.map((x) => ({ ...x }));
+            pl.contains = inIt ? 0 : 1;
+            pl.item_count = Math.max(0, (pl.item_count || 0) + (inIt ? -1 : 1));
+            setSaved();
+            paint();
+            try {
+              if (inIt) await call(`shorts/playlists/${pl.id}/items?short=${s.id}`, { method: 'DELETE' });
+              else await call(`shorts/playlists/${pl.id}/items`, { method: 'POST', body: { shortId: s.id } });
+            } catch (e) {
+              pls = before;
+              setSaved();
+              paint();
+              fail(e);
+            }
+          } },
+          h('span', { class: 'tf-pl-t' }, h('b', null, pl.name), h('small', null, `${num(pl.item_count)} clips`)),
+          lu('bookmark', 20, 2, inIt ? 'on' : null));
+        }
+        function reload() {
+          call(`shorts/playlists?short=${s.id}`).then((d) => {
+            pls = d.playlists || [];
+            setSaved();
+            paint();
+          }).catch((e) => fill(listEl, h('p', { class: 'tf-cm-err' }, e.message)));
+        }
+        const form = h('form', { class: 'tf-pl-form', onsubmit: async (e) => {
           e.preventDefault();
           const n = name.value.trim();
           if (!n) return;
+          name.value = '';
           try {
             const d = await call('shorts/playlists', { method: 'POST', body: { name: n } });
             if (d.playlist) await call(`shorts/playlists/${d.playlist.id}/items`, { method: 'POST', body: { shortId: s.id } });
-            name.value = '';
-            s.viewer_saved = true;
-            paintCounts(c);
             reload();
           } catch (err) { fail(err); }
-        } }, name, h('button', { type: 'submit', class: 'btn' }, 'Create'));
-        function reload() {
-          call(`shorts/playlists?short=${s.id}`).then((d) => {
-            const pls = d.playlists || [];
-            fill(listEl, ...(pls.length ? pls.map(row) : [h('p', { class: 'muted' }, 'No playlists yet.')]));
-            s.viewer_saved = pls.some((x) => Number(x.contains) === 1);
-            paintCounts(c);
-          }).catch((e) => fill(listEl, h('p', { class: 'err' }, e.message)));
-        }
-        function row(pl) {
-          const box = h('input', { type: 'checkbox', checked: Number(pl.contains) === 1 });
-          box.addEventListener('change', async () => {
-            const want = box.checked;
-            try {
-              if (want) await call(`shorts/playlists/${pl.id}/items`, { method: 'POST', body: { shortId: s.id } });
-              else await call(`shorts/playlists/${pl.id}/items?short=${s.id}`, { method: 'DELETE' });
-              pl.contains = want ? 1 : 0;
-            } catch (e) { box.checked = !want; fail(e); }
-            reload();
-          });
-          return h('label', { class: 'tik-check' }, box, h('span', null, pl.name), h('small', { class: 'muted' }, `${num(pl.item_count)} clips`));
-        }
+        } }, name, h('button', { type: 'submit', class: 'tf-round-btn', 'aria-label': 'Create playlist' }, lu('plus', 18)));
         reload();
-        openSheet('Save to playlist', [listEl, form]);
+        openSheet('Save to playlist', [form, listEl], { clear: true, cls: 'tf-sheet-save' });
       }
-      async function share(c) {
+      // Share: the system share sheet where there is one, the clipboard
+      // otherwise; the clip's own address in Grabbit.
+      function openShare(c) {
         const url = `${location.origin}/${link('', { focus: c.s.id, sort: 'new' })}`;
-        try {
-          if (navigator.share) { await navigator.share({ url, title: splitCaption(c.s.caption).title || 'TikShortis clip' }); return; }
-          await navigator.clipboard.writeText(url);
-          say('Link copied');
-        } catch (e) {
-          if (e && e.name === 'AbortError') return;
-          say('Could not share the link');
-        }
+        const label = h('span', null, 'Copy link / share');
+        const btn = h('button', { type: 'button', class: 'tf-row tf-share-row', onclick: async () => {
+          if (navigator.share) {
+            try { await navigator.share({ url }); return; } catch (err) { if (err && err.name === 'AbortError') return; }
+          }
+          try {
+            await navigator.clipboard.writeText(url);
+            label.textContent = 'Link copied!';
+            setTimeout(() => { label.textContent = 'Copy link / share'; }, 2000);
+          } catch { say('Could not copy the link'); }
+        } }, h('span', { class: 'tf-row-ic' }, lu('link2', 17)), label);
+        openSheet('Share', btn, { clear: true, cls: 'tf-sheet-share' });
       }
 
-      // ---- More menu and the sheets behind it ----
+      // ---- The player menu and the sheets behind it ----
       function hideFromFeed(c, msg, undoable) {
         // In a playlist and in Liked the clip stays; elsewhere it leaves.
         if (inPlaylist || sort === 'liked') { c.s.viewer_hidden = true; say(msg); return; }
@@ -975,50 +1358,121 @@
           } catch (e) { fail(e); }
         } } : null);
       }
+      async function toggleHidden(c) {
+        const s = c.s;
+        try {
+          if (s.viewer_hidden) {
+            await call(`shorts/${s.id}/hide`, { method: 'DELETE' });
+            s.viewer_hidden = false;
+            say('Shown in your feed again');
+          } else {
+            await call(`shorts/${s.id}/hide`, { method: 'POST' });
+            s.viewer_hidden = true;
+            hideFromFeed(c, 'Hidden from your feed', true);
+          }
+        } catch (e) { fail(e); }
+      }
+      // Modelled on TikShortis' long-press sheet: viewing controls for
+      // everyone first, then the owner's and the admin's.
       function openMore(c) {
         const s = c.s;
         const owner = isOwner(s) || isAdmin();
-        const rows = [];
-        const row = (label, run, opts = {}) => rows.push(h('button', { type: 'button', class: `tik-menu-row${opts.danger ? ' danger' : ''}`, onclick: () => { sheet.close(); run(); } }, label, opts.note ? h('small', null, opts.note) : null));
-        rows.push(h('a', { class: 'tik-menu-row', href: `${videoOf(s.id)}?download=1`, download: '' }, 'Download'));
-        if (s.viewer_hidden) row('Show in feed again', async () => { try { await call(`shorts/${s.id}/hide`, { method: 'DELETE' }); s.viewer_hidden = false; say('Shown in your feed again'); } catch (e) { fail(e); } });
-        else row('Not interested', async () => { try { await call(`shorts/${s.id}/hide`, { method: 'POST' }); s.viewer_hidden = true; hideFromFeed(c, 'Hidden from your feed', true); } catch (e) { fail(e); } });
-        if (s.why) row('Why this post', () => openSheet('Why this post', h('p', null, s.why)));
-        row(s.viewer_reported ? 'Reported' : 'Report', () => openReport(c));
-        row(`Speed: ${S.speed}x`, () => { const all = [0.5, 1, 1.5, 2]; S.speed = all[(all.indexOf(S.speed) + 1) % all.length]; const cur = F.cards[F.active]; if (cur) cur.video.playbackRate = S.speed; say(`Speed ${S.speed}x`); });
-        row(S.chromeHidden ? 'Show overlay' : 'Clear display', () => { S.chromeHidden = !S.chromeHidden; store.set(KEYS.chrome, S.chromeHidden ? '1' : null); root.classList.toggle('clean', S.chromeHidden); });
-        row(`Auto-scroll: ${S.autoScroll ? 'on' : 'off'}`, () => { S.autoScroll = !S.autoScroll; store.set(KEYS.autoScroll, S.autoScroll ? '1' : null); for (const x of F.cards) x.video.loop = !S.autoScroll; say(`Auto-scroll ${S.autoScroll ? 'on' : 'off'}`); });
-        if (document.pictureInPictureEnabled) row('Picture-in-picture', () => { c.video.requestPictureInPicture().catch(() => say('Picture-in-picture is not available')); });
-        row(document.fullscreenElement ? 'Leave full screen' : 'Full screen', toggleFullscreen);
+        const close = (fn) => () => { sheet.close(); fn(); };
+        const speedBox = h('div', { class: 'tf-speeds', role: 'group', 'aria-label': 'Speed' });
+        const paintSpeed = () => fill(speedBox, SPEEDS.map((r) => h('button', { type: 'button', class: `tf-speed${r === S.speed ? ' on' : ''}`, 'aria-pressed': String(r === S.speed), onclick: () => {
+          S.speed = r;
+          const cur = F.cards[F.active];
+          if (cur) { cur.video.defaultPlaybackRate = r; cur.video.playbackRate = r; }
+          paintSpeed();
+        } }, `${r.toFixed(1)}×`)));
+        paintSpeed();
+        const autoRow = moreRow('chevronsDown', 'Auto scroll', () => { toggleAutoScroll(); fill(autoRow.querySelector('.tf-row-t'), switchEl(S.autoScroll)); }, { trailing: switchEl(S.autoScroll) });
+        const pip = document.pictureInPictureEnabled && typeof HTMLVideoElement.prototype.requestPictureInPicture === 'function';
+        const rows = [
+          moreRow('download', 'Download', () => sheet.close(), { href: `${videoOf(s.id)}?download=1` }),
+          moreRow(s.viewer_hidden ? 'eye' : 'eyeOff', s.viewer_hidden ? 'Show in feed again' : 'Not interested', close(() => toggleHidden(c))),
+          s.why ? moreRow('info', 'Why this post', close(() => openWhy(c))) : null,
+          moreRow('flag', s.viewer_reported ? 'Reported' : 'Report', close(() => openReport(c))),
+          h('div', { class: 'tf-sep' }),
+          h('div', { class: 'tf-row tf-row-static' }, h('span', { class: 'tf-row-ic' }, lu('gauge', 18)), h('span', { class: 'tf-row-l' }, 'Speed'), speedBox),
+          moreRow('minimize2', S.chromeHidden ? 'Show overlay' : 'Clear display', close(toggleChrome)),
+          autoRow,
+          pip ? moreRow('pip', 'Picture-in-Picture', close(() => { c.video.requestPictureInPicture().catch(() => say('Picture-in-Picture is not available')); })) : null,
+          moreRow(F.fullscreen ? 'minimize' : 'maximize', F.fullscreen ? 'Exit fullscreen' : 'Fullscreen', close(toggleFullscreen)),
+        ];
         if (owner) {
-          row(s.is_private ? 'Private: make public' : 'Public: make private', async () => {
-            const want = !s.is_private;
-            s.is_private = want;
-            try { const d = await call(`shorts/${s.id}/visibility`, { method: 'PATCH', body: { isPrivate: want } }); s.is_private = !!d.is_private; say(s.is_private ? 'Now private' : 'Now public'); } catch (e) { s.is_private = !want; fail(e); }
-          });
-          row('Edit title and tags', () => openEdit(s, (caption) => { s.caption = caption; const fresh = buildCard(s); swapCard(c, fresh); }));
+          rows.push(
+            h('div', { class: 'tf-sep' }),
+            moreRow(s.is_private ? 'lock' : 'globe', s.is_private ? 'Private — make public' : 'Public — make private', close(() => toggleVisibility(c)), s.is_private ? { icon: lu('lock', 18, 2, 'amber') } : {}),
+            moreRow('pencil', 'Edit title', close(() => editHere(c))),
+            moreRow('hash', 'Tags', close(() => editHere(c))));
+          if (isAdmin()) rows.push(moreRow('type', 'Fetch title from source', close(() => fetchTitle(c))));
+          rows.push(
+            h('div', { class: 'tf-sep' }),
+            moreRow('arrowRightLeft', 'Hand over to 18+', close(() => confirmSheet('Hand over to 18+?', 'The clip moves to the 18+ library and leaves TikShortis and every general feed. There is no way back from here.', 'Hand over', async () => {
+              const d = await call(`shorts/${s.id}/channel`, { method: 'PATCH', body: { channel: '18plus' } });
+              removeCard(c);
+              say(d.message || 'Handed over to 18+');
+            }))),
+            moreRow('trash2', 'Delete', close(() => confirmSheet('Delete this clip?', 'The video and its file are removed. This can’t be undone.', 'Delete', async () => {
+              await call(`shorts/${s.id}`, { method: 'DELETE' });
+              removeCard(c);
+              say('Deleted');
+            })), { danger: true, icon: lu('trash2', 18, 2, 'red') }));
         }
-        if (isAdmin()) {
-          row('Fetch title from source', async () => { try { const d = await call(`shorts/${s.id}/fetch-title`, { method: 'POST' }); s.caption = d.caption; swapCard(c, buildCard(s)); say('Title updated'); } catch (e) { fail(e); } });
-          row('Set cover from this frame', async () => {
-            c.video.pause();
-            try { await call(`shorts/${s.id}/poster`, { method: 'POST', body: { time: c.video.currentTime || 0 } }); s.has_poster = true; c.video.poster = `/api/tik/shorts/${s.id}/poster?v=${Date.now()}`; say('Cover updated'); } catch (e) { fail(e); }
-          });
-          row('Describe with AI', () => describe(s));
-        }
-        if (owner) {
-          row('Hand over to 18+', () => confirmSheet('Hand over to 18+', 'Move this clip to the 18+ library? It leaves TikShortis and every general feed.', 'Hand over', async () => {
-            await call(`shorts/${s.id}/channel`, { method: 'PATCH', body: { channel: '18plus' } });
-            removeCard(c);
-            say('Handed over to 18+');
-          }), { danger: true });
-          row('Delete', () => confirmSheet('Delete clip', 'Delete this clip? Its files are removed.', 'Delete', async () => {
-            await call(`shorts/${s.id}`, { method: 'DELETE' });
-            removeCard(c);
-            say('Deleted');
-          }), { danger: true });
-        }
-        const sheet = openSheet('More', h('div', { class: 'tik-menulist' }, rows));
+        const sheet = openSheet('Player menu', h('div', { class: 'tf-more' }, rows), { size: 'narrow', bare: true });
+      }
+      async function toggleVisibility(c) {
+        const s = c.s;
+        const want = !s.is_private;
+        s.is_private = want;
+        c.privateEl.hidden = !want;
+        try {
+          const d = await call(`shorts/${s.id}/visibility`, { method: 'PATCH', body: { isPrivate: want } });
+          s.is_private = !!d.is_private;
+        } catch (e) { s.is_private = !want; fail(e); }
+        c.privateEl.hidden = !(s.is_private && (isOwner(s) || isAdmin()));
+      }
+      function editHere(c) {
+        openEdit(c.s, (caption) => { c.s.caption = caption; swapCard(c, buildCard(c.s)); });
+      }
+      async function fetchTitle(c) {
+        say('Fetching title…');
+        try {
+          const d = await call(`shorts/${c.s.id}/fetch-title`, { method: 'POST' });
+          c.s.caption = d.caption;
+          swapCard(c, buildCard(c.s));
+          say('Title updated');
+        } catch (e) { fail(e); }
+      }
+      async function setCover(c) {
+        c.video.pause();
+        say('Saving cover…');
+        try {
+          await call(`shorts/${c.s.id}/poster`, { method: 'POST', body: { time: c.video.currentTime || 0 } });
+          c.s.has_poster = true;
+          c.video.poster = `/api/tik/shorts/${c.s.id}/poster?v=${Date.now()}`;
+          say('Cover set');
+        } catch (e) { fail(e); }
+      }
+      // The AI description shows over the clip, dismissed with a tap.
+      function describeHere(c) {
+        describe(c.s, (text, error) => {
+          if (!text) { say(error ? 'Could not read it' : 'Failed'); return; }
+          fill(c.aiEl, h('div', { class: 'tf-ai-head' }, lu('sparkles', 12), 'AI description', h('span', null, 'tap to dismiss')), text);
+          c.aiEl.hidden = false;
+        });
+      }
+      function openWhy(c) {
+        const s = c.s;
+        const sheet = openSheet('Why you’re seeing this', [
+          h('p', { class: 'tf-sheet-title' }, 'Why you’re seeing this'),
+          h('p', { class: 'tf-sheet-sub light' }, s.why),
+          h('p', { class: 'tf-sheet-note' }, 'Not what you want? Mark it Not interested and the feed stops showing it. Liking and following shape For You.'),
+          h('div', { class: 'tf-sheet-btns' },
+            s.viewer_hidden ? null : h('button', { type: 'button', class: 'tf-sbtn', onclick: () => { sheet.close(); toggleHidden(c); } }, 'Not interested'),
+            h('button', { type: 'button', class: 'tf-sbtn light', onclick: () => sheet.close() }, 'Got it')),
+        ], { size: 'narrow', bare: true });
       }
       function swapCard(oldC, fresh) {
         const i = F.cards.indexOf(oldC);
@@ -1037,15 +1491,18 @@
           play(fresh);
         }
       }
+      // TikShortis' report sheet: a reason list, an optional note, Send.
       function openReport(c) {
         const s = c.s;
         const REASONS = [['broken', 'Video does not play or is cut off'], ['wrong_creator', 'Wrong creator or title'], ['duplicate', 'Duplicate of another clip'], ['inappropriate', 'Inappropriate content'], ['other', 'Something else']];
-        const note = h('textarea', { rows: '3', maxlength: '500', placeholder: 'Anything to add (optional)', 'aria-label': 'Note' });
-        const send = h('button', { type: 'submit', class: 'btn' }, 'Report');
-        const form = h('form', { class: 'tik-form', onsubmit: async (e) => {
-          e.preventDefault();
-          const reason = (form.querySelector('input[name="reason"]:checked') || {}).value;
-          if (!reason) { say('Choose a reason'); return; }
+        let reason = null;
+        const note = h('textarea', { rows: '2', maxlength: '500', placeholder: 'Anything the admin should know (optional)', 'aria-label': 'Note' });
+        const send = h('button', { type: 'button', class: 'tf-sbtn rose', disabled: true }, s.viewer_reported ? 'Update report' : 'Send report');
+        const listEl = h('div', { class: 'tf-reasons', role: 'radiogroup', 'aria-label': 'Reason' });
+        const paint = () => fill(listEl, REASONS.map(([v, label]) => h('button', { type: 'button', class: `tf-reason${reason === v ? ' on' : ''}`, role: 'radio', 'aria-checked': String(reason === v), onclick: () => { reason = v; send.disabled = false; paint(); } }, h('span', { class: 'tf-dot' }), label)));
+        paint();
+        send.addEventListener('click', async () => {
+          if (!reason) return;
           send.disabled = true;
           try {
             const body = { reason };
@@ -1054,23 +1511,23 @@
             s.viewer_reported = true;
             s.viewer_hidden = true;
             sheet.close();
-            hideFromFeed(c, 'Reported and hidden from your feed', false);
+            hideFromFeed(c, 'Reported and hidden from your feed', true);
           } catch (err) { fail(err); send.disabled = false; }
-        } },
-        REASONS.map(([v, label]) => h('label', { class: 'tik-check' }, h('input', { type: 'radio', name: 'reason', value: v }), h('span', null, label))),
-        note, send);
-        const sheet = openSheet('Report clip', form);
+        });
+        const sheet = openSheet('Report this clip', [
+          h('p', { class: 'tf-sheet-title' }, s.viewer_reported ? 'Update your report' : 'Report this clip'),
+          h('p', { class: 'tf-sheet-sub' }, 'An admin will look at it. The clip leaves your feed right away.'),
+          listEl, note,
+          h('div', { class: 'tf-sheet-btns' }, send, h('button', { type: 'button', class: 'tf-sbtn', onclick: () => sheet.close() }, 'Cancel')),
+        ], { size: 'narrow', bare: true });
       }
-      function toggleFullscreen() {
-        if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
-        if (!root.requestFullscreen) { say('Full screen is not available'); return; }
-        root.requestFullscreen().then(() => document.body.classList.add('tik-immersive')).catch(() => say('Full screen is not available'));
-      }
-      const onFs = () => { if (!document.fullscreenElement) document.body.classList.remove('tik-immersive'); };
-      document.addEventListener('fullscreenchange', onFs);
 
       // ---- Keyboard ----
       const onKey = (e) => {
+        if (e.key === 'Escape') {
+          // An open feed selector closes first.
+          for (const close of menus) if (close()) { e.preventDefault(); return; }
+        }
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
         if (sheets.length || document.querySelector('[role=dialog][aria-modal=true]')) return;
@@ -1102,9 +1559,7 @@
         try { saved = JSON.parse(store.get(KEYS.resume) || 'null'); } catch { saved = null; }
         if (!saved || !intOf(saved.focus) || !(Date.now() - saved.at < 7 * 86400000)) return;
         if (F.items[0] && F.items[0].id === saved.focus) return;
-        fill(resumeBox, 
-          h('a', { class: 'btn small', href: link('', { focus: saved.focus, sort: 'new' }) }, 'Continue where you left off'),
-          h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Dismiss', onclick: () => { resumeBox.hidden = true; } }, ic('close')));
+        fill(resumeBox, h('a', { class: 'tf-resume-btn', href: link('', { focus: saved.focus, sort: 'new' }), onclick: () => { resumeBox.hidden = true; } }, lu('history', 16), 'Continue where you left off'));
         resumeBox.hidden = false;
         const t = setTimeout(() => { resumeBox.hidden = true; }, 15000);
         onLeave(() => clearTimeout(t));
@@ -1112,11 +1567,14 @@
 
       // ---- Leaving the page stops everything ----
       onLeave(() => {
+        F.token++;
         activeObserver.disconnect();
         edgeObserver.disconnect();
+        resizeObserver.disconnect();
         document.removeEventListener('keydown', onKey);
         document.removeEventListener('visibilitychange', onVis);
         document.removeEventListener('fullscreenchange', onFs);
+        document.removeEventListener('webkitfullscreenchange', onFs);
         if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
         if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
         const c = F.cards[F.active];
@@ -1176,7 +1634,8 @@
       }).catch(() => {});
     }
     // Starts one AI description (admin) and waits for it, like the card does.
-    async function describe(s) {
+    // done(text, error): the caller shows the result; without it, a sheet.
+    async function describe(s, done) {
       const gen = generation;
       try {
         const d = await call(`shorts/summarize?id=${s.id}`, { method: 'POST' });
@@ -1190,6 +1649,7 @@
         const r = await call(`shorts/summarize?id=${s.id}`);
         if (!live(gen)) return;
         const sum = r.summary;
+        if (done) { done(sum && sum.summary ? sum.summary : null, sum && sum.error); return; }
         openSheet('AI description', sum && sum.summary ? h('p', null, sum.summary) : h('p', { class: 'muted' }, (sum && sum.error) || 'No description yet.'));
       } catch (e) { fail(e); }
     }
