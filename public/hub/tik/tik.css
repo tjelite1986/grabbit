@@ -543,8 +543,9 @@ body.tik-page .view { padding-bottom: calc(var(--tik-bar) + 24px); }
 @media (pointer: coarse) {
   .tik-x.small { width: 44px; height: 44px; }
   /* Bigger hit areas without a bigger look: the top buttons and the tag
-     chips get an invisible margin of touch. */
-  .tf-cbtn, .tf-tag { position: relative; }
+     chips get an invisible margin of touch. .tf-side is already absolute,
+     so it must not be reset here: in the flow it fell below the feed. */
+  .tf-ctl .tf-cbtn, .tf-tag { position: relative; }
   .tf-side::after, .tf-ctl .tf-cbtn::after, .tf-tag::after { content: ''; position: absolute; inset: -5px; }
 }
 /* Feed controls sit over video, where the browser's default focus ring can
