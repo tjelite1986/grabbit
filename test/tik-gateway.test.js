@@ -1,7 +1,7 @@
 'use strict';
 // Unit tests for the TikShortis gateway (tikshortis-gateway.js), run against a
 // fake TikShortis upstream in this process. The gateway is mounted the way
-// server.js mounts it (express.json() first, then /api/tik), but without
+// server.js mounts it (the global body parsers first, then /api/tik), but without
 // Grabbit's auth gate: that part is covered by tik-server.test.js.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -53,6 +53,7 @@ test.before(async () => {
     timeoutMs: 5000,
   });
   const app = express();
+  app.use(express.urlencoded({ extended: false }));
   app.use(express.json());
   app.use('/api/tik', (req, res) => {
     g.proxy(req, res).catch(() => {
@@ -189,6 +190,16 @@ test('upload headers pass on the upload route and are capped', async () => {
   assert.equal(h['x-upload-caption'].length, 8192);
   assert.equal(h['x-admin-token'], undefined);
   assert.equal(seen[0].body, 'raw-bytes');
+});
+
+test('an upload with a body Grabbit already parsed is a 415, not a hang', async () => {
+  for (const [ct, body] of [['application/json', '{"a":1}'], ['application/x-www-form-urlencoded', 'a=1']]) {
+    const started = Date.now();
+    const r = await call('shorts/upload', { method: 'POST', headers: { 'Content-Type': ct }, body });
+    assert.equal(r.status, 415, ct);
+    assert.ok(Date.now() - started < 2000, `${ct} answered at once`);
+  }
+  assert.equal(seen.length, 0);
 });
 
 // --- Who may call ------------------------------------------------------------------------

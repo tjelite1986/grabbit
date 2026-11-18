@@ -419,6 +419,10 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
     if (cur) headers.cookie = `${UPSTREAM_COOKIE}=${cur.t}`;
     if (route.stream && req.headers.range) headers.range = req.headers.range;
     for (const k of ['if-none-match', 'if-modified-since']) if (req.headers[k]) headers[k] = req.headers[k];
+    // An upload must reach the gateway unread. A JSON or form body has already
+    // been consumed by Grabbit's global parsers, so streaming it on would send
+    // an empty body under the original content-length and hang upstream.
+    if (route.upload && req._body) return fail(res, 415, 'Uploads must be sent as raw or multipart data');
     let body = null;
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       if (route.upload || !req._body) {
