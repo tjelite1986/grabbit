@@ -1550,6 +1550,10 @@ app.post('/login', async (req, res) => {
 
 app.post('/logout', (_req, res) => {
   res.clearCookie(AUTH_COOKIE);
+  // Grabbit 3.0: the linked TikShortis session goes with the Grabbit one, so the
+  // next sign-in in this browser does not inherit it. (The hub ends it upstream
+  // first; this clears it even when that call did not get through.)
+  res.clearCookie(tikGateway.TIK_COOKIE, { path: '/api/tik' });
   res.redirect('/login');
 });
 

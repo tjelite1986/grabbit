@@ -176,3 +176,18 @@ test('/api/tik: refused for everyone else, before anything goes upstream', async
   }
   assert.equal(upSeen.length, before, 'nothing reached TikShortis');
 });
+
+test('/logout also clears the linked TikShortis session cookie', async () => {
+  const cookie = await login(native.base);
+  const res = await fetch(`${native.base}/logout`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { Cookie: cookie, Origin: native.base, 'Sec-Fetch-Site': 'same-origin' },
+  });
+  assert.equal(res.status, 302);
+  const set = res.headers.getSetCookie();
+  const tik = set.find((c) => c.startsWith('grabbit_tik='));
+  assert.ok(tik, `Set-Cookie: ${set.join(' | ')}`);
+  assert.match(tik, /Path=\/api\/tik/);
+  assert.match(tik, /Expires=Thu, 01 Jan 1970/);
+});

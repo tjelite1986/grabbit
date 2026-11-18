@@ -16,6 +16,10 @@
 
   function create(hub) {
     const { h, num } = hub;
+    // replaceChildren() turns a null or false argument into the text "null" /
+    // "false", and these pages build optional parts as `cond ? el : null`.
+    // fill() drops them the way h() does for its children.
+    const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
     const enc = encodeURIComponent;
 
     // --- Icons -------------------------------------------------------------
@@ -199,6 +203,14 @@
           const d = await r.json().catch(() => null);
           if (!r.ok || !d) throw new Error((d && d.error) || `HTTP ${r.status}`);
           const was = S.session;
+          // Another account (or none) since the last answer: what was cached
+          // for the old one (grids, the tag catalogue built from its private
+          // clips) must not show for the new one.
+          const who = (x) => (x && x.linked ? `${(x.user && x.user.id) ?? '?'}` : '');
+          if (was && who(was) !== who(d)) {
+            S.gridCache.clear();
+            S.catalogue = { tags: null, creators: null, at: 0 };
+          }
           S.session = d;
           S.sessionError = null;
           // Redraw when the link state changed (or on the first answer).
@@ -225,7 +237,7 @@
         document.body.append(toastEl);
       }
       clearTimeout(toastTimer);
-      toastEl.replaceChildren(h('span', null, msg), action ? h('button', { type: 'button', class: 'btn small', onclick: () => { toastEl.hidden = true; action.run(); } }, action.label) : null);
+      fill(toastEl, h('span', null, msg), action ? h('button', { type: 'button', class: 'btn small', onclick: () => { toastEl.hidden = true; action.run(); } }, action.label) : null);
       toastEl.hidden = false;
       toastTimer = setTimeout(() => { toastEl.hidden = true; }, action ? 5000 : 3500);
     }
@@ -311,6 +323,19 @@
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && sheets.length) { e.preventDefault(); closeSheet(sheets[sheets.length - 1], true); }
+      // aria-modal: Tab and Shift+Tab cycle inside the top sheet and never
+      // reach the page behind the scrim.
+      if (e.key === 'Tab' && sheets.length) {
+        const panel = sheets[sheets.length - 1].panel;
+        const items = [...panel.querySelectorAll('a[href], button, input, textarea, select, video[controls], [tabindex]:not([tabindex="-1"])')]
+          .filter((el) => !el.disabled && !el.hidden && el.getClientRects().length);
+        if (!items.length) return;
+        const firstEl = items[0];
+        const lastEl = items[items.length - 1];
+        const inside = panel.contains(document.activeElement);
+        if (e.shiftKey && (!inside || document.activeElement === firstEl)) { e.preventDefault(); lastEl.focus(); }
+        else if (!e.shiftKey && (!inside || document.activeElement === lastEl)) { e.preventDefault(); firstEl.focus(); }
+      }
     });
     function confirmSheet(title, text, label, run) {
       const s = openSheet(title, [
@@ -406,7 +431,7 @@
         S.muted = m;
         F.soundBlocked = false;
         store.set(KEYS.soundLast, m ? 'muted' : 'on');
-        muteBtn.replaceChildren(ic(m ? 'muted' : 'sound'));
+        fill(muteBtn, ic(m ? 'muted' : 'sound'));
         muteBtn.setAttribute('aria-label', m ? 'Turn sound on' : 'Mute');
         const c = F.cards[F.active];
         if (c) c.video.muted = m;
@@ -506,14 +531,14 @@
       function paintStatus() {
         if (F.cards.length) {
           status.hidden = !(F.loading || (F.errors && F.hasMore));
-          status.replaceChildren(F.loading ? 'Loading ...' : h('span', null, 'Could not load more. ', h('button', { type: 'button', class: 'linkish', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again')));
+          fill(status, F.loading ? 'Loading ...' : h('span', null, 'Could not load more. ', h('button', { type: 'button', class: 'linkish', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again')));
           return;
         }
         status.hidden = false;
-        if (F.loading) status.replaceChildren(h('p', null, 'Loading ...'));
-        else if (F.errors) status.replaceChildren(h('p', null, `Could not load the feed: ${F.lastError || ''}`), h('button', { type: 'button', class: 'btn', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again'));
-        else if (sort === 'following') status.replaceChildren(h('p', null, 'Nothing from creators you follow.'), h('p', { class: 'muted small' }, 'TikShortis has no follow button yet; this list only holds follows carried over from the old app.'));
-        else status.replaceChildren(h('p', null, 'No clips yet.'), h('a', { class: 'btn', href: link('upload') }, 'Upload a clip'));
+        if (F.loading) fill(status, h('p', null, 'Loading ...'));
+        else if (F.errors) fill(status, h('p', null, `Could not load the feed: ${F.lastError || ''}`), h('button', { type: 'button', class: 'btn', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again'));
+        else if (sort === 'following') fill(status, h('p', null, 'Nothing from creators you follow.'), h('p', { class: 'muted small' }, 'TikShortis has no follow button yet; this list only holds follows carried over from the old app.'));
+        else fill(status, h('p', null, 'No clips yet.'), h('a', { class: 'btn', href: link('upload') }, 'Upload a clip'));
       }
 
       // ---- Cards ----
@@ -797,7 +822,7 @@
       }
       function step(by) {
         const next = F.cards[F.active + by];
-        if (next) next.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (next) next.el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
       }
 
       // ---- Like, comments, save, share ----
@@ -836,7 +861,7 @@
           panel.hidden = false;
           panel.dataset.open = '1';
           root.classList.add('with-panel');
-          panel.replaceChildren(
+          fill(panel, 
             h('div', { class: 'tik-sheet-head' }, h('h3', null, `Comments (${num(c.s.comment_count)})`), h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Close comments', onclick: closePanel }, ic('close'))),
             box);
         } else if (!follow) {
@@ -847,7 +872,7 @@
         panel.hidden = true;
         panel.dataset.open = '';
         root.classList.remove('with-panel');
-        panel.replaceChildren();
+        fill(panel, );
       }
       function commentsBox(c) {
         const s = c.s;
@@ -864,7 +889,7 @@
             input.value = '';
             s.comment_count = (s.comment_count || 0) + 1;
             paintCounts(c);
-            if (listEl.querySelector('.muted')) listEl.replaceChildren();
+            if (listEl.querySelector('.muted')) fill(listEl, );
             if (d.comment) listEl.append(commentRow(d.comment));
             const head = form.closest('.tik-sheet, .tf-panel');
             const h3 = head && head.querySelector('h3');
@@ -877,8 +902,8 @@
         } }, input, send);
         call(`shorts/${s.id}/comments`).then((d) => {
           const list = d.comments || [];
-          listEl.replaceChildren(...(list.length ? list.map(commentRow) : [h('p', { class: 'muted' }, 'No comments yet.')]));
-        }).catch((e) => listEl.replaceChildren(h('p', { class: 'err' }, e.message)));
+          fill(listEl, ...(list.length ? list.map(commentRow) : [h('p', { class: 'muted' }, 'No comments yet.')]));
+        }).catch((e) => fill(listEl, h('p', { class: 'err' }, e.message)));
         return h('div', { class: 'tik-comments-box' }, listEl, form);
       }
       function commentRow(m) {
@@ -904,10 +929,10 @@
         function reload() {
           call(`shorts/playlists?short=${s.id}`).then((d) => {
             const pls = d.playlists || [];
-            listEl.replaceChildren(...(pls.length ? pls.map(row) : [h('p', { class: 'muted' }, 'No playlists yet.')]));
+            fill(listEl, ...(pls.length ? pls.map(row) : [h('p', { class: 'muted' }, 'No playlists yet.')]));
             s.viewer_saved = pls.some((x) => Number(x.contains) === 1);
             paintCounts(c);
-          }).catch((e) => listEl.replaceChildren(h('p', { class: 'err' }, e.message)));
+          }).catch((e) => fill(listEl, h('p', { class: 'err' }, e.message)));
         }
         function row(pl) {
           const box = h('input', { type: 'checkbox', checked: Number(pl.contains) === 1 });
@@ -1077,7 +1102,7 @@
         try { saved = JSON.parse(store.get(KEYS.resume) || 'null'); } catch { saved = null; }
         if (!saved || !intOf(saved.focus) || !(Date.now() - saved.at < 7 * 86400000)) return;
         if (F.items[0] && F.items[0].id === saved.focus) return;
-        resumeBox.replaceChildren(
+        fill(resumeBox, 
           h('a', { class: 'btn small', href: link('', { focus: saved.focus, sort: 'new' }) }, 'Continue where you left off'),
           h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Dismiss', onclick: () => { resumeBox.hidden = true; } }, ic('close')));
         resumeBox.hidden = false;
@@ -1145,7 +1170,7 @@
       const sheet = openSheet('Edit clip', form);
       call(`shorts/summarize?id=${s.id}`).then((d) => {
         const sum = d.summary;
-        ai.replaceChildren(
+        fill(ai, 
           sum && sum.summary ? h('p', { class: 'muted small' }, `AI description: ${sum.summary}`) : null,
           isAdmin() ? h('button', { type: 'button', class: 'btn small ghost', onclick: () => { sheet.close(); describe(s); } }, sum && sum.summary ? 'Describe again with AI' : 'Describe with AI') : null);
       }).catch(() => {});
@@ -1210,7 +1235,7 @@
       async function more() {
         if (G.loading || !G.hasMore) return;
         G.loading = true;
-        status.replaceChildren('Loading ...');
+        fill(status, 'Loading ...');
         try {
           const q = new URLSearchParams(query);
           q.set('limit', '30');
@@ -1223,10 +1248,10 @@
           tiles.append(...add.map(tile));
           G.cursor = d.nextCursor;
           G.hasMore = d.nextCursor !== null && d.nextCursor !== undefined;
-          status.replaceChildren(G.items.length ? '' : emptyText || 'No clips here yet.');
+          fill(status, G.items.length ? '' : emptyText || 'No clips here yet.');
         } catch (e) {
           if (!live(gen)) return;
-          status.replaceChildren(h('span', { class: 'err' }, e.message), ' ', h('button', { type: 'button', class: 'linkish', onclick: () => { G.hasMore = true; more(); } }, 'Try again'));
+          fill(status, h('span', { class: 'err' }, e.message), ' ', h('button', { type: 'button', class: 'linkish', onclick: () => { G.hasMore = true; more(); } }, 'Try again'));
           G.hasMore = false;
         } finally {
           if (live(gen)) G.loading = false;
@@ -1269,10 +1294,10 @@
       const paint = () => {
         const q = filter.value.trim().toLowerCase();
         const shown = all.filter((p) => p.id !== s.profile_id && (!q || String(p.name).toLowerCase().includes(q))).slice(0, 200);
-        listEl.replaceChildren(...shown.map((p) => h('button', { type: 'button', class: 'tik-menu-row', onclick: () => assign(p.id) }, p.name, h('small', null, `${num(p.clip_count)} clips`))));
+        fill(listEl, ...shown.map((p) => h('button', { type: 'button', class: 'tik-menu-row', onclick: () => assign(p.id) }, p.name, h('small', null, `${num(p.clip_count)} clips`))));
       };
       filter.addEventListener('input', paint);
-      try { all = (await call('shorts/profiles')).profiles || []; paint(); } catch (e) { listEl.replaceChildren(h('p', { class: 'err' }, e.message)); }
+      try { all = (await call('shorts/profiles')).profiles || []; paint(); } catch (e) { fill(listEl, h('p', { class: 'err' }, e.message)); }
     }
     function lengthControls(r, extra) {
       const length = ['short', 'long'].includes(r.params.get('length')) ? r.params.get('length') : 'all';
@@ -1319,7 +1344,7 @@
       const paint = () => {
         const term = tagOf(q.value).toLowerCase();
         const hits = all.filter((t) => !term || String(t.tag).toLowerCase().includes(term));
-        listEl.replaceChildren(
+        fill(listEl, 
           ...hits.slice(0, shown).map((t) => h('a', { class: 'tik-tagcard', href: tagHref(t.tag) },
             t.coverId ? h('img', { src: coverOf(t.coverId, t.coverV), alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: (e) => e.currentTarget.remove() }) : null,
             h('span', null, h('b', null, `#${t.tag}`), h('small', null, `${num(t.count)} clips`)))),
@@ -1327,7 +1352,7 @@
           hits.length ? null : h('p', { class: 'muted' }, all.length ? 'No tag matches.' : 'No tags yet.'));
       };
       q.addEventListener('input', () => { shown = 60; paint(); });
-      catalogue().then(() => { if (!live(gen)) return; all = S.catalogue.tags || []; paint(); }).catch((e) => { if (live(gen)) listEl.replaceChildren(h('p', { class: 'err' }, e.status === 404 ? 'This TikShortis cannot list tags yet (it needs the Grabbit 3.0 update).' : e.message)); });
+      catalogue().then(() => { if (!live(gen)) return; all = S.catalogue.tags || []; paint(); }).catch((e) => { if (live(gen)) fill(listEl, h('p', { class: 'err' }, e.status === 404 ? 'This TikShortis cannot list tags yet (it needs the Grabbit 3.0 update).' : e.message)); });
       return [pageHead('Tags'), h('div', { class: 'tik-controls' }, q), listEl];
     }
     // Tags and creators, shared by Tags, Profiles and Search; kept a minute.
@@ -1359,10 +1384,10 @@
       const paint = () => {
         const term = q.value.trim().toLowerCase();
         const hits = all.filter((c) => !term || String(c.name).toLowerCase().includes(term) || handleOf(c.name).includes(handleOf(term)));
-        listEl.replaceChildren(...hits.slice(0, 400).map(creatorCard), hits.length ? null : h('p', { class: 'muted' }, all.length ? 'No creator matches.' : 'No creators yet.'));
+        fill(listEl, ...hits.slice(0, 400).map(creatorCard), hits.length ? null : h('p', { class: 'muted' }, all.length ? 'No creator matches.' : 'No creators yet.'));
       };
       q.addEventListener('input', paint);
-      call('shorts/creators').then((d) => { if (!live(gen)) return; all = d.creators || []; paint(); }).catch((e) => { if (live(gen)) listEl.replaceChildren(h('p', { class: 'err' }, e.message)); });
+      call('shorts/creators').then((d) => { if (!live(gen)) return; all = d.creators || []; paint(); }).catch((e) => { if (live(gen)) fill(listEl, h('p', { class: 'err' }, e.message)); });
       return [pageHead('Profiles'), h('div', { class: 'tik-controls' }, q), listEl];
     }
     function creatorCard(c) {
@@ -1384,7 +1409,7 @@
       call(`shorts/profiles/${id}`).then((d) => {
         if (!live(gen)) return;
         const p = d.profile;
-        head.replaceChildren(
+        fill(head, 
           avatar(p.name, p.avatar_key ? p.id : null, p.avatar_checked_at, 88),
           h('div', { class: 'tik-profile-main' },
             h('h1', null, `@${p.name}`),
@@ -1394,7 +1419,7 @@
               h('a', { class: 'btn small ghost', href: link(`person/${enc(p.handle || handleOf(p.name))}`) }, 'All handles of this person'),
               isAdmin() ? h('a', { class: 'btn small ghost', href: link(`profile/${id}/candidates`) }, 'Source videos') : null)));
       }).catch((e) => {
-        if (live(gen)) head.replaceChildren(h('p', { class: 'err' }, e.status === 404 ? 'This profile is not in TikShortis.' : e.message));
+        if (live(gen)) fill(head, h('p', { class: 'err' }, e.status === 404 ? 'This profile is not in TikShortis.' : e.message));
       });
       return [head, grid({
         key: gridKey(r),
@@ -1407,7 +1432,7 @@
     function linksRow(pid, links) {
       const box = h('div', { class: 'tik-links' });
       const paint = (list) => {
-        box.replaceChildren(
+        fill(box, 
           ...list.map((l) => {
             const href = safeHref(l.url);
             return h('span', { class: 'tik-link' },
@@ -1440,13 +1465,13 @@
       const listEl = h('div', { class: 'tik-cands' }, h('p', { class: 'muted' }, 'Loading ...'));
       const url = h('input', { type: 'url', placeholder: 'Add a video by URL', 'aria-label': 'Video URL' });
       async function load() {
-        listEl.replaceChildren(h('p', { class: 'muted' }, 'Loading ...'));
+        fill(listEl, h('p', { class: 'muted' }, 'Loading ...'));
         try {
           const d = await call(`shorts/profiles/${id}/candidates?limit=${limit}`);
           if (!live(gen)) return;
           const list = d.candidates || [];
-          listEl.replaceChildren(...list.map(row), list.length >= limit && limit < 200 ? h('button', { type: 'button', class: 'btn ghost', onclick: () => { limit = Math.min(200, limit + 40); load(); } }, 'Show more') : null, list.length ? null : h('p', { class: 'muted' }, 'No source videos found.'));
-        } catch (e) { if (live(gen)) listEl.replaceChildren(h('p', { class: 'err' }, e.message)); }
+          fill(listEl, ...list.map(row), list.length >= limit && limit < 200 ? h('button', { type: 'button', class: 'btn ghost', onclick: () => { limit = Math.min(200, limit + 40); load(); } }, 'Show more') : null, list.length ? null : h('p', { class: 'muted' }, 'No source videos found.'));
+        } catch (e) { if (live(gen)) fill(listEl, h('p', { class: 'err' }, e.message)); }
       }
       function row(c) {
         const thumb = c.thumbnail && safeHref(c.thumbnail) ? `/api/tik/image-proxy?url=${enc(c.thumbnail)}` : null;
@@ -1483,8 +1508,8 @@
       call(`shorts/people/${enc(handle)}`).then((d) => {
         if (!live(gen)) return;
         const m = (d.person && d.person.members) || [];
-        also.replaceChildren(m.length ? ['also ', ...m.flatMap((x, i) => [i ? ', ' : '', h('a', { href: link(`person/${enc(x)}`) }, `@${x}`)])] : '');
-      }).catch((e) => { if (live(gen)) also.replaceChildren(e.status === 404 ? 'Nobody uses this handle.' : ''); });
+        fill(also, m.length ? ['also ', ...m.flatMap((x, i) => [i ? ', ' : '', h('a', { href: link(`person/${enc(x)}`) }, `@${x}`)])] : '');
+      }).catch((e) => { if (live(gen)) fill(also, e.status === 404 ? 'Nobody uses this handle.' : ''); });
       const lq = lengthQuery(r);
       return [pageHead(`@${handle}`), also, grid({
         key: gridKey(r),
@@ -1504,8 +1529,8 @@
           const d = await call('shorts/playlists');
           if (!live(gen)) return;
           const pls = d.playlists || [];
-          listEl.replaceChildren(...pls.map(card), pls.length ? null : h('p', { class: 'muted' }, 'No playlists yet. Save a clip from the player, or create one here.'));
-        } catch (e) { if (live(gen)) listEl.replaceChildren(h('p', { class: 'err' }, e.message)); }
+          fill(listEl, ...pls.map(card), pls.length ? null : h('p', { class: 'muted' }, 'No playlists yet. Save a clip from the player, or create one here.'));
+        } catch (e) { if (live(gen)) fill(listEl, h('p', { class: 'err' }, e.message)); }
       }
       function card(pl) {
         return h('div', { class: 'tik-creator' },
@@ -1563,7 +1588,7 @@
       call('shorts/analysis').then((d) => {
         if (!live(gen)) return;
         const items = d.items || [];
-        listEl.replaceChildren(...items.map((it) => {
+        fill(listEl, ...items.map((it) => {
           let tags = [];
           try { tags = JSON.parse(it.ai_summary_tags || '[]'); } catch { tags = []; }
           return h('a', { class: 'tik-an', href: link('', { sort: 'new', focus: it.id }) },
@@ -1573,7 +1598,7 @@
               h('p', null, it.ai_summary),
               Array.isArray(tags) && tags.length ? h('small', { class: 'muted' }, tags.map((t) => `#${tagOf(t)}`).join(' ')) : null));
         }), items.length ? null : h('p', { class: 'muted' }, 'No clip has an AI description yet.'));
-      }).catch((e) => { if (live(gen)) listEl.replaceChildren(h('p', { class: 'err' }, e.status === 404 ? 'This TikShortis cannot list analysed clips yet (it needs the Grabbit 3.0 update).' : e.message)); });
+      }).catch((e) => { if (live(gen)) fill(listEl, h('p', { class: 'err' }, e.status === 404 ? 'This TikShortis cannot list analysed clips yet (it needs the Grabbit 3.0 update).' : e.message)); });
       return [pageHead('Analysis'), h('p', { class: 'muted small' }, 'Public clips with an AI description, newest first.'), listEl];
     }
 
@@ -1591,7 +1616,7 @@
         file = input.files && input.files[0];
         if (preview) URL.revokeObjectURL(preview);
         preview = null;
-        pv.replaceChildren();
+        fill(pv, );
         if (!file) return;
         if (file.size > 1024 ** 3) { say('The file is larger than 1 GB'); file = null; input.value = ''; return; }
         preview = URL.createObjectURL(file);
@@ -1648,7 +1673,7 @@
         const cat = S.catalogue;
         const tags = (cat.tags || []).filter((x) => t && String(x.tag).toLowerCase().includes(t)).slice(0, 60);
         const creators = (cat.creators || []).filter((x) => t && (String(x.name).toLowerCase().includes(t) || handleOf(x.name).includes(handleOf(t)))).slice(0, 60);
-        out.replaceChildren(
+        fill(out, 
           !t ? h('p', { class: 'muted' }, 'Type part of a tag or a creator name.') : null,
           t ? h('h2', { class: 'section' }, `Creators (${creators.length})`) : null,
           t ? h('div', { class: 'tik-creators' }, creators.map(creatorCard)) : null,
@@ -1699,6 +1724,7 @@
               if (!r.ok) throw new Error(`HTTP ${r.status}`);
               S.session = undefined;
               S.gridCache.clear();
+              S.catalogue = { tags: null, creators: null, at: 0 };
               await loadSession(true);
             }) }, 'Unlink this browser'))];
       }
@@ -1810,7 +1836,7 @@
           const d = await call('shorts/profiles');
           if (!live(gen)) return false;
           const rows = d.profiles || [];
-          listEl.replaceChildren(rows.length ? h('table', { class: 'tik-table' },
+          fill(listEl, rows.length ? h('table', { class: 'tik-table' },
             h('thead', null, h('tr', null, h('th', null, 'Profile'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Clips'), h('th', null, 'Last poll'), h('th', null, 'Auto'), h('th', null, ''))),
             h('tbody', null, rows.map((p) => {
               const toggle = h('input', { type: 'checkbox', checked: !!p.auto_poll, 'aria-label': `Auto-poll ${p.name}`, disabled: p.source_type === 'manual' ? true : null });
@@ -1827,7 +1853,7 @@
                   h('button', { type: 'button', class: 'btn small ghost', onclick: () => confirmSheet('Delete source', `Delete the profile "${p.name}"? Its clips stay, without a profile.`, 'Delete', async () => { await call(`shorts/profiles/${p.id}`, { method: 'DELETE' }); load(); }) }, 'Delete')));
             }))) : h('p', { class: 'muted' }, 'No sources yet.'));
           return Date.now() < refreshUntil;
-        } catch (e) { if (live(gen)) listEl.replaceChildren(errRow(e)); return false; }
+        } catch (e) { if (live(gen)) fill(listEl, errRow(e)); return false; }
       }
       const form = h('form', { class: 'tik-form', onsubmit: async (e) => {
         e.preventDefault();
@@ -1857,11 +1883,11 @@
         const listEl = h('div', { class: 'tik-merge-list' });
         const paint = () => {
           const t = filter.value.trim().toLowerCase();
-          listEl.replaceChildren(...checks.filter(({ p }) => !t || p.name.toLowerCase().includes(t)).slice(0, 300).map(({ p, box: b }) => h('label', { class: 'tik-check' }, b, h('span', null, p.name), h('small', { class: 'muted' }, `${num(p.clips)} clips`))));
+          fill(listEl, ...checks.filter(({ p }) => !t || p.name.toLowerCase().includes(t)).slice(0, 300).map(({ p, box: b }) => h('label', { class: 'tik-check' }, b, h('span', null, p.name), h('small', { class: 'muted' }, `${num(p.clips)} clips`))));
         };
         filter.addEventListener('input', paint);
         paint();
-        box.replaceChildren(
+        fill(box, 
           h('label', { class: 'tik-field' }, 'Keep', primary), filter, listEl,
           h('button', { type: 'button', class: 'btn', onclick: () => {
             const primaryId = Number(primary.value);
@@ -1874,7 +1900,7 @@
               hub.rerender();
             });
           } }, 'Merge'));
-      }).catch((e) => { if (live(gen)) box.replaceChildren(errRow(e)); });
+      }).catch((e) => { if (live(gen)) fill(box, errRow(e)); });
       return h('section', { class: 'card' }, h('h2', null, 'Merge profiles'), h('p', { class: 'muted small' }, 'One person with several profiles: keep one and move the others into it.'), box);
     }
     function settingsImport() {
@@ -1883,12 +1909,12 @@
         h('p', null, 'Clips dropped into TikShortis\' import folder are filed automatically. Grabbit saves there when you pick "Tikshortis (shorts)" as the destination.'),
         isAdmin() ? h('button', { type: 'button', class: 'btn', onclick: async (e) => {
           e.currentTarget.disabled = true;
-          out.replaceChildren('Importing ...');
+          fill(out, 'Importing ...');
           try {
             const d = await call('shorts/import', { method: 'POST' });
-            out.replaceChildren(h('p', null, `Imported ${num(d.imported)}, new profiles ${num(d.profilesNew)}, skipped ${num(d.skipped)}.`));
+            fill(out, h('p', null, `Imported ${num(d.imported)}, new profiles ${num(d.profilesNew)}, skipped ${num(d.skipped)}.`));
             S.gridCache.clear();
-          } catch (err) { out.replaceChildren(errRow(err)); }
+          } catch (err) { fill(out, errRow(err)); }
           e.currentTarget.disabled = false;
         } }, 'Import now') : h('p', { class: 'muted small' }, 'Only an admin can start an import by hand.'),
         out);
@@ -1903,7 +1929,7 @@
         stateEl.textContent = st.status === 'running' ? `Scanning ... ${num(st.scanned)} clips so far` : st.finished_at ? `Last scan ${when(st.finished_at)}: ${num(st.groups)} groups. ${st.message || ''}` : 'Never scanned.';
         scan.disabled = st.status === 'running';
         const groups = d.groups || [];
-        groupsEl.replaceChildren(...groups.map(group), groups.length ? null : h('p', { class: 'muted' }, 'No duplicates found.'));
+        fill(groupsEl, ...groups.map(group), groups.length ? null : h('p', { class: 'muted' }, 'No duplicates found.'));
         return st.status === 'running';
       }
       function group(g) {
@@ -1920,7 +1946,7 @@
             extras.length ? h('button', { type: 'button', class: 'btn small danger', onclick: () => confirmSheet('Delete copies', `Delete ${extras.length} copy(ies) and keep the best one?`, 'Delete', async () => { const d = await call('shorts/duplicates/resolve', { method: 'POST', body: { shortIds: extras } }); say(`Deleted ${num(d.deleted)}`); S.gridCache.clear(); poll(load, 3000); }) }, 'Delete the copies') : null));
       }
       scan.addEventListener('click', async () => { try { await call('shorts/duplicates/scan', { method: 'POST' }); poll(load, 3000); } catch (e) { fail(e); } });
-      poll(() => load().catch((e) => { stateEl.replaceChildren(errRow(e)); return false; }), 3000);
+      poll(() => load().catch((e) => { fill(stateEl, errRow(e)); return false; }), 3000);
       return h('section', { class: 'card' }, stateEl, scan, groupsEl);
     }
     function settingsCleaning() {
@@ -1932,14 +1958,14 @@
           if (!live(gen)) return;
           const orphans = d.orphans || [];
           const pls = d.emptyPlaylists || [];
-          box.replaceChildren(
+          fill(box, 
             h('h2', null, `Clips whose file is missing (${orphans.length})`),
             orphans.length ? h('ul', { class: 'rows' }, orphans.slice(0, 200).map((o) => h('li', null, splitCaption(o.caption).title || `#${o.id}`, h('span', { class: 'v small' }, o.profile_name || '')))) : h('p', { class: 'muted' }, 'None.'),
             orphans.length ? h('button', { type: 'button', class: 'btn small danger', onclick: () => confirmSheet('Remove missing clips', `Remove ${orphans.length} clip(s) whose file is gone?`, 'Remove', async () => { const r = await call('shorts/maintenance?channel=main', { method: 'POST', body: { action: 'orphans' } }); say(`Removed ${num(r.deleted)}`); load(); }) }, 'Remove them') : null,
             h('h2', null, `Empty playlists (${pls.length})`),
             pls.length ? h('ul', { class: 'rows' }, pls.slice(0, 200).map((p) => h('li', null, p.name, h('span', { class: 'v small' }, p.owner_name || '')))) : h('p', { class: 'muted' }, 'None.'),
             pls.length && isAdmin() ? h('button', { type: 'button', class: 'btn small danger', onclick: () => confirmSheet('Remove empty playlists', `Remove ${pls.length} empty playlist(s), including other people's?`, 'Remove', async () => { const r = await call('shorts/maintenance', { method: 'POST', body: { action: 'playlists' } }); say(`Removed ${num(r.deleted)}`); load(); }) }, 'Remove them') : null);
-        } catch (e) { if (live(gen)) box.replaceChildren(errRow(e)); }
+        } catch (e) { if (live(gen)) fill(box, errRow(e)); }
       }
       load();
       return h('section', { class: 'card' }, box);
@@ -1956,7 +1982,7 @@
           return s.status === 'running';
         }
         btn.addEventListener('click', async () => { try { await call(`shorts/${what}/scan?channel=main`, { method: 'POST' }); poll(load, 3000); } catch (e) { fail(e); } });
-        poll(() => load().catch((e) => { st.replaceChildren(errRow(e)); return false; }), 3000);
+        poll(() => load().catch((e) => { fill(st, errRow(e)); return false; }), 3000);
         return h('section', { class: 'card' }, h('h2', null, title), h('p', { class: 'muted small' }, note), st, btn);
       };
       return [
@@ -1973,7 +1999,7 @@
           const d = await call('admin/shorts/reports');
           if (!live(gen)) return;
           const items = d.items || [];
-          box.replaceChildren(...items.map((it) => h('div', { class: 'tik-report' },
+          fill(box, ...items.map((it) => h('div', { class: 'tik-report' },
             h('a', { href: link('', { sort: 'new', focus: it.id }) }, it.has_poster ? h('img', { src: coverOf(it.id, it.poster_v), alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: (e) => e.currentTarget.remove() }) : h('span', { class: 'tik-cand-ph' })),
             h('div', null,
               h('b', null, splitCaption(it.caption).title || `Clip ${it.id}`),
@@ -1983,7 +2009,7 @@
                 h('button', { type: 'button', class: 'btn small ghost', onclick: async () => { try { await call('admin/shorts/reports', { method: 'POST', body: { shortId: it.id, action: 'dismiss' } }); load(); } catch (e) { fail(e); } } }, 'Dismiss'),
                 h('button', { type: 'button', class: 'btn small danger', onclick: () => confirmSheet('Delete clip', 'Delete the reported clip? Its files are removed.', 'Delete', async () => { await call(`shorts/${it.id}`, { method: 'DELETE' }); await call('admin/shorts/reports', { method: 'POST', body: { shortId: it.id, action: 'dismiss' } }); S.gridCache.clear(); load(); }) }, 'Delete clip'))))),
           items.length ? null : h('p', { class: 'muted' }, 'No open reports.'));
-        } catch (e) { if (live(gen)) box.replaceChildren(errRow(e)); }
+        } catch (e) { if (live(gen)) fill(box, errRow(e)); }
       }
       load();
       return h('section', { class: 'card' }, box);

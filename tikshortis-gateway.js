@@ -27,6 +27,7 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
+const { pipeline } = require('stream');
 
 const TIK_COOKIE = 'grabbit_tik';
 const COOKIE_PATH = '/api/tik';
@@ -227,14 +228,19 @@ function allowed(o, isAdult) {
 
 // Walks a JSON value and removes everything not allowed, wherever it sits
 // (feed items, group members, nested profiles). Returns the cleaned value and
-// how many objects were dropped.
-function filterClips(value, isAdult) {
+// how many objects were dropped. `onKeep` sees every clip that is kept and
+// carries its channel and source id, so the per-clip gate can skip a lookup.
+function filterClips(value, isAdult, onKeep = null) {
   let dropped = 0;
+  const keep = (x) => {
+    if (onKeep && x && typeof x === 'object' && !Array.isArray(x) && looksLikeClip(x) && 'channel' in x && 'source_id' in x) onKeep(x);
+  };
   const walk = (v) => {
     if (Array.isArray(v)) {
       const out = [];
       for (const x of v) {
         if (!allowed(x, isAdult)) { dropped++; continue; }
+        keep(x);
         out.push(walk(x));
       }
       return out;
@@ -243,6 +249,7 @@ function filterClips(value, isAdult) {
       const out = {};
       for (const [k, x] of Object.entries(v)) {
         if (!allowed(x, isAdult)) { dropped++; out[k] = null; continue; }
+        keep(x);
         out[k] = walk(x);
       }
       return out;
@@ -288,12 +295,20 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
         'x-real-ip': clientIp(req) || 'unknown',
         ...headers,
       };
-      const r = agentMod.request({ agent, protocol: up.protocol, hostname: up.hostname, port: up.port, method, path, headers: h, timeout: timeoutMs }, resolve);
+      const r = agentMod.request({ agent, protocol: up.protocol, hostname: up.hostname, port: up.port, method, path, headers: h, timeout: timeoutMs }, (res) => {
+        // An upstream that drops the connection mid-answer makes the response
+        // emit 'error'. Without a listener that is an uncaught exception and
+        // takes Grabbit down; every consumer (pipeline, readJson) also sees it.
+        res.on('error', (e) => log.warn(`[tik] upstream answer ${method} ${path.split('?')[0]}: ${e.message}`));
+        resolve(res);
+      });
       r.on('timeout', () => r.destroy(new Error('TikShortis did not answer in time')));
       r.on('error', reject);
       if (signal) signal.once('close', () => { if (!r.writableEnded || !r.destroyed) r.destroy(); });
-      if (body && typeof body.pipe === 'function') body.pipe(r);
-      else r.end(body || undefined);
+      if (body && typeof body.pipe === 'function') {
+        // A browser that aborts an upload must not crash the process either.
+        pipeline(body, r, (e) => { if (e) r.destroy(e); });
+      } else r.end(body || undefined);
     });
   }
 
@@ -336,6 +351,60 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
 
   function sessionOf(req) {
     return openSession(secret, readCookie(req, TIK_COOKIE));
+  }
+
+  // --- Per-clip audience gate ---------------------------------------------------
+  // The list filter keeps adult clips out of what the pages show, but a route
+  // that acts on one clip by id (its video, poster, comments, like...) is
+  // reachable with any id. Before such a route is proxied the gateway knows the
+  // clip's channel and source id, from a filtered list it already passed or from
+  // TikShortis' GET /api/shorts/<id>, and refuses the clip (404) when it is not
+  // in the general channel or Grabbit's registry marks it adult. Fail closed: a
+  // clip the gateway cannot place is refused. Only channel and source id are
+  // cached (facts about the clip, not the viewer); TikShortis still decides
+  // access on every request, and the adult check runs fresh each time.
+  const AUDIENCE_TTL_MS = 10 * 60 * 1000;
+  const AUDIENCE_MAX = 50000;
+  const audience = new Map();
+  const remember = (o) => {
+    if (audience.size >= AUDIENCE_MAX) audience.clear();
+    audience.set(clipId(o), { channel: o.channel, sourceId: o.source_id, at: Date.now() });
+  };
+  const ONE_CLIP = /^shorts\/(\d{1,12})(?:\/|$)/;
+  function clipOfRequest(req, rest) {
+    const m = ONE_CLIP.exec(rest);
+    if (m) return Number(m[1]);
+    if (rest === 'shorts/summarize' && req.query && req.query.id != null) {
+      const id = Number(req.query.id);
+      return Number.isInteger(id) && id > 0 ? id : -1;
+    }
+    return null;
+  }
+  // -> 'ok' | 'refused' | 'unlinked' | 'unreachable'
+  async function clipGate(req, id, cur) {
+    if (!(id > 0)) return 'refused';
+    let a = audience.get(id);
+    if (!a || Date.now() - a.at > AUDIENCE_TTL_MS) {
+      let r;
+      try {
+        r = await upstream(req, { method: 'GET', path: `/api/shorts/${id}`, headers: { accept: 'application/json', ...(cur ? { cookie: `${UPSTREAM_COOKIE}=${cur.t}` } : {}) } });
+      } catch {
+        return 'unreachable';
+      }
+      if (r.statusCode === 401) { r.resume(); return 'unlinked'; }
+      if (r.statusCode >= 500) { r.resume(); return 'unreachable'; }
+      // 404 (gone or private to someone else), 403 (another channel), 405 (a
+      // TikShortis without this route): the clip cannot be placed.
+      if (r.statusCode !== 200) { r.resume(); return 'refused'; }
+      const d = await readJson(r).catch(() => null);
+      const s = d && d.short;
+      if (!s || clipId(s) !== id || typeof s.channel !== 'string') return 'refused';
+      remember(s);
+      a = audience.get(id);
+    }
+    if (a.channel !== 'main') return 'refused';
+    if (isAdult && isAdult({ id, channel: a.channel, source_id: a.sourceId })) return 'refused';
+    return 'ok';
   }
 
   // GET /api/tik/session -> { linked, user } ; POST (email, password) links;
@@ -414,6 +483,13 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
     if (!route) return fail(res, 404, 'Not available through Grabbit');
     if (!fromOwnPage(req)) return fail(res, 403, 'Request not from this site');
     const cur = sessionOf(req);
+    const oneClip = clipOfRequest(req, rest);
+    if (oneClip != null) {
+      const g = await clipGate(req, oneClip, cur);
+      if (g === 'refused') return fail(res, 404, 'Not found');
+      if (g === 'unreachable') return fail(res, 424, 'TikShortis is not reachable right now');
+      // 'unlinked': go on; TikShortis answers 401 and the session unlinks below.
+    }
     const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
     const headers = { accept: req.headers.accept || '*/*' };
     if (cur) headers.cookie = `${UPSTREAM_COOKIE}=${cur.t}`;
@@ -428,7 +504,12 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
       if (route.upload || !req._body) {
         // Not parsed by express (multipart, raw): stream it as it arrives.
         if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
-        if (route.upload) for (const k of UPLOAD_HEADERS) if (req.headers[k]) headers[k] = String(req.headers[k]).slice(0, 8192);
+        if (route.upload) {
+          for (const k of UPLOAD_HEADERS) if (req.headers[k]) headers[k] = String(req.headers[k]).slice(0, 8192);
+          // The native pages are the general module: an upload through them
+          // always lands in the general channel, whatever the request asks.
+          headers['x-upload-channel'] = 'main';
+        }
         if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
         else if (req.headers['transfer-encoding']) headers['transfer-encoding'] = req.headers['transfer-encoding'];
         body = req;
@@ -460,7 +541,10 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
       return fail(res, status >= 400 ? status : 424, status >= 400 ? `TikShortis answered ${r.statusCode}` : 'TikShortis sent an unexpected kind of file');
     }
     res.status(status);
-    res.setHeader('Cache-Control', route.stream && status < 400 ? 'private, max-age=3600' : 'private, no-store');
+    // Media may be stored by the browser but is revalidated on every use, so a
+    // clip that turned private, or a switch to another linked account, is
+    // judged by TikShortis again (ETag/Last-Modified make that a cheap 304).
+    res.setHeader('Cache-Control', route.stream && status < 400 ? 'private, no-cache' : 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (route.stream) res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
     // An upstream session that ended (signed out elsewhere, expired) unlinks here.
@@ -470,16 +554,20 @@ function createGateway({ apiUrl, secret, isAdult = null, clientIp = (req) => req
       let d;
       try { d = await readJson(r); } catch (e) { return fail(res, 424, e.message); }
       if (route.filter && status < 400) {
-        const { value, dropped } = filterClips(d, isAdult);
+        const { value, dropped } = filterClips(d, isAdult, remember);
         if (dropped) log.warn(`[tik] dropped ${dropped} item(s) outside the general channel from ${rest}`);
         if (value === null || (typeof route.filter === 'string' && value[route.filter] == null)) return fail(res, 404, 'Not found');
         d = value;
       }
+      // A write may have moved the clip (channel, visibility): place it again.
+      if (oneClip > 0 && req.method !== 'GET') audience.delete(oneClip);
       return res.json(d);
     }
     for (const k of PASS_HEADERS) if (r.headers[k]) res.setHeader(k, r.headers[k]);
-    r.pipe(res);
-    res.once('close', () => r.destroy());
+    // pipeline() tears both sides down on an error or an early close. Headers
+    // are out by then, so an upstream failure mid-stream ends in a cut-off
+    // response, never in an unhandled stream error.
+    pipeline(r, res, (e) => { if (e && e.code !== 'ERR_STREAM_PREMATURE_CLOSE') log.warn(`[tik] stream ${rest}: ${e.message}`); });
   }
 
   return { origin, proxy, session, routes: ROUTES, upstream };

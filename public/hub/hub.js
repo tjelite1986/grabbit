@@ -3189,6 +3189,22 @@
     $('#scrim').hidden = false;
   });
   $('#scrim').addEventListener('click', closeMenu);
+  // Signing out of Grabbit also signs this browser out of TikShortis. The
+  // linked session's cookie is scoped to /api/tik, so /logout cannot see it to
+  // end it upstream; do that first, then sign out as before (a TikShortis that
+  // does not answer within two seconds does not hold up the sign-out).
+  const logoutForm = document.querySelector('form.logout');
+  if (logoutForm) logoutForm.addEventListener('submit', (e) => {
+    if (!tikIsNative() || logoutForm.dataset.tikDone) return;
+    e.preventDefault();
+    logoutForm.dataset.tikDone = '1';
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 2000);
+    fetch('/api/tik/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal })
+      .catch(() => {})
+      .finally(() => { clearTimeout(timer); logoutForm.submit(); });
+  });
+
   $('#searchForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const q = $('#searchInput').value.trim();

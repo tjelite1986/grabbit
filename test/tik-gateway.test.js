@@ -13,7 +13,11 @@ const SECRET = 'test-secret';
 
 // --- Fake upstream ---------------------------------------------------------------
 // Records every request; answers from `handlers[path]` or with a JSON echo.
+// The gateway's per-clip audience lookup (GET /api/shorts/<id>) is recorded in
+// `lookups`, not `seen`, and by default places the clip in the general channel
+// with no source id; a handler for that path overrides it.
 const seen = [];
+const lookups = [];
 const handlers = {};
 let upBase;
 const upstream = http.createServer((req, res) => {
@@ -21,9 +25,16 @@ const upstream = http.createServer((req, res) => {
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
     const rec = { method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') };
-    seen.push(rec);
     const path = req.url.split('?')[0];
     const h = handlers[`${req.method} ${path}`] || handlers[path];
+    const lookup = req.method === 'GET' && /^\/api\/shorts\/\d+$/.exec(path);
+    if (lookup) {
+      lookups.push(rec);
+      if (h) return h(req, res, rec);
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify({ short: { id: Number(path.split('/').pop()), channel: 'main', source_id: null } }));
+    }
+    seen.push(rec);
     if (h) return h(req, res, rec);
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ ok: true }));
@@ -72,6 +83,7 @@ test.after(() => {
 
 test.beforeEach(() => {
   seen.length = 0;
+  lookups.length = 0;
   for (const k of Object.keys(handlers)) delete handlers[k];
   adultSet = new Set();
 });
@@ -420,4 +432,105 @@ test('session: expired upstream session unlinks; old TikShortis is outdated; 5xx
   r = await call('session');
   assert.deepEqual(await r.json(), { ok: true, linked: false });
   assert.equal(seen.length, 3, 'no upstream call without a linked session');
+});
+
+// --- Per-clip audience gate (Codex review, Grabbit 3.0 step 5) ---------------------
+
+test('one clip by id: refused unless it is a general clip Grabbit does not mark adult', async () => {
+  const media = (req, res) => { res.writeHead(200, { 'content-type': 'video/mp4' }); res.end('VIDEO'); };
+  handlers['/api/shorts/9001/video'] = media;
+  handlers['GET /api/shorts/9001'] = json(200, { short: { id: 9001, channel: '18plus', source_id: null } });
+  let r = await call('shorts/9001/video', { headers: { Cookie: linked() } });
+  assert.equal(r.status, 404, 'another channel');
+  assert.equal(seen.length, 0, 'the media route is never asked');
+  assert.equal(lookups[0].headers.cookie, 'tikshortis_session=upstream-token', 'the lookup runs as the viewer');
+
+  adultSet = new Set(['s-adult']);
+  handlers['/api/shorts/9002/poster'] = media;
+  handlers['GET /api/shorts/9002'] = json(200, { short: { id: 9002, channel: 'main', source_id: 's-adult' } });
+  assert.equal((await call('shorts/9002/poster')).status, 404, 'a general clip Grabbit knows as adult');
+  assert.equal((await call('shorts/9002/like', { method: 'POST' })).status, 404, 'writes on it too');
+  assert.equal(seen.length, 0);
+
+  for (const [id, status] of [[9003, 404], [9004, 403], [9005, 405]]) {
+    handlers[`GET /api/shorts/${id}`] = json(status, { error: 'x' });
+    assert.equal((await call(`shorts/${id}/video`)).status, 404, `lookup ${status} (405 = a TikShortis without the route)`);
+  }
+  handlers['GET /api/shorts/9006'] = json(503, { error: 'down' });
+  assert.equal((await call('shorts/9006/video')).status, 424, 'lookup 5xx');
+  handlers['GET /api/shorts/9007'] = json(200, { short: { id: 9999, channel: 'main' } });
+  assert.equal((await call('shorts/9007/video')).status, 404, 'an answer about another clip');
+  assert.equal(seen.length, 0);
+
+  // POST shorts/summarize?id= acts on one clip too.
+  handlers['GET /api/shorts/9008'] = json(200, { short: { id: 9008, channel: '18plus', source_id: null } });
+  assert.equal((await call('shorts/summarize?id=9008', { method: 'POST' })).status, 404);
+  assert.equal((await call('shorts/summarize?id=abc', { method: 'POST' })).status, 404);
+  assert.equal(seen.length, 0);
+
+  // A general clip passes, and the decision is not cached: marking it adult
+  // later refuses it at once.
+  handlers['/api/shorts/9009/video'] = media;
+  handlers['GET /api/shorts/9009'] = json(200, { short: { id: 9009, channel: 'main', source_id: 's-later' } });
+  r = await call('shorts/9009/video');
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), 'VIDEO');
+  adultSet = new Set(['s-later']);
+  assert.equal((await call('shorts/9009/video')).status, 404);
+});
+
+test('a clip the feed already passed needs no lookup; a write on a clip places it again', async () => {
+  handlers['/api/shorts/feed'] = json(200, { items: [{ id: 9101, channel: 'main', storage_key: 'a', source_id: 's-9101' }] });
+  assert.equal((await call('shorts/feed')).status, 200);
+  handlers['/api/shorts/9101/video'] = (req, res) => { res.writeHead(200, { 'content-type': 'video/mp4' }); res.end('V'); };
+  assert.equal((await call('shorts/9101/video')).status, 200);
+  assert.equal(lookups.length, 0);
+  // Moving it to 18+ (a write) drops what the gateway knew.
+  handlers['PATCH /api/shorts/9101/channel'] = json(200, { ok: true });
+  assert.equal((await call('shorts/9101/channel', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{"channel":"18plus"}' })).status, 200);
+  handlers['GET /api/shorts/9101'] = json(403, { error: 'Forbidden' });
+  assert.equal((await call('shorts/9101/video')).status, 404);
+  assert.equal(lookups.length, 1, 'the write used what the feed passed; the next request looks the clip up again');
+});
+
+test('media is revalidated on every use (no-cache), JSON is no-store', async () => {
+  handlers['/api/shorts/9201/poster'] = (req, res) => { res.writeHead(200, { 'content-type': 'image/jpeg', etag: '"p1"' }); res.end('JPG'); };
+  const r = await call('shorts/9201/poster');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('cache-control'), 'private, no-cache');
+  assert.equal(r.headers.get('etag'), '"p1"');
+  assert.equal((await call('me')).headers.get('cache-control'), 'private, no-store');
+});
+
+test('an upload always goes to the general channel', async () => {
+  handlers['/api/shorts/upload'] = json(200, { ok: true, id: 1 });
+  const r = await call('shorts/upload', {
+    method: 'POST',
+    headers: { 'content-type': 'video/mp4', 'x-upload-channel': '18plus', 'x-upload-name': 'a.mp4' },
+    body: 'VIDEO',
+  });
+  assert.equal(r.status, 200);
+  assert.equal(seen[0].headers['x-upload-channel'], 'main');
+  assert.equal(seen[0].body, 'VIDEO');
+});
+
+test('an upstream that drops the connection mid-stream cuts the response and does not crash Grabbit', { timeout: 5000 }, async () => {
+  handlers['/api/shorts/9301/video'] = (req, res) => {
+    res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': '100000' });
+    res.write(Buffer.alloc(1000));
+    setTimeout(() => res.socket.destroy(), 50);
+  };
+  const uncaught = [];
+  const onUncaught = (e) => uncaught.push(e);
+  process.on('uncaughtException', onUncaught);
+  try {
+    const r = await call('shorts/9301/video');
+    assert.equal(r.status, 200);
+    await assert.rejects(r.arrayBuffer(), 'the browser sees a cut-off response');
+    await new Promise((res) => setTimeout(res, 100));
+  } finally {
+    process.off('uncaughtException', onUncaught);
+  }
+  assert.deepEqual(uncaught, []);
+  assert.equal((await call('me')).status, 200, 'the gateway still answers');
 });
