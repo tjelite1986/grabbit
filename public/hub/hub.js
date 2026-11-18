@@ -3256,6 +3256,8 @@
   });
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      // Not behind an open dialog: the search would sit under its scrim.
+      if (document.querySelector('[role=dialog][aria-modal=true]')) return;
       e.preventDefault();
       $('#searchInput').focus();
     }

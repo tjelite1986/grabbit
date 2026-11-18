@@ -434,6 +434,10 @@
           } }, label),
           h('button', { type: 'button', class: 'tf-sbtn', onclick: () => s.close() }, 'Cancel')),
       ], { size: 'narrow', bare: true });
+      // The destructive button comes first, as in TikShortis, but the focus
+      // starts on Cancel: Enter (or a held key) must never confirm by itself.
+      const cancel = s.panel.querySelector('.tf-sheet-btns .tf-sbtn:not(.danger)');
+      if (cancel) cancel.focus({ preventScroll: true });
     }
 
     // --- Watch history (the view beacon) ----------------------------------
@@ -626,10 +630,23 @@
         const menu = h('div', { class: 'tf-mode-menu', role: 'menu', hidden: true });
         modeBox = h('div', { class: 'tf-modebox' }, btn, menu);
         const setOpen = (v) => {
+          // Closing with the focus inside: hand it back to the button, never
+          // leave it on a hidden item.
+          const inside = !v && menu.contains(document.activeElement);
           menu.hidden = !v;
           btn.setAttribute('aria-expanded', String(v));
           modeBox.classList.toggle('open', v);
+          if (inside) btn.focus({ preventScroll: true });
         };
+        // Up and Down move between the items, as in any menu.
+        menu.addEventListener('keydown', (e) => {
+          if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+          e.preventDefault();
+          const items = [...menu.querySelectorAll('[role=menuitemradio]')];
+          const i = items.indexOf(document.activeElement);
+          const next = items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length];
+          if (next) next.focus();
+        });
         menus.push(() => { if (!menu.hidden) { setOpen(false); return true; } return false; });
         btn.addEventListener('click', () => setOpen(menu.hidden));
         const item = (label, cur, pick) => h('button', { type: 'button', class: 'tf-mode-item', role: 'menuitemradio', 'aria-checked': String(cur), onclick: () => { setOpen(false); pick(); } }, label);
@@ -668,7 +685,7 @@
         chromeBtn.setAttribute('aria-label', S.chromeHidden ? 'Show overlay' : 'Clear display');
         fill(autoBtn, lu('chevronsDown', 18));
         autoBtn.classList.toggle('on', S.autoScroll);
-        autoBtn.setAttribute('aria-label', S.autoScroll ? 'Auto-scroll off' : 'Auto-scroll on');
+        autoBtn.setAttribute('aria-label', 'Auto-scroll');
         autoBtn.setAttribute('aria-pressed', String(S.autoScroll));
       }
       paintCtl();
@@ -927,12 +944,13 @@
         let titleEl = null;
         if (parts.title) {
           const long = parts.title.length > 40;
-          const more = long ? h('span', { class: 'tf-title-more' }, '… more') : null;
+          const more = long ? h('button', { type: 'button', class: 'tf-title-more', 'aria-expanded': 'false' }, '… more') : null;
           titleEl = h('p', { class: `tf-title${long ? ' long' : ''}` }, linkify(parts.title), more);
           if (long) titleEl.addEventListener('click', (e) => {
             if (e.target.closest('a')) return;
             const open = titleEl.classList.toggle('open');
             more.textContent = open ? ' less' : '… more';
+            more.setAttribute('aria-expanded', String(open));
           });
         }
         const src = sourceLink(s, parts);
@@ -976,7 +994,9 @@
         });
         video.addEventListener('ended', () => {
           c.completed = true;
-          if (S.autoScroll && F.cards[F.active] === c) step(1);
+          // Not under an open sheet: the sheet's Back entry would then point
+          // at the clip before.
+          if (S.autoScroll && F.cards[F.active] === c && !sheets.length) step(1);
         });
         video.addEventListener('play', () => { c.playIcon.hidden = true; });
         video.addEventListener('pause', () => { c.playIcon.hidden = F.cards[F.active] !== c; });
@@ -1293,7 +1313,7 @@
         function row(pl) {
           const inIt = Number(pl.contains) === 1;
           return h('button', { type: 'button', class: 'tf-pl', 'aria-pressed': String(inIt), onclick: async () => {
-            const before = pls.map((x) => ({ ...x }));
+            const before = { contains: pl.contains, item_count: pl.item_count };
             pl.contains = inIt ? 0 : 1;
             pl.item_count = Math.max(0, (pl.item_count || 0) + (inIt ? -1 : 1));
             setSaved();
@@ -1302,7 +1322,8 @@
               if (inIt) await call(`shorts/playlists/${pl.id}/items?short=${s.id}`, { method: 'DELETE' });
               else await call(`shorts/playlists/${pl.id}/items`, { method: 'POST', body: { shortId: s.id } });
             } catch (e) {
-              pls = before;
+              // Undo this row only: another row may have changed meanwhile.
+              Object.assign(pl, before);
               setSaved();
               paint();
               fail(e);
@@ -1532,9 +1553,15 @@
         if (e.key === 'Escape') {
           // An open feed selector closes first.
           for (const close of menus) if (close()) { e.preventDefault(); return; }
+          // No browser fullscreen to leave (refused or unsupported): Escape
+          // ends the page's own immersive view.
+          if (F.fullscreen && !sheets.length && !(document.fullscreenElement || document.webkitFullscreenElement)) { e.preventDefault(); toggleFullscreen(); return; }
         }
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
+        // Space and the arrows belong to a focused control (a button, the
+        // feed selector), not to the player.
+        if ((e.key === ' ' || e.key.startsWith('Arrow')) && e.target.closest && e.target.closest('button, a[href], [role=menu], [role=listbox]')) return;
         if (sheets.length || document.querySelector('[role=dialog][aria-modal=true]')) return;
         const c = F.cards[F.active];
         const k = e.key;
@@ -1581,6 +1608,7 @@
         document.removeEventListener('fullscreenchange', onFs);
         document.removeEventListener('webkitfullscreenchange', onFs);
         if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        else if (document.webkitFullscreenElement && document.webkitExitFullscreen) document.webkitExitFullscreen();
         if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
         const c = F.cards[F.active];
         if (c) deactivate(c);

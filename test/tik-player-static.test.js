@@ -44,7 +44,7 @@ test('no rules for the old 9:16 player box', () => {
   assert.doesNotMatch(js, /['"`\s]tf-player\b/);
 });
 
-test('the Grabbit menu button stays absolute on every pointer type', () => {
+test('tik.css: .tf-side is absolute and no pointer:coarse rule resets it', () => {
   // A touch rule once set every .tf-cbtn to position: relative, which put
   // .tf-side in the flow under the feed; a tap scrolled the feed 47 px up.
   const base = rules(cssCode).find((r) => r.selectors.includes('.tf-side'));
@@ -59,13 +59,13 @@ test('the Grabbit menu button stays absolute on every pointer type', () => {
   }
 });
 
-test('the feed is full-bleed with object-fit contain', () => {
+test('tik.css: the .tf-video rule uses object-fit: contain', () => {
   const video = rules(cssCode).find((r) => r.selectors.includes('.tf-video'));
   assert.ok(video, '.tf-video has a rule');
   assert.match(video.body, /object-fit:\s*contain/);
 });
 
-test('bottom bar: TikShortis tabs in order, then Menu', () => {
+test('tabBar() source: TikShortis tabs in order, plus a Menu tab', () => {
   const at = js.indexOf('function tabBar(');
   assert.ok(at >= 0);
   const body = js.slice(at, js.indexOf('function openMenuSheet(', at));
@@ -74,14 +74,14 @@ test('bottom bar: TikShortis tabs in order, then Menu', () => {
   assert.match(body, /'Menu'/);
 });
 
-test('rail buttons are named for the action, not the count', () => {
+test('railBtn() calls for Like and Comments pass a fixed aria name', () => {
   for (const [icon, aria] of [['heart', 'Like'], ['messageCircle', 'Comments']]) {
     const re = new RegExp(`railBtn\\('${icon}',[^\\n]*\\{ aria: '${aria}' \\}\\)`);
     assert.match(js, re, `${aria} button passes an aria name`);
   }
 });
 
-test('the hub hands the player its menu hooks', () => {
+test('hub.js passes the menu hooks to the module and tik.js calls them', () => {
   const at = hubJs.indexOf('tikDef.create({');
   assert.ok(at >= 0, 'hub.js creates the TikShortis module');
   const call = hubJs.slice(at, hubJs.indexOf('});', at));
@@ -96,4 +96,12 @@ test('the hub hands the player its menu hooks', () => {
 test('version labels and the service worker cache name moved to 3.0.1', () => {
   assert.match(read('hub/index.html'), /<span id="version">v3\.0\.1<\/span>/);
   assert.match(read('sw.js'), /const CACHE = 'grabbit-v11';/);
+});
+
+test('confirmSheet() puts the focus on Cancel, not on the destructive button', () => {
+  const at = js.indexOf('function confirmSheet(');
+  assert.ok(at >= 0);
+  const body = js.slice(at, js.indexOf('\n    }\n', at));
+  assert.match(body, /querySelector\('\.tf-sheet-btns \.tf-sbtn:not\(\.danger\)'\)/);
+  assert.match(body, /cancel\.focus\(/);
 });
