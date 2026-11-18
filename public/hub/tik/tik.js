@@ -374,6 +374,8 @@
       if (target) target.focus({ preventScroll: true });
       return { close, panel, body: panel.querySelector('.tik-sheet-body') };
     }
+    // Called once the last sheet is gone (the feed resumes auto-scroll).
+    const whenSheetsClosed = new Set();
     function closeSheet(entry, viaUi) {
       const i = sheets.indexOf(entry);
       if (i < 0) return;
@@ -381,6 +383,7 @@
       entry.panel.remove();
       entry.scrim.remove();
       if (entry.onClose) entry.onClose();
+      if (!sheets.length) for (const fn of whenSheetsClosed) { try { fn(); } catch (e) { console.warn('tik: sheet-close hook failed', e); } }
       if (!viaUi) return;
       if (entry.back && entry.back.isConnected && !sheets.length) entry.back.focus({ preventScroll: true });
       // Closed on screen: take the history entry back off, unless another
@@ -944,12 +947,12 @@
         let titleEl = null;
         if (parts.title) {
           const long = parts.title.length > 40;
-          const more = long ? h('button', { type: 'button', class: 'tf-title-more', 'aria-expanded': 'false' }, '… more') : null;
+          const more = long ? h('button', { type: 'button', class: 'tf-title-more', 'aria-expanded': 'false' }, 'more') : null;
           titleEl = h('p', { class: `tf-title${long ? ' long' : ''}` }, linkify(parts.title), more);
           if (long) titleEl.addEventListener('click', (e) => {
             if (e.target.closest('a')) return;
             const open = titleEl.classList.toggle('open');
-            more.textContent = open ? ' less' : '… more';
+            more.textContent = open ? 'less' : 'more';
             more.setAttribute('aria-expanded', String(open));
           });
         }
@@ -996,7 +999,7 @@
           c.completed = true;
           // Not under an open sheet: the sheet's Back entry would then point
           // at the clip before.
-          if (S.autoScroll && F.cards[F.active] === c && !sheets.length) step(1);
+          if (S.autoScroll && F.cards[F.active] === c) { if (sheets.length) c.advanceOnClose = true; else step(1); }
         });
         video.addEventListener('play', () => { c.playIcon.hidden = true; });
         video.addEventListener('pause', () => { c.playIcon.hidden = F.cards[F.active] !== c; });
@@ -1575,6 +1578,19 @@
         else if (k === 'f') toggleFullscreen();
       };
       document.addEventListener('keydown', onKey);
+      // A clip that ended under a sheet moves on once the sheet is closed.
+      const onSheetsClosed = () => {
+        const c = F.cards[F.active];
+        if (!c || !c.advanceOnClose) return;
+        c.advanceOnClose = false;
+        // After closeSheet() has taken the sheet's history entry back off
+        // (a setTimeout 0 plus the async history.back()); stepping sooner
+        // would write the next clip's address into that entry.
+        const t = setTimeout(() => { if (live(gen) && S.autoScroll && F.cards[F.active] === c && c.video.ended) step(1); }, 150);
+        onLeave(() => clearTimeout(t));
+      };
+      whenSheetsClosed.add(onSheetsClosed);
+      onLeave(() => whenSheetsClosed.delete(onSheetsClosed));
 
       // ---- Pause when the tab is hidden; resume what was playing ----
       const onVis = () => {
