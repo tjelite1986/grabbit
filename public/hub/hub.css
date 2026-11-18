@@ -76,6 +76,13 @@ kbd { font-size: 11px; color: var(--muted); border: 1px solid var(--line); borde
 .icon-btn { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; cursor: pointer; display: grid; place-items: center; }
 .icon-btn:hover { border-color: var(--accent); }
 .menu-btn { display: none; }
+/* Grabbit 3.0.1: the menu column collapses on wide screens (#sideBtn, or the
+   TikShortis feed's own button); the immersive player hides it outright. */
+.side-btn { display: grid; }
+@media (min-width: 901px) {
+  body.side-collapsed .app, body.tik-immersive .app { grid-template-columns: minmax(0, 1fr); }
+  body.side-collapsed .side { display: none; }
+}
 
 /* Content */
 .view { padding: 8px 24px 40px; outline: none; }
@@ -188,6 +195,7 @@ tr.selected td { background: color-mix(in srgb, var(--accent) 14%, transparent);
   .side.open { transform: none; }
   .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 15; }
   .menu-btn { display: grid; }
+  .side-btn { display: none; }
   .top { padding: 10px 14px; }
   .view { padding: 6px 14px 32px; }
   kbd { display: none; }

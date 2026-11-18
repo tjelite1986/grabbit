@@ -510,7 +510,7 @@
     const recent = (state.media || []).slice(0, 6);
     return [
       h('h1', null, 'Welcome back'),
-      h('p', { class: 'lead' }, 'Grabbit 2.0 - one place to download, sort, convert and hand media to your apps.'),
+      h('p', { class: 'lead' }, 'Grabbit 3.0 - one place to download, sort, convert and hand media to your apps.'),
       h('div', { class: 'grid-dash' },
         h('div', { class: 'col' },
           h('div', { class: 'stats' },
@@ -1037,7 +1037,11 @@
         rerender: () => { if (route().id === 'tikshortis') render(false); },
         // Change the address without a redraw (the feed's current clip).
         replaceHash: (hash) => { history.replaceState(history.state, '', hash); renderedKey = pageKey(); updateNav(); },
-        openMenu: () => { $('#side').classList.add('open'); $('#scrim').hidden = false; },
+        openMenu,
+        closeMenu,
+        // The Grabbit menu: collapse it (wide screens) or open the drawer.
+        toggleSide,
+        sideOpen,
       });
     } catch (e) {
       console.error('TikShortis module failed to start', e);
@@ -1069,7 +1073,7 @@
         h('button', { class: 'btn small ghost', type: 'button', onclick: () => { frame.src = cfg.origin + tikPath(route().params.get('path')); } }, 'Reload'),
         h('a', { class: 'btn small ghost tik-ext', href: cfg.origin + path, target: '_blank', rel: 'noopener' }, 'Open on its own')),
       frame,
-      h('button', { class: 'tik-menu', type: 'button', 'aria-label': 'Open the Grabbit menu', onclick: () => { $('#side').classList.add('open'); $('#scrim').hidden = false; } },
+      h('button', { class: 'tik-menu', type: 'button', 'aria-label': 'Open the Grabbit menu', onclick: openMenu },
         icon('menu')));
   }
 
@@ -3180,14 +3184,53 @@
   }
 
   // --- Menu, search, boot --------------------------------------------------
-  function closeMenu() {
-    $('#side').classList.remove('open');
-    $('#scrim').hidden = true;
+  // On a wide screen the menu is a column that can be collapsed (Grabbit
+  // 3.0.1, remembered per browser); on a narrow one it is a drawer. Either
+  // change fires 'grabbit:side' so a page with its own menu button (the
+  // TikShortis feed) can repaint it.
+  const SIDE_KEY = 'grabbit.hub.sideCollapsed';
+  const wideQuery = matchMedia('(min-width: 901px)');
+  const sideEvent = () => window.dispatchEvent(new Event('grabbit:side'));
+  function sideOpen() {
+    // The immersive player hides the menu whatever its state.
+    if (document.body.classList.contains('tik-immersive')) return false;
+    return wideQuery.matches ? !document.body.classList.contains('side-collapsed') : $('#side').classList.contains('open');
   }
-  $('#menuBtn').addEventListener('click', () => {
+  function paintSideBtn() {
+    const open = !document.body.classList.contains('side-collapsed');
+    const btn = $('#sideBtn');
+    btn.setAttribute('aria-expanded', String(open));
+    btn.setAttribute('aria-label', open ? 'Hide the menu' : 'Show the menu');
+    btn.title = open ? 'Hide the menu' : 'Show the menu';
+  }
+  function setCollapsed(collapsed) {
+    document.body.classList.toggle('side-collapsed', collapsed);
+    try { if (collapsed) localStorage.setItem(SIDE_KEY, '1'); else localStorage.removeItem(SIDE_KEY); } catch { /* storage blocked */ }
+    paintSideBtn();
+    sideEvent();
+  }
+  function openMenu() {
     $('#side').classList.add('open');
     $('#scrim').hidden = false;
-  });
+    sideEvent();
+  }
+  function closeMenu() {
+    const was = $('#side').classList.contains('open');
+    $('#side').classList.remove('open');
+    $('#scrim').hidden = true;
+    if (was) sideEvent();
+  }
+  function toggleSide() {
+    if (wideQuery.matches) setCollapsed(!document.body.classList.contains('side-collapsed'));
+    else if ($('#side').classList.contains('open')) closeMenu();
+    else openMenu();
+  }
+  try { document.body.classList.toggle('side-collapsed', localStorage.getItem(SIDE_KEY) === '1'); } catch { /* storage blocked */ }
+  paintSideBtn();
+  // Crossing the breakpoint (a tablet turned) changes what the menu is.
+  wideQuery.addEventListener('change', () => { closeMenu(); sideEvent(); });
+  $('#sideBtn').addEventListener('click', toggleSide);
+  $('#menuBtn').addEventListener('click', openMenu);
   $('#scrim').addEventListener('click', closeMenu);
   // Signing out of Grabbit also signs this browser out of TikShortis. The
   // linked session's cookie is scoped to /api/tik, so /logout cannot see it to

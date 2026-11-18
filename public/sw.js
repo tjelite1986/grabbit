@@ -7,7 +7,8 @@
 // so an icon swapped behind an unchanged URL never reaches the home screen.
 // v8: the hub became the start page (/) and Grabbit 1 moved to /classic/.
 // v10: the native TikShortis pages (public/hub/tik/) joined the hub shell.
-const CACHE = 'grabbit-v10';
+// v11: Grabbit 3.0.1 restyled the TikShortis player and the hub's menu.
+const CACHE = 'grabbit-v11';
 const SHELL = [
   '/',
   '/classic/',

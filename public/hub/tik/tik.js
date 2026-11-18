@@ -426,7 +426,12 @@
         h('p', { class: 'tf-sheet-title' }, title),
         h('p', { class: 'tf-sheet-sub' }, text),
         h('div', { class: 'tf-sheet-btns' },
-          h('button', { type: 'button', class: 'tf-sbtn danger', onclick: async (e) => { e.currentTarget.disabled = true; try { await run(); s.close(); } catch (err) { fail(err); e.currentTarget.disabled = false; } } }, label),
+          h('button', { type: 'button', class: 'tf-sbtn danger', onclick: async (e) => {
+            // currentTarget is gone after the await: keep the button.
+            const btn = e.currentTarget;
+            btn.disabled = true;
+            try { await run(); s.close(); } catch (err) { fail(err); btn.disabled = false; }
+          } }, label),
           h('button', { type: 'button', class: 'tf-sbtn', onclick: () => s.close() }, 'Cancel')),
       ], { size: 'narrow', bare: true });
     }
@@ -922,7 +927,7 @@
         let titleEl = null;
         if (parts.title) {
           const long = parts.title.length > 40;
-          const more = long ? h('span', { class: 'tf-more' }, '… more') : null;
+          const more = long ? h('span', { class: 'tf-title-more' }, '… more') : null;
           titleEl = h('p', { class: `tf-title${long ? ' long' : ''}` }, linkify(parts.title), more);
           if (long) titleEl.addEventListener('click', (e) => {
             if (e.target.closest('a')) return;
@@ -2368,14 +2373,15 @@
       return h('section', { class: 'card' },
         h('p', null, 'Clips dropped into TikShortis\' import folder are filed automatically. Grabbit saves there when you pick "Tikshortis (shorts)" as the destination.'),
         isAdmin() ? h('button', { type: 'button', class: 'btn', onclick: async (e) => {
-          e.currentTarget.disabled = true;
+          const btn = e.currentTarget;
+          btn.disabled = true;
           fill(out, 'Importing ...');
           try {
             const d = await call('shorts/import', { method: 'POST' });
             fill(out, h('p', null, `Imported ${num(d.imported)}, new profiles ${num(d.profilesNew)}, skipped ${num(d.skipped)}.`));
             S.gridCache.clear();
           } catch (err) { fill(out, errRow(err)); }
-          e.currentTarget.disabled = false;
+          btn.disabled = false;
         } }, 'Import now') : h('p', { class: 'muted small' }, 'Only an admin can start an import by hand.'),
         out);
     }
@@ -2478,38 +2484,102 @@
     // =======================================================================
     // Shell: sections, bottom bar, the hub's hooks
     // =======================================================================
+    // The hub's side menu lists every section; the feed's own selector picks
+    // the order, so "Videos" is current on the main feed whatever the order.
     const SECTIONS = [
-      { sub: '', label: 'For You', test: (r) => !r.sub.length && !r.params.get('sort') && !r.params.get('tag') },
-      { sub: '', q: { sort: 'following' }, label: 'Following', test: (r) => !r.sub.length && r.params.get('sort') === 'following' },
+      { sub: '', label: 'Videos', test: (r) => !r.sub.length },
       { sub: 'explore', label: 'Explore' },
-      { sub: 'tags', label: 'Tags', also: ['tag'] },
+      { sub: 'tags', label: 'Categories', also: ['tag'] },
       { sub: 'profiles', label: 'Profiles', also: ['profile', 'person'] },
       { sub: 'playlists', label: 'Playlists', also: ['playlist'] },
       { sub: 'liked', label: 'Liked' },
       { sub: 'history', label: 'History' },
-      { sub: 'mine', label: 'My uploads' },
+      { sub: 'mine', label: 'Mine' },
       { sub: 'upload', label: 'Upload' },
       { sub: 'analysis', label: 'Analysis' },
+      { sub: 'search', label: 'Search' },
       { sub: 'settings', label: 'Settings', also: ['account'] },
     ];
     function sectionCurrent(sec, r) {
       if (sec.test) return sec.test(r);
+      if (r.sub[0] === 'watch') return watchTab(r) === sec.sub;
       return r.sub[0] === sec.sub || (sec.also || []).includes(r.sub[0]);
+    }
+    // A scoped feed (#/tikshortis/watch?playlist=3) belongs to the section it
+    // was opened from.
+    function watchTab(r) {
+      if (intOf(r.params.get('playlist'))) return 'playlists';
+      if (intOf(r.params.get('profile')) || r.params.get('handle')) return 'profiles';
+      return '';
     }
     function subnav(r) {
       if (!S.session || !S.session.linked) return [{ href: link('account'), label: 'Link account', current: true }];
       return SECTIONS.map((sec) => ({ href: link(sec.sub, sec.q), label: sec.label, current: sectionCurrent(sec, r) }));
     }
+    // TikShortis' bottom bar (components/bottom-nav.tsx): four tabs and a Menu
+    // button for everything that does not earn a tab.
     function tabBar(r) {
-      const first = r.sub[0] || '';
-      const libSubs = ['library', 'playlists', 'playlist', 'liked', 'history', 'mine', 'tags', 'tag', 'profiles', 'profile', 'person', 'analysis', 'settings', 'account', 'search'];
-      const tab = (href, label, name, cur, extra) => h('a', { href, class: extra || null, 'aria-current': cur ? 'page' : null }, extra === 'plus' ? h('span', { class: 'tik-plus' }, ic(name)) : ic(name), h('span', null, label));
+      const first = r.sub[0] === 'watch' ? watchTab(r) : r.sub[0] || '';
+      const TABS = [
+        ['', 'Videos', 'play', ['']],
+        ['explore', 'Explore', 'compass', ['explore', 'tag']],
+        ['profiles', 'Profiles', 'users', ['profiles', 'profile', 'person']],
+        ['playlists', 'Playlists', 'listVideo', ['playlists', 'playlist']],
+      ];
+      const menuBtn = h('button', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' });
+      const paintMenu = (open) => {
+        fill(menuBtn, lu('menu', 22, open ? 2.4 : 2), 'Menu');
+        menuBtn.setAttribute('aria-expanded', String(open));
+      };
+      paintMenu(false);
+      menuBtn.addEventListener('click', () => {
+        paintMenu(true);
+        openMenuSheet(() => paintMenu(false));
+      });
       return h('nav', { class: 'tik-tabbar', 'aria-label': 'TikShortis' },
-        tab(link(''), 'For You', 'home', !first || first === 'watch'),
-        tab(link('explore'), 'Explore', 'compass', first === 'explore'),
-        tab(link('upload'), 'Upload', 'plus', first === 'upload', 'plus'),
-        tab(link('library'), 'Library', 'lib', libSubs.includes(first)),
-        h('button', { type: 'button', onclick: hub.openMenu, 'aria-label': 'Open the Grabbit menu' }, ic('menu'), h('span', null, 'Menu')));
+        TABS.map(([sub, label, icon, subs]) => {
+          const cur = subs.includes(first);
+          return h('a', { href: link(sub), 'aria-current': cur ? 'page' : null }, lu(icon, 22, cur ? 2.4 : 2), label);
+        }),
+        menuBtn);
+    }
+    // The Menu sheet: TikShortis' own list, plus Grabbit's way to its menu.
+    function openMenuSheet(onClose) {
+      const u = me();
+      const handle = u ? u.handle || handleOf(u.displayName || u.username) || 'you' : 'you';
+      const row = (sub, label, icon) => {
+        const href = sub.startsWith('#') ? sub : link(sub);
+        return h('a', { class: 'tf-row', href, onclick: (e) => { if (location.hash === href) { e.preventDefault(); sheet.close(); } } }, lu(icon, 18, 2, 'dim'), h('span', { class: 'tf-row-l' }, label));
+      };
+      const wide = matchMedia('(min-width: 901px)').matches;
+      const sideLabel = wide ? (hub.sideOpen() ? 'Hide the Grabbit menu' : 'Show the Grabbit menu') : 'Grabbit menu';
+      const sheet = openSheet(`@${handle}`, h('div', { class: 'tf-menu' },
+        row('tags', 'Categories', 'hash'),
+        row('analysis', 'Analysis', 'sparkles'),
+        row('mine', 'Mine', 'clapperboard'),
+        row('history', 'History', 'history'),
+        row('upload', 'Upload', 'upload'),
+        row('search', 'Search', 'search'),
+        // Grabbing is Grabbit's own job: its start page.
+        isAdmin() ? row('#/', 'Grab', 'download') : null,
+        row('settings', 'Settings', 'settings'),
+        h('div', { class: 'tf-sep' }),
+        h('button', { type: 'button', class: 'tf-row', onclick: () => { sheet.close(); hub.toggleSide(); } }, lu(wide ? 'panelLeft' : 'menu', 18, 2, 'dim'), h('span', { class: 'tf-row-l' }, sideLabel)),
+        h('button', { type: 'button', class: 'tf-row', onclick: async (e) => {
+          // TikShortis' Sign out ends its session; here that is the link.
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          try {
+            const res = await fetch('/api/tik/session', { method: 'DELETE', credentials: 'same-origin' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            sheet.close();
+            S.session = undefined;
+            S.gridCache.clear();
+            S.catalogue = { tags: null, creators: null, at: 0 };
+            await loadSession(true);
+          } catch (err) { fail(err); btn.disabled = false; }
+        } }, lu('logOut', 18, 2, 'dim'), h('span', { class: 'tf-row-l' }, 'Sign out of TikShortis'))),
+      { size: 'wide', cls: 'tf-sheet-menu', onClose });
     }
     // A 2.2 link (#/tikshortis?path=/explore) opens the same native page.
     function fromLegacyPath(raw) {
