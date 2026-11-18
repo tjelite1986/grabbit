@@ -1554,8 +1554,9 @@
           // An open feed selector closes first.
           for (const close of menus) if (close()) { e.preventDefault(); return; }
           // No browser fullscreen to leave (refused or unsupported): Escape
-          // ends the page's own immersive view.
-          if (F.fullscreen && !sheets.length && !(document.fullscreenElement || document.webkitFullscreenElement)) { e.preventDefault(); toggleFullscreen(); return; }
+          // ends the page's own immersive view. Not when the same key just
+          // closed a sheet (its handler runs first and prevents the default).
+          if (F.fullscreen && !e.defaultPrevented && !sheets.length && !(document.fullscreenElement || document.webkitFullscreenElement)) { e.preventDefault(); toggleFullscreen(); return; }
         }
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
