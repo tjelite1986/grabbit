@@ -258,6 +258,9 @@
     }
     const tileGrid = () => h('div', { class: 'sg-grid' });
 
+    // "1 post", "2 posts"
+    const plural = (n, one, many) => `${num(n)} ${Number(n) === 1 ? one : many}`;
+
     function chips(options, current, href) {
       return h('div', { class: 'sg-chips', role: 'group' },
         options.map(([value, label]) => h('a', { class: `sg-chip${current === value ? ' on' : ''}`, href: href(value), 'aria-current': current === value ? 'true' : null }, label)));
@@ -352,7 +355,7 @@
       const bar = h('div', { class: 'sg-classify' }, h('span', { class: 'muted small' }, 'Unclassified post'));
       const act = (aud, label) => h('button', {
         type: 'button',
-        class: `btn small${aud === 'adult' ? ' danger' : ''}`,
+        class: `btn small${aud === 'adult' ? ' ghost danger' : ''}`,
         onclick: async (e) => {
           const btn = e.currentTarget;
           btn.disabled = true;
@@ -485,7 +488,7 @@
     // --- Pages ---------------------------------------------------------------------
     function viewFeed() {
       const box = h('div', { class: 'sg-feed' });
-      return [pageHead('Social'), pager(box, (cur) => call(`feed${cur ? `?cursor=${enc(cur)}` : ''}`), (p) => postCard(p), { emptyText: 'No general posts yet. Classify creators in the Review lane to fill this feed.' })];
+      return [pageHead('Feed'), pager(box, (cur) => call(`feed${cur ? `?cursor=${enc(cur)}` : ''}`), (p) => postCard(p), { emptyText: 'No general posts yet. Classify creators in the Review lane to fill this feed.' })];
     }
 
     function viewPhotos(r) {
@@ -525,7 +528,7 @@
         pageHead('Explore', q ? h('span', { class: 'muted' }, `"${q}"`) : null),
         chips([['', 'Everything'], ['image', 'Photos'], ['video', 'Videos']], kind, (v) => link('explore', { ...keep, kind: v })),
         chips([['', 'Any shape'], ['portrait', 'Portrait'], ['landscape', 'Landscape'], ['square', 'Square']], orient, (v) => link('explore', { ...keep, orient: v })),
-        q ? null : cats,
+        q || kind ? null : cats,
         pager(grid, (cur) => call(`explore?${qs(cur)}`), (t) => tile(t), { emptyText: 'Nothing matches.' }),
       ];
     }
@@ -539,7 +542,7 @@
         pageHead(`#${tag}`, total),
         pager(grid, async (cur) => {
           const d = await call(`hashtags/${enc(tag)}${cur ? `?cursor=${enc(cur)}` : ''}`);
-          if (d.total != null) total.textContent = `${num(d.total)} posts`;
+          if (d.total != null) total.textContent = plural(d.total, 'post', 'posts');
           return d;
         }, (t) => tile(t), { emptyText: 'No general posts with this tag.' }),
       ];
@@ -574,7 +577,7 @@
         }, (c) => h('a', { class: 'sg-creator', href: link(`creator/${enc(c.handle)}`) },
           avatar(c.avatar, c.display_name || c.handle, null, 48),
           h('span', { class: 'sg-creator-name' }, h('b', null, c.display_name || c.handle), h('span', { class: 'muted small' }, `@${c.handle}`)),
-          h('span', { class: 'muted small' }, `${num(c.post_count)} posts`)), { emptyText: 'No general creators yet.' }),
+          h('span', { class: 'muted small' }, plural(c.post_count, 'post', 'posts'))), { emptyText: 'No general creators yet.' }),
       ];
     }
 
@@ -600,7 +603,7 @@
           avatar(c.avatar, c.display_name || c.handle, lane, 88),
           h('div', { class: 'sg-profile-text' },
             h('h1', null, c.display_name || c.handle),
-            h('p', { class: 'muted' }, `@${c.handle} · ${num(c.post_count)} posts · ${num(c.follower_count)} followers`),
+            h('p', { class: 'muted' }, `@${c.handle} · ${plural(c.post_count, 'post', 'posts')} · ${plural(c.follower_count, 'follower', 'followers')}`),
             c.bio ? h('p', { class: 'sg-bio' }, c.bio) : null,
             h('div', { class: 'sg-inline' }, follow,
               lane === 'review' && canClassify() ? classifyCreatorButtons([c.handle], () => { location.hash = link('review'); }) : null)));
@@ -641,7 +644,7 @@
         const items = d.items || [];
         fill(box, items.length ? items.map((c) => h('a', { class: 'sg-collection', href: link(`collection/${intOf(c.id)}`) },
           c.cover && intOf(c.cover.media_id) ? h('img', { alt: '', src: thumbUrl(c.cover.media_id), loading: 'lazy', 'data-media-bg': '1' }) : h('div', { class: 'sg-collection-empty' }, ic('folder', 32)),
-          h('b', null, c.name), h('span', { class: 'muted small' }, `${num(c.count)} posts`))) : empty('No collections yet. Save a post to one from its folder button.'));
+          h('b', null, c.name), h('span', { class: 'muted small' }, plural(c.count, 'post', 'posts')))) : empty('No collections yet. Save a post to one from its folder button.'));
       }).catch((e) => { if (live(gen)) fill(box, empty(e.message)); });
       return [pageHead('Collections'), form, box];
     }
@@ -656,7 +659,7 @@
           if (!n || !n.trim()) return;
           try { await call(`collections/${id}`, { method: 'PATCH', body: { name: n.trim() } }); title.textContent = n.trim(); } catch (e) { fail(e); }
         } }, 'Rename'),
-        h('button', { type: 'button', class: 'btn small danger', onclick: async () => {
+        h('button', { type: 'button', class: 'btn small ghost danger', onclick: async () => {
           if (!confirm('Delete this collection? The posts stay where they are.')) return;
           try { await call(`collections/${id}`, { method: 'DELETE' }); location.hash = link('collections'); } catch (e) { fail(e); }
         } }, 'Delete'));
@@ -707,7 +710,7 @@
       };
       return [
         h('button', { type: 'button', class: 'btn small', onclick: go('general') }, 'Mark general'),
-        h('button', { type: 'button', class: 'btn small danger', onclick: go('adult') }, 'Mark 18+'),
+        h('button', { type: 'button', class: 'btn small ghost danger', onclick: go('adult') }, 'Mark 18+'),
       ];
     }
 
@@ -747,7 +750,7 @@
           });
           return h('div', { class: 'sg-review-item', 'data-handle': c.handle },
             h('label', { class: 'sg-review-who' }, pick, avatar(c.avatar, c.display_name || c.handle, 'review', 40),
-              h('span', null, h('b', null, c.handle), h('span', { class: 'muted small' }, ` ${num(c.post_count)} posts`))),
+              h('span', { class: 'sg-review-name' }, h('b', null, c.handle), h('span', { class: 'muted small' }, plural(c.post_count, 'post', 'posts')))),
             h('div', { class: 'sg-review-samples' }, (c.samples || []).map((t) => tile(t, 'review'))),
             h('a', { class: 'btn small ghost', href: link(`creator/${enc(c.handle)}`, { lane: 'review' }) }, 'All posts'));
         }, { emptyText: 'No unclassified creators left.' }),
