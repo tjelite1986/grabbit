@@ -1586,9 +1586,15 @@
         // After closeSheet() has taken the sheet's history entry back off
         // (a setTimeout 0 plus the async history.back()); stepping sooner
         // would write the next clip's address into that entry.
-        const t = setTimeout(() => { if (live(gen) && S.autoScroll && F.cards[F.active] === c && c.video.ended) step(1); }, 150);
-        onLeave(() => clearTimeout(t));
+        // A sheet opened in the meantime (menu -> Report) waits for its own close.
+        clearTimeout(advanceTimer);
+        advanceTimer = setTimeout(() => {
+          if (!live(gen) || !S.autoScroll || F.cards[F.active] !== c || !c.video.ended) return;
+          if (sheets.length) c.advanceOnClose = true; else step(1);
+        }, 150);
       };
+      let advanceTimer = 0;
+      onLeave(() => clearTimeout(advanceTimer));
       whenSheetsClosed.add(onSheetsClosed);
       onLeave(() => whenSheetsClosed.delete(onSheetsClosed));
 
