@@ -186,6 +186,16 @@ test('media: audience and creator headers decide, and a missing one refuses', ()
   assert.equal(gw.mediaAllowed(post, {}, 'general', null), false);
   assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'adult' }, 'general', null), false);
   assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-creator': 'evil' }, 'general', evil), false);
+  // A post an account wrote itself names that account instead of a creator.
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'unknown', 'x-egram-account': 'cc_test' }, 'unknown', null), true);
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-account': 'Bob' }, 'general', null), true, 'account names are compared lowercased');
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-account': 'evil' }, 'general', evil), false, 'an account named like an 18+ profile');
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-account': 'a,b' }, 'general', null), false);
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-creator': 'ann', 'x-egram-account': 'bob' }, 'general', null), false, 'both named');
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-account': 'bob' }, 'general', null, ['X-Egram-Audience', 'general', 'X-Egram-Account', 'bob', 'X-Egram-Account', 'ann']), false, 'account named twice');
+  assert.equal(gw.mediaAllowed(post, { 'x-egram-audience': 'general', 'x-egram-account': 'bob' }, 'general', null, ['X-Egram-Audience', 'general', 'X-Egram-Account', 'bob']), true);
+  // Never for a creator's picture.
+  assert.equal(gw.mediaAllowed(pic, { 'x-egram-picture': 'creator', 'x-egram-audience': 'general', 'x-egram-account': 'bob' }, 'general', null), false);
   // A creator's picture must say so, name the lane and a creator not 18+ in Grabbit.
   const cp = { 'x-egram-picture': 'creator', 'x-egram-audience': 'general', 'x-egram-creator': 'ann' };
   assert.equal(gw.mediaAllowed(pic, cp, 'general', evil), true);

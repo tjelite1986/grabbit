@@ -277,7 +277,8 @@ function allowedType(ct, route) {
 }
 
 // Every file must say whose it is, and fails closed when it does not:
-//   - a post's file names the lane's audience and its creator;
+//   - a post's file names the lane's audience and its creator (or, for a post
+//     an account wrote itself, that account);
 //   - a creator's avatar or banner says it is one (X-Egram-Picture: creator)
 //     and names the lane's audience and the creator. Elitogram answers a
 //     creator outside the scope with an unlabelled neutral picture, which the
@@ -305,6 +306,28 @@ function mediaCreator(headers, rawHeaders) {
   return typeof v === 'string' && CANONICAL_HANDLE.test(v) ? v : null;
 }
 
+// The author of a post's file: its creator, or for a post an account wrote
+// itself (no creator), that account (X-Egram-Account), checked against
+// Grabbit's 18+ profiles like the author_handle of the post's JSON. Both
+// named, or either named twice, is no author. Never used for pictures.
+function headerCount(headers, rawHeaders, name) {
+  if (Array.isArray(rawHeaders)) {
+    let n = 0;
+    for (let i = 0; i + 1 < rawHeaders.length; i += 2) if (String(rawHeaders[i]).toLowerCase() === name) n++;
+    return n;
+  }
+  return headers[name] === undefined ? 0 : 1;
+}
+function mediaAuthor(headers, rawHeaders) {
+  const c = headerCount(headers, rawHeaders, 'x-egram-creator');
+  const a = headerCount(headers, rawHeaders, 'x-egram-account');
+  if (c + a !== 1) return null;
+  if (c) return mediaCreator(headers, rawHeaders);
+  const v = rawHeaders ? singleHeader(rawHeaders, 'x-egram-account') : headers['x-egram-account'];
+  const account = typeof v === 'string' ? norm(v) : '';
+  return CANONICAL_HANDLE.test(account) ? account : null;
+}
+
 function mediaAllowed(route, headers, want, isAdultHandle, rawHeaders) {
   const one = (k) => (typeof headers[k] === 'string' ? headers[k] : null);
   // An account's own upload says nothing about its audience, so only the
@@ -312,7 +335,7 @@ function mediaAllowed(route, headers, want, isAdultHandle, rawHeaders) {
   if (route.picture === 'user') return one('x-egram-picture') === 'user' && /^image\/svg\+xml\b/i.test(one('content-type') || '');
   if (route.picture && one('x-egram-picture') !== 'creator') return false;
   if (one('x-egram-audience') !== want) return false;
-  const creator = mediaCreator(headers, rawHeaders);
+  const creator = route.picture ? mediaCreator(headers, rawHeaders) : mediaAuthor(headers, rawHeaders);
   if (!creator) return false;
   if (isAdultHandle && isAdultHandle(creator)) return false;
   return true;
@@ -623,7 +646,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       let ok = false;
       try {
         let test = isAdultHandle;
-        const named = route.picture === 'user' ? null : mediaCreator(r.headers, r.rawHeaders);
+        const named = route.picture === 'user' ? null : route.picture ? mediaCreator(r.headers, r.rawHeaders) : mediaAuthor(r.headers, r.rawHeaders);
         if (named && isAdultHandle) test = adultTest(await identitiesFor(req, cur, lane, [named]));
         ok = mediaAllowed(route, r.headers, want, test, r.rawHeaders);
       } catch (e) { log.warn(`[egram] media check ${rest}: ${e.message}`); }
@@ -633,7 +656,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
           res.status(200).set({ 'Content-Type': 'image/svg+xml', 'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'" });
           return req.method === 'HEAD' ? res.end() : res.end(NEUTRAL_PICTURE);
         }
-        log.warn(`[egram] refused ${rest}: audience ${r.headers['x-egram-audience'] || 'missing'}, creator ${r.headers['x-egram-creator'] ? 'named' : 'missing'} in the ${lane} lane`);
+        log.warn(`[egram] refused ${rest}: audience ${r.headers['x-egram-audience'] || 'missing'}, author ${r.headers['x-egram-creator'] || r.headers['x-egram-account'] ? 'named' : 'missing'} in the ${lane} lane`);
         return fail(res, 404, 'Not found');
       }
     }

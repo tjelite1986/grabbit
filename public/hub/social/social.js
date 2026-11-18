@@ -449,8 +449,17 @@
     // --- Sheets and the photo viewer --------------------------------------------------
     let sheetEl = null;
     let sheetBack = null;
+    // Escape closes the sheet wherever focus is: a row the sheet redraws (a
+    // deleted comment) takes focus with it to <body>, outside the sheet.
+    function sheetKeys(e) {
+      if (e.key !== 'Escape' || !sheetEl) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeSheet();
+    }
     function closeSheet() {
       if (!sheetEl) return;
+      document.removeEventListener('keydown', sheetKeys, true);
       sheetEl.remove();
       sheetEl = null;
       const back = sheetBack;
@@ -468,7 +477,7 @@
         h('div', { class: 'sg-sheet-head' }, h('b', null, title), h('button', { type: 'button', class: 'sg-act', 'aria-label': 'Close', onclick: closeSheet }, ic('close'))),
         body);
       sheetEl = h('div', { class: 'sg-sheet', onclick: (e) => { if (e.target === sheetEl) closeSheet(); } }, panel);
-      sheetEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSheet(); } });
+      document.addEventListener('keydown', sheetKeys, true);
       layer().append(sheetEl);
       const first = opts.focus || panel.querySelector('input, textarea, select, button:not(.sg-act)') || panel.querySelector('button');
       if (first) first.focus({ preventScroll: true });
