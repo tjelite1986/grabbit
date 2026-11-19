@@ -97,3 +97,107 @@ test('a move across mounts (EXDEV) copies through a .part, then unlinks the sour
   assert.deepEqual(left, [trash[0].trash_name], 'no .part left behind');
   assert.equal(fs.readFileSync(path.join(dir, 'trash', left[0]), 'utf8'), 'same bytes');
 });
+
+// A tiny store and two identical files in a Grabbit folder, for merge and
+// restore paths.
+function mergeFixture() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-merge-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const g = path.join(dir, 'g');
+  fs.mkdirSync(g);
+  fs.writeFileSync(path.join(g, 'a.mp4'), 'same bytes');
+  fs.writeFileSync(path.join(g, 'b.mp4'), 'same bytes');
+  const sha = require('crypto').createHash('sha256').update('same bytes').digest('hex');
+  const rows = [
+    { id: 1, root: g, rel: 'a.mp4', bytes: 10, sha256: sha, mtime_ms: 1, link: 'none', item_id: null },
+    { id: 2, root: g, rel: 'b.mp4', bytes: 10, sha256: sha, mtime_ms: 2, link: 'none', item_id: null },
+  ];
+  const trash = [];
+  const store = {
+    dupeFile: (id) => rows.find((r) => r.id === Number(id)),
+    trashAdd: (t) => (trash.push({ ...t, id: trash.length + 1 }), trash.length),
+    trashGet: (id) => trash.find((t) => t.id === Number(id)),
+    trashPurged: (id) => { trash.find((t) => t.id === id).purged_at = 1; },
+    trashRestored: (id) => { trash.find((t) => t.id === id).restored_at = 1; },
+    fileSeen: () => {},
+    fileGoneNow: () => {},
+  };
+  const trashDir = path.join(dir, 'trash');
+  const t = new DupeTrash({
+    store, trashDir, rootOf: () => ({ owner: 'grabbit' }), now: () => 5,
+    mergeOf: () => ({ keep_root: g, keep_rel: 'a.mp4' }),
+  });
+  return { dir, g, trash, trashDir, t };
+}
+
+test('merge never leaves the live name missing, and a failed swap changes nothing', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const rename = fs.renameSync;
+  const seen = [];
+  fs.renameSync = (from, to) => {
+    seen.push(fs.existsSync(path.join(g, 'b.mp4')));
+    if (to === path.join(g, 'b.mp4')) { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }
+    return rename(from, to);
+  };
+  try {
+    await assert.rejects(t.mergeLocal(2, 1), /nothing changed/);
+  } finally {
+    fs.renameSync = rename;
+  }
+  assert.ok(seen.every(Boolean), 'b.mp4 was there at every rename');
+  const before = fs.statSync(path.join(g, 'b.mp4'));
+  assert.notEqual(before.ino, fs.statSync(path.join(g, 'a.mp4')).ino, 'b.mp4 is still its own file');
+  assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no merge temp left behind');
+  assert.deepEqual(fs.readdirSync(trashDir), [], 'no trash copy left behind');
+  assert.equal(trash[0].purged_at, 1, 'the trash row is closed');
+
+  const id = await t.mergeLocal(2, 1);
+  assert.equal(fs.statSync(path.join(g, 'b.mp4')).ino, fs.statSync(path.join(g, 'a.mp4')).ino);
+  const held = path.join(trashDir, trash[id - 1].trash_name);
+  assert.equal(fs.readFileSync(held, 'utf8'), 'same bytes');
+  assert.equal(fs.statSync(held).ino, before.ino, 'the trash holds the original file');
+});
+
+test('restoring a merged copy keeps the trash copy until the swap succeeded', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const id = await t.mergeLocal(2, 1);
+  const held = path.join(trashDir, trash[id - 1].trash_name);
+  const rename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (to === path.join(g, 'b.mp4')) { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }
+    return rename(from, to);
+  };
+  try {
+    await assert.rejects(t.restore(id), /trash still holds it/);
+  } finally {
+    fs.renameSync = rename;
+  }
+  assert.ok(fs.existsSync(held), 'the trash copy is still there');
+  assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no restore stage left behind');
+  assert.equal(fs.statSync(path.join(g, 'b.mp4')).ino, fs.statSync(path.join(g, 'a.mp4')).ino, 'the link is untouched');
+
+  const r = await t.restore(id);
+  assert.equal(r.renamed, false);
+  assert.ok(!fs.existsSync(held));
+  assert.notEqual(fs.statSync(path.join(g, 'b.mp4')).ino, fs.statSync(path.join(g, 'a.mp4')).ino);
+  assert.equal(fs.readFileSync(path.join(g, 'b.mp4'), 'utf8'), 'same bytes');
+});
+
+test('a copy across mounts is checked against the sha256 and leaves the source on a mismatch', async () => {
+  const { placeCopy } = require('../dupe-trash');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-copy-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const src = path.join(dir, 'src.bin');
+  fs.writeFileSync(src, 'payload');
+  const link = fs.linkSync;
+  fs.linkSync = () => { const e = new Error('cross-device'); e.code = 'EXDEV'; throw e; };
+  try {
+    await assert.rejects(placeCopy(src, path.join(dir, 'bad.bin'), 'f'.repeat(64)), /does not match/);
+    const good = require('crypto').createHash('sha256').update('payload').digest('hex');
+    await placeCopy(src, path.join(dir, 'ok.bin'), good);
+  } finally {
+    fs.linkSync = link;
+  }
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['ok.bin', 'src.bin'], 'no .part and no bad copy left');
+  assert.equal(fs.readFileSync(path.join(dir, 'ok.bin'), 'utf8'), 'payload');
+});

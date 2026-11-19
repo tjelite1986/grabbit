@@ -67,9 +67,17 @@ class DupeService {
 
   cfg() { return readCfg(this.store); }
 
-  setCfg(patch, by) {
+  setCfg(patch, by, { confirmRetention = false } = {}) {
     const before = this.cfg();
     const next = sanitizeCfg({ ...before, ...patch, prevention: { ...before.prevention, ...(patch.prevention || {}) } });
+    // A shorter hold time applies at the next hourly purge, so it needs its
+    // own confirmation, with the number of held copies it would delete.
+    const shorter = next.trashRetentionDays && (!before.trashRetentionDays || next.trashRetentionDays < before.trashRetentionDays);
+    if (shorter && !confirmRetention) {
+      const cut = this.now() - next.trashRetentionDays * 86400000;
+      const due = this.trashEntries().filter((t) => t.at < cut).length;
+      throw new DupeError(`Keeping removed copies for ${next.trashRetentionDays} days deletes ${due} held ${due === 1 ? 'copy' : 'copies'} within the hour. Confirm the shorter time to save it.`, 409);
+    }
     this.store.setSetting(CFG_KEY, JSON.stringify(next), this.now());
     if (this.analyzer) {
       const engines = ['photo', 'ai', 'video', 'model'];
@@ -84,6 +92,14 @@ class DupeService {
   }
 
   invalidate() { this.cache = null; }
+
+  // Background work (retention purge, duplicate prevention) takes the same
+  // lock as the owner's actions, but waits for no one: when the lock is held
+  // it returns `busyValue` and the caller tries again later or keeps the file.
+  async whenFree(what, fn, busyValue) {
+    if (this.busy) return busyValue;
+    return this.exclusive(what, fn);
+  }
 
   async exclusive(what, fn) {
     if (this.busy) throw new DupeError(`Another operation is running (${this.busy})`, 409);
@@ -658,6 +674,13 @@ class DupeService {
   // action: trash_extras | mark_reviewed | ignore | keep_both
   async batch({ keys = [], filter = null, action, dryRun = true, by = null, expect = null }) {
     if (!['trash_extras', 'mark_reviewed', 'ignore', 'keep_both'].includes(action)) throw new DupeError('Unknown batch action');
+    // Copies move to the trash only from groups the owner picked one by one
+    // and only after confirming the count the summary showed: a filter can
+    // select groups (its dry run returns their keys) but never trash them.
+    if (action === 'trash_extras' && !dryRun) {
+      if (filter) throw new DupeError('Select the groups first: a filter cannot move copies to the trash');
+      if (!expect || !Number.isFinite(Number(expect.files))) throw new DupeError('Confirm how many copies move to the trash');
+    }
     let list = filter ? this.matchingKeys(filter) : [...new Set(keys.map(String))];
     if (list.length > MAX_BATCH_GROUPS) throw new DupeError(`At most ${MAX_BATCH_GROUPS} groups at once`);
     const all = new Map(this.build().groups.map((g) => [g.key, g]));
@@ -684,8 +707,8 @@ class DupeService {
       }
     }
     const pub = { ...summary, apps: [...summary.apps], blocked: summary.blocked.slice(0, 50), blockedTotal: summary.blocked.length };
-    if (dryRun) return { dryRun: true, ...pub };
-    if (action === 'trash_extras' && expect && (Number(expect.files) !== pub.files)) {
+    if (dryRun) return { dryRun: true, ...pub, ...(filter ? { keys: groups.map((g) => g.key) } : {}) };
+    if (action === 'trash_extras' && Number(expect.files) !== pub.files) {
       throw new DupeError('The selection changed since the summary; review it again', 409);
     }
     if (action !== 'trash_extras') {
@@ -776,7 +799,7 @@ class DupeService {
         try {
           const t = this.parseTrashId(raw);
           if (t.source === 'grabbit') {
-            const r = this.trash.restore(t.id);
+            const r = await this.trash.restore(t.id);
             out.done.push({ id: raw, rel: r.restoredRel, renamed: r.renamed });
           } else {
             const e = this.dx.appTrashGet(t.id);
@@ -852,21 +875,31 @@ class DupeService {
   }
 
   // App entries past the retention time are purged by the app (best effort;
-  // an unreachable app is tried again next hour).
+  // an unreachable app is tried again next hour). Runs under the lock that
+  // restore and delete use, so an entry is never purged while it is restored;
+  // when that lock is held, the purge waits for the next hour.
   async purgeAppTrash() {
     const days = this.cfg().trashRetentionDays;
     if (!days) return 0;
-    let n = 0;
-    for (const e of this.dx.appTrashHeld()) {
-      if (e.at + days * 86400000 > this.now()) continue;
-      try {
-        await this.deleteOne(`a${e.id}`, 'retention');
-        n++;
-      } catch {
-        // retried next time
+    return this.whenFree('retention purge', async () => {
+      let n = 0;
+      for (const e of this.dx.appTrashHeld()) {
+        if (e.at + days * 86400000 > this.now()) continue;
+        try {
+          await this.deleteOne(`a${e.id}`, 'retention');
+          n++;
+        } catch {
+          // retried next time
+        }
       }
-    }
-    return n;
+      return n;
+    }, 0);
+  }
+
+  // Grabbit's own held copies past the hold time, under the same lock.
+  async purgeGrabbitTrash() {
+    if (!this.trash) return 0;
+    return this.whenFree('retention purge', async () => this.trash.purge(), 0);
   }
 
   // --- cache & thumbnails ---------------------------------------------------------
@@ -997,43 +1030,52 @@ class DupeService {
         detail = 'Kept: the new file is a post of its own in an app';
         action = 'review';
       }
-      if (action === 'link' && where) {
-        try {
-          const keepAbs = path.join(o.root, o.rel);
-          const ks = fs.statSync(keepAbs);
-          if (ks.dev !== st.dev) throw new Error('different disks');
-          const tmp = `${abs}.dedupe-${process.pid}`;
-          fs.linkSync(keepAbs, tmp);
-          if ((await sha256File(tmp)) !== sha) { fs.unlinkSync(tmp); throw new Error('the existing copy changed'); }
-          // The download must still be the file that was hashed; a newer file
-          // in its place is never overwritten.
-          let now = null;
-          try { now = fs.lstatSync(abs); } catch {}
-          if (!now || now.dev !== st.dev || now.ino !== st.ino || now.size !== st.size) {
-            fs.unlinkSync(tmp);
-            throw new Error('the new file changed while it was checked');
+      // Linking or skipping changes files, so it takes the lock the owner's
+      // actions use; while one of those runs, the new copy simply stays.
+      if ((action === 'link' || action === 'skip') && where) {
+        const done = await this.whenFree(`prevention ${job.id}`, async () => {
+          if (action === 'link' && where) {
+            try {
+              const keepAbs = path.join(o.root, o.rel);
+              const ks = fs.statSync(keepAbs);
+              if (ks.dev !== st.dev) throw new Error('different disks');
+              const tmp = `${abs}.dedupe-${process.pid}`;
+              fs.linkSync(keepAbs, tmp);
+              if ((await sha256File(tmp)) !== sha) { fs.unlinkSync(tmp); throw new Error('the existing copy changed'); }
+              // The download must still be the file that was hashed; a newer file
+              // in its place is never overwritten.
+              let now = null;
+              try { now = fs.lstatSync(abs); } catch {}
+              if (!now || now.dev !== st.dev || now.ino !== st.ino || now.size !== st.size) {
+                fs.unlinkSync(tmp);
+                throw new Error('the new file changed while it was checked');
+              }
+              fs.renameSync(tmp, abs);
+              detail = `Now stored once with ${oInfo.label}/${o.rel}`;
+            } catch (e) {
+              action = 'review';
+              detail = `Could not link (${e.message}); kept`;
+            }
           }
-          fs.renameSync(tmp, abs);
-          detail = `Now stored once with ${oInfo.label}/${o.rel}`;
-        } catch (e) {
-          action = 'review';
-          detail = `Could not link (${e.message}); kept`;
-        }
-      }
-      if (action === 'skip' && where && this.trash) {
-        try {
-          // The new copy goes to the trash (restorable), the library keeps the
-          // existing one. The scan has not seen the new file yet: record it.
-          this.store.fileSeen(where.root.path, where.rel, st, this.now());
-          const row = this.db.prepare('SELECT * FROM file_hashes WHERE root = ? AND rel = ?').get(where.root.path, where.rel);
-          this.store.fileHashed(row.id, { sha256: sha, ...this.store.fileLink(path.basename(where.rel)) }, this.now());
-          const fresh = this.store.dupeFile(row.id);
-          await this.trash.remove(fresh.id, { by: 'prevention', plannedKeep: o.id, reason: 'Duplicate prevention: already in the library' });
-          detail = `Moved to the trash: identical to ${oInfo.label}/${o.rel}`;
-        } catch (e) {
-          action = 'review';
-          detail = `Kept (${e.message})`;
-        }
+          if (action === 'skip' && where && this.trash) {
+            try {
+              // The new copy goes to the trash (restorable), the library keeps the
+              // existing one. The scan has not seen the new file yet: record it.
+              this.store.fileSeen(where.root.path, where.rel, st, this.now());
+              const row = this.db.prepare('SELECT * FROM file_hashes WHERE root = ? AND rel = ?').get(where.root.path, where.rel);
+              this.store.fileHashed(row.id, { sha256: sha, ...this.store.fileLink(path.basename(where.rel)) }, this.now());
+              const fresh = this.store.dupeFile(row.id);
+              await this.trash.remove(fresh.id, { by: 'prevention', plannedKeep: o.id, reason: 'Duplicate prevention: already in the library' });
+              detail = `Moved to the trash: identical to ${oInfo.label}/${o.rel}`;
+            } catch (e) {
+              action = 'review';
+              detail = `Kept (${e.message})`;
+            }
+          }
+          return { action, detail };
+        }, null);
+        if (done) ({ action, detail } = done);
+        else { action = 'review'; detail = 'Kept: another duplicate operation was running'; }
       }
       const p = { job_id: job.id, root: where ? where.root.path : null, rel: where ? where.rel : path.basename(abs), sha256: sha, match: 'exact', other_root: o.root, other_rel: o.rel, action, detail };
       this.dx.preventionAdd(p, this.now());

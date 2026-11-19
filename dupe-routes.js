@@ -200,12 +200,13 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
   r.post('/settings', wrap((req) => {
     const b = req.body && typeof req.body.settings === 'object' ? req.body.settings : null;
     if (!b) throw new DupeError('settings must be an object');
-    return { settings: service.setCfg(b, who(req)) };
+    return { settings: service.setCfg(b, who(req), { confirmRetention: (req.body || {}).confirmRetention === true }) };
   }));
   r.post('/models/:id/download', wrap(async (req) => {
     if (!models) throw new DupeError('Models are not available', 409);
     if (!/^(light|medium|heavy)$/.test(req.params.id)) throw new DupeError('Unknown model');
     if (!MODELS[req.params.id].sha256) throw new DupeError(`The ${req.params.id} model has no pinned checksum in this build yet, so it cannot be downloaded`, 409);
+    if (models.downloading) throw new DupeError(`The ${models.downloading} model is already downloading`, 409);
     // Runs in the background; progress shows in /settings.
     models.download(req.params.id).catch((e) => console.warn(`dupes: model download failed (${e.message})`));
     return { started: true };

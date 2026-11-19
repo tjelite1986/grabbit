@@ -3505,7 +3505,7 @@ const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({
   store: ITEM_STORE,
   trashDir: DUPE_TRASH_DIR,
   rootOf: dupeRootOf,
-  holdMs: () => (ITEM_STORE ? readDupeCfg(ITEM_STORE).trashRetentionDays * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000),
+  holdMs: () => (ITEM_STORE ? readDupeCfg(ITEM_STORE).trashRetentionDays * 24 * 3600 * 1000 : 0),
   onRemoved: DUPE_DX ? (id, row, info) => {
     const r = dupeRootOf(row.root) || {};
     const kind = require('./dupe-classify').kindOf(row.rel);
@@ -3521,17 +3521,20 @@ const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({
   } : null,
 }) : null;
 if (DUPE_TRASH) {
-  const purge = () => {
+  const purge = async () => {
     try {
-      const n = DUPE_TRASH.purge();
+      const n = DUPE_SERVICE ? await DUPE_SERVICE.purgeGrabbitTrash() : DUPE_TRASH.purge();
       if (n) console.log(`dupes: purged ${n} trashed copies past the hold time`);
     } catch (e) {
       console.error(`dupes: trash purge failed (${e.message})`);
     }
     if (DUPE_SERVICE) {
-      DUPE_SERVICE.purgeAppTrash()
-        .then((n) => { if (n) console.log(`dupes: ${n} app-held copies purged past the hold time`); })
-        .catch((e) => console.error(`dupes: app trash purge failed (${e.message})`));
+      try {
+        const n = await DUPE_SERVICE.purgeAppTrash();
+        if (n) console.log(`dupes: ${n} app-held copies purged past the hold time`);
+      } catch (e) {
+        console.error(`dupes: app trash purge failed (${e.message})`);
+      }
     }
   };
   setTimeout(purge, 60 * 1000).unref();
@@ -4685,10 +4688,10 @@ app.get('/api/hub/dupes/trash', (req, res) => {
 });
 
 // POST /api/hub/dupes/trash/:id/restore -> back to where it was.
-app.post('/api/hub/dupes/trash/:id/restore', (req, res) => {
+app.post('/api/hub/dupes/trash/:id/restore', async (req, res) => {
   if (!metaStore(res) || trashOff(res)) return;
   try {
-    const t = DUPE_TRASH.restore(req.params.id);
+    const t = await DUPE_TRASH.restore(req.params.id);
     console.log(`dupes: trash entry ${t.id} restored to ${t.rel} by ${actorOf(req) || 'owner'}`);
     res.json({ ok: true });
   } catch (e) {

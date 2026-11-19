@@ -171,7 +171,11 @@ test('a copy in an app library without an adapter is never touched, and says why
   assert.ok(r.refused.find((x) => x.name === 'd.mp4').fix);
   // A batch over everything (the group is reviewed now) moves only Grabbit's
   // remaining extra.
-  const b = await svc.batch({ filter: { tab: 'identical', status: 'all' }, action: 'trash_extras', dryRun: false });
+  // A filter selects (its dry run returns the keys) but never trashes.
+  await assert.rejects(svc.batch({ filter: { tab: 'identical', status: 'all' }, action: 'trash_extras', dryRun: false, expect: { files: 1 } }), /cannot move copies/);
+  const sel = await svc.batch({ filter: { tab: 'identical', status: 'all' }, action: 'trash_extras', dryRun: true });
+  await assert.rejects(svc.batch({ keys: sel.keys, action: 'trash_extras', dryRun: false }), /Confirm how many/);
+  const b = await svc.batch({ keys: sel.keys, action: 'trash_extras', dryRun: false, expect: { files: sel.files } });
   assert.equal(b.done, 1);
   guard.undo();
   assert.deepEqual(guard.offences, []);
@@ -274,7 +278,8 @@ test('a copy in an app import folder is never moved by Grabbit, even when the li
   assert.ok(spent['new.mp4'].fix);
   const waiting = byName(exactGroup(svc, other));
   assert.equal(waiting['waiting.mp4'] && waiting['waiting.mp4'].action, null);
-  const b = await svc.batch({ filter: { tab: 'identical' }, action: 'trash_extras', dryRun: false });
+  const sel = await svc.batch({ filter: { tab: 'identical' }, action: 'trash_extras', dryRun: true });
+  const b = await svc.batch({ keys: sel.keys, action: 'trash_extras', dryRun: false, expect: { files: sel.files } });
   assert.equal(b.done, 0);
   for (const g of [exactGroup(svc, body), exactGroup(svc, other)]) {
     const ids = g.members.map((x) => x.id);
@@ -420,6 +425,7 @@ test('trash: extras move, the kept copy stays, restore works, nothing is deleted
   // The hourly purge with the default hold deletes nothing fresh.
   assert.equal(trash.purge(), 0);
   assert.equal(await svc.purgeAppTrash(), 0);
+  assert.equal(await svc.purgeGrabbitTrash(), 0);
   assert.equal(fs.readdirSync(trashDir).length, 2);
   // Restore puts the copy back at its own name.
   const cEntry = list.items.find((x) => x.name === 'c.mp4');
@@ -551,10 +557,10 @@ test('similar photo matches are review-only: no action or batch removes them for
     const dry = await svc.batch({ filter, action: 'trash_extras', dryRun: true });
     assert.equal(dry.files, 0);
     assert.equal(dry.similarSkipped, 1);
-    const real = await svc.batch({ filter, action: 'trash_extras', dryRun: false });
+    const real = await svc.batch({ keys: dry.keys, action: 'trash_extras', dryRun: false, expect: { files: dry.files } });
     assert.equal(real.done, 0);
   }
-  const all = await svc.batch({ keys: [g.key, videos.key], action: 'trash_extras', dryRun: false });
+  const all = await svc.batch({ keys: [g.key, videos.key], action: 'trash_extras', dryRun: false, expect: { files: 0 } });
   assert.equal(all.done, 0);
   assert.deepEqual({ own: snapshot(own), tik: snapshot(tik) }, before);
   // Keep both records the pair as different, so it is not offered again.
@@ -614,6 +620,13 @@ test('prevention skip moves a new Grabbit copy to the trash (restorable) and kee
   svc.setCfg({ prevention: { exact: 'skip' } });
   const abs = path.join(own, 'dl', 'new.mp4');
   write(abs, body);
+  // While the owner's restore or delete holds the lock, the new copy stays.
+  svc.busy = 'restore';
+  const [held] = await svc.checkSaved({ id: 'j0', status: 'done', savedPaths: [abs] });
+  svc.busy = null;
+  assert.equal(held.action, 'review');
+  assert.match(held.detail, /another duplicate operation/);
+  assert.ok(fs.existsSync(abs));
   const [hit] = await svc.checkSaved({ id: 'j', status: 'done', savedPaths: [abs] });
   assert.equal(hit.action, 'skip');
   assert.ok(!fs.existsSync(abs));
@@ -729,10 +742,23 @@ test('references ask each app about its own copies only, and report a failing ap
 
 // --- settings ---------------------------------------------------------------------------------
 
+test('the trash defaults to manual cleanup, and a time limit needs its own confirmation', async (t) => {
+  const { svc } = setup(t);
+  assert.equal(svc.cfg().trashRetentionDays, 0);
+  assert.equal(await svc.purgeGrabbitTrash(), 0);
+  assert.equal(await svc.purgeAppTrash(), 0);
+  assert.throws(() => svc.setCfg({ trashRetentionDays: 90 }), (e) => e.status === 409 && /deletes 0 held copies/.test(e.message));
+  assert.equal(svc.cfg().trashRetentionDays, 0, 'nothing saved');
+  assert.equal(svc.setCfg({ trashRetentionDays: 30 }, 'owner', { confirmRetention: true }).trashRetentionDays, 30);
+  assert.equal(svc.setCfg({ trashRetentionDays: 60 }).trashRetentionDays, 60, 'longer needs no confirmation');
+  assert.throws(() => svc.setCfg({ trashRetentionDays: 7 }), /Confirm the shorter time/);
+  assert.equal(svc.setCfg({ trashRetentionDays: 0 }).trashRetentionDays, 0, 'back to manual needs none');
+});
+
 test('settings are sanitised and stored in items.db settings, not as a schema change', async (t) => {
   const { svc, s } = setup(t);
   const next = svc.setCfg({ trashRetentionDays: 3, defaultRule: 'bogus', prevention: { exact: 'explode', perceptual: 'delete' } });
-  assert.equal(next.trashRetentionDays, 30);
+  assert.equal(next.trashRetentionDays, 0, 'an unknown hold time falls back to manual cleanup');
   assert.equal(next.defaultRule, 'recommended');
   assert.equal(next.prevention.exact, 'review');
   assert.equal(next.prevention.perceptual, 'review', 'a perceptual match only ever goes to review');

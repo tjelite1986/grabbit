@@ -113,31 +113,61 @@ function sha256Of(file) {
   });
 }
 
-// Moves `from` to `to`: a rename where possible, else a copy (flushed and
-// size-checked) and an unlink. Bind mounts make a rename across folders fail
-// with EXDEV even on one disk.
-function moveFile(from, to) {
+const rand = () => crypto.randomBytes(4).toString('hex');
+
+// Copies `from` to a new file `to` without blocking the event loop: streamed
+// to a .part beside the target, flushed, hashed on the way and compared with
+// `sha256` (when given), then renamed into place. The source is not touched.
+async function copyVerified(from, to, sha256 = null) {
+  const part = path.join(path.dirname(to), `.${path.basename(to).slice(0, 180)}.${rand()}.part`);
+  try {
+    const h = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(part, { flags: 'wx' });
+      const src = fs.createReadStream(from);
+      src.on('error', (e) => { out.destroy(); reject(e); });
+      out.on('error', reject);
+      src.on('data', (c) => h.update(c));
+      out.on('finish', resolve);
+      src.pipe(out);
+    });
+    const fd = fs.openSync(part, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    const digest = h.digest('hex');
+    if (sha256 && digest !== sha256) throw new TrashError('The copy does not match the original; nothing changed');
+    if (fs.existsSync(to)) throw new TrashError('Target already exists');
+    fs.renameSync(part, to);
+  } catch (e) {
+    try { fs.unlinkSync(part); } catch {}
+    throw e;
+  }
+}
+
+// Puts a second copy of `from` at the new path `to` and leaves `from` where
+// it is: a hard link on the same disk, else a verified copy. Bind mounts make
+// a link across folders fail with EXDEV even on one disk.
+async function placeCopy(from, to, sha256 = null) {
+  try {
+    fs.linkSync(from, to);
+    return;
+  } catch (e) {
+    if (e.code === 'EEXIST') throw new TrashError('Target already exists');
+    if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
+  }
+  await copyVerified(from, to, sha256);
+}
+
+// Moves `from` to `to`: a rename where possible, else a verified copy and an
+// unlink. The source goes last, so a failure at any step leaves it in place.
+async function moveFile(from, to, sha256 = null) {
+  if (fs.existsSync(to)) throw new TrashError('Target already exists');
   try {
     fs.renameSync(from, to);
     return;
   } catch (e) {
     if (e.code !== 'EXDEV') throw e;
   }
-  // Copy to a .part beside the target, flush, check, rename; the source goes
-  // last, so a failure at any step leaves it where it was.
-  if (fs.existsSync(to)) throw new TrashError('Target already exists');
-  const size = fs.statSync(from).size;
-  const part = path.join(path.dirname(to), `.${path.basename(to)}.part`);
-  try {
-    fs.copyFileSync(from, part);
-    const fd = fs.openSync(part, 'r');
-    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    if (fs.statSync(part).size !== size) throw new TrashError('The copy came out short');
-    fs.renameSync(part, to);
-  } catch (e) {
-    try { fs.unlinkSync(part); } catch {}
-    throw e;
-  }
+  await copyVerified(from, to, sha256);
   fs.unlinkSync(from);
 }
 
@@ -185,16 +215,7 @@ class DupeTrash {
     const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
     if (a !== row.sha256 || b !== row.sha256) throw new TrashError('The bytes no longer match; scan again first');
 
-    fs.mkdirSync(this.dir, { recursive: true });
-    const trashName = `${this.now()}-${row.id}-${path.basename(row.rel).slice(0, 150)}`;
-    const to = path.join(this.dir, trashName);
-    moveFile(doomed.abs, to);
-    const id = this.store.trashAdd({ file_id: row.id, root: row.root, rel: row.rel, sha256: row.sha256, bytes: row.bytes, trash_name: trashName, by }, this.now());
-    this.store.fileGoneNow(row.id, this.now());
-    if (this.onRemoved) {
-      try { this.onRemoved(id, row, { keep: keepRow, reason }); } catch {}
-    }
-    return id;
+    return this.moveToTrash(row, doomed, { by, keepRow, reason });
   }
 
   // Removes one copy of a picture or video whose bytes differ from the copy
@@ -218,16 +239,24 @@ class DupeTrash {
     return this.moveToTrash(row, doomed, { by, keepRow, reason });
   }
 
-  moveToTrash(row, doomed, { by, keepRow, reason }) {
+  trashNameFor(row) {
     fs.mkdirSync(this.dir, { recursive: true });
-    const trashName = `${this.now()}-${row.id}-${path.basename(row.rel).slice(0, 150)}`;
-    const to = path.join(this.dir, trashName);
-    moveFile(doomed.abs, to);
+    return `${this.now()}-${row.id}-${rand()}-${path.basename(row.rel).slice(0, 150)}`;
+  }
+
+  record(row, trashName, { by, keepRow, reason }) {
     const id = this.store.trashAdd({ file_id: row.id, root: row.root, rel: row.rel, sha256: row.sha256, bytes: row.bytes, trash_name: trashName, by }, this.now());
-    this.store.fileGoneNow(row.id, this.now());
     if (this.onRemoved) {
       try { this.onRemoved(id, row, { keep: keepRow, reason }); } catch {}
     }
+    return id;
+  }
+
+  async moveToTrash(row, doomed, { by, keepRow, reason }) {
+    const trashName = this.trashNameFor(row);
+    await moveFile(doomed.abs, path.join(this.dir, trashName), row.sha256);
+    const id = this.record(row, trashName, { by, keepRow, reason });
+    this.store.fileGoneNow(row.id, this.now());
     return id;
   }
 
@@ -249,12 +278,30 @@ class DupeTrash {
     if (doomed.stat.ino === kept.stat.ino) throw new TrashError('Already stored once');
     const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
     if (a !== row.sha256 || b !== row.sha256) throw new TrashError('The bytes no longer match; scan again first');
-    const id = this.moveToTrash(row, doomed, { by, keepRow, reason: 'merged' });
+    // The live name is never missing: a link to the kept file waits beside
+    // it, the trash gets its own copy of the original (the original stays),
+    // and one rename swaps the name over to the kept file.
+    const tmp = path.join(path.dirname(doomed.abs), `.${path.basename(doomed.abs).slice(0, 180)}.merge-${rand()}`);
     try {
-      fs.linkSync(kept.abs, doomed.abs);
+      fs.linkSync(kept.abs, tmp);
     } catch (e) {
-      // Put the original back; the merge did not happen.
-      try { this.restore(id); } catch {}
+      throw new TrashError(`The files could not share one copy (${e.code || e.message}); nothing changed`);
+    }
+    const trashName = this.trashNameFor(row);
+    const held = path.join(this.dir, trashName);
+    try {
+      await placeCopy(doomed.abs, held, row.sha256);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      throw e instanceof TrashError ? e : new TrashError(`The original could not be kept in the trash (${e.code || e.message}); nothing changed`);
+    }
+    const id = this.record(row, trashName, { by, keepRow, reason: 'merged' });
+    try {
+      fs.renameSync(tmp, doomed.abs);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      try { fs.unlinkSync(held); } catch {}
+      this.store.trashPurged(id, this.now());
       throw new TrashError(`The files could not share one copy (${e.code || e.message}); nothing changed`);
     }
     try { this.store.fileSeen(row.root, row.rel, fs.statSync(doomed.abs), this.now()); } catch {}
@@ -367,7 +414,7 @@ class DupeTrash {
     return out;
   }
 
-  restore(trashId) {
+  async restore(trashId) {
     const t = this.store.trashGet(trashId);
     if (!t || t.restored_at || t.purged_at) throw new TrashError('Not in the trash');
     const r = this.rootOf(t.root);
@@ -399,13 +446,20 @@ class DupeTrash {
     }
     let target = abs;
     if (replaceLink) {
-      const stage = path.join(path.dirname(abs), `.${path.basename(abs).slice(0, 180)}.restore-${process.pid}`);
-      moveFile(from, stage);
+      // The trash keeps its copy until the original is back under its name:
+      // a crash at any step leaves at worst one extra copy, never none.
+      const stage = path.join(path.dirname(abs), `.${path.basename(abs).slice(0, 180)}.restore-${rand()}`);
+      await placeCopy(from, stage, t.sha256);
       try {
         fs.renameSync(stage, abs);
       } catch (e) {
-        try { moveFile(stage, from); } catch {}
+        try { fs.unlinkSync(stage); } catch {}
         throw new TrashError(`The original could not be put back (${e.code || e.message}); the trash still holds it`);
+      }
+      try {
+        fs.unlinkSync(from);
+      } catch (e) {
+        console.error(`dupes: restored trash entry ${t.id}, but its trash copy stayed (${e.code || e.message})`);
       }
     } else {
       // A newer file in its place is never overwritten: the copy comes back
@@ -415,7 +469,7 @@ class DupeTrash {
         const ext = path.extname(abs);
         target = path.join(path.dirname(abs), `${path.basename(abs, ext)} (restored${n > 1 ? ` ${n}` : ''})${ext}`);
       }
-      moveFile(from, target);
+      await moveFile(from, target, t.sha256);
     }
     const restoredRel = path.relative(root, target);
     this.store.trashRestored(t.id, this.now());
@@ -440,4 +494,4 @@ class DupeTrash {
   }
 }
 
-module.exports = { DupeTrash, TrashError, planGroup, checkRemoval, HOLD_MS, realFileOf, sha256Of };
+module.exports = { DupeTrash, TrashError, planGroup, checkRemoval, HOLD_MS, realFileOf, sha256Of, placeCopy, moveFile };

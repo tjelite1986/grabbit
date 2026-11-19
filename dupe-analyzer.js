@@ -35,7 +35,7 @@ const DEFAULT_CFG = {
   threads: 2,
   pauseMs: 150,
   scanMbps: null,
-  trashRetentionDays: 30,
+  trashRetentionDays: 0, // manual cleanup only (owner decision 2026-11-19)
   defaultRule: 'recommended',
   showThumbnails: false,
   prevention: {
@@ -75,7 +75,7 @@ function sanitizeCfg(c) {
   out.threads = Math.max(1, Math.min(4, Math.round(Number(c.threads) || 2)));
   out.pauseMs = Math.max(0, Math.min(5000, Math.round(Number(c.pauseMs)) || 0));
   out.scanMbps = c.scanMbps == null || c.scanMbps === '' ? null : Math.max(1, Math.min(500, Math.round(Number(c.scanMbps)) || 20));
-  out.trashRetentionDays = RETENTION.includes(Number(c.trashRetentionDays)) ? Number(c.trashRetentionDays) : 30;
+  out.trashRetentionDays = RETENTION.includes(Number(c.trashRetentionDays)) ? Number(c.trashRetentionDays) : 0;
   out.defaultRule = require('./dupe-quality').RULES.includes(c.defaultRule) ? c.defaultRule : 'recommended';
   out.showThumbnails = c.showThumbnails === true;
   const p = c.prevention || {};

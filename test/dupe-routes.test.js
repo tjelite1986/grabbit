@@ -238,6 +238,11 @@ test('model downloads take only known ids and need a model manager', async (t) =
   assert.equal((await s2.post('/models/..%2Flight/download')).status, 400);
   assert.deepEqual((await s2.post('/models/light/download')).body, { ok: true, started: true });
   assert.deepEqual(asked, ['light']);
+  models.downloading = 'light';
+  const busy = await s2.post('/models/light/download');
+  assert.equal(busy.status, 409);
+  assert.match(busy.body.error, /already downloading/);
+  assert.deepEqual(asked, ['light'], 'a second download is not started');
 });
 
 test('a model without a pinned checksum is refused, not reported as started', async (t) => {

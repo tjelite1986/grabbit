@@ -398,9 +398,19 @@
         if (count) count.textContent = `${num(n)} selected`;
       };
       const keysHere = () => [...selected].filter((k) => k.startsWith(tab === 'photos' ? 'photo:' : tab === 'videos' ? 'video:' : 'exact:'));
-      async function runBatch(action, opts = {}) {
-        const keys = opts.filter ? null : keysHere();
-        const payload = opts.filter ? { filter: { ...q, limit: undefined, offset: undefined }, action } : { keys, action };
+      // Selects every group the filter matches (not only this page). Moving
+      // copies still goes through "Move selected to Trash" and its summary.
+      async function selectMatching() {
+        try {
+          const s = await post('batch', { filter: { ...q, limit: undefined, offset: undefined }, action: 'mark_reviewed', dryRun: true });
+          (s.keys || []).forEach((k) => selected.add(k));
+          list.querySelectorAll('.dm-gsel').forEach((c) => { c.checked = selected.has(c.value); });
+          updateBatch();
+          toast(`${num((s.keys || []).length)} groups selected`);
+        } catch (e) { toast(e.message); }
+      }
+      async function runBatch(action) {
+        const payload = { keys: keysHere(), action };
         try {
           const s = await post('batch', { ...payload, dryRun: true });
           const lines = [
@@ -433,7 +443,7 @@
 
       const selectBar = h('div', { class: 'dm-selectbar' },
         h('button', { class: 'btn small ghost', type: 'button', onclick: () => { d.items.forEach((g) => selected.add(g.key)); list.querySelectorAll('.dm-gsel').forEach((c) => { c.checked = true; }); updateBatch(); } }, 'Select all visible'),
-        tab === 'identical' || tab === 'cache' ? h('button', { class: 'btn small ghost', type: 'button', onclick: () => runBatch('trash_extras', { filter: true }) }, `Select all matching filter (${num(d.total)})`) : null,
+        tab === 'identical' || tab === 'cache' ? h('button', { class: 'btn small ghost', type: 'button', onclick: () => selectMatching() }, `Select all matching filter (${num(d.total)})`) : null,
         tab === 'identical' || tab === 'cache' ? h('button', { class: 'btn small ghost', type: 'button', onclick: () => { d.items.filter((g) => g.deletable).forEach((g) => selected.add(g.key)); list.querySelectorAll('.dm-gsel').forEach((c) => { c.checked = selected.has(c.value); }); updateBatch(); } }, 'Select recommended extras') : null,
         h('span', { class: 'muted small' }, `${num(d.total)} groups`, d.reclaim ? `, ${bytes(d.reclaim)} reclaimable` : '', d.hiddenAdult ? ` - ${num(d.hiddenAdult)} 18+ hidden` : ''));
 
@@ -900,8 +910,19 @@
           trashRetentionDays: Number(fd.get('trashRetentionDays')),
           prevention: { enabled: bool('prevention.enabled'), exact: fd.get('prevention.exact'), perceptual: fd.get('prevention.perceptual') },
         };
+        // A shorter hold time deletes older held copies at the next hourly
+        // purge, so it is confirmed on its own; the server checks it too.
+        const was = Number(s.trashRetentionDays) || 0;
+        const days = patch.trashRetentionDays;
+        let confirmRetention = false;
+        if (days && (!was || days < was)) {
+          confirmRetention = await dialog('Shorten how long removed copies are kept?',
+            [h('p', null, `Held copies older than ${days} days are deleted for good within the hour. Copies you may still want back should be restored first.`)],
+            [{ label: `Keep for ${days} days`, value: true, danger: true }]);
+          if (!confirmRetention) return;
+        }
         await busyBtn(btn, async () => {
-          try { await post('settings', { settings: patch }); toast('Settings saved.'); viewSettings(body, generation); } catch (err) { toast(err.message); }
+          try { await post('settings', { settings: patch, confirmRetention }); toast('Settings saved.'); viewSettings(body, generation); } catch (err) { toast(err.message); }
         });
       }
       fill(body, form);

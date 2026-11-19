@@ -250,7 +250,7 @@ test('a change that does not touch an engine keeps skip marks', async (t) => {
   svc.setCfg({ video: false });
   const vid = add('v.mp4', 'vid:V:1');
   await drain(an);
-  svc.setCfg({ trashRetentionDays: 7 });
+  svc.setCfg({ trashRetentionDays: 7 }, null, { confirmRetention: true });
   assert.equal(dx.feature(vid).error, 'skip: video not analysed');
 });
 
