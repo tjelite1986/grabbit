@@ -738,7 +738,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
     const headers = { accept: req.headers.accept || '*/*', ...authHeaders(cur, lane) };
     if (route.media && req.headers.range) headers.range = req.headers.range;
-    for (const k of ['if-none-match', 'if-modified-since']) if (req.headers[k]) headers[k] = req.headers[k];
+    // Validators go upstream for media only. A JSON answer is judged after it
+    // is read, so an upstream 304 would answer before the filter.
+    if (route.media) for (const k of ['if-none-match', 'if-modified-since']) if (req.headers[k]) headers[k] = req.headers[k];
     let body = null;
     const src = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
     if ('audience' in src && (route.body || []).includes('audience') && !AUDIENCE_WRITES.includes(src.audience)) {
@@ -791,7 +793,10 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     }
     let r;
     try {
-      r = await upstream(req, { method: req.method, path: `/${rest}${qs}`, headers, body, signal: res });
+      // A HEAD on a JSON route is asked upstream as a GET and goes through the
+      // same filter, so it answers what the GET would (Express sends no body).
+      const method = req.method === 'HEAD' && !route.media ? 'GET' : req.method;
+      r = await upstream(req, { method, path: `/${rest}${qs}`, headers, body, signal: res });
     } catch (e) {
       log.warn(`[egram] ${req.method} ${rest}: ${e.message}`);
       return fail(res, 424, 'Elitogram is not reachable right now');
@@ -816,7 +821,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
         return fail(res, 404, 'Not found');
       }
     }
-    if (status === 304 || req.method === 'HEAD' || status === 204) {
+    if ((route.media && (status === 304 || req.method === 'HEAD')) || status === 204) {
       r.resume();
       for (const k of ['etag', 'last-modified']) if (r.headers[k]) res.setHeader(k, r.headers[k]);
       return res.status(status).end();

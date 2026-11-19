@@ -392,6 +392,40 @@ test('a post stays actionable after the filter drops an 18+ mention from it', as
   }
 });
 
+test('a HEAD on a JSON route answers what the filtered GET would', async () => {
+  adultSet = new Set(['secretly18']);
+  handlers['/api/posts/31'] = json(200, { id: 31, caption: '', author: { handle: 'secretly18' }, media: [], audience: 'general' }, { etag: '"j31"' });
+  handlers['/api/posts/32'] = json(200, { id: 32, caption: '', author: { handle: 'ann' }, media: [], audience: 'general' }, { etag: '"j32"' });
+  try {
+    for (const id of [31, 32]) {
+      const get = await call('GET', `/api/egram/api/posts/${id}`);
+      const getBody = await get.text();
+      const before = seen.length;
+      const head = await call('HEAD', `/api/egram/api/posts/${id}`);
+      assert.equal(head.status, get.status, `${id}`);
+      assert.equal(await head.text(), '', `${id}: HEAD carries no body`);
+      assert.equal(head.headers.get('content-length'), String(Buffer.byteLength(getBody)), `${id}`);
+      assert.equal(head.headers.get('etag') === '"j31"' || head.headers.get('etag') === '"j32"', false, 'no upstream validator');
+      const asked = seen.slice(before).filter((q) => !q.url.startsWith('/api/creator-identities'));
+      assert.deepEqual(asked.map((q) => q.method), ['GET']);
+    }
+    assert.equal((await call('HEAD', '/api/egram/api/posts/31')).status, 404);
+    // A JSON route never passes a validator upstream, so an upstream 304 cannot skip the filter.
+    await call('GET', '/api/egram/api/posts/31', { headers: { 'if-none-match': '"j31"' } });
+    assert.equal(last().headers['if-none-match'], undefined);
+    handlers['/api/posts/33'] = (req, res) => { res.writeHead(304, { etag: '"j33"' }); res.end(); };
+    assert.notEqual((await call('GET', '/api/egram/api/posts/33')).status, 304);
+    // Media HEAD still goes upstream as HEAD with its size.
+    handlers['/m/44'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'ann', 'content-length': '8' });
+    const mh = await call('HEAD', '/api/egram/m/44');
+    assert.equal(mh.status, 200);
+    assert.equal(last().method, 'HEAD');
+  } finally {
+    adultSet = new Set();
+    for (const k of ['/api/posts/31', '/api/posts/32', '/api/posts/33', '/m/44']) delete handlers[k];
+  }
+});
+
 test('media: refused without the right audience header, passed with it', async () => {
   handlers['/m/10'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'ann', 'content-disposition': 'attachment; filename="a.jpg"' });
   handlers['/m/11'] = file({ 'x-egram-audience': 'unknown', 'x-egram-creator': 'bob' });
