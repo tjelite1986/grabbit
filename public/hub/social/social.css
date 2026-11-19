@@ -127,6 +127,15 @@ html.sg-snap .sg-feed .sg-carousel { max-height: calc(100vh - var(--sg-snap-top,
   display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px;
   background: var(--panel); border: 1px solid var(--line); text-decoration: none;
 }
+.sg-creator-item { position: relative; display: grid; }
+.sg-creator-item .sg-creator { padding-right: 56px; }
+.sg-creator-copy {
+  position: absolute; top: 50%; right: 8px; transform: translateY(-50%); width: 40px; height: 40px;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 10px;
+  background: transparent; border: 1px solid var(--line); color: inherit; cursor: pointer;
+}
+.sg-creator-copy:hover, .sg-creator-copy:focus-visible { background: var(--panel-2); }
+.sg-creator-copy.on { border-color: var(--accent, currentColor); }
 .sg-creator-name { display: grid; min-width: 0; flex: 1; }
 .sg-creator-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sg-creator-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }

@@ -300,3 +300,13 @@ test('3.0.3: @mentions link only to the creators the post names, and a creator h
   // A limited profile offers no Follow (Elitogram refuses it).
   assert.match(js, /const follow = c\.limited \? null :/);
 });
+
+test('3.0.3: every row of the Creators list has a copy-username button beside its link', () => {
+  assert.match(js, /copy: 'M9 9h11v11H9zM5 15H4V4h11v1'/);
+  // The button is a sibling of the row's link (a button inside a link would also open the profile).
+  assert.match(js, /h\('div', \{ class: 'sg-creator-item' \},\s*h\('a', \{ class: 'sg-creator'/);
+  assert.match(js, /copyHandleButton\(c\.handle\)\), \{ emptyText: 'No general creators yet\.' \}/);
+  // The bare handle is copied, without @.
+  assert.match(js, /await navigator\.clipboard\.writeText\(handle\);/);
+  assert.match(css, /\.sg-creator-copy \{/);
+});

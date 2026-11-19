@@ -26,6 +26,7 @@
 
     // --- Icons (stroke paths, 24 px grid) ------------------------------------
     const PATHS = {
+      copy: 'M9 9h11v11H9zM5 15H4V4h11v1',
       heart: 'M12 21s-8-5.3-8-11a5 5 0 0 1 8-3.9A5 5 0 0 1 20 10c0 5.7-8 11-8 11z',
       bookmark: 'M6 3h12v18l-6-4-6 4z',
       folder: 'M3 6h6l2 2h10v11H3z',
@@ -1376,6 +1377,21 @@
       return [pageHead('Search', h('span', { class: 'muted' }, `"${q}"`)), top, pager(grid, (cur) => call(`explore?q=${enc(q)}${cur ? `&cursor=${enc(cur)}` : ''}`), (t, c) => tile(t, null, null, c), { emptyText: 'No posts match.' })];
     }
 
+    // Copies a creator's username (the handle, without @) in one tap. It sits
+    // beside the row's link, not inside it, so the tap never opens the profile.
+    function copyHandleButton(handle) {
+      const btn = h('button', { type: 'button', class: 'sg-creator-copy', title: `Copy username ${handle}`, 'aria-label': `Copy username ${handle}` }, ic('copy', 18));
+      btn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(handle);
+          say(`Copied ${handle}`);
+          btn.classList.add('on');
+          setTimeout(() => btn.classList.remove('on'), 1500);
+        } catch { say('Could not copy the username'); }
+      });
+      return btn;
+    }
+
     function viewCreators(r) {
       const q = (r.params.get('q') || '').slice(0, 80);
       const box = h('div', { class: 'sg-creators' });
@@ -1387,10 +1403,12 @@
         pager(box, async (cur) => {
           const d = await call(`creators?${new URLSearchParams(Object.entries({ q, offset: cur || '' }).filter(([, v]) => v))}`);
           return { items: d.items || [], next: d.next };
-        }, (c) => h('a', { class: 'sg-creator', href: link(`creator/${enc(c.handle)}`) },
-          avatar(c.avatar, c.display_name || c.handle, null, 48),
-          h('span', { class: 'sg-creator-name' }, h('b', null, c.display_name || c.handle), h('span', { class: 'muted small' }, `@${c.handle}`)),
-          h('span', { class: 'muted small' }, plural(c.post_count, 'post', 'posts'))), { emptyText: 'No general creators yet.' }),
+        }, (c) => h('div', { class: 'sg-creator-item' },
+          h('a', { class: 'sg-creator', href: link(`creator/${enc(c.handle)}`) },
+            avatar(c.avatar, c.display_name || c.handle, null, 48),
+            h('span', { class: 'sg-creator-name' }, h('b', null, c.display_name || c.handle), h('span', { class: 'muted small' }, `@${c.handle}`)),
+            h('span', { class: 'muted small' }, plural(c.post_count, 'post', 'posts'))),
+          copyHandleButton(c.handle)), { emptyText: 'No general creators yet.' }),
       ];
     }
 
