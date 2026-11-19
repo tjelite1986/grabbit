@@ -65,7 +65,10 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     const b = req.body || {};
     if (!KEY_RE.test(String(b.key))) throw new DupeError('Not a group key');
     if (!GROUP_ACTIONS.includes(b.action)) throw new DupeError('Unknown action');
-    const keep = b.keep == null ? [] : idList(b.keep, /^[1-9][0-9]{0,15}$/, 500).map(Number);
+    // An empty list means no choice (Mark known sends one), which only
+    // keep_selected needs.
+    const none = b.keep == null || (Array.isArray(b.keep) && !b.keep.length && b.action !== 'keep_selected');
+    const keep = none ? [] : idList(b.keep, /^[1-9][0-9]{0,15}$/, 500).map(Number);
     const note = b.note == null ? null : String(b.note).slice(0, 500);
     return service.act(b.key, b.action, { keep, by: who(req), note });
   }));

@@ -4,7 +4,9 @@
 .dm-head h1 { margin: 0 0 6px; }
 .dm-head-note { margin-left: auto; }
 .dm-tabs {
-  display: flex; gap: 4px; margin: 6px 0 18px; padding: 4px; overflow-x: auto; scrollbar-width: thin;
+  /* The tabs wrap instead of scrolling, so Trash and Settings are never
+     hidden off the edge of a narrow screen. */
+  display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 18px; padding: 4px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
 }
 .dm-tab {
@@ -70,6 +72,12 @@ a.dm-stat:hover { border-color: var(--accent); }
 }
 .dm-iconbtn[aria-pressed='true'] { border-color: var(--accent); color: #fff; background: var(--accent); }
 .dm-selectbar, .dm-batch { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.dm-destructive { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; padding-left: 12px; border-left: 1px solid var(--line); }
+.dm-danger-solid { background: var(--bad); border: 1px solid var(--bad); color: #fff; }
+.dm-danger-solid:hover:not(:disabled) { filter: brightness(1.1); }
+@media (pointer: coarse) {
+  .dm-selectbar .btn, .dm-destructive .btn, .dm-btns .btn { min-height: 44px; }
+}
 .dm-batch {
   position: sticky; top: 8px; z-index: 5; padding: 10px 12px; border-radius: 12px;
   background: #241d45; border: 1px solid var(--accent); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);

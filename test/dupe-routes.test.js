@@ -356,3 +356,12 @@ test('server.js puts v2 behind the owner session and refuses cross-site requests
   });
   assert.ok(r.status < 500, `status ${r.status}`);
 });
+
+test('a group action without a choice accepts an empty keep list; keep_selected still needs one', async (t) => {
+  const s = await mount(t);
+  const r = await s.post('/groups/action', { key: `exact:${SHA}`, action: 'mark_known', keep: [] });
+  assert.equal(r.status, 200, 'Mark known sends keep: []');
+  const [, action, opts] = s.service.calls.find((c) => c.name === 'act').args;
+  assert.equal(action, 'mark_known');
+  assert.deepEqual(opts.keep, []);
+});

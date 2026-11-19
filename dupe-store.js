@@ -20,7 +20,9 @@
 //   holds the file; Grabbit holds the record). Grabbit's own trash stays in
 //   items.db dupe_trash; trash_meta adds the 3.0.4 fields to those rows.
 // - ops: a journal for operations that touch an app and Grabbit's records, so
-//   an interrupted one is visible and can be finished or undone.
+//   an interrupted one is visible ("Unfinished app operations"). The owner
+//   checks the item in the app and marks the operation checked; Grabbit does
+//   not finish or undo it on its own.
 // - scan_history, prevention: what ran and what the download check found.
 
 const fs = require('fs');

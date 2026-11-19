@@ -4648,7 +4648,10 @@ app.post('/api/hub/dupes/remove', async (req, res) => {
   if (dupeRemoveBusy) return res.status(409).json({ ok: false, error: 'Another removal is running' });
   dupeRemoveBusy = true;
   try {
-    const trashId = await DUPE_TRASH.remove(id, { by: actorOf(req) });
+    // Same lock as the v2 actions: prevention, a retention purge or a v2
+    // removal never decides on the same group while this one runs.
+    const run = () => DUPE_TRASH.remove(id, { by: actorOf(req) });
+    const trashId = DUPE_SERVICE ? await DUPE_SERVICE.exclusive('remove', run) : await run();
     console.log(`dupes: file ${id} moved to the trash (entry ${trashId}) by ${actorOf(req) || 'owner'}`);
     res.json({ ok: true, trashId });
   } catch (e) {
@@ -4668,7 +4671,8 @@ app.post('/api/hub/dupes/remove-all', async (req, res) => {
   if (!dryRun && dupeRemoveBusy) return res.status(409).json({ ok: false, error: 'Another removal is running' });
   if (!dryRun) dupeRemoveBusy = true;
   try {
-    const r = await DUPE_TRASH.removeAll({ by: actorOf(req), dryRun, sha256s: body.sha256 ? [String(body.sha256)] : null });
+    const run = () => DUPE_TRASH.removeAll({ by: actorOf(req), dryRun, sha256s: body.sha256 ? [String(body.sha256)] : null });
+    const r = DUPE_SERVICE && !dryRun ? await DUPE_SERVICE.exclusive('remove all', run) : await run();
     if (!dryRun) console.log(`dupes: ${r.files} copies (${r.bytes} bytes) moved to the trash by ${actorOf(req) || 'owner'}, ${r.failed.length} refused`);
     res.json({ ok: true, dryRun, ...r });
   } catch (e) {

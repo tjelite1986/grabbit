@@ -836,3 +836,61 @@ test('a restore that arrives while another operation holds the lock is refused w
   assert.equal(rr.done.length, 1);
   assert.ok(fs.existsSync(path.join(own, 'b.mp4')));
 });
+
+test('the batch summary counts only copies that move to the trash; merges and app links are listed apart', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  const ad = stubAdapter();
+  adapters.set(ctx.tik, ad);
+  const { own, tik, svc, scan } = ctx;
+  const body = 'one grabbit, two tik';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  write(path.join(own, 'g.mp4'), body, 3000);
+  await scan();
+  const g = exactGroup(svc, body);
+  const m = byName(g);
+  assert.equal(m['g.mp4'].action, 'trash');
+  assert.equal(m['two.mp4'].action, 'link');
+  const s = await svc.batch({ keys: [g.key], action: 'trash_extras', dryRun: true });
+  assert.equal(s.files, 1, 'only the Grabbit copy moves');
+  assert.equal(s.otherActions, 1);
+  assert.deepEqual(s.apps, ['Grabbit'], 'TikShortis is not named: nothing moves there');
+  const r = await svc.batch({ keys: [g.key], action: 'trash_extras', dryRun: false, expect: { files: 1 } });
+  assert.equal(r.files, 1);
+  assert.deepEqual(ad.calls, [], 'no app link as a side effect');
+  assert.ok(!fs.existsSync(path.join(own, 'g.mp4')));
+  assert.ok(fs.existsSync(path.join(tik, 'two.mp4')));
+});
+
+test('an app that answers a merge without a usable id leaves the operation pending and records nothing', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  adapters.set(ctx.tik, stubAdapter({ link: () => ({ ok: true }) }));
+  const { tik, svc, scan, dx } = ctx;
+  const body = 'answer without id';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  await scan();
+  const r = await svc.act(exactGroup(svc, body).key, 'merge');
+  assert.equal(r.done.length, 0);
+  assert.match(r.refused[0].error, /without a valid entry id/);
+  assert.deepEqual(dx.opsRecent().map((o) => o.state), ['pending']);
+  assert.deepEqual(dx.appTrashHeld(), []);
+});
+
+test('a merged name keeps its hash and its library link without waiting for a new hash pass', async (t) => {
+  const { own, svc, scan, s } = setup(t);
+  const body = 'merged keeps link';
+  s.upsert({ key: 'id:x:21', filename: 'a.mp4', creator: 'ann' });
+  s.upsert({ key: 'id:x:22', filename: 'b.mp4', creator: 'bob' });
+  write(path.join(own, 'a.mp4'), body, 1000);
+  write(path.join(own, 'b.mp4'), body, 2000);
+  await scan();
+  const row = () => s.raw.prepare('SELECT sha256, link, item_id FROM file_hashes WHERE rel = ? AND gone_at IS NULL').get('b.mp4');
+  const before = row();
+  assert.equal(before.link, 'filename');
+  const r = await svc.act(exactGroup(svc, body).key, 'merge', { by: 'owner' });
+  assert.equal(r.done.length, 1);
+  assert.deepEqual(row(), before, 'same hash and item link right after the merge');
+});

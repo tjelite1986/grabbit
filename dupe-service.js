@@ -500,6 +500,8 @@ class DupeService {
   // The keys of every group matching a filter (Select all matching filter).
   matchingKeys(q) {
     const all = this.list({ ...q, limit: 200, offset: 0 });
+    // Never a silent cut: the owner would act on part of what they selected.
+    if (all.total > MAX_BATCH_GROUPS) throw new DupeError(`${all.total} groups match; narrow the filter to at most ${MAX_BATCH_GROUPS}`);
     const keys = [];
     for (let off = 0; off < all.total && keys.length < MAX_BATCH_GROUPS; off += 200) {
       keys.push(...this.list({ ...q, limit: 200, offset: off }).items.map((g) => g.key));
@@ -699,6 +701,12 @@ class DupeService {
       const opId = this.dx.opBegin(ad.id, 'link', { keep: target.rel, drop: m.rel, sha256: m.sha256 }, by, this.now());
       try {
         const r = await ad.link(target.rel, m.rel, m.sha256);
+        // The answer names the held entry. Without a usable id there is
+        // nothing to restore or purge later, yet the app may have merged:
+        // the operation stays pending for the owner to check.
+        if (!r || !Number.isInteger(r.id) || r.id < 1 || (r.uid != null && !/^[A-Za-z0-9_-]{1,64}$/.test(String(r.uid)))) {
+          throw new AdapterError(`${ad.app} answered the merge without a valid entry id`, { status: 424, stalled: true, fix: `Check the item in ${ad.app}; it may have been merged.` });
+        }
         const tid = this.dx.appTrashAdd({
           adapter: ad.id, ref: r.uid ? `${r.id}:${r.uid}` : String(r.id), root: m.root, rel: m.rel, sha256: m.sha256, bytes: m.bytes,
           keep_root: target.root, keep_rel: target.rel, reason: 'Merged in the app (both posts kept)', kind: m.kind, audience: m.audience, app: ad.app, by,
@@ -728,7 +736,7 @@ class DupeService {
     if (list.length > MAX_BATCH_GROUPS) throw new DupeError(`At most ${MAX_BATCH_GROUPS} groups at once`);
     const all = new Map(this.build().groups.map((g) => [g.key, g]));
     const groups = list.map((k) => all.get(k)).filter(Boolean);
-    const summary = { groups: groups.length, files: 0, bytes: 0, apps: new Set(), blocked: [], similarSkipped: 0 };
+    const summary = { groups: groups.length, files: 0, bytes: 0, apps: new Set(), blocked: [], similarSkipped: 0, otherActions: 0 };
     for (const g of groups) {
       if (action !== 'trash_extras') { summary.files += g.files; continue; }
       if (g.match !== 'exact') { summary.similarSkipped++; continue; }
@@ -736,7 +744,11 @@ class DupeService {
       const counted = new Set(kept ? [`${kept.dev}:${kept.ino}`] : []);
       for (const m of g.members) {
         if (m.recommended) continue;
-        if (m.suggested && m.action) {
+        // Only copies this action moves are counted: a suggested merge or
+        // app link is its own confirmed action and is listed apart.
+        if (m.suggested && m.action && m.action !== 'trash') {
+          summary.otherActions++;
+        } else if (m.suggested && m.action) {
           summary.files++;
           const unit = `${m.dev}:${m.ino}`;
           if (!counted.has(unit)) {
@@ -1023,7 +1035,8 @@ class DupeService {
     for (const { ad, members } of byRoot.values()) {
       try {
         const r = await ad.lookup(members.map((m) => m.rel));
-        for (const m of members) out[m.id] = { app: ad.app, ...(r.get(m.rel) || { refs: [] }) };
+        // A copy the app left out of its answer is unknown, not unused.
+        for (const m of members) out[m.id] = { app: ad.app, ...(r.get(m.rel) || { error: `${ad.app} did not report on this copy` }) };
       } catch (e) {
         for (const m of members) out[m.id] = { app: ad.app, error: e.message };
       }

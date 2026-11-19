@@ -120,11 +120,27 @@ function sha256Of(file) {
 
 const rand = () => crypto.randomBytes(4).toString('hex');
 
+// The first `max` BYTES of a name, cut on a code-point boundary: file systems
+// limit a name to 255 bytes, and a CJK or emoji name is three to four bytes a
+// character, so a cut by characters can still be too long.
+function clampName(name, max) {
+  if (Buffer.byteLength(name) <= max) return name;
+  let out = '';
+  let used = 0;
+  for (const ch of name) {
+    const n = Buffer.byteLength(ch);
+    if (used + n > max) break;
+    out += ch;
+    used += n;
+  }
+  return out;
+}
+
 // Copies `from` to a new file `to` without blocking the event loop: streamed
 // to a .part beside the target, flushed, hashed on the way and compared with
 // `sha256` (when given), then renamed into place. The source is not touched.
 async function copyVerified(from, to, sha256 = null) {
-  const part = path.join(path.dirname(to), `.${path.basename(to).slice(0, 180)}.${rand()}.part`);
+  const part = path.join(path.dirname(to), `.${clampName(path.basename(to), 180)}.${rand()}.part`);
   try {
     const h = crypto.createHash('sha256');
     await new Promise((resolve, reject) => {
@@ -276,9 +292,21 @@ class DupeTrash {
     return this.moveToTrash(row, doomed, { by, keepRow, reason });
   }
 
+  // Records a name whose inode changed but whose bytes are known (the
+  // verified sha256): the row keeps its hash and its library link, instead
+  // of dropping out of its group until the next hash pass.
+  seenSame(row, rel, abs) {
+    try {
+      const seen = this.store.fileSeen(row.root, rel, fs.statSync(abs), this.now());
+      if (seen && seen.hash && seen.row && row.sha256 && this.store.fileHashed) {
+        this.store.fileHashed(seen.row.id, { sha256: row.sha256, link: row.link || 'none', itemId: row.item_id ?? null }, this.now());
+      }
+    } catch {}
+  }
+
   trashNameFor(row) {
     fs.mkdirSync(this.dir, { recursive: true });
-    return `${this.now()}-${row.id}-${rand()}-${path.basename(row.rel).slice(0, 150)}`;
+    return `${this.now()}-${row.id}-${rand()}-${clampName(path.basename(row.rel), 150)}`;
   }
 
   record(row, trashName, { by, keepRow, reason }) {
@@ -318,7 +346,7 @@ class DupeTrash {
     // The live name is never missing: a link to the kept file waits beside
     // it, the trash gets its own copy of the original (the original stays),
     // and one rename swaps the name over to the kept file.
-    const tmp = path.join(path.dirname(doomed.abs), `.${path.basename(doomed.abs).slice(0, 180)}.merge-${rand()}`);
+    const tmp = path.join(path.dirname(doomed.abs), `.${clampName(path.basename(doomed.abs), 180)}.merge-${rand()}`);
     try {
       fs.linkSync(kept.abs, tmp);
     } catch (e) {
@@ -350,7 +378,7 @@ class DupeTrash {
       this.store.trashPurged(id, this.now());
       throw new TrashError(`The files could not share one copy (${e.code || e.message}); nothing changed`);
     }
-    try { this.store.fileSeen(row.root, row.rel, fs.statSync(doomed.abs), this.now()); } catch {}
+    this.seenSame(row, row.rel, doomed.abs);
     return id;
   }
 
@@ -472,12 +500,17 @@ class DupeTrash {
     if (!f) throw new TrashError('The trashed file is missing');
     const from = f.abs;
     // Every check comes before the first change: the folder must be inside
-    // the root without a symlink on the way.
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    // the root without a symlink on the way. A missing folder is checked at
+    // its nearest existing parent, so no folder is made through a symlink.
     const realRoot = fs.realpathSync(root);
-    if (fs.realpathSync(path.dirname(abs)) !== path.join(realRoot, path.relative(root, path.dirname(abs)))) {
-      throw new TrashError('Path runs through a symlink');
-    }
+    const inside = (dir) => {
+      try { return fs.realpathSync(dir) === path.join(realRoot, path.relative(root, dir)); } catch { return false; }
+    };
+    let probe = path.dirname(abs);
+    while (probe !== root && !taken(probe)) probe = path.dirname(probe);
+    if (!inside(probe)) throw new TrashError('Path runs through a symlink');
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    if (!inside(path.dirname(abs))) throw new TrashError('Path runs through a symlink');
     // A merged copy: its name now points at the kept file (a hard link). The
     // original replaces that link in one rename, so the name never goes
     // missing; it is staged beside it first (the trash may be on another disk).
@@ -495,7 +528,7 @@ class DupeTrash {
     if (replaceLink) {
       // The trash keeps its copy until the original is back under its name:
       // a crash at any step leaves at worst one extra copy, never none.
-      const stage = path.join(path.dirname(abs), `.${path.basename(abs).slice(0, 180)}.restore-${rand()}`);
+      const stage = path.join(path.dirname(abs), `.${clampName(path.basename(abs), 180)}.restore-${rand()}`);
       await placeCopy(from, stage, t.sha256);
       // The staging may have taken a while: a file written to that name
       // meanwhile is newer than the link we checked and must not be replaced.

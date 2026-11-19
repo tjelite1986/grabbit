@@ -300,3 +300,46 @@ test('a dangling symlink counts as a taken name: moveFile refuses it and restore
   assert.equal(fs.readFileSync(path.join(g, 'b (restored).mp4'), 'utf8'), 'same bytes');
   assert.ok(!fs.existsSync(path.join(trashDir, trash[id - 1].trash_name)));
 });
+
+test('restore makes no folder through a symlinked parent, even when the folder is missing', async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-restore-ln-')));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const g = path.join(dir, 'g');
+  const outside = path.join(dir, 'outside');
+  const trashDir = path.join(dir, 'trash');
+  for (const d of [g, outside, trashDir]) fs.mkdirSync(d);
+  fs.symlinkSync(outside, path.join(g, 'sub'));
+  fs.writeFileSync(path.join(trashDir, 'held'), 'kept bytes');
+  const entry = { id: 1, root: g, rel: path.join('sub', 'new', 'b.mp4'), trash_name: 'held', bytes: 10, sha256: null };
+  const store = { trashGet: () => entry, trashRestored: () => { throw new Error('must not be recorded'); }, fileSeen: () => {} };
+  const t = new DupeTrash({ store, trashDir, rootOf: () => ({ owner: 'grabbit' }), now: () => 5 });
+  await assert.rejects(t.restore(1), /symlink/);
+  assert.deepEqual(fs.readdirSync(outside), [], 'no folder was made outside the root');
+  assert.ok(fs.existsSync(path.join(trashDir, 'held')));
+});
+
+test('a name of multi-byte characters gets a trash name under the 255-byte limit', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-cjk-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const g = path.join(dir, 'g');
+  fs.mkdirSync(g);
+  const long = `${'動画'.repeat(40)}.mp4`; // 240 bytes of CJK + .mp4
+  fs.writeFileSync(path.join(g, 'a.mp4'), 'same bytes');
+  fs.writeFileSync(path.join(g, long), 'same bytes');
+  const sha = require('crypto').createHash('sha256').update('same bytes').digest('hex');
+  const rows = [
+    { id: 1, root: g, rel: 'a.mp4', bytes: 10, sha256: sha, mtime_ms: 1, link: 'none', item_id: null },
+    { id: 2, root: g, rel: long, bytes: 10, sha256: sha, mtime_ms: 2, link: 'none', item_id: null },
+  ];
+  const trash = [];
+  const store = {
+    dupeFile: (id) => rows.find((r) => r.id === Number(id)),
+    dupeMembers: () => rows,
+    trashAdd: (x) => (trash.push(x), trash.length),
+    fileGoneNow: () => {},
+  };
+  const t = new DupeTrash({ store, trashDir: path.join(dir, 'trash'), rootOf: () => ({ owner: 'grabbit' }), now: () => 5 });
+  await t.remove(2);
+  assert.ok(Buffer.byteLength(trash[0].trash_name) <= 255, `${Buffer.byteLength(trash[0].trash_name)} bytes`);
+  assert.ok(!fs.existsSync(path.join(g, long)));
+});

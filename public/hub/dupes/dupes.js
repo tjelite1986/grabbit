@@ -420,6 +420,7 @@
               action === 'trash_extras' ? h('li', null, h('b', null, bytes(s.bytes)), ' can be freed once the trash is emptied') : null,
               s.apps.length ? h('li', null, 'Apps: ', s.apps.join(', ')) : null,
               s.similarSkipped ? h('li', null, `${num(s.similarSkipped)} similarity groups left alone: choose those copies yourself`) : null,
+              s.otherActions ? h('li', null, h('b', null, num(s.otherActions)), ' copies need a merge or an app link instead: not included, open the group to do that') : null,
               s.blockedTotal ? h('li', null, h('b', null, num(s.blockedTotal)), ' copies stay (blocked)') : null),
             s.blocked.length ? h('details', { class: 'dm-blocked' }, h('summary', null, 'Why some copies stay'),
               h('ul', null, s.blocked.slice(0, 20).map((b) => h('li', null, h('b', null, b.name), ': ', b.why, b.fix ? h('div', { class: 'muted small' }, b.fix) : null)))) : null,
@@ -830,12 +831,15 @@
         h('button', { class: 'btn small ghost', type: 'button', onclick: () => { d.items.forEach((t) => tsel.add(t.id)); rowsBox.querySelectorAll('.dm-tsel').forEach((c) => { c.checked = true; }); upd(); } }, 'Select all'),
         selN,
         h('button', { class: 'btn small ghost', type: 'button', onclick: () => (tsel.size ? doRestore([...tsel]) : toast('Select something first.')) }, 'Restore selected'),
-        h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => (tsel.size ? doDelete([...tsel]) : toast('Select something first.')) }, 'Delete selected permanently'),
         h('button', { class: 'btn small ghost', type: 'button', disabled: d.summary.files ? null : true, onclick: async () => {
           const ok = await dialog('Restore everything?', [h('p', null, `${plural(d.summary.files, 'file goes', 'files go')} back to where they were.`)], [{ label: 'Restore all', value: true }]);
           if (ok) doRestore([], true);
         } }, 'Restore all'),
-        h('button', { class: 'btn small danger', type: 'button', disabled: d.summary.files ? null : true, onclick: doEmpty }, 'Empty Trash'));
+        // The permanent actions sit apart from the restore ones, so a mis-tap
+        // between them is unlikely; both still ask for confirmation.
+        h('div', { class: 'dm-destructive' },
+          h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => (tsel.size ? doDelete([...tsel]) : toast('Select something first.')) }, 'Delete selected permanently'),
+          h('button', { class: 'btn small dm-danger-solid', type: 'button', disabled: d.summary.files ? null : true, onclick: doEmpty }, 'Empty Trash')));
       const rowsBox = h('ul', { class: 'dm-trash' });
       if (!d.items.length) {
         fill(rowsBox, h('li', { class: 'dm-emptystate' }, ic('trash', 36), h('b', null, d.summary.files ? 'Nothing matches' : 'The trash is empty'),
