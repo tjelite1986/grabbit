@@ -129,7 +129,9 @@ const ROUTES = [
   r('GET', 'api/hashtags'),
   r('GET', `api/hashtags/${TAG}`),
   r('GET', `api/posts/${ID}`),
-  r('PATCH', `api/posts/${ID}`, { body: ['audience', 'caption'], parent: 'path' }),
+  // `author` moves the post to another creator ({ creator: handle } only). The
+  // new creator must pass this lane's checks like a creator page would.
+  r('PATCH', `api/posts/${ID}`, { body: ['audience', 'caption', 'author'], parent: 'path', author: true }),
   r('DELETE', `api/posts/${ID}`, { parent: 'path' }),
   // A new post: multipart (files, caption, creator, audience, adult), streamed
   // as it comes. Elitogram decides the audience: unclassified unless a
@@ -815,6 +817,22 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       }
       if (verdict === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
       if (verdict !== true) return fail(res, 404, 'Not found');
+    }
+    if (route.author && 'author' in src) {
+      // Only a creator handle, canonical, that this lane would show as a
+      // creator page: never an account, an alias or a creator Grabbit has as 18+.
+      const a = src.author;
+      const keys = a && typeof a === 'object' && !Array.isArray(a) ? Object.keys(a) : null;
+      const handle = keys && keys.length === 1 && keys[0] === 'creator' && typeof a.creator === 'string' ? norm(a.creator).replace(/^@/, '') : '';
+      if (!CANONICAL_HANDLE.test(handle)) return fail(res, 400, 'author must name a creator');
+      let verdict;
+      try { verdict = await subjectVerdict(req, cur, lane, handle, res); } catch (e) {
+        log.warn(`[egram] author check ${rest}: ${e.message}`);
+        return fail(res, 424, 'Elitogram is not reachable right now');
+      }
+      if (verdict === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
+      if (verdict !== true) return fail(res, 400, `Unknown creator "${handle}"`);
+      src.author = { creator: handle };
     }
     if (route.upload) return uploadPost(req, res, cur, lane, headers);
     if (req.method !== 'GET' && req.method !== 'HEAD') {

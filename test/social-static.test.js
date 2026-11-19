@@ -56,8 +56,8 @@ test('the Review lane is labelled, opt-in per request, and the only unclassified
   // Only the review pages and links they build ask for the review lane.
   const asks = [...js.matchAll(/lane: 'review'/g)].length;
   // The post viewer's creator and post links keep the lane like the post card's (2 of them),
-  // and so do caption @mention links (1).
-  assert.ok(asks >= 3 && asks <= 15, `lane: 'review' appears ${asks} times`);
+  // and so do caption @mention links (1) and the post menu's "Open the post" (1).
+  assert.ok(asks >= 3 && asks <= 16, `lane: 'review' appears ${asks} times`);
   assert.doesNotMatch(js, /lane=adult|audience: 'unknown'/);
 });
 
@@ -143,7 +143,9 @@ test('notifications, settings and post editing use only allowlisted gateway rout
   assert.match(js, /call\('me', \{ method: 'PATCH', body: \{ display_name: name\.value\.trim\(\), bio: bio\.value \} \}\)/);
   assert.match(js, /call\('me\/password', \{ method: 'POST', body: \{ current: cur\.value, password: next\.value \} \}\)/);
   assert.match(js, /single && p\.can_edit \? ownerBar\(p, lane, caption\)/);
-  assert.match(js, /call\(`posts\/\$\{id\}`, \{ method: 'PATCH', body: \{ caption: text\.value \}, lane \}\)/);
+  assert.match(js, /const body = \{ caption \};\n\s+if \(moving\) body\.author = \{ creator: handle \};/);
+  assert.match(js, /call\(`posts\/\$\{id\}`, \{ method: 'PATCH', body, lane \}\)/);
+  assert.ok(gw.includes("r('PATCH', `api/posts/${ID}`, { body: ['audience', 'caption', 'author'], parent: 'path', author: true })"));
   // The standalone-only list is on the settings page.
   assert.match(js, /'Only in standalone Elitogram'/);
   assert.match(js, /\['upload', 'Upload'\],\n\s+\['notifications', 'Notifications'\],\n\s+\['settings', 'Settings'\],/);
@@ -236,7 +238,7 @@ test('post viewer: vertical snap between posts, more loaded near the end, Back c
   assert.match(body, /if \(!src\.done && active >= src\.items\.length - 4\) src\.more\(\);/);
   assert.match(body, /src\.listeners\.add\(addReels\);/);
   // Every button of a post, on the post.
-  for (const label of ['Like', 'Comments', 'Share', 'Favorite', 'Save to a collection', 'Download this file', 'Zoom', 'Open the post']) {
+  for (const label of ['Like', 'Comments', 'Share', 'Favorite (hold or right-click to save to a collection)', 'Save to a collection', 'Download this file', 'Zoom', 'Open the post', 'More']) {
     assert.ok(body.includes(`'aria-label': '${label}'`), label);
   }
   // Back closes the viewer; Close steps back past its history entry; links push after it.
@@ -344,4 +346,50 @@ test('Back from a page reached through the post viewer opens the viewer again on
   // (Chrome would mark the page skippable and Back would close the app).
   assert.match(js, /if \(!reuseEntry\) history\.pushState\(/);
   assert.match(js, /close\('link'\);\s*location\.assign\(to\);/);
+});
+
+test('Photos and Explore have a layout picker remembered per page under grabbit.*', () => {
+  assert.match(js, /const VIEWS = \[\['auto', 'Auto'\], \['feed', 'Feed'\], \['2', '2'\], \['3', '3'\], \['4', '4'\]\]/);
+  assert.match(js, /localStorage\.getItem\(`grabbit\.social\.view\.\$\{page\}`\)/);
+  assert.match(js, /localStorage\.setItem\(`grabbit\.social\.view\.\$\{page\}`, value\)/);
+  assert.match(js, /viewPicker\('photos', box\)/);
+  assert.match(js, /viewPicker\('explore', grid\)/);
+  // Storage can throw (private mode, blocked site data): both calls are guarded.
+  for (const m of js.matchAll(/localStorage\.\w+\([^\n]*/g)) assert.match(m[0], /grabbit\.social\.view/);
+  assert.match(js, /try \{\s*const v = localStorage\.getItem/);
+  assert.match(js, /try \{ localStorage\.setItem\(`grabbit\.social\.view/);
+  assert.match(js, /onLeave\(\(\) => \{ gridView = 'auto'; \}\)/);
+  for (const v of ['2', '3', '4', 'feed']) assert.ok(css.includes(`.sg-grid[data-sg-view="${v}"]`), v);
+});
+
+test('bookmark: a hold or right click opens the collections, and the click it ends is swallowed', () => {
+  const start = js.indexOf('function longPress(');
+  const body = js.slice(start, js.indexOf('// --- Tiles', start));
+  assert.match(body, /const HOLD_MS = 500;|HOLD_MS\)/);
+  assert.match(body, /Math\.hypot\(e\.clientX - start\.x, e\.clientY - start\.y\) > 10\) stop\(\)/);
+  assert.match(body, /el\.addEventListener\('click', \(e\) => \{\n\s+if \(!fresh\(\)\) return;\n\s+heldAt = 0;\n\s+e\.preventDefault\(\);\n\s+e\.stopImmediatePropagation\(\);\n\s+\}, true\);/);
+  // A hold whose ending click never came (the sheet covered the button) expires and is reset by the next press.
+  assert.match(body, /const fresh = \(\) => Date\.now\(\) - heldAt < 1500;/);
+  assert.match(body, /el\.addEventListener\('pointerdown', \(e\) => \{\n\s+heldAt = 0;/);
+  assert.match(body, /el\.addEventListener\('contextmenu', \(e\) => \{\n\s+e\.preventDefault\(\);\n\s+if \(fresh\(\)\) return;/);
+  assert.equal([...js.matchAll(/longPress\(favBtn, \(\) => collectionSheet\(id, lane\)\);/g)].length, 2, 'post card and viewer');
+  assert.match(css, /\.sg-fav \{[^}]*-webkit-touch-callout: none/);
+});
+
+test('three-dot menu and Edit post (creator, description, tags)', () => {
+  assert.equal([...js.matchAll(/'aria-label': 'More', title: 'More', 'aria-haspopup': 'dialog', onclick: \(\) => postMenu\(p, lane/g)].length, 2);
+  const menu = js.slice(js.indexOf('function postMenu('), js.indexOf('// --- Sheets and the photo viewer'));
+  for (const label of ['Save to a collection', 'Copy link', 'Share ...', 'Download this file', 'Open the post', 'Open the source', 'Edit post', 'Delete post']) assert.ok(menu.includes(`'${label}'`), label);
+  // Edit and delete only for the author (Elitogram's can_edit), and never inside the viewer.
+  assert.match(js, /edit: p\.can_edit \? \(\) => editPostSheet\(p, lane, caption\) : null,\n\s+remove: p\.can_edit \? \(\) => deletePost\(id, lane\) : null,/);
+  // A list answer has no can_edit: the menu asks the post itself and adds the rows only on can_edit === true.
+  assert.match(js, /ask: p\.can_edit === undefined \? \{ captionEl: caption \} : null,/);
+  assert.match(js, /if \(!d \|\| d\.can_edit !== true \|\| !owner\.isConnected\) return;/);
+  assert.match(js, /postMenu\(p, lane, \{ single: true, source: safeHttps\(p\.source_url\), download: \(\) => dl\.getAttribute\('href'\) \}\)/);
+  const edit = js.slice(js.indexOf('function editPostSheet('), js.indexOf('function postMenu('));
+  // Unchanged or empty creator: no author in the write.
+  assert.match(edit, /const moving = !!handle && handle !== was\.toLowerCase\(\);/);
+  // Where a moved post ended up is asked again through the lane checks.
+  assert.match(edit, /try \{ await call\(`posts\/\$\{id\}`, \{ lane \}\); \} catch \{ still = false; \}/);
+  assert.match(edit, /p\.mentions = d && Array\.isArray\(d\.mentions\) \? d\.mentions : \[\];/);
 });

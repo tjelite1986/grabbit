@@ -42,6 +42,25 @@
 .sg-tile img.sg-broken { visibility: hidden; }
 .sg-badge { position: absolute; top: 6px; right: 6px; color: #fff; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .8)); }
 .sg-photos .sg-tile { aspect-ratio: 3 / 4; }
+/* Layout picker (Photos, Explore): data-sg-view on the grid overrides the responsive columns. */
+.sg-views {
+  display: inline-flex; margin-left: auto; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--panel-2); overflow: hidden;
+}
+.sg-view {
+  min-width: 40px; min-height: 36px; padding: 0 10px; border: 0; background: none; color: inherit;
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.sg-view + .sg-view { border-left: 1px solid var(--line); }
+.sg-view[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.sg-view:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+.sg-grid[data-sg-view="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sg-grid[data-sg-view="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.sg-grid[data-sg-view="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.sg-grid[data-sg-view="feed"] { grid-template-columns: minmax(0, 1fr); gap: 12px; max-width: 640px; margin: 0 auto; }
+.sg-grid[data-sg-view="feed"] .sg-tile { aspect-ratio: auto; min-height: 120px; border-radius: 8px; }
+.sg-grid[data-sg-view="feed"] .sg-tile img { height: auto; max-height: 85vh; object-fit: contain; }
+.sg-grid[data-sg-view="feed"] .sg-tile:hover img { transform: none; }
 
 /* Feed and a single post */
 /* Grabbit 3.0.3: the feed runs nearly edge to edge like Elitogram's, and it
@@ -197,6 +216,15 @@ html.sg-snap .sg-feed .sg-carousel { max-height: calc(100vh - var(--sg-snap-top,
 .sg-row span:nth-child(2) { flex: 1; }
 .sg-sheet-body .sg-inline { margin: 10px 0 0; }
 .sg-share-row { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font: inherit; text-align: left; }
+/* The three-dot menu of a post */
+.sg-menu { display: grid; }
+.sg-menu-row { width: 100%; min-height: 44px; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font: inherit; text-align: left; text-decoration: none; }
+.sg-menu-row:last-child { border-bottom: 0; }
+.sg-menu-row:hover { background: var(--panel-2); }
+.sg-menu-row:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+.sg-menu-danger { color: var(--bad); }
+/* A held bookmark opens the collections; no text selection or system callout on the way. */
+.sg-fav { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
 .sg-share-url { width: 100%; margin: 10px 0 4px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; color: var(--text); }
 
 /* Comments: the list scrolls, the field stays at the bottom of the sheet */

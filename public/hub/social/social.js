@@ -51,6 +51,8 @@
       edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
       trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',
       send: 'M4 12l16-8-6 16-2-7z',
+      more: 'M4 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM11 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM18 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0z',
+      link: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1',
     };
     function ic(name, size = 20) {
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -406,6 +408,47 @@
       return wrap;
     }
 
+    // --- Long press ----------------------------------------------------------------
+    // Holding a button (half a second, finger or mouse) or a right click runs
+    // `fn` instead of the button's tap. The click that ends a hold is swallowed,
+    // so holding the bookmark never also toggles the favorite.
+    const HOLD_MS = 500;
+    function longPress(el, fn) {
+      let timer = null;
+      let start = null;
+      // When the last hold fired. The sheet it opens covers the button, so the
+      // click that ends the hold may never reach it: a stale hold must not
+      // swallow a later tap or right click.
+      let heldAt = 0;
+      const fresh = () => Date.now() - heldAt < 1500;
+      const stop = () => { clearTimeout(timer); timer = null; };
+      el.addEventListener('pointerdown', (e) => {
+        heldAt = 0;
+        stop();
+        if (e.button !== 0) return;
+        start = { x: e.clientX, y: e.clientY };
+        timer = setTimeout(() => { timer = null; heldAt = Date.now(); fn(); }, HOLD_MS);
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (timer && start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) stop();
+      });
+      for (const t of ['pointerup', 'pointercancel', 'pointerleave']) el.addEventListener(t, stop);
+      el.addEventListener('click', (e) => {
+        if (!fresh()) return;
+        heldAt = 0;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }, true);
+      // Right click on a desktop; Android also sends it for a held finger,
+      // after the hold already fired.
+      el.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (fresh()) return;
+        stop();
+        fn();
+      });
+    }
+
     // --- Tiles -------------------------------------------------------------------
     // A tile in a pager's grid (ctx from the pager) opens the full-screen post
     // viewer on a plain click; the address still opens the post page in a new
@@ -420,10 +463,43 @@
         openPosts(ctx.src, ctx.src.els.indexOf(e.currentTarget), lane);
       } : null;
       return h('a', { class: 'sg-tile', href: link(`post/${id}`, { ...(query || {}), lane: lane === 'review' ? 'review' : null }), 'aria-label': `Post by ${t.author_handle || 'unknown'}`, onclick: open },
-        h('img', { alt: '', src: thumbUrl(mid, lane), loading: 'lazy', decoding: 'async', 'data-media-bg': '1', onerror: (e) => e.currentTarget.classList.add('sg-broken') }),
+        h('img', { alt: '', src: gridSrc(mid, lane), 'data-sg-mid': mid, 'data-sg-lane': lane || null, loading: 'lazy', decoding: 'async', 'data-media-bg': '1', onerror: (e) => e.currentTarget.classList.add('sg-broken') }),
         t.has_video ? h('span', { class: 'sg-badge' }, ic('play', 16)) : t.count > 1 ? h('span', { class: 'sg-badge' }, ic('stack', 16)) : null);
     }
     const tileGrid = () => h('div', { class: 'sg-grid' });
+
+    // --- Grid layout picker ------------------------------------------------------
+    // Photos and Explore each remember their own layout in localStorage
+    // (grabbit.social.view.<page>). 'auto' is the responsive grid, 'feed' one
+    // column of uncropped images, 2/3/4 a fixed column count. Tiles read
+    // gridView for their thumbnail size; leave() resets it for other pages.
+    const VIEWS = [['auto', 'Auto'], ['feed', 'Feed'], ['2', '2'], ['3', '3'], ['4', '4']];
+    let gridView = 'auto';
+    const gridSrc = (mid, lane) => thumbUrl(mid, lane, gridView === 'feed' ? 1080 : null);
+    function savedView(page) {
+      try {
+        const v = localStorage.getItem(`grabbit.social.view.${page}`);
+        return VIEWS.some(([k]) => k === v) ? v : 'auto';
+      } catch { return 'auto'; } // storage blocked: default layout
+    }
+    function viewPicker(page, box) {
+      gridView = savedView(page);
+      box.dataset.sgView = gridView;
+      onLeave(() => { gridView = 'auto'; });
+      const buttons = VIEWS.map(([value, label]) => h('button', {
+        type: 'button', class: 'sg-view', 'data-view': value, 'aria-pressed': String(value === gridView),
+        'aria-label': value === 'auto' || value === 'feed' ? `${label} layout` : `${label} columns`,
+        onclick: () => {
+          if (value === gridView) return;
+          gridView = value;
+          box.dataset.sgView = value;
+          for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.view === value));
+          for (const img of box.querySelectorAll('img[data-sg-mid]')) img.src = gridSrc(img.dataset.sgMid, img.dataset.sgLane || null);
+          try { localStorage.setItem(`grabbit.social.view.${page}`, value); } catch { /* storage blocked: layout lasts this visit */ }
+        },
+      }, label));
+      return h('div', { class: 'sg-views', role: 'group', 'aria-label': 'Layout' }, buttons);
+    }
 
     // "1 post", "2 posts"
     const plural = (n, one, many) => `${num(n)} ${Number(n) === 1 ? one : many}`;
@@ -551,7 +627,8 @@
           likeN.textContent = d.like_count ? num(d.like_count) : '';
         } catch (e) { fail(e); } finally { likeBtn.disabled = false; }
       });
-      const favBtn = h('button', { type: 'button', class: `sg-act${p.favorited ? ' on' : ''}`, 'aria-pressed': p.favorited ? 'true' : 'false', 'aria-label': 'Favorite', title: 'Favorite' }, ic('bookmark', 22));
+      const favBtn = h('button', { type: 'button', class: `sg-act sg-fav${p.favorited ? ' on' : ''}`, 'aria-pressed': p.favorited ? 'true' : 'false', 'aria-label': 'Favorite (hold or right-click to save to a collection)', title: 'Favorite (hold or right-click: collections)' }, ic('bookmark', 22));
+      longPress(favBtn, () => collectionSheet(id, lane));
       favBtn.addEventListener('click', async () => {
         const on = favBtn.getAttribute('aria-pressed') !== 'true';
         favBtn.disabled = true;
@@ -580,7 +657,13 @@
           h('div', { class: 'sg-who' },
             creatorHref ? h('a', { href: creatorHref, class: 'sg-handle' }, a.handle) : h('span', { class: 'sg-handle' }, a.handle || 'unknown'),
             h('span', { class: 'muted small' }, ago(p.created_at), meta && typeof meta.platform === 'string' ? ` · ${meta.platform}` : '')),
-          !single ? h('a', { class: 'sg-act', href: link(`post/${id}`, lane === 'review' ? { lane: 'review' } : null), 'aria-label': 'Open the post', title: 'Open' }, ic('external', 20)) : null),
+          !single ? h('a', { class: 'sg-act', href: link(`post/${id}`, lane === 'review' ? { lane: 'review' } : null), 'aria-label': 'Open the post', title: 'Open' }, ic('external', 20)) : null,
+          h('button', { type: 'button', class: 'sg-act', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'dialog', onclick: () => postMenu(p, lane, {
+            single, source, download: () => dl.getAttribute('href'),
+            edit: p.can_edit ? () => editPostSheet(p, lane, caption) : null,
+            remove: p.can_edit ? () => deletePost(id, lane) : null,
+            ask: p.can_edit === undefined ? { captionEl: caption } : null,
+          }) }, ic('more', 20))),
         stage,
         h('div', { class: 'sg-actions' },
           likeBtn, likeN, commentBtn, commentN, shareBtn, favBtn, saveBtn, dl,
@@ -591,43 +674,143 @@
         lane === 'review' ? classifyPostBar(id) : null);
     }
 
-    // The author (or an admin) of a post: edit its caption or delete it.
+    // The author (or an admin) of a post: edit it or delete it.
     // Elitogram decides who may (can_edit, and again on every write).
     function ownerBar(p, lane, captionEl) {
       const id = intOf(p.id);
-      const edit = h('button', { type: 'button', class: 'btn small ghost', onclick: () => {
-        const text = h('textarea', { rows: '5', maxlength: '5000', 'aria-label': 'Caption' });
-        text.value = p.caption || '';
-        const form = h('form', { class: 'sg-form', onsubmit: async (e) => {
-          e.preventDefault();
-          const btn = form.querySelector('button[type=submit]');
-          btn.disabled = true;
-          try {
-            const d = await call(`posts/${id}`, { method: 'PATCH', body: { caption: text.value }, lane });
-            p.caption = d && typeof d.caption === 'string' ? d.caption : text.value;
-            // An edit relinks the mentions upstream. No list back means nothing
-            // was checked for the new caption, so no @name links (fail closed).
-            p.mentions = d && Array.isArray(d.mentions) ? d.mentions : [];
+      const edit = h('button', { type: 'button', class: 'btn small ghost', onclick: () => editPostSheet(p, lane, captionEl) }, ic('edit', 16), ' Edit post');
+      const del = h('button', { type: 'button', class: 'btn small ghost danger', onclick: (e) => deletePost(id, lane, e.currentTarget) }, ic('trash', 16), ' Delete post');
+      return h('div', { class: 'sg-owner' }, h('span', { class: 'muted small' }, 'Your post'), edit, del);
+    }
+
+    async function deletePost(id, lane, btn) {
+      if (!confirm('Delete this post? It can be restored in standalone Elitogram.')) return;
+      if (btn) btn.disabled = true;
+      try {
+        await call(`posts/${id}`, { method: 'DELETE', lane });
+        closeSheet();
+        say('Post deleted');
+        const card = document.querySelector(`.sg-post[data-post="${Number(id)}"]:not(.single)`);
+        if (card) card.remove();
+        else location.hash = lane === 'review' ? link('review', { tab: 'posts' }) : BASE;
+      } catch (err) { fail(err); if (btn) btn.disabled = false; }
+    }
+
+    // A caption whose last paragraph holds only #tags (what Upload writes)
+    // edits as description + tags; #tags inside the text stay in the text.
+    function splitCaption(caption) {
+      const text = String(caption || '');
+      const parts = text.split(/\n\s*\n/);
+      const lastPart = parts[parts.length - 1].trim();
+      if (parts.length > 1 || /^#/.test(lastPart)) {
+        if (lastPart && /^(#[\p{L}\p{N}_]+[\s,]*)+$/u.test(lastPart)) {
+          return { desc: parts.slice(0, -1).join('\n\n').trim(), tags: tagsOf(lastPart).join(' ') };
+        }
+      }
+      return { desc: text, tags: '' };
+    }
+
+    // Edit post: creator, description and tags. A new creator goes through the
+    // gateway's creator check; Elitogram moves the files and may hold the post
+    // for review (a general creator needs a moderator). Where it ends up is
+    // asked again through the normal lane checks.
+    function editPostSheet(p, lane, captionEl) {
+      const id = intOf(p.id);
+      if (!id) return;
+      const a = p.author || {};
+      const was = a.type === 'creator' && typeof a.handle === 'string' ? a.handle : '';
+      const { input: creator, options } = creatorField('sg-edit-creators', was ? `@${was}` : `Posted as @${a.handle || 'you'}`);
+      creator.value = was;
+      const split = splitCaption(p.caption);
+      const desc = h('textarea', { rows: '5', maxlength: '4000', 'aria-label': 'Description' });
+      desc.value = split.desc;
+      const tags = h('input', { type: 'text', maxlength: '600', placeholder: 'beach, summer, travel', 'aria-label': 'Tags' });
+      tags.value = split.tags;
+      const err = h('p', { class: 'sg-up-err', role: 'alert', hidden: true });
+      const form = h('form', { class: 'sg-form', onsubmit: async (e) => {
+        e.preventDefault();
+        const btn = form.querySelector('button[type=submit]');
+        const tagList = tagsOf(tags.value);
+        const caption = [desc.value.trim(), tagList.map((t) => `#${t}`).join(' ')].filter(Boolean).join('\n\n');
+        const handle = creator.value.trim().replace(/^@/, '').toLowerCase();
+        const moving = !!handle && handle !== was.toLowerCase();
+        const body = { caption };
+        if (moving) body.author = { creator: handle };
+        btn.disabled = true;
+        err.hidden = true;
+        try {
+          const d = await call(`posts/${id}`, { method: 'PATCH', body, lane });
+          if (moving) {
+            closeSheet();
+            // Still shown in this lane? Otherwise say where it went.
+            let still = true;
+            try { await call(`posts/${id}`, { lane }); } catch { still = false; }
+            if (still) { say(`Moved to @${handle}`); hub.rerender(); return; }
+            say(lane === 'review' ? `Moved to @${handle}. It left the Review lane.` : `Moved to @${handle}. It waits in the Review lane until it is classified.`);
+            const card = document.querySelector(`.sg-post[data-post="${id}"]:not(.single)`);
+            if (card) card.remove();
+            else location.hash = lane === 'review' ? link('review', { tab: 'posts' }) : BASE;
+            return;
+          }
+          p.caption = d && typeof d.caption === 'string' ? d.caption : caption;
+          // An edit relinks the mentions upstream. No list back means nothing
+          // was checked for the new caption, so no @name links (fail closed).
+          p.mentions = d && Array.isArray(d.mentions) ? d.mentions : [];
+          if (captionEl) {
             fill(captionEl, captionNodes(p.caption, p.mentions, lane));
             captionEl.hidden = !p.caption;
-            closeSheet();
-            say('Caption saved');
-          } catch (err) { fail(err); btn.disabled = false; }
-        } }, text, h('p', { class: 'muted small' }, 'Write #tags in the caption; they become the post\'s tags.'),
-          h('div', { class: 'sg-inline' }, h('button', { type: 'submit', class: 'btn small' }, 'Save'), h('button', { type: 'button', class: 'btn small ghost', onclick: closeSheet }, 'Cancel')));
-        sheet('Edit caption', form);
-      } }, ic('edit', 16), ' Edit caption');
-      const del = h('button', { type: 'button', class: 'btn small ghost danger', onclick: async (e) => {
-        if (!confirm('Delete this post? It can be restored in standalone Elitogram.')) return;
-        const btn = e.currentTarget;
-        btn.disabled = true;
+          }
+          closeSheet();
+          say('Post saved');
+        } catch (x) {
+          err.textContent = x.message;
+          err.hidden = false;
+          btn.disabled = false;
+        }
+      } },
+        h('label', null, 'Creator', creator, options, h('span', { class: 'muted small' }, was ? 'Another creator moves the post and its files there.' : 'Name a creator to move the post there; empty keeps it as it is.')),
+        h('label', null, 'Description', desc, h('span', { class: 'muted small' }, '@names link to creators.')),
+        h('label', null, 'Tags', tags, h('span', { class: 'muted small' }, 'Separated by spaces or commas. They are added to the caption as #tags.')),
+        err,
+        h('div', { class: 'sg-inline' }, h('button', { type: 'submit', class: 'btn small' }, 'Save'), h('button', { type: 'button', class: 'btn small ghost', onclick: closeSheet }, 'Cancel')));
+      sheet('Edit post', form, { focus: desc });
+    }
+
+    // The three-dot menu of a post: everything the action bar has, plus copy
+    // link and, for the post's author, edit and delete.
+    function postMenu(p, lane, { single = false, source = null, download = null, edit = null, remove = null, ask = null } = {}) {
+      const id = intOf(p.id);
+      if (!id) return;
+      const owner = h('div', { class: 'sg-menu' });
+      const row = (icon, label, fn, cls) => h('button', { type: 'button', class: `sg-row sg-menu-row${cls ? ` ${cls}` : ''}`, onclick: fn }, ic(icon, 18), h('span', null, label));
+      const linkRow = (icon, label, href, extra) => h('a', { class: 'sg-row sg-menu-row', href, ...extra }, ic(icon, 18), h('span', null, label));
+      const dlHref = download ? download() : null;
+      const copy = row('link', 'Copy link', async (e) => {
+        const label = e.currentTarget.querySelector('span');
         try {
-          await call(`posts/${id}`, { method: 'DELETE', lane });
-          say('Post deleted');
-          location.hash = lane === 'review' ? link('review', { tab: 'posts' }) : BASE;
-        } catch (err) { fail(err); btn.disabled = false; }
-      } }, ic('trash', 16), ' Delete post');
-      return h('div', { class: 'sg-owner' }, h('span', { class: 'muted small' }, 'Your post'), edit, del);
+          await navigator.clipboard.writeText(postAddress(id, lane));
+          label.textContent = 'Link copied!';
+          setTimeout(closeSheet, 700);
+        } catch { say('Could not copy the link'); }
+      });
+      sheet('Post', h('div', { class: 'sg-menu' },
+        row('folder', 'Save to a collection', () => collectionSheet(id, lane)),
+        copy,
+        row('share', 'Share ...', () => shareSheet(id, lane)),
+        dlHref ? linkRow('download', 'Download this file', dlHref, { download: '', onclick: () => closeSheet() }) : null,
+        !single ? linkRow('external', 'Open the post', link(`post/${id}`, lane === 'review' ? { lane: 'review' } : null), { onclick: () => closeSheet() }) : null,
+        source ? linkRow('external', 'Open the source', source, { target: '_blank', rel: 'noopener noreferrer', onclick: () => closeSheet() }) : null,
+        edit ? row('edit', 'Edit post', edit) : null,
+        remove ? row('trash', 'Delete post', () => remove(), 'sg-menu-danger') : null,
+        owner), { focus: copy });
+      // Lists do not say who may edit; the post's own answer does (can_edit).
+      if (ask) {
+        call(`posts/${id}`, { lane }).then((d) => {
+          if (!d || d.can_edit !== true || !owner.isConnected) return;
+          p.can_edit = true;
+          fill(owner, row('edit', 'Edit post', () => editPostSheet(p, lane, ask.captionEl)), row('trash', 'Delete post', () => deletePost(id, lane), 'sg-menu-danger'));
+        }).catch(() => {});
+      }
     }
 
     // In the Review lane only: classify one post.
@@ -1133,7 +1316,8 @@
           } catch (e) { fail(e); } finally { liking = false; }
         }
         likeBtn.addEventListener('click', () => like());
-        const favBtn = h('button', { type: 'button', class: `sg-ract sg-fav${p.favorited ? ' on' : ''}`, 'aria-pressed': p.favorited ? 'true' : 'false', 'aria-label': 'Favorite', title: 'Favorite' }, ic('bookmark', 26));
+        const favBtn = h('button', { type: 'button', class: `sg-ract sg-fav${p.favorited ? ' on' : ''}`, 'aria-pressed': p.favorited ? 'true' : 'false', 'aria-label': 'Favorite (hold or right-click to save to a collection)', title: 'Favorite (hold or right-click: collections)' }, ic('bookmark', 26));
+        longPress(favBtn, () => collectionSheet(id, lane));
         favBtn.addEventListener('click', async () => {
           const on = favBtn.getAttribute('aria-pressed') !== 'true';
           favBtn.disabled = true;
@@ -1192,7 +1376,9 @@
           h('button', { type: 'button', class: 'sg-ract', 'aria-label': 'Save to a collection', title: 'Save to a collection', onclick: () => collectionSheet(id, lane) }, ic('folder', 26)),
           dl,
           h('button', { type: 'button', class: 'sg-ract', 'aria-label': 'Zoom', title: 'Zoom', onclick: () => openViewer(viewerItems(), car.index(), lane) }, ic('zoomin', 26)),
-          h('a', { class: 'sg-ract', href: link(`post/${id}`, lane === 'review' ? { lane: 'review' } : null), 'aria-label': 'Open the post', title: 'Open the post', onclick: leaveTo }, ic('external', 24)));
+          h('a', { class: 'sg-ract', href: link(`post/${id}`, lane === 'review' ? { lane: 'review' } : null), 'aria-label': 'Open the post', title: 'Open the post', onclick: leaveTo }, ic('external', 24)),
+          // Inside the viewer the menu has no edit or delete: those redraw the page under it.
+          h('button', { type: 'button', class: 'sg-ract', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'dialog', onclick: () => postMenu(p, lane, { single: true, source: safeHttps(p.source_url), download: () => dl.getAttribute('href') }) }, ic('more', 26)));
         fill(r.el, car.el, info, rail);
         if (r.index === active) activate(r);
       }
@@ -1389,15 +1575,16 @@
       const list = [];
       const box = h('div', { class: 'sg-grid sg-photos' });
       const q = orient ? `orient=${orient}` : '';
+      const picker = viewPicker('photos', box);
       return [
-        pageHead('Photos'),
+        pageHead('Photos', picker),
         chips([['', 'All'], ['portrait', 'Portrait'], ['landscape', 'Landscape'], ['square', 'Square']], orient, (v) => link('photos', { orient: v })),
         pager(box, (cur) => call(`photos?${[q, cur ? `cursor=${enc(cur)}` : ''].filter(Boolean).join('&')}`), (it) => {
           const mid = intOf(it.media_id);
           if (!mid) return null;
           const idx = list.push(it) - 1;
           return h('button', { type: 'button', class: 'sg-tile', 'aria-label': `Photo by ${it.author_handle || 'unknown'}`, onclick: () => openViewer(list, idx) },
-            h('img', { alt: '', src: thumbUrl(mid), loading: 'lazy', decoding: 'async', 'data-media-bg': '1' }));
+            h('img', { alt: '', src: gridSrc(mid), 'data-sg-mid': mid, loading: 'lazy', decoding: 'async', 'data-media-bg': '1', onerror: (e) => e.currentTarget.classList.add('sg-broken') }));
         }, { emptyText: 'No general photos yet.' }),
       ];
     }
@@ -1417,8 +1604,9 @@
       else call('categories').then((d) => { categories = { at: Date.now(), data: d }; if (live(gen)) paintCats(d); }).catch(() => {});
       const qs = (cur) => new URLSearchParams(Object.entries({ kind, orient, q, cursor: cur || '' }).filter(([, v]) => v)).toString();
       const grid = tileGrid();
+      const picker = viewPicker('explore', grid);
       return [
-        pageHead('Explore', q ? h('span', { class: 'muted' }, `"${q}"`) : null),
+        pageHead('Explore', q ? h('span', { class: 'muted' }, `"${q}"`) : null, picker),
         chips([['', 'Everything'], ['image', 'Photos'], ['video', 'Videos']], kind, (v) => link('explore', { ...keep, kind: v })),
         chips([['', 'Any shape'], ['portrait', 'Portrait'], ['landscape', 'Landscape'], ['square', 'Square']], orient, (v) => link('explore', { ...keep, orient: v })),
         q || kind ? null : cats,
@@ -1761,6 +1949,30 @@
       }
       return out.slice(0, 30);
     }
+    // A creator name field with suggestions from both lanes the account may
+    // see (Elitogram resolves the name; the gateway checks it on an edit).
+    function creatorField(listId, placeholder) {
+      const gen = generation;
+      const input = h('input', { type: 'text', list: listId, maxlength: '80', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder, 'aria-label': 'Creator' });
+      const options = h('datalist', { id: listId });
+      let timer = null;
+      input.addEventListener('input', () => {
+        clearTimeout(timer);
+        const q = input.value.trim().replace(/^@/, '');
+        if (q.length < 2) return;
+        timer = setTimeout(async () => {
+          const ask = (lane) => call(`creators?q=${enc(q)}`, { lane }).then((d) => d.items || []).catch(() => []);
+          const [a, b] = await Promise.all([ask(null), ask('review')]);
+          if (!live(gen) || !input.isConnected) return;
+          const seen = new Set();
+          fill(options, [...a, ...b].filter((c) => c && typeof c.handle === 'string' && !seen.has(c.handle) && seen.add(c.handle)).slice(0, 20)
+            .map((c) => h('option', { value: c.handle }, c.display_name && c.display_name !== c.handle ? c.display_name : null)));
+        }, 250);
+      });
+      onLeave(() => clearTimeout(timer));
+      return { input, options };
+    }
+
     function viewUpload() {
       const gen = generation;
       const picked = []; // { file, url }
@@ -1807,23 +2019,7 @@
       // Creator: empty posts as the account itself. Suggestions come from
       // both lanes the account may see; Elitogram resolves the name.
       const u = me() || {};
-      const creator = h('input', { type: 'text', list: 'sg-up-creators', maxlength: '80', autocomplete: 'off', placeholder: `Empty: posted as @${u.username || 'you'}`, 'aria-label': 'Creator' });
-      const options = h('datalist', { id: 'sg-up-creators' });
-      let timer = null;
-      creator.addEventListener('input', () => {
-        clearTimeout(timer);
-        const q = creator.value.trim().replace(/^@/, '');
-        if (q.length < 2) return;
-        timer = setTimeout(async () => {
-          const ask = (lane) => call(`creators?q=${enc(q)}`, { lane }).then((d) => d.items || []).catch(() => []);
-          const [a, b] = await Promise.all([ask(null), ask('review')]);
-          if (!live(gen)) return;
-          const seen = new Set();
-          fill(options, [...a, ...b].filter((c) => c && typeof c.handle === 'string' && !seen.has(c.handle) && seen.add(c.handle)).slice(0, 20)
-            .map((c) => h('option', { value: c.handle }, c.display_name && c.display_name !== c.handle ? c.display_name : null)));
-        }, 250);
-      });
-      onLeave(() => clearTimeout(timer));
+      const { input: creator, options } = creatorField('sg-up-creators', `Empty: posted as @${u.username || 'you'}`);
       const desc = h('textarea', { rows: '4', maxlength: '4000', placeholder: 'Description', 'aria-label': 'Description' });
       const tags = h('input', { type: 'text', maxlength: '600', placeholder: 'beach, summer, travel', 'aria-label': 'Tags' });
       const audience = h('select', { 'aria-label': 'Classification' },

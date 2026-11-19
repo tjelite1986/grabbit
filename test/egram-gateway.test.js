@@ -274,10 +274,48 @@ test('cross-site and same-site requests are refused', async () => {
 test('a write carries only the keys its route allows', async () => {
   handlers['/api/posts/5'] = json(200, { id: 5, caption: '', author: { handle: 'ann' }, media: [], audience: 'general' });
   handlers['PATCH /api/posts/5'] = json(200, { id: 5, out_of_scope: true, can_edit: true });
-  const r = await call('PATCH', '/api/egram/api/posts/5', { body: { audience: 'general', caption: 'x', adult: false, author: { creator: 'z' } } });
+  const r = await call('PATCH', '/api/egram/api/posts/5', { body: { audience: 'general', caption: 'x', adult: false, removeMedia: [1] } });
   assert.equal(r.status, 200);
   assert.deepEqual(JSON.parse(last().body), { audience: 'general', caption: 'x' });
   assert.equal((await call('PATCH', '/api/egram/api/posts/5', { body: { audience: 'everyone' } })).status, 400);
+});
+
+test('an edit may move a post only to a creator this lane would show', async () => {
+  const creator = (handle, extra = {}) => ({ id: 9, handle, post_count: 1, mentioned_count: 0, follower_count: 0, audience: 'general', ...extra });
+  handlers['/api/posts/5'] = json(200, { id: 5, caption: '', author: { handle: 'ann' }, media: [], audience: 'general' });
+  handlers['PATCH /api/posts/5'] = json(200, { id: 5, caption: 'x', can_edit: true, audience: 'general' });
+  handlers['/api/creators/dana'] = json(200, creator('dana'));
+  handlers['/api/creators/eve18'] = json(200, creator('eve18'));
+  handlers['/api/creators/rev'] = json(200, creator('rev', { audience: 'unknown' }));
+  handlers['/api/creators/alias1'] = json(200, creator('dana')); // Elitogram resolved an alias
+  handlers['/api/creators/nobody'] = json(404, { error: 'Profile not found' });
+  adultSet = new Set(['eve18']);
+  try {
+    // A general creator: passes, re-encoded as the canonical handle only.
+    const ok = await call('PATCH', '/api/egram/api/posts/5', { body: { caption: 'x', author: { creator: ' @Dana ' } } });
+    assert.equal(ok.status, 200);
+    assert.equal(last().method, 'PATCH');
+    assert.deepEqual(JSON.parse(last().body), { caption: 'x', author: { creator: 'dana' } });
+    // The review lane checks the creator in that lane.
+    assert.equal((await call('PATCH', '/api/egram/api/posts/5?lane=review', { body: { author: { creator: 'dana' } } })).status, 404, 'post 5 is not in review');
+    const refused = async (author, why, status = 400) => {
+      const before = seen.length;
+      const r = await call('PATCH', '/api/egram/api/posts/5', { body: { caption: 'x', author } });
+      assert.equal(r.status, status, why);
+      assert.ok(!seen.slice(before).some((q) => q.method === 'PATCH'), `${why}: nothing written`);
+    };
+    await refused({ creator: 'eve18' }, '18+ in Grabbit');
+    await refused({ creator: 'rev' }, 'creator not in this lane');
+    await refused({ creator: 'alias1' }, 'an alias of another creator');
+    await refused({ creator: 'nobody' }, 'unknown creator');
+    await refused({ self: true }, 'an account');
+    await refused({ creator: 'dana', self: true }, 'extra keys');
+    await refused('dana', 'not an object');
+    await refused({ creator: 'a,b' }, 'not a handle');
+    await refused({ creator: '' }, 'empty');
+    handlers['/api/creators/down'] = json(503, { error: 'busy' });
+    await refused({ creator: 'down' }, 'Elitogram down', 424);
+  } finally { adultSet = new Set(); }
 });
 
 test('reads below a post and writes to it need the post itself to pass', async () => {
