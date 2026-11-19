@@ -787,7 +787,9 @@
                 if (ok) return run(action, false)({ currentTarget: btn });
                 return null;
               }
-              toast(action === 'clean' ? `${num(x.files || 0)} files removed (${bytes(x.bytes || 0)}).` : `${num(x.made || 0)} thumbnails made.`);
+              // A clean that hit an error part way says so (egram answers what it did remove).
+              const stopped = action === 'clean' && x.stopReason === 'error' && Array.isArray(x.errors) && x.errors.length ? ` Stopped early: ${String(x.errors[x.errors.length - 1]).slice(0, 160)}` : '';
+              toast(action === 'clean' ? `${num(x.files || 0)} files removed (${bytes(x.bytes || 0)}).${stopped}` : `${num(x.made || 0)} thumbnails made.`);
               viewCache(body, generation, r);
             } catch (err) { toast(err.message); }
             return null;
