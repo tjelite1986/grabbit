@@ -930,6 +930,17 @@
             h('div', { class: 'small dm-break' }, o.check),
             h('div', { class: 'muted small' }, `Started ${date(o.at)}`)),
           h('div', { class: 'dm-tact' },
+            // The app can say what became of it (by the key sent with the call).
+            o.canResolve ? h('button', { class: 'btn small', type: 'button', onclick: async (e) => {
+              const btn = e.currentTarget;
+              await busyBtn(btn, async () => {
+                try {
+                  const res = await post(`ops/${o.id}/resolve`);
+                  toast(res.outcome === 'merged' ? `${o.app} did merge it; it is now in the trash and can be restored` : `${o.app} reports that nothing changed`);
+                  viewTrash(body, generation, r);
+                } catch (err) { toast(err.message); }
+              });
+            } }, `Check with ${o.app}`) : null,
             h('button', { class: 'btn small ghost', type: 'button', onclick: async (e) => {
               const btn = e.currentTarget;
               const ok = await dialog('Mark as checked?', [h('p', null, `Only do this after you have looked in ${o.app}. The entry leaves this list; nothing is changed in ${o.app} or in Grabbit's trash.`)], [{ label: 'Checked', value: true }]);

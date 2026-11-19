@@ -122,9 +122,12 @@ function stubAdapter(o = {}) {
     app: o.app || 'TikShortis',
     caps: new Set(o.caps || ['lookup', 'link']),
     calls,
+    ops: [],
+    async opStatus(op) { calls.push(['opStatus', op]); return o.opStatus(op); },
     ready: () => (o.ready ? o.ready() : { ok: true }),
-    async link(keep, drop, sha256) {
+    async link(keep, drop, sha256, op) {
       calls.push(['link', keep, drop, sha256]);
+      if (op) ad.ops.push(op);
       if (o.link) return o.link(keep, drop, sha256);
       return { id: 100 + calls.length, uid: String(100 + calls.length).padStart(32, '0'), bytes: 1 };
     },
@@ -1034,4 +1037,56 @@ test('a local move cut short is listed as an unfinished operation with both plac
   assert.equal(a.what, 'Move clip.mp4 to the trash');
   assert.match(a.check, /in the trash folder as 5-1-ab-clip\.mp4/);
   assert.match(b.check, /extra copy of the earlier file stays at \/trash\/5-2-cd-b\.mp4/);
+});
+
+test('a merge whose answer was lost is resolved by asking the app with its op key', async (t) => {
+  const adapters = new Map();
+  const { tik, svc, scan, dx } = setup(t, { adapters });
+  const body = 'tik twin resolve';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  await scan();
+  let clock = 1_000_000;
+  svc.now = () => clock;
+  let answer = null;
+  const ad = stubAdapter({
+    caps: ['lookup', 'link', 'opstatus'],
+    link: () => { throw new AdapterError('TikShortis stopped answering half way', { status: 424, stalled: true }); },
+    opStatus: (op) => answer(op),
+  });
+  adapters.set(tik, ad);
+  svc.invalidate();
+  await svc.act(exactGroup(svc, body).key, 'merge');
+  assert.equal(ad.ops.length, 1);
+  assert.match(ad.ops[0], /^[0-9a-f]{32}$/, 'the link call carried an op key');
+  clock += 3 * 60 * 1000;
+  let [u] = svc.trashList().unfinished;
+  assert.equal(u.canResolve, true);
+  // Still running in the app: stays pending.
+  answer = (op) => ({ op, found: true, inProgress: true });
+  await assert.rejects(svc.resolveOp(u.id, 'owner'), /still working/);
+  assert.equal(svc.trashList().unfinished.length, 1);
+  // The app merged it: recorded like any merge, so it can be restored.
+  const uid = 'd'.repeat(32);
+  answer = (op) => ({ op, found: true, inProgress: false, id: 42, uid, bytes: 16, state: 'linked', posts: [1] });
+  const r = await svc.resolveOp(u.id, 'owner');
+  assert.equal(r.outcome, 'merged');
+  const held = dx.appTrashHeld();
+  assert.equal(held.length, 1);
+  assert.equal(held[0].ref, `42:${uid}`);
+  assert.equal(held[0].rel, 'two.mp4');
+  assert.deepEqual(svc.trashList().unfinished, []);
+  // A second merge the app never received: closed as nothing changed.
+  write(path.join(tik, 'three.mp4'), body, 3000);
+  await scan();
+  svc.invalidate();
+  await svc.act(exactGroup(svc, body).key, 'merge');
+  clock += 3 * 60 * 1000;
+  answer = (op) => ({ op, found: false });
+  const left = svc.trashList().unfinished;
+  assert.ok(left.length >= 1);
+  for (const x of left) assert.equal((await svc.resolveOp(x.id, 'owner')).outcome, 'nothing changed');
+  assert.deepEqual(svc.trashList().unfinished, []);
+  assert.equal(dx.appTrashHeld().length, 1, 'only the merge the app reported is in the trash');
+  await assert.rejects(svc.resolveOp(left[0].id, 'owner'), (e) => e.status === 404);
 });

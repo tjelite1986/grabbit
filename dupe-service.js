@@ -164,7 +164,38 @@ class DupeService {
             : `Check ${app}'s cache page.`;
       const note = res.appDone ? ` ${app} reported it done${res.appRef ? ` (held entry ${res.appRef})` : ''}, but Grabbit could not record it.`
         : res.appRef ? ` ${app} reported held entry ${res.appRef}.` : '';
-      return { id: o.id, app, op: o.op, what, check: check + note, appRef: res.appRef || null, at: o.at };
+      const ad = [...this.adapters.values()].find((a) => a.id === o.adapter);
+      const canResolve = o.op === 'link' && !!p.opKey && !!ad && ad.caps.has('opstatus');
+      return { id: o.id, app, op: o.op, what, check: check + note, appRef: res.appRef || null, at: o.at, canResolve };
+    });
+  }
+
+  // Asks the app what became of a merge whose answer was lost (by the op
+  // key sent with it). Found: it is recorded in the trash like any merge, so
+  // it can be restored or deleted from here. Not found: the app closed the
+  // key and nothing changed. Still running or unclear: it stays pending.
+  async resolveOp(id, by) {
+    return this.exclusive('check an unfinished operation', async () => {
+      const o = this.dx.opsPending().find((x) => x.id === Number(id));
+      if (!o) throw new DupeError('That operation is not waiting for a check', 404);
+      let p = {};
+      try { p = JSON.parse(o.payload) || {}; } catch {}
+      const ad = [...this.adapters.values()].find((a) => a.id === o.adapter);
+      if (o.op !== 'link' || !p.opKey || !ad || !ad.caps.has('opstatus')) throw new DupeError('This operation cannot be checked automatically; check it in the app and mark it checked', 409);
+      const st = await ad.opStatus(p.opKey);
+      if (st.found && st.inProgress) throw new DupeError(`${ad.app} is still working on it; check again in a minute`, 409);
+      if (!st.found || st.state === 'failed') {
+        this.dx.opEnd(o.id, false, { error: `${ad.app} reports that nothing changed` }, this.now());
+        this.log(`unfinished ${o.id}: ${ad.app} reports nothing changed`);
+        return { id: o.id, outcome: 'nothing changed' };
+      }
+      const ref = `${st.id}:${st.uid}`;
+      const tid = this.recordAppDone(o.id, ad, { ref, result: st }, () => this.dx.appTrashAdd({
+        adapter: ad.id, ref, root: p.root, rel: p.drop, sha256: p.sha256, bytes: Number.isSafeInteger(p.bytes) ? p.bytes : st.bytes,
+        keep_root: p.keep_root, keep_rel: p.keep, reason: 'Merged in the app (both posts kept)', kind: p.kind, audience: p.audience, app: ad.app, by: o.by || by,
+      }, this.now()));
+      this.log(`unfinished ${o.id}: ${ad.app} merged it (entry ${st.id}), now in the trash`);
+      return { id: o.id, outcome: 'merged', trash: `a${tid}` };
     });
   }
 
@@ -736,9 +767,15 @@ class DupeService {
       // suggested target is only used when it is not.
       const target = g.members.find((x) => x.id === keepId && x.root === m.root) || g.members.find((x) => x.id === m.linkTo && x.root === m.root);
       if (!ad || !target) throw new DupeError('No copy in the same app to share with');
-      const opId = this.dx.opBegin(ad.id, 'link', { keep: target.rel, drop: m.rel, sha256: m.sha256 }, by, this.now());
+      // Everything needed to record the merge later, should the answer be
+      // lost: the op key lets the app say what became of it (resolveOp).
+      const opKey = crypto.randomBytes(16).toString('hex');
+      const opId = this.dx.opBegin(ad.id, 'link', {
+        keep: target.rel, drop: m.rel, sha256: m.sha256, opKey,
+        root: m.root, bytes: m.bytes, keep_root: target.root, kind: m.kind, audience: m.audience,
+      }, by, this.now());
       try {
-        const r = await ad.link(target.rel, m.rel, m.sha256);
+        const r = await ad.link(target.rel, m.rel, m.sha256, opKey);
         // The answer names the held entry. Without a usable id there is
         // nothing to restore or purge later, yet the app may have merged:
         // the operation stays pending for the owner to check.

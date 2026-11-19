@@ -382,3 +382,28 @@ test('purge needs an integer byte count', async () => {
     await assert.rejects(adapter({ fetchImpl: stubFetch(() => jsonRes(200, bad)) }).purge(ref), (e) => e.status === 424, JSON.stringify(bad));
   }
 });
+
+test('link sends the op key only to an app with opstatus, and opStatus validates the answer', async () => {
+  const OP = 'a'.repeat(32);
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push([url, init.body ? JSON.parse(init.body) : null]);
+    if (/\/link$/.test(url)) return jsonRes(200, { id: 5, uid: 'b'.repeat(32), bytes: 3 });
+    return jsonRes(200, reply);
+  };
+  let reply = null;
+  await adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'c'.repeat(64), OP);
+  assert.equal(seen[0][1].op, undefined, 'no opstatus capability: no key');
+  const ad = adapter({ fetchImpl, caps: ['lookup', 'link', 'opstatus'] });
+  await ad.link('a.mp4', 'b.mp4', 'c'.repeat(64), OP);
+  assert.equal(seen[1][1].op, OP);
+  reply = { op: OP, found: false };
+  assert.deepEqual(await ad.opStatus(OP), reply);
+  reply = { op: OP, found: true, inProgress: false, id: 5, uid: 'b'.repeat(32), bytes: 3, state: 'linked' };
+  assert.equal((await ad.opStatus(OP)).id, 5);
+  for (const bad of [{ found: false }, { op: 'x', found: false }, { op: OP, found: true, id: 5 }, { op: OP, found: true, id: 5, uid: 'short', bytes: 3, state: 'linked' }, [OP]]) {
+    reply = bad;
+    await rejectsAdapter(ad.opStatus(OP), { status: 424, message: /does not recognise/ });
+  }
+  await rejectsAdapter(adapter({ fetchImpl }).opStatus(OP), { message: /cannot look up/ });
+});

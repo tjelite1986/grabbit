@@ -83,7 +83,8 @@ class AppAdapter {
   async call(method, route, body) {
     const ready = this.ready();
     if (!ready.ok) throw new AdapterError(ready.why, { fix: ready.fix });
-    const mutation = method !== 'GET' && route !== 'lookup';
+    // opstatus only reads (its fence makes a repeat give the same answer).
+    const mutation = method !== 'GET' && route !== 'lookup' && route !== 'opstatus';
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     let res;
@@ -184,10 +185,27 @@ class AppAdapter {
     });
   }
 
-  async link(keepRel, dropRel, sha256) {
+  // `op` is Grabbit's key for this call (32 hex). An app with the opstatus
+  // capability records it, so a lost answer can be looked up later.
+  async link(keepRel, dropRel, sha256, op = null) {
     if (!this.caps.has('link')) throw new AdapterError(`${this.app} cannot share one file between posts`);
-    const j = await this.call('POST', 'link', { keep: this.appPath(keepRel), drop: this.appPath(dropRel), sha256 });
+    const body = { keep: this.appPath(keepRel), drop: this.appPath(dropRel), sha256 };
+    if (op && this.caps.has('opstatus')) body.op = op;
+    const j = await this.call('POST', 'link', body);
     return this.confirm(j, (x) => Number.isSafeInteger(x.id) && x.id > 0, 'merge');
+  }
+
+  // What became of the link call with key `op`: { found: false } (nothing
+  // changed; the app closed the key), { found: true, inProgress: true }, or
+  // { found: true, id, uid, bytes, state }. Any other shape throws.
+  async opStatus(op) {
+    if (!this.caps.has('opstatus')) throw new AdapterError(`${this.app} cannot look up an unfinished operation`);
+    const j = await this.call('POST', 'opstatus', { op });
+    const isObj = j && typeof j === 'object' && !Array.isArray(j) && j.op === op && typeof j.found === 'boolean';
+    const ok = isObj && (!j.found || j.inProgress === true
+      || (Number.isSafeInteger(j.id) && j.id > 0 && /^[0-9a-f]{32}$/i.test(String(j.uid)) && Number.isSafeInteger(j.bytes) && j.bytes >= 0 && typeof j.state === 'string'));
+    if (!ok) throw new AdapterError(`${this.app} answered the status check in a form Grabbit does not recognise`, { status: 424 });
+    return j;
   }
 
   // A held entry is named by the app's id plus the random uid its link

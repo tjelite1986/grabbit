@@ -3584,7 +3584,7 @@ if (DUPE_DX) {
   const tikUrl = (() => { try { return process.env.TIKSHORTIS_API_URL ? new URL(process.env.TIKSHORTIS_API_URL).origin : null; } catch { return null; } })();
   const egramUrl = (() => { try { return process.env.EGRAM_API_URL ? new URL(process.env.EGRAM_API_URL).origin : null; } catch { return null; } })();
   if (TIKSHORTIS_ROOT) {
-    adapters.set(TIKSHORTIS_ROOT, new AppAdapter({ id: 'tikshortis', app: 'TikShortis', root: TIKSHORTIS_ROOT, url: tikUrl, token: dedupeToken, caps: ['lookup', 'link'] }));
+    adapters.set(TIKSHORTIS_ROOT, new AppAdapter({ id: 'tikshortis', app: 'TikShortis', root: TIKSHORTIS_ROOT, url: tikUrl, token: dedupeToken, caps: ['lookup', 'link', 'opstatus'] }));
   }
   if (EGRAM_LIBRARY_DIR) {
     adapters.set(EGRAM_LIBRARY_DIR, new AppAdapter({ id: 'egram', app: 'egram', root: EGRAM_LIBRARY_DIR, url: egramUrl, token: dedupeToken, caps: ['lookup', 'cache'] }));
