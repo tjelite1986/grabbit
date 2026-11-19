@@ -261,6 +261,8 @@ class DupeService {
     if (base === 'adult' || !r.mixedAudience) return base;
     const c = this.appAnswer(row);
     if (!c || c.aud !== 'general') return 'adult';
+    // A list for a request counts only answers given since it began.
+    if (this.audTrack && c.at < this.audTrack.since) return 'adult';
     // A list built on this answer holds only while the answer does.
     if (this.audTrack) this.audTrack.exp = Math.min(this.audTrack.exp, c.at + AUD_TTL_MS);
     return 'general';
@@ -546,12 +548,17 @@ class DupeService {
   }
 
   // All groups, built once and cached for a short while.
-  build() {
-    // A cached list holds for 15 s, and never past the first 'general' app
-    // answer it rests on: after that the copy counts as 18+ again.
-    if (this.cache && this.now() - this.cache.at < 15000 && this.now() < this.cache.audExp) return this.cache;
+  // since: count only app answers given at or after this time (a list a
+  // person asked for counts only what the app said during that request); a
+  // copy with an older answer counts as 18+.
+  build({ since = -Infinity } = {}) {
+    // A cached list holds for 15 s, never past the first 'general' app
+    // answer it rests on (after that the copy counts as 18+ again), and only
+    // when it was built on answers at least as recent as asked for.
+    const c = this.cache;
+    if (c && this.now() - c.at < 15000 && this.now() < c.audExp && c.since >= since) return c;
     const t0 = this.now();
-    this.audTrack = { exp: Infinity };
+    this.audTrack = { exp: Infinity, since };
     try {
       return this.buildFresh(t0);
     } finally {
@@ -622,7 +629,7 @@ class DupeService {
         }));
       }
     }
-    this.cache = { at: this.now(), groups, ms: this.now() - t0, audExp: this.audTrack.exp };
+    this.cache = { at: this.now(), groups, ms: this.now() - t0, audExp: this.audTrack.exp, since: this.audTrack.since };
     return this.cache;
   }
 
@@ -663,10 +670,12 @@ class DupeService {
   }
 
   // --- listing ------------------------------------------------------------------
-  list(q = {}) {
+  // audSince: see build().
+  list(q = {}, { audSince = -Infinity } = {}) {
     const tab = TABS.includes(q.tab) ? q.tab : 'identical';
     const adult = ['hide', 'show', 'only'].includes(q.adult) ? q.adult : 'hide';
-    let gs = this.build().groups.filter((g) => g.tab === tab);
+    const built = this.build({ since: audSince });
+    let gs = built.groups.filter((g) => g.tab === tab);
     const hiddenAdult = adult === 'hide' ? gs.filter((g) => g.adult).length : 0;
     if (adult === 'hide') gs = gs.filter((g) => !g.adult);
     if (adult === 'only') gs = gs.filter((g) => g.adult);
@@ -694,7 +703,7 @@ class DupeService {
     const total = gs.length;
     const limit = Math.max(1, Math.min(200, Number(q.limit) || 24));
     const offset = Math.max(0, Number(q.offset) || 0);
-    const apps = [...new Set(this.build().groups.filter((g) => g.tab === tab).flatMap((g) => g.apps))].sort();
+    const apps = [...new Set(built.groups.filter((g) => g.tab === tab).flatMap((g) => g.apps))].sort();
     return {
       tab, total, offset, limit, sort, status, hiddenAdult, apps,
       reclaim: gs.reduce((n, g) => n + g.reclaim, 0),

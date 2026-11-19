@@ -1230,3 +1230,26 @@ test('every list asks the app again, and a copy it does not confirm now is 18+',
   assert.equal(state.asked, asked);
   assert.equal(shown(), 0);
 });
+
+test('a list counts only answers given during its request: a copy outside every group at refresh time is 18+', async (t) => {
+  const { own, svc, scan, state, shown, tick } = await mixedFixture(t);
+  await svc.refreshAppAudience({ fresh: true });
+  assert.equal(shown(), 1);
+  // The Grabbit copy goes away: the egram copy is in no group, so a fresh
+  // refresh does not ask about it, and its earlier 'general' answer stays.
+  const b = path.join(own, 'b.jpg');
+  fs.renameSync(b, `${b}.away`);
+  await scan();
+  state.aud = 'adult'; // reclassified in egram meanwhile
+  tick(5 * 1000);
+  const since = svc.now();
+  const asked = state.asked;
+  await svc.refreshAppAudience({ fresh: true });
+  assert.equal(state.asked, asked, 'nothing in a group to ask about');
+  // The copy comes back before the list is built.
+  fs.renameSync(`${b}.away`, b);
+  await scan();
+  svc.invalidate();
+  const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audSince: since });
+  assert.equal(list.items.length, 0, 'an answer from before the request does not show the copy');
+});

@@ -158,6 +158,9 @@ function fsyncDir(dir) {
 // Same file and, as far as stat can tell, same contents as when it was looked at.
 const sameStat = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
 const sameNode = (a, b) => a.dev === b.dev && a.ino === b.ino;
+// The same scanned row: same group, place, size and library link.
+const sameRow = (x, y) => !!x && x.sha256 === y.sha256 && x.root === y.root && x.rel === y.rel && x.bytes === y.bytes
+  && (x.link || 'none') === (y.link || 'none') && (x.item_id ?? null) === (y.item_id ?? null);
 
 // Writes `from` into a new file `to` that this call creates exclusively
 // ('wx'), all through the one descriptor that create returned: the bytes, the
@@ -376,8 +379,10 @@ function replaceWith(p, match, stage) {
 // verified copy and an unlink. The source goes last, so a failure at any
 // step leaves it in place. `expect` is the source's stat from before it was
 // hashed: a file a writer put at that name since then is never removed.
-// `keep` ({ abs, stat }) is the copy that stays: it must still be that file
-// at the last look, so a move never takes what became the last copy.
+// `keep` ({ abs, stat, still? }) is the copy that stays: it must still be
+// that file at the last look, so a move never takes what became the last
+// copy. `keep.still()` (synchronous, throws to refuse) rechecks the caller's
+// rules on its records right before that look.
 async function moveFile(from, to, sha256 = null, expect = null, keep = null) {
   if (taken(to)) throw new TrashError('Target already exists');
   const before = fs.lstatSync(from);
@@ -417,6 +422,12 @@ async function moveFile(from, to, sha256 = null, expect = null, keep = null) {
   // The last look before the source goes: still the file that was hashed
   // (a cross-disk copy can take minutes), and on the same disk the new name
   // still points at it. Otherwise the copy is undone.
+  // The caller's rules first (synchronous database reads, nothing slow),
+  // then the files, then the change.
+  let policy = null;
+  if (keep && keep.still) {
+    try { keep.still(); } catch (e) { policy = e instanceof TrashError ? e : new TrashError(`The duplicates changed meanwhile (${e.message}); nothing changed, scan again`); }
+  }
   let now = null;
   let dest = null;
   try { now = fs.lstatSync(from); } catch {}
@@ -438,6 +449,7 @@ async function moveFile(from, to, sha256 = null, expect = null, keep = null) {
     if (kept) err.keptCopy = kept;
     return err;
   };
+  if (policy) throw refuse(policy);
   if (!keepOk) throw refuse(new TrashError('The copy that stays changed while this one was being moved; nothing changed, scan again'));
   if (!now || !sameStat(now, before) || !destOk) {
     throw refuse(changed());
@@ -519,18 +531,21 @@ class DupeTrash {
     const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
     if (a !== row.sha256 || b !== row.sha256) throw new TrashError('The bytes no longer match; scan again first');
     // Hashing awaited: the rows may have changed meanwhile (a rescan, another
-    // removal). Both rows must still be the ones checked, in the same group,
-    // and the removal must still be allowed in the group as it is now.
-    const row2 = this.store.dupeFile(row.id);
-    const keep2 = this.store.dupeFile(keepRow.id);
-    const same = (x, y) => !!x && x.sha256 === y.sha256 && x.root === y.root && x.rel === y.rel && x.bytes === y.bytes;
-    if (!same(row2, row) || !same(keep2, keepRow)) throw stale();
-    const members2 = this.store.dupeMembers(row.sha256);
-    const member2 = members2.find((m) => m.id === row.id);
-    if (!member2 || !members2.some((m) => m.id === keepRow.id)) throw stale();
-    checkRemoval(member2, members2, this.rootOf);
-
-    return this.moveToTrash(row2, doomed, { by, keepRow: keep2, reason, kept });
+    // removal, a relink). Both rows must still be the ones checked, in the
+    // same group, and the removal must still be allowed in the group as it
+    // is now. This runs again inside the move, right before its last look
+    // (a copy to another disk can take minutes).
+    const still = () => {
+      const row2 = this.store.dupeFile(row.id);
+      const keep2 = this.store.dupeFile(keepRow.id);
+      if (!sameRow(row2, row) || !sameRow(keep2, keepRow)) throw stale();
+      const members2 = this.store.dupeMembers(row.sha256);
+      const member2 = members2.find((m) => m.id === row.id);
+      if (!member2 || !members2.some((m) => m.id === keepRow.id)) throw stale();
+      checkRemoval(member2, members2, this.rootOf);
+    };
+    still();
+    return this.moveToTrash(row, doomed, { by, keepRow, reason, kept: { ...kept, still } });
   }
 
   // Removes one copy of a picture or video whose bytes differ from the copy
@@ -556,7 +571,20 @@ class DupeTrash {
     if (doomed.stat.size !== row.bytes || kept.stat.size !== keepRow.bytes) throw new TrashError('A file changed since the scan; scan again first');
     const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
     if (a !== row.sha256 || b !== keepRow.sha256) throw new TrashError('The bytes no longer match; scan again first');
-    return this.moveToTrash(row, doomed, { by, keepRow, reason, kept });
+    // The same rules on the rows as they are after hashing, and again inside
+    // the move right before its last look.
+    const still = () => {
+      const row2 = this.store.dupeFile(row.id);
+      const keep2 = this.store.dupeFile(keepRow.id);
+      if (!sameRow(row2, row) || !sameRow(keep2, keepRow)) throw new TrashError('The copies changed since you chose; check them again');
+      if (row2.link === 'filename' && row2.item_id != null) throw new TrashError('Kept: a library item uses this file');
+      const r2 = this.rootOf(row2.root);
+      if (!r2 || r2.owner !== 'grabbit') throw new TrashError('Unknown folder');
+      const kr2 = this.rootOf(keep2.root);
+      if (!kr2 || isImport(kr2)) throw new TrashError('The copy that stays is only waiting in an import folder; keep another copy');
+    };
+    still();
+    return this.moveToTrash(row, doomed, { by, keepRow, reason, kept: { ...kept, still } });
   }
 
   // Records a name whose inode changed but whose bytes are known (the

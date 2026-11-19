@@ -1139,3 +1139,36 @@ test('a removal rechecks its rows after hashing: a row rehashed meanwhile is ref
   assert.equal(trash.length, 0);
   assert.equal(fs.readFileSync(path.join(g, 'c.mp4'), 'utf8'), 'other bytes');
 });
+
+test('a cross-disk move rechecks the removal rules after the copy: a copy that became the only linked one stays', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const rows = [1, 2].map((id) => ({ ...t.store.dupeFile(id), link: 'filename', item_id: 7 }));
+  t.store.dupeFile = (id) => rows.find((r) => r.id === Number(id));
+  t.store.dupeMembers = (s) => rows.filter((r) => r.sha256 === s);
+  const b = path.join(fs.realpathSync(g), 'b.mp4');
+  const link = fs.linkSync;
+  const read = fs.createReadStream;
+  let reads = 0;
+  // The trash is on another disk: every link into it fails with EXDEV.
+  fs.linkSync = (from, to) => {
+    if (String(to).startsWith(trashDir)) { const e = new Error('cross-device'); e.code = 'EXDEV'; throw e; }
+    return link(from, to);
+  };
+  // Read 1 of b is the hash; read 2 is the copy into the trash. While it
+  // runs, a's library link goes away: b is now the only copy linked to item 7.
+  fs.createReadStream = (p, ...rest) => {
+    const s = read(p, ...rest);
+    if (String(p) === b && ++reads === 2) s.on('end', () => { rows[0] = { ...rows[0], link: 'none', item_id: null }; });
+    return s;
+  };
+  try {
+    await quiet(() => assert.rejects(t.remove(2, { plannedKeep: 1 }), /changed since the plan|only copy linked/));
+  } finally {
+    fs.linkSync = link;
+    fs.createReadStream = read;
+  }
+  assert.equal(reads, 2, 'the copy ran');
+  assert.equal(fs.readFileSync(b, 'utf8'), 'same bytes', 'the newly protected copy stays in place');
+  assert.equal(trash.length, 0);
+  assert.deepEqual(fs.readdirSync(trashDir).filter((n) => !n.startsWith('.')), [], 'the trash copy is undone');
+});

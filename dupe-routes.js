@@ -58,9 +58,11 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
   r.get('/library', wrap(() => ({ roots: service.libraryStatus() })));
   r.get('/groups', wrap(async (req) => {
     // egram's own audience decides whether its copies are 18+ (best effort).
-    // Asked again for every list: the list never rests on an earlier answer.
+    // Asked again for every list: the list counts only answers given during
+    // this request, so a copy the refresh did not ask about counts as 18+.
+    const since = service.now();
     try { await service.refreshAppAudience({ fresh: true }); } catch {}
-    return service.list(listQuery(req.query));
+    return service.list(listQuery(req.query), { audSince: since });
   }));
   r.get('/groups/:key/references', wrap(async (req) => {
     if (!KEY_RE.test(req.params.key)) throw new DupeError('Not a group key');
