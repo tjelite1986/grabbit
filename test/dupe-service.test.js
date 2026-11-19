@@ -1244,33 +1244,42 @@ test('a list counts only answers given during its request: a copy outside every 
   await scan();
   state.aud = 'adult'; // reclassified in egram meanwhile
   tick(5 * 1000);
-  const since = svc.now();
   const asked = state.asked;
-  await svc.refreshAppAudience({ fresh: true });
+  const run = await svc.refreshAppAudience({ fresh: true });
   assert.equal(state.asked, asked, 'nothing in a group to ask about');
   // The copy comes back before the list is built.
   fs.renameSync(`${b}.away`, b);
   await scan();
   svc.invalidate();
-  const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audSince: since });
+  const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audRun: run });
   assert.equal(list.items.length, 0, 'an answer from before the request does not show the copy');
 });
 
-test('a reply that was asked for before a list request began does not count for that list', async (t) => {
-  const { svc, state, tick } = await mixedFixture(t);
+test('a list counts only the answers of the fresh run it waited for, never a late reply of an earlier run', async (t) => {
+  const { own, svc, scan, state } = await mixedFixture(t);
   let release;
   state.hold = new Promise((r) => { release = r; });
-  // Refresh A asks egram while the post is general; the reply is held.
+  // Run A asks egram while the post is general; its reply is held.
   const a = svc.refreshAppAudience();
   await new Promise((r) => setImmediate(r));
   assert.equal(state.asked, 1);
-  // The post turns 18+, and a list request B begins; A's reply then lands.
+  // The post turns 18+ and the Grabbit twin goes away (the egram copy is in
+  // no group). List request B starts and waits for A.
   state.aud = 'adult';
-  tick(5 * 1000);
-  const since = svc.now();
+  const b = path.join(own, 'b.jpg');
+  fs.renameSync(b, `${b}.away`);
+  await scan();
+  const runB = svc.refreshAppAudience({ fresh: true });
+  // A's general reply lands after B began.
   release();
   await a;
   state.hold = null;
-  const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audSince: since });
-  assert.equal(list.items.length, 0, 'an answer asked for before the request is older than its cutoff');
+  const run = await runB;
+  // The twin comes back before B's list is built.
+  fs.renameSync(`${b}.away`, b);
+  await scan();
+  svc.invalidate();
+  const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audRun: run });
+  assert.equal(list.items.length, 0, 'an answer of run A does not count for request B');
+  assert.equal(svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audRun: 0 }).items.length, 0, 'a failed refresh counts no answer');
 });

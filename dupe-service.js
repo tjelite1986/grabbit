@@ -261,8 +261,8 @@ class DupeService {
     if (base === 'adult' || !r.mixedAudience) return base;
     const c = this.appAnswer(row);
     if (!c || c.aud !== 'general') return 'adult';
-    // A list for a request counts only answers given since it began.
-    if (this.audTrack && c.at < this.audTrack.since) return 'adult';
+    // A list for a request counts only answers from the fresh run it waited for.
+    if (this.audTrack && this.audTrack.run != null && c.run !== this.audTrack.run) return 'adult';
     // A list built on this answer holds only while the answer does.
     if (this.audTrack) this.audTrack.exp = Math.min(this.audTrack.exp, c.at + AUD_TTL_MS);
     return 'general';
@@ -293,7 +293,8 @@ class DupeService {
       if (!fresh || (cur.fresh && cur.startedAt >= t0)) return cur.p;
       try { await cur.p; } catch {}
     }
-    const run = { fresh, startedAt: this.now(), p: null };
+    this.audSeq = (this.audSeq || 0) + 1;
+    const run = { id: this.audSeq, fresh, startedAt: this.now(), p: null };
     this.audBusy = run;
     run.p = (async () => {
       // Expired answers go first; a cached list built on a 'general' one is
@@ -349,12 +350,13 @@ class DupeService {
             const aud = refs.length && refs.every((x) => x && x.audience === 'general') ? 'general' : 'adult';
             const k = `${m.root}\0${m.rel}`;
             const was = this.appAud.get(k);
-            this.appAud.set(k, { aud, ino: String(m.ino), mtime: m.mtime_ms, at: askedAt });
+            this.appAud.set(k, { aud, ino: String(m.ino), mtime: m.mtime_ms, at: askedAt, run: run.id });
             if (!was || was.aud !== aud || was.ino !== String(m.ino) || was.mtime !== m.mtime_ms) changed = true;
           }
         }
       }
       if (changed) this.invalidate();
+      return run.id;
     })().finally(() => { if (this.audBusy === run) this.audBusy = null; });
     return run.p;
   }
@@ -552,17 +554,18 @@ class DupeService {
   }
 
   // All groups, built once and cached for a short while.
-  // since: count only app answers given at or after this time (a list a
-  // person asked for counts only what the app said during that request); a
-  // copy with an older answer counts as 18+.
-  build({ since = -Infinity } = {}) {
+  // run: count only app answers from this refresh run (the fresh run a list
+  // request waited for: refreshAppAudience({ fresh: true }) resolves to its
+  // id); a copy without an answer from that run counts as 18+. Without a
+  // run, every current answer counts.
+  build({ run = null } = {}) {
     // A cached list holds for 15 s, never past the first 'general' app
-    // answer it rests on (after that the copy counts as 18+ again), and only
-    // when it was built on answers at least as recent as asked for.
+    // answer it rests on (after that the copy counts as 18+ again), and for
+    // a request only when it was built for that same run.
     const c = this.cache;
-    if (c && this.now() - c.at < 15000 && this.now() < c.audExp && c.since >= since) return c;
+    if (c && this.now() - c.at < 15000 && this.now() < c.audExp && (run == null || c.run === run)) return c;
     const t0 = this.now();
-    this.audTrack = { exp: Infinity, since };
+    this.audTrack = { exp: Infinity, run };
     try {
       return this.buildFresh(t0);
     } finally {
@@ -633,7 +636,7 @@ class DupeService {
         }));
       }
     }
-    this.cache = { at: this.now(), groups, ms: this.now() - t0, audExp: this.audTrack.exp, since: this.audTrack.since };
+    this.cache = { at: this.now(), groups, ms: this.now() - t0, audExp: this.audTrack.exp, run: this.audTrack.run };
     return this.cache;
   }
 
@@ -674,11 +677,11 @@ class DupeService {
   }
 
   // --- listing ------------------------------------------------------------------
-  // audSince: see build().
-  list(q = {}, { audSince = -Infinity } = {}) {
+  // audRun: see build().
+  list(q = {}, { audRun = null } = {}) {
     const tab = TABS.includes(q.tab) ? q.tab : 'identical';
     const adult = ['hide', 'show', 'only'].includes(q.adult) ? q.adult : 'hide';
-    const built = this.build({ since: audSince });
+    const built = this.build({ run: audRun });
     let gs = built.groups.filter((g) => g.tab === tab);
     const hiddenAdult = adult === 'hide' ? gs.filter((g) => g.adult).length : 0;
     if (adult === 'hide') gs = gs.filter((g) => !g.adult);

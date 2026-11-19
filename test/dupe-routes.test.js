@@ -377,3 +377,14 @@ test('an error code from the service reaches the page', async (t) => {
   const plain = await mount(t, { service: stubService({ overview: () => { throw new DupeError('Busy', 409); } }) });
   assert.equal((await plain.get('/overview')).body.code, undefined);
 });
+
+test('a group list counts only the answers of the fresh audience run it waited for, and none when that run fails', async (t) => {
+  const ok = await mount(t, { service: stubService({ refreshAppAudience: async () => 7 }) });
+  await ok.get('/groups?tab=identical');
+  const ref = ok.service.calls.find((c) => c.name === 'refreshAppAudience');
+  assert.deepEqual(ref.args[0], { fresh: true });
+  assert.deepEqual(ok.service.calls.find((c) => c.name === 'list').args[1], { audRun: 7 });
+  const down = await mount(t, { service: stubService({ refreshAppAudience: async () => { throw new Error('down'); } }) });
+  await down.get('/groups?tab=identical');
+  assert.deepEqual(down.service.calls.find((c) => c.name === 'list').args[1], { audRun: 0 });
+});
