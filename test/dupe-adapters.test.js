@@ -233,12 +233,15 @@ test('404 with an app error is that app refusing (409, its message and fix)', as
 test('5xx from the app is a 424, never passed through as 5xx', async () => {
   for (const [status, body, msg] of [
     [500, { error: 'db locked' }, /db locked/],
-    [502, undefined, /refused \(HTTP 502\)/],
-    [503, { ok: false }, /refused \(HTTP 503\)/],
+    [502, undefined, /\(HTTP 502\)/],
+    [503, { ok: false }, /\(HTTP 503\)/],
   ]) {
     const fetchImpl = stubFetch(() => jsonRes(status, body));
     await rejectsAdapter(adapter({ fetchImpl }).restore(1), { status: 424, message: msg });
+    // A change that met a 5xx may have happened: it stays pending (round 5).
+    await assert.rejects(adapter({ fetchImpl }).restore(1), (e) => e.stalled === true);
   }
+  await rejectsAdapter(adapter({ fetchImpl: stubFetch(() => jsonRes(502, undefined)), caps: ['lookup', 'cache'] }).cache(), { status: 424, message: /refused \(HTTP 502\)/ });
 });
 
 test('other refusals are 409: 4xx and ok:false on a 200', async () => {
@@ -294,4 +297,20 @@ test('restore and purge send the id and uid of an "id:uid" reference, and the id
   await a.restore('12:abc');
   await a.purge('13');
   assert.deepEqual(fetchImpl.calls.map((c) => c.body), [{ id: 12, uid: 'abc' }, { id: 13 }]);
+});
+
+// Round 5: only the app's own refusal closes a change as "nothing changed".
+test('a 5xx, a proxy page or an app that may have acted leaves a change pending, with its held entry', async () => {
+  const html = { status: 502, ok: false, json: async () => { throw new SyntaxError("Unexpected token '<'"); } };
+  for (const fetchImpl of [stubFetch(() => html), stubFetch(() => jsonRes(500, { error: 'boom' }))]) {
+    await assert.rejects(adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), (e) => e.stalled === true && e.status === 424);
+  }
+  const uid = 'b'.repeat(32);
+  const maybe = stubFetch(() => jsonRes(422, { error: 'Merged, but the folder could not be synced', mayHaveChanged: true, id: 7, uid }));
+  await assert.rejects(adapter({ fetchImpl: maybe }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), (e) => e.stalled === true && e.appRef === `7:${uid}` && e.fix.includes(`7:${uid}`));
+  // A plain refusal from the app itself is a definite "nothing changed".
+  const no = stubFetch(() => jsonRes(409, { error: 'Not the same bytes' }));
+  await assert.rejects(adapter({ fetchImpl: no }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), (e) => !e.stalled && e.status === 409);
+  // A lookup is never pending.
+  await assert.rejects(adapter({ fetchImpl: stubFetch(() => html), caps: ['lookup'] }).lookup(['a.mp4']), (e) => !e.stalled);
 });

@@ -105,7 +105,12 @@ class DupeService {
   // answering half way stays pending: the app may have carried it out, so
   // the trash page lists it until the owner has checked it in the app.
   opFailed(opId, err) {
-    if (err && err.stalled) return;
+    if (err && err.stalled) {
+      if (err.appRef) {
+        try { this.dx.opNote(opId, { appRef: err.appRef }); } catch {}
+      }
+      return;
+    }
     this.dx.opEnd(opId, false, { error: err && err.message }, this.now());
   }
 
@@ -117,6 +122,8 @@ class DupeService {
     return this.dx.opsPending().filter((o) => o.at < cut).map((o) => {
       let p = {};
       try { p = JSON.parse(o.payload) || {}; } catch {}
+      let res = {};
+      try { res = JSON.parse(o.result) || {}; } catch {}
       const app = apps.get(o.adapter) || o.adapter;
       const what = o.op === 'link' ? `Share ${p.drop} with ${p.keep}`
         : o.op === 'restore' ? `Restore held copy ${p.ref}`
@@ -126,7 +133,8 @@ class DupeService {
         : o.op === 'restore' ? `Check whether the item is back in ${app}; if not, restore it again.`
           : o.op === 'purge' ? `Check whether the copy is still in ${app}'s trash; if so, delete it again.`
             : `Check ${app}'s cache page.`;
-      return { id: o.id, app, op: o.op, what, check, at: o.at };
+      const note = res.appRef ? ` ${app} reported held entry ${res.appRef}.` : '';
+      return { id: o.id, app, op: o.op, what, check: check + note, appRef: res.appRef || null, at: o.at };
     });
   }
 
@@ -714,6 +722,8 @@ class DupeService {
           keep_root: target.root, keep_rel: target.rel, reason: 'Merged in the app (both posts kept)', kind: m.kind, audience: m.audience, app: ad.app, by,
         }, this.now());
         this.dx.opEnd(opId, true, { result: r }, this.now());
+        // The app merged but could not confirm its folder reached the disk.
+        if (r.durable === false) this.log(`${ad.app} merged ${m.rel} (entry ${r.id}) without confirming it on disk`);
         return { trash: `a${tid}`, merged: true };
       } catch (e) {
         this.opFailed(opId, e);
@@ -1003,12 +1013,17 @@ class DupeService {
   }
 
   // retryFailed (rebuild only): egram retries the thumbnails that failed in
-  // the last 30 minutes instead of skipping them.
-  async cacheAction(appId, action, dryRun, by, { retryFailed = false } = {}) {
+  // the last 30 minutes instead of skipping them. cursor (rebuild only):
+  // egram's own resume point from its previous answer, passed back verbatim.
+  async cacheAction(appId, action, dryRun, by, { retryFailed = false, cursor = null } = {}) {
     const ad = [...new Set(this.adapters.values())].find((a) => a.id === appId);
     if (!ad) throw new DupeError('Unknown app', 404);
     if (!['clean', 'rebuild'].includes(action)) throw new DupeError('Unknown cache action');
-    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.call('POST', 'cache/rebuild', { dryRun: Boolean(dryRun), retryFailed: Boolean(retryFailed) }));
+    if (cursor != null && !(typeof cursor === 'string' ? /^[A-Za-z0-9_:.-]{1,200}$/.test(cursor) : Number.isSafeInteger(cursor) && cursor >= 0)) {
+      throw new DupeError('Bad rebuild cursor', 400);
+    }
+    const body = { dryRun: Boolean(dryRun), retryFailed: Boolean(retryFailed), ...(cursor != null ? { cursor } : {}) };
+    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.call('POST', 'cache/rebuild', body));
     if (dryRun) return run();
     return this.exclusive(`cache ${action}`, async () => {
       const opId = this.dx.opBegin(ad.id, `cache-${action}`, {}, by, this.now());

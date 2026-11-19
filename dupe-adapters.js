@@ -35,12 +35,14 @@ function refBody(ref) {
 const NEVER_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ERR_INVALID_URL']);
 
 class AdapterError extends Error {
-  constructor(message, { status = 409, fix = null, stalled = false } = {}) {
+  constructor(message, { status = 409, fix = null, stalled = false, appRef = null } = {}) {
     super(message);
     this.status = status;
     this.fix = fix;
     // The app may or may not have carried the request out.
     this.stalled = stalled;
+    // The held entry the app says it may have made ("<id>:<uid>").
+    this.appRef = appRef;
   }
 }
 
@@ -136,6 +138,16 @@ class AppAdapter {
       throw new AdapterError(`${this.app} does not have the dedupe operations yet`, { status: 424, fix: `Install the ${this.app} version that ships the Grabbit dedupe v1 routes.` });
     }
     if (!res.ok || !j || j.ok === false) {
+      // A 4xx refusal (from the app, or a proxy that never passed the
+      // request on) means nothing changed. A 5xx, a proxy's 502/504, or an
+      // app that says it may have acted leaves the operation pending.
+      if (mutation && (res.status >= 500 || (j && typeof j === 'object' && j.mayHaveChanged === true))) {
+        const ref = j && Number.isSafeInteger(j.id) && j.id > 0 ? (j.uid != null && /^[A-Za-z0-9_-]{1,64}$/.test(String(j.uid)) ? `${j.id}:${j.uid}` : String(j.id)) : null;
+        throw new AdapterError((j && j.error) || `${this.app} failed while carrying out the request (HTTP ${res.status})`, {
+          status: 424, stalled: true, appRef: ref,
+          fix: `The request may have been carried out${ref ? ` (${this.app} held entry ${ref})` : ''}; check the item in ${this.app} before trying again.`,
+        });
+      }
       throw new AdapterError((j && j.error) || `${this.app} refused (HTTP ${res.status})`, { status: res.status >= 500 ? 424 : 409, fix: j && j.fix ? j.fix : null });
     }
     return j;

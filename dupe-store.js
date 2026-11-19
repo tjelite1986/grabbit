@@ -373,6 +373,11 @@ function attach(db, file) {
       db.prepare('UPDATE dx.ops SET state = ?, result = ?, error = ?, done_at = ? WHERE id = ?')
         .run(ok ? 'done' : 'failed', result == null ? null : JSON.stringify(result), error ? String(error).slice(0, 500) : null, now, Number(id));
     },
+    // What a half-finished operation is known to have done, kept on the
+    // pending row (an app's held-entry reference) for the owner's check.
+    opNote(id, result) {
+      return db.prepare("UPDATE dx.ops SET result = ? WHERE id = ? AND state = 'pending'").run(JSON.stringify(result), Number(id)).changes;
+    },
     // The owner checked an operation the app never answered for.
     opChecked(id, by = null, now = Date.now()) {
       return db.prepare("UPDATE dx.ops SET state = 'failed', error = ?, done_at = ? WHERE id = ? AND state = 'pending'")

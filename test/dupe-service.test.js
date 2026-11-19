@@ -279,6 +279,16 @@ test('an adapter that is not ready or refuses leaves the app copy and records no
   assert.throws(() => svc.opChecked(u.id, 'owner'), (e) => e.status === 404);
   assert.deepEqual(dx.appTrashHeld(), []);
   assert.ok(fs.existsSync(path.join(tik, 'two.mp4')));
+  // Round 5: an app that says it may have merged names its held entry; the
+  // pending row keeps that reference for the owner's check.
+  const ref = `9:${'c'.repeat(32)}`;
+  adapters.set(tik, stubAdapter({ link: () => { throw new AdapterError('Merged, but not confirmed on disk', { status: 424, stalled: true, appRef: ref }); } }));
+  svc.invalidate();
+  await svc.act(exactGroup(svc, body).key, 'merge');
+  clock += 3 * 60 * 1000;
+  const [u2] = svc.trashList().unfinished;
+  assert.equal(u2.appRef, ref);
+  assert.ok(u2.check.includes(`held entry ${ref}`));
 });
 
 test('a copy in an app import folder is never moved by Grabbit, even when the library already has it', async (t) => {

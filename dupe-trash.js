@@ -234,19 +234,33 @@ async function moveFile(from, to, sha256 = null, expect = null) {
     if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
   }
   if (!linked) await copyVerified(from, to, sha256);
+  // Its new name is durable before the old one goes. The sync is slow disk
+  // I/O, so it comes before the last look, never between it and the unlink.
+  fsyncDir(path.dirname(to));
   // The last look before the source goes: still the file that was hashed
-  // (a cross-disk copy can take minutes). Otherwise the copy is undone.
+  // (a cross-disk copy can take minutes), and on the same disk the new name
+  // still points at it. Otherwise the copy is undone.
   let now = null;
+  let dest = null;
   try { now = fs.lstatSync(from); } catch {}
-  if (!now || !sameStat(now, before)) {
-    try { fs.unlinkSync(to); } catch {}
-    try { fsyncDir(path.dirname(to)); } catch {}
+  try { dest = fs.lstatSync(to); } catch {}
+  const destOk = dest && dest.isFile() && (!linked || (dest.dev === before.dev && dest.ino === before.ino));
+  if (!now || !sameStat(now, before) || !destOk) {
+    // A hard link whose source name now holds another file is the last name
+    // of the original: it stays (an extra copy in the trash folder, never none).
+    const lastName = linked && !(now && now.dev === dest.dev && now.ino === dest.ino);
+    if (destOk && !lastName) {
+      try { fs.unlinkSync(to); } catch {}
+      try { fsyncDir(path.dirname(to)); } catch {}
+    } else if (destOk) {
+      console.error(`dupes: ${path.basename(from)} was replaced while moving; its earlier copy stays at ${to}`);
+    }
     throw changed();
   }
-  // Its new name is durable before the old one goes.
-  fsyncDir(path.dirname(to));
   fs.unlinkSync(from);
-  fsyncDir(path.dirname(from));
+  // The move is done: a failed sync of the old folder must not keep the
+  // caller from recording it (the trash row, the restore).
+  try { fsyncDir(path.dirname(from)); } catch (e) { console.error(`dupes: moved ${path.basename(from)}, but its old folder could not be synced (${e.code || e.message})`); }
 }
 
 // True when the name exists in any form, a dangling symlink included
@@ -349,7 +363,15 @@ class DupeTrash {
   }
 
   trashNameFor(row) {
-    fs.mkdirSync(this.dir, { recursive: true });
+    // A trash folder made here is a new entry in its parent: that entry is
+    // durable before any move can unlink a source into it.
+    const made = fs.mkdirSync(this.dir, { recursive: true });
+    if (made) {
+      for (let d = path.resolve(this.dir); ; d = path.dirname(d)) {
+        fsyncDir(path.dirname(d));
+        if (d === path.resolve(made) || d === path.dirname(d)) break;
+      }
+    }
     return `${this.now()}-${row.id}-${rand()}-${clampName(path.basename(row.rel), 150)}`;
   }
 

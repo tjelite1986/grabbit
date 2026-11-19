@@ -438,3 +438,67 @@ test('where hard links are refused, a published copy never replaces a name that 
   assert.equal(fs.readFileSync(to, 'utf8'), 'writer was first');
   assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.part')), []);
 });
+
+// Round 5: the directory syncs are slow disk I/O, so they come before the
+// last identity check, never between it and the unlink.
+test('a source replaced while the trash folder is synced is never unlinked', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const { g, trashDir } = mergeFixture();
+  fs.mkdirSync(trashDir, { recursive: true });
+  const src = path.join(g, 'b.mp4');
+  const dest = path.join(trashDir, 'held.mp4');
+  const expect = fs.lstatSync(src);
+  const open = fs.openSync;
+  fs.openSync = (p, ...rest) => {
+    if (p === trashDir) replaceFile(src, 'published meanwhile');
+    return open(p, ...rest);
+  };
+  try {
+    await assert.rejects(moveFile(src, dest, null, expect), /changed while it was being moved/);
+  } finally {
+    fs.openSync = open;
+  }
+  assert.equal(fs.readFileSync(src, 'utf8'), 'published meanwhile', 'the replacement stays');
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'same bytes', 'the hard link is the last name of the original, so it stays');
+});
+
+test('a failed sync of the old folder after the unlink still records the trash entry', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  t.store.dupeMembers = () => [1, 2].map((id) => t.store.dupeFile(id));
+  const unlink = fs.unlinkSync;
+  const open = fs.openSync;
+  let gone = false;
+  fs.unlinkSync = (p) => { const r = unlink(p); if (p === path.join(g, 'b.mp4')) gone = true; return r; };
+  fs.openSync = (p, ...rest) => {
+    if (gone && p === g) { const e = new Error('i/o error'); e.code = 'EIO'; throw e; }
+    return open(p, ...rest);
+  };
+  const err = console.error;
+  console.error = () => {};
+  try {
+    await t.remove(2);
+  } finally {
+    fs.unlinkSync = unlink;
+    fs.openSync = open;
+    console.error = err;
+  }
+  assert.ok(gone);
+  assert.equal(trash.length, 1, 'the move is recorded');
+  assert.ok(fs.existsSync(path.join(trashDir, trash[0].trash_name)));
+});
+
+test('a trash folder made by the first removal is synced into its parent', async () => {
+  const { dir, trashDir, t } = mergeFixture();
+  t.store.dupeMembers = () => [1, 2].map((id) => t.store.dupeFile(id));
+  const open = fs.openSync;
+  const opened = [];
+  fs.openSync = (p, ...rest) => { opened.push(p); return open(p, ...rest); };
+  try {
+    await t.remove(2);
+  } finally {
+    fs.openSync = open;
+  }
+  const parent = opened.indexOf(dir);
+  assert.ok(parent >= 0, 'the parent of the new trash folder is synced');
+  assert.ok(parent < opened.indexOf(trashDir), 'before the move syncs the trash folder itself');
+});

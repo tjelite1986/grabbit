@@ -710,19 +710,32 @@
                 let made = 0;
                 let failed = 0;
                 let x = {};
+                // egram looks for missing thumbnails a page at a time and hands
+                // back where it got to; that cursor goes back verbatim.
+                let cursor = null;
                 for (let round = 0; round < 50; round++) {
                   btn.textContent = made ? `Rebuilding ... ${num(made)} made` : 'Rebuilding ...';
-                  x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0 })).result || {};
+                  x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0, ...(cursor != null ? { cursor } : {}) })).result || {};
                   made += x.made || 0;
                   failed += x.failed || 0;
-                  const more = (x.stoppedEarly && x.stopReason === 'time') || (x.remaining || 0) > 0;
-                  if (!more || x.stopReason === 'disconnected' || (!x.made && !x.inProgress)) break;
+                  const moved = x.cursor != null && x.cursor !== cursor;
+                  cursor = x.cursor ?? null;
+                  if (x.stopReason === 'disconnected') break;
+                  const more = (x.stoppedEarly && x.stopReason === 'time') || (x.remaining || 0) > 0 || cursor != null;
+                  if (!more || (!x.made && !x.inProgress && !moved)) break;
+                }
+                // Discovery that ran out of time without a place to resume from
+                // says nothing about how many are missing.
+                if (x.discoveryIncomplete && x.cursor == null) {
+                  toast(`${num(made)} thumbnails made. ${a.app} could not finish looking for missing thumbnails in time; try again later.`);
+                  viewCache(body, generation, r);
+                  return null;
                 }
                 const left = x.remaining || 0;
                 // egram sets aside, for 30 minutes, the files that failed or are
                 // still being made, so one bad video cannot stall the batches.
                 const skipped = x.skipped || 0;
-                toast(`${num(made)} thumbnails made${failed ? `, ${num(failed)} failed` : ''}${left ? `; ${num(left)} still missing` : ''}${skipped ? `; ${num(skipped)} set aside (failed recently or still being made)` : ''}.`);
+                toast(`${num(made)} thumbnails made${failed ? `, ${num(failed)} failed` : ''}${left ? `; ${num(left)} still missing` : ''}${skipped ? `; ${num(skipped)} set aside (failed recently or still being made)` : ''}${cursor != null ? '; more left to check, run it again' : ''}.`);
                 if (skipped && !left && !retryFailed) {
                   const again = await dialog('Retry the files set aside?', [
                     h('p', null, `${num(skipped)} files in ${a.app} failed in the last 30 minutes or are still being made, so the rebuild skipped them.`),
