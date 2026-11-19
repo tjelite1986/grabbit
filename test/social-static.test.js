@@ -282,3 +282,21 @@ test('3.0.3: the feed is as wide as the screen allows, like Elitogram', () => {
   assert.match(css, /\.sg-slide img, \.sg-slide video \{[^}]*object-fit: contain;/);
   assert.match(js, /Math\.max\(0\.5625, Math\.min\(1\.91, ratio\)\)/);
 });
+
+test('3.0.3: @mentions link only to the creators the post names, and a creator has Published / Mentioned in', () => {
+  // The caption links an @name only through the post's own `mentions`.
+  assert.match(js, /function captionNodes\(text, mentions\)/);
+  assert.match(js, /const handle = byName\.get\(name\.toLowerCase\(\)\);\s*if \(!handle\) continue;/);
+  assert.match(js, /h\('a', \{ class: 'sg-mention', href: link\(`creator\/\$\{enc\(handle\)\}`\) \}, `@\$\{name\}`\)/);
+  // Every post caption passes them: the card, a saved edit and the full-screen viewer.
+  assert.match(js, /captionNodes\(single \? p\.caption : String\(p\.caption \|\| ''\)\.slice\(0, 400\), p\.mentions\)/);
+  assert.match(js, /fill\(captionEl, captionNodes\(p\.caption, p\.mentions\)\)/);
+  assert.match(js, /captionNodes\(caption, p\.mentions\)/);
+  // Comments carry no mentions and stay plain.
+  assert.match(js, /captionNodes\(c\.body\)/);
+  // The creator page: two tabs, the list from posts or mentioned.
+  assert.match(js, /\['posts', `Published · \$\{num\(posts\)\}`\], \['mentioned', `Mentioned in · \$\{num\(mentioned\)\}`\]/);
+  assert.match(js, /call\(`creators\/\$\{enc\(handle\)\}\/\$\{tab\}\$\{cur \?/);
+  // A limited profile offers no Follow (Elitogram refuses it).
+  assert.match(js, /const follow = c\.limited \? null :/);
+});

@@ -223,17 +223,38 @@
       return box;
     }
 
-    // Caption text with #tags as links; everything else stays text.
-    function captionNodes(text) {
+    // Caption text with #tags and @mentions as links; everything else stays text.
+    // An @name links only when the post's `mentions` (what the gateway let
+    // through) name a creator for it; the name is read the way Elitogram reads
+    // it (ASCII, a trailing dot dropped, case folded).
+    function captionNodes(text, mentions) {
+      const byName = new Map();
+      for (const m of Array.isArray(mentions) ? mentions : []) {
+        if (m && m.type === 'creator' && typeof m.name === 'string' && typeof m.handle === 'string' && /^[a-z0-9._~-]{1,100}$/.test(m.handle)) byName.set(m.name.toLowerCase(), m.handle);
+      }
       const out = [];
-      const re = /#([\p{L}\p{N}_]{1,100})/gu;
+      const re = /#([\p{L}\p{N}_]{1,100})|(^|[^A-Za-z0-9_.])@([A-Za-z0-9._-]{1,60})/gu;
       let last = 0;
       let m;
       const s = String(text || '');
       while ((m = re.exec(s))) {
-        if (m.index > last) out.push(s.slice(last, m.index));
-        out.push(h('a', { href: link(`tag/${enc(m[1].toLowerCase())}`) }, m[0]));
-        last = m.index + m[0].length;
+        let at = m.index;
+        let node;
+        let end = m.index + m[0].length;
+        if (m[1] !== undefined) {
+          node = h('a', { href: link(`tag/${enc(m[1].toLowerCase())}`) }, m[0]);
+        } else {
+          at += m[2].length;
+          const name = m[3].replace(/\.$/, '');
+          end = at + 1 + name.length;
+          const handle = byName.get(name.toLowerCase());
+          if (!handle) continue;
+          node = h('a', { class: 'sg-mention', href: link(`creator/${enc(handle)}`) }, `@${name}`);
+        }
+        if (at > last) out.push(s.slice(last, at));
+        out.push(node);
+        last = end;
+        re.lastIndex = end;
       }
       if (last < s.length) out.push(s.slice(last));
       return out;
@@ -473,7 +494,7 @@
       const source = safeHttps(p.source_url);
       const meta = p.meta && typeof p.meta === 'object' ? p.meta : null;
       const tags = meta && Array.isArray(meta.tags) ? meta.tags.filter((t) => typeof t === 'string').slice(0, 12) : [];
-      const caption = h('p', { class: 'sg-caption', hidden: !p.caption }, captionNodes(single ? p.caption : String(p.caption || '').slice(0, 400)));
+      const caption = h('p', { class: 'sg-caption', hidden: !p.caption }, captionNodes(single ? p.caption : String(p.caption || '').slice(0, 400), p.mentions));
       // In the feed the caption shows three lines; a tap shows the rest (a tag link still opens the tag).
       if (!single) caption.addEventListener('click', (e) => { if (!e.target.closest('a')) caption.classList.toggle('sg-open'); });
 
@@ -508,7 +529,9 @@
           try {
             const d = await call(`posts/${id}`, { method: 'PATCH', body: { caption: text.value }, lane });
             p.caption = d && typeof d.caption === 'string' ? d.caption : text.value;
-            fill(captionEl, captionNodes(p.caption));
+            // An edit relinks the mentions upstream; keep the old ones only if none came back.
+            if (d && Array.isArray(d.mentions)) p.mentions = d.mentions;
+            fill(captionEl, captionNodes(p.caption, p.mentions));
             captionEl.hidden = !p.caption;
             closeSheet();
             say('Caption saved');
@@ -1062,7 +1085,7 @@
         r.like = like;
         setDl(0);
         const caption = String(p.caption || '');
-        const capEl = caption ? h('p', { class: 'sg-reel-cap' }, captionNodes(caption)) : null;
+        const capEl = caption ? h('p', { class: 'sg-reel-cap' }, captionNodes(caption, p.mentions)) : null;
         const capMore = caption.length > 90 || caption.includes('\n')
           ? h('button', { type: 'button', class: 'sg-reel-more', 'aria-expanded': 'false', onclick: (e) => {
             const open = info.classList.toggle('sg-open');
@@ -1376,11 +1399,27 @@
       const lane = r.params.get('lane') === 'review' ? 'review' : null;
       if (!/^[a-z0-9._~-]{1,100}$/.test(handle)) return [pageHead('Creator'), empty('No such creator.')];
       const head = h('div', { class: 'sg-profile' }, h('p', { class: 'muted' }, 'Loading ...'));
+      // The tabs and the list wait for the profile: which tab opens first
+      // depends on its counts, and a profile that does not open lists nothing.
+      const body = h('div', { class: 'sg-creator-body' });
+      const asked = r.params.get('tab');
       const gen = generation;
       call(`creators/${enc(handle)}`, { lane }).then((c) => {
         if (!live(gen)) return;
-        const follow = h('button', { type: 'button', class: `btn small${c.following ? ' ghost' : ''}` }, c.following ? 'Following' : 'Follow');
-        follow.addEventListener('click', async () => {
+        const posts = Number(c.post_count) || 0;
+        const mentioned = Number(c.mentioned_count) || 0;
+        // Published first, unless the creator has only been mentioned (a creator
+        // made for an @name usually has no posts of its own).
+        const tab = asked === 'mentioned' || (asked !== 'posts' && !posts && mentioned) ? 'mentioned' : 'posts';
+        const tabs = mentioned || tab === 'mentioned'
+          ? chips([['posts', `Published · ${num(posts)}`], ['mentioned', `Mentioned in · ${num(mentioned)}`]], tab, (v) => link(`creator/${enc(handle)}`, { tab: v, lane }))
+          : null;
+        fill(body, tabs, pager(tileGrid(), (cur) => call(`creators/${enc(handle)}/${tab}${cur ? `?cursor=${enc(cur)}` : ''}`, { lane }), (t, c) => tile(t, lane, null, c),
+          { emptyText: tab === 'mentioned' ? 'No posts mention this creator.' : 'No posts here.' }));
+        // A limited profile (a creator only known from @mentions, not classified)
+        // is read-only: Elitogram refuses follow on it, so the button is not offered.
+        const follow = c.limited ? null : h('button', { type: 'button', class: `btn small${c.following ? ' ghost' : ''}` }, c.following ? 'Following' : 'Follow');
+        if (follow) follow.addEventListener('click', async () => {
           follow.disabled = true;
           try {
             const d = await call(`creators/${enc(handle)}/follow`, { method: c.following ? 'DELETE' : 'POST', lane });
@@ -1393,13 +1432,15 @@
           avatar(c.avatar, c.display_name || c.handle, lane, 88),
           h('div', { class: 'sg-profile-text' },
             h('h1', null, c.display_name || c.handle),
-            h('p', { class: 'muted' }, `@${c.handle} · ${plural(c.post_count, 'post', 'posts')} · ${plural(c.follower_count, 'follower', 'followers')}`),
+            h('p', { class: 'muted' }, c.limited
+              ? `@${c.handle} · ${plural(mentioned, 'mention', 'mentions')}`
+              : `@${c.handle} · ${plural(c.post_count, 'post', 'posts')} · ${plural(c.follower_count, 'follower', 'followers')}`),
+            c.limited ? h('p', { class: 'muted small sg-limited' }, 'Known only from mentions in other posts. Not classified yet.') : null,
             c.bio ? h('p', { class: 'sg-bio' }, c.bio) : null,
             h('div', { class: 'sg-inline' }, follow,
               lane === 'review' && canClassify() ? classifyCreatorButtons([c.handle], () => { location.hash = link('review'); }) : null)));
       }).catch((e) => { if (live(gen)) fill(head, empty(e.status === 404 ? 'This creator is not in Social & Photos.' : e.message)); });
-      const grid = tileGrid();
-      return [lane === 'review' ? reviewBanner() : null, head, pager(grid, (cur) => call(`creators/${enc(handle)}/posts${cur ? `?cursor=${enc(cur)}` : ''}`, { lane }), (t, c) => tile(t, lane, null, c), { emptyText: 'No posts here.' })];
+      return [lane === 'review' ? reviewBanner() : null, head, body];
     }
 
     function viewPost(r) {
