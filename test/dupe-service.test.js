@@ -788,3 +788,51 @@ test('settings are sanitised and stored in items.db settings, not as a schema ch
   assert.deepEqual(svc.cfg(), next);
   assert.equal(s.raw.pragma('main.user_version', { simple: true }), itemStore.SCHEMA_VERSION);
 });
+
+test('empty trash deletes only the exact entries the owner saw, not another set of the same count and size', async (t) => {
+  const { own, svc, scan, trashDir } = setup(t);
+  const body = 'same size';
+  write(path.join(own, 'a.mp4'), body, 1000);
+  write(path.join(own, 'b.mp4'), body, 2000);
+  write(path.join(own, 'c.mp4'), body, 3000);
+  await scan();
+  await svc.act(exactGroup(svc, body).key, 'trash_extras', { by: 'owner' });
+  const seen = svc.trashSummary();
+  assert.equal(seen.files, 2);
+  assert.match(seen.fingerprint, /^[0-9a-f]{32}$/);
+  // One copy comes back and goes again: same count and bytes, another entry.
+  const c = svc.trashList().items.find((x) => x.name === 'c.mp4');
+  await svc.trashRestore([c.id], 'owner');
+  await scan();
+  await svc.act(exactGroup(svc, body).key, 'trash_extras', { by: 'owner' });
+  const now = svc.trashSummary();
+  assert.equal(now.files, seen.files);
+  assert.equal(now.bytes, seen.bytes);
+  assert.notEqual(now.fingerprint, seen.fingerprint);
+  await assert.rejects(svc.trashEmpty(seen, 'owner'), (e) => e.status === 409);
+  await assert.rejects(svc.trashEmpty({ files: now.files, bytes: now.bytes }, 'owner'), (e) => e.status === 409, 'no fingerprint is no confirmation');
+  assert.equal(fs.readdirSync(trashDir).length, 2, 'nothing was deleted');
+  await svc.trashEmpty(now, 'owner');
+  assert.deepEqual(fs.readdirSync(trashDir), []);
+});
+
+test('a restore that arrives while another operation holds the lock is refused with 409 and changes nothing', async (t) => {
+  const { own, svc, scan } = setup(t);
+  const body = 'locked restore';
+  write(path.join(own, 'a.mp4'), body, 1000);
+  write(path.join(own, 'b.mp4'), body, 2000);
+  await scan();
+  await svc.act(exactGroup(svc, body).key, 'trash_extras', { by: 'owner' });
+  const entry = svc.trashList().items[0];
+  let release;
+  const held = svc.exclusive('delete', () => new Promise((r) => { release = r; }));
+  // The legacy route runs DupeTrash.restore through this same lock.
+  await assert.rejects(svc.exclusive('restore', () => svc.trash.restore(Number(entry.id.replace(/^\D+/, '')))), (e) => e.status === 409 && /Another operation is running \(delete\)/.test(e.message));
+  await assert.rejects(svc.trashRestore([entry.id], 'owner'), (e) => e.status === 409);
+  release();
+  await held;
+  assert.ok(!fs.existsSync(path.join(own, 'b.mp4')), 'nothing came back while locked');
+  const rr = await svc.trashRestore([entry.id], 'owner');
+  assert.equal(rr.done.length, 1);
+  assert.ok(fs.existsSync(path.join(own, 'b.mp4')));
+});

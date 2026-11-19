@@ -255,3 +255,28 @@ test('noAdapterReason explains why an app copy cannot go', () => {
   assert.match(r.why, /TikShortis owns this file/);
   assert.match(noAdapterReason({}).why, /This app owns/);
 });
+
+test('a change request that times out before the answer stays open (stalled), a lookup does not', async () => {
+  const fetchImpl = (url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+  const a = adapter({ fetchImpl, timeoutMs: 30 });
+  for (const p of [a.link('a.mp4', 'b.mp4', 'f'.repeat(64)), a.restore('7:u1'), a.purge('7:u1')]) {
+    await assert.rejects(p, (e) => {
+      assert.ok(e instanceof AdapterError);
+      assert.equal(e.status, 424);
+      assert.equal(e.stalled, true, 'the app may have done it: the operation stays pending');
+      assert.match(e.fix, /may have been carried out/);
+      return true;
+    });
+  }
+  await assert.rejects(a.lookup(['a.mp4']), (e) => e.stalled !== true && /nothing was changed/.test(e.fix));
+});
+
+test('restore and purge send the id and uid of an "id:uid" reference, and the id alone for an old one', async () => {
+  const fetchImpl = stubFetch(() => jsonRes(200, { ok: true }));
+  const a = adapter({ fetchImpl });
+  await a.restore('12:abc');
+  await a.purge('13');
+  assert.deepEqual(fetchImpl.calls.map((c) => c.body), [{ id: 12, uid: 'abc' }, { id: 13 }]);
+});

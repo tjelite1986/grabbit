@@ -703,13 +703,32 @@
           const btn = e.currentTarget;
           await busyBtn(btn, async () => {
             try {
+              if (action === 'rebuild' && !dry) {
+                // egram stops a rebuild after its time budget and reports what
+                // is left; call again until nothing is left or no progress is made.
+                let made = 0;
+                let failed = 0;
+                let x = {};
+                for (let round = 0; round < 50; round++) {
+                  btn.textContent = made ? `Rebuilding ... ${num(made)} made` : 'Rebuilding ...';
+                  x = (await post(`cache/${a.id}/rebuild`, { dryRun: false })).result || {};
+                  made += x.made || 0;
+                  failed += x.failed || 0;
+                  const more = (x.stoppedEarly && x.stopReason === 'time') || (x.remaining || 0) > 0;
+                  if (!more || x.stopReason === 'disconnected' || (!x.made && !x.inProgress)) break;
+                }
+                const left = x.remaining || 0;
+                toast(`${num(made)} thumbnails made${failed ? `, ${num(failed)} failed` : ''}${left ? `; ${num(left)} still missing` : ''}.`);
+                viewCache(body, generation, r);
+                return null;
+              }
               const res = await post(`cache/${a.id}/${action}`, { dryRun: dry });
               const x = res.result || {};
               if (dry) {
                 const ok = await dialog(action === 'clean' ? 'Clean unused cache?' : 'Rebuild thumbnails?', [
                   h('p', null, action === 'clean'
                     ? `${num(x.files || 0)} unused generated files (${bytes(x.bytes || 0)}) in ${a.app}. They are rebuilt from the originals if ever needed.`
-                    : `${num(x.missing || 0)} thumbnails are missing in ${a.app}${x.limit ? `; up to ${num(x.limit)} are made now` : ''}.`),
+                    : `${num(x.missing || 0)} thumbnails are missing in ${a.app}${x.limit ? `; they are made in batches of up to ${num(x.limit)} until none is left` : ''}.`),
                 ], [{ label: action === 'clean' ? 'Clean' : 'Rebuild', value: true, danger: action === 'clean' }]);
                 if (ok) return run(action, false)({ currentTarget: btn });
                 return null;

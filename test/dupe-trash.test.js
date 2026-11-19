@@ -224,3 +224,79 @@ test('a similar copy never goes when the copy that stays is only waiting in an i
   await assert.rejects(trash.removeSimilar(1, 2), /waiting in egram's import folder/);
   assert.ok(fs.existsSync(path.join(g, 'a.jpg')), 'nothing moved');
 });
+
+// Runs `fn` with fs.linkSync wrapped: after a link whose target matches
+// `when`, `then()` runs, like a writer that acts while a copy is staged.
+async function duringLink(when, then, fn) {
+  const link = fs.linkSync;
+  fs.linkSync = (from, to) => {
+    const r = link(from, to);
+    if (when(to)) then();
+    return r;
+  };
+  try {
+    return await fn();
+  } finally {
+    fs.linkSync = link;
+  }
+}
+
+// Replaces `file` with a new inode holding `body`, as an atomic writer does.
+function replaceFile(file, body) {
+  const tmp = `${file}.writer`;
+  fs.writeFileSync(tmp, body);
+  fs.renameSync(tmp, file);
+}
+
+test('merge stops and changes nothing when the file is replaced while the trash copy is placed', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const b = path.join(g, 'b.mp4');
+  await duringLink((to) => to.startsWith(trashDir + path.sep), () => replaceFile(b, 'newer bytes'), async () => {
+    await assert.rejects(t.mergeLocal(2, 1), /changed while it was being merged/);
+  });
+  assert.equal(fs.readFileSync(b, 'utf8'), 'newer bytes', 'the writer\'s file is untouched');
+  assert.notEqual(fs.statSync(b).ino, fs.statSync(path.join(g, 'a.mp4')).ino);
+  assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no merge temp left behind');
+  assert.deepEqual(fs.readdirSync(trashDir), [], 'no trash copy left behind');
+  assert.equal(trash.length, 0, 'no trash row recorded');
+});
+
+test('restoring a merge refuses when the live name is replaced while the original is staged', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const id = await t.mergeLocal(2, 1);
+  const held = path.join(trashDir, trash[id - 1].trash_name);
+  const b = path.join(g, 'b.mp4');
+  await duringLink((to) => path.basename(to).includes('.restore-'), () => replaceFile(b, 'written meanwhile'), async () => {
+    await assert.rejects(t.restore(id), /changed while restoring/);
+  });
+  assert.equal(fs.readFileSync(b, 'utf8'), 'written meanwhile', 'the newer file is never overwritten');
+  assert.ok(fs.existsSync(held), 'the trash still holds the original');
+  assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no restore stage left behind');
+  assert.equal(trash[id - 1].restored_at, undefined, 'the entry is still in the trash');
+});
+
+test('a dangling symlink counts as a taken name: moveFile refuses it and restore goes beside it', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const { g, trash, trashDir, t } = mergeFixture();
+  const src = path.join(g, 'src.bin');
+  const dangling = path.join(g, 'dangling.bin');
+  fs.writeFileSync(src, 'payload');
+  fs.symlinkSync(path.join(g, 'nowhere'), dangling);
+  await assert.rejects(moveFile(src, dangling), /already exists/);
+  assert.equal(fs.readFileSync(src, 'utf8'), 'payload', 'the source stays');
+  assert.ok(fs.lstatSync(dangling).isSymbolicLink() && !fs.existsSync(dangling), 'the symlink is untouched');
+  fs.unlinkSync(src);
+  fs.unlinkSync(dangling);
+
+  // A merged copy whose name is now a dangling symlink comes back beside it.
+  const id = await t.mergeLocal(2, 1);
+  const b = path.join(g, 'b.mp4');
+  fs.unlinkSync(b);
+  fs.symlinkSync(path.join(g, 'nowhere'), b);
+  const r = await t.restore(id);
+  assert.equal(r.renamed, true);
+  assert.equal(r.restoredRel, 'b (restored).mp4');
+  assert.ok(fs.lstatSync(b).isSymbolicLink(), 'the symlink is left as it was');
+  assert.equal(fs.readFileSync(path.join(g, 'b (restored).mp4'), 'utf8'), 'same bytes');
+  assert.ok(!fs.existsSync(path.join(trashDir, trash[id - 1].trash_name)));
+});
