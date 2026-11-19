@@ -99,7 +99,8 @@ class DupeScanner {
     this.roots = this.rootsFn();
     // The server's own limit (env), used again when the owner clears the setting.
     this.defaultMbPerSec = Math.max(1, Math.min(500, Number(opts.defaultMbPerSec) || 20));
-    this.mbPerSec = Math.max(1, Number(opts.mbPerSec) || this.defaultMbPerSec);
+    // Normalised like a live change (setRate): 1..500 MB/s, whatever the env says.
+    this.mbPerSec = Math.max(1, Math.min(500, Number(opts.mbPerSec) || this.defaultMbPerSec));
     this.pauseMs = Math.max(0, Number(opts.pauseMs != null ? opts.pauseMs : 25));
     this.rescanMs = Math.max(60_000, Number(opts.rescanMs) || 6 * 3600_000);
     this.log = opts.log || ((m) => console.log(`dupes: ${m}`));

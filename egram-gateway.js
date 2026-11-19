@@ -130,7 +130,8 @@ const ROUTES = [
   r('GET', `api/hashtags/${TAG}`),
   r('GET', `api/posts/${ID}`),
   // `author` moves the post to another creator ({ creator: handle } only). The
-  // new creator must pass this lane's checks like a creator page would.
+  // new creator must pass this lane's checks like a creator page would, and
+  // the gateway binds the write to that creator's id and identity_rev.
   r('PATCH', `api/posts/${ID}`, { body: ['audience', 'caption', 'author'], parent: 'path', author: true }),
   r('DELETE', `api/posts/${ID}`, { parent: 'path' }),
   // A new post: multipart (files, caption, creator, audience, adult), streamed
@@ -655,12 +656,15 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   }
 
   // Would the creator `handle` be passed back in this lane? -> true | false | 401
-  async function subjectVerdict(req, cur, lane, handle, downstream = null) {
+  // `seen`, when given, receives the creator's id and identity fingerprint
+  // (identity_rev) as read with this check, so a write can be bound to them.
+  async function subjectVerdict(req, cur, lane, handle, downstream = null, seen = null) {
     const r = await upstream(req, { method: 'GET', path: `/api/creators/${encodeURIComponent(handle)}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
     if (r.statusCode === 401) { r.resume(); return 401; }
     if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
     const d = await readJson(r);
     if (!d || typeof d !== 'object' || norm(d.handle) !== handle) return false;
+    if (seen) { seen.id = d.id; seen.rev = d.identity_rev; }
     const ids = await identitiesFor(req, cur, lane, [...new Set([...handlesIn(d), `c:${handle}`])], downstream);
     const { value, dropped } = filterAnswer(d, LANES[lane], adultTest(ids));
     if (!(value !== null && dropped === 0 && value.audience === LANES[lane] && !adultTest(ids)?.(handle, 'c'))) return false;
@@ -826,13 +830,21 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       const handle = keys && keys.length === 1 && keys[0] === 'creator' && typeof a.creator === 'string' ? norm(a.creator).replace(/^@/, '') : '';
       if (!CANONICAL_HANDLE.test(handle)) return fail(res, 400, 'author must name a creator');
       let verdict;
-      try { verdict = await subjectVerdict(req, cur, lane, handle, res); } catch (e) {
+      const seen = {};
+      try { verdict = await subjectVerdict(req, cur, lane, handle, res, seen); } catch (e) {
         log.warn(`[egram] author check ${rest}: ${e.message}`);
         return fail(res, 424, 'Elitogram is not reachable right now');
       }
       if (verdict === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
       if (verdict !== true) return fail(res, 400, `Unknown creator "${handle}"`);
-      src.author = { creator: handle };
+      // The move is bound to the creator just checked: Elitogram accepts the
+      // handle only as that creator's own (never an alias) and only while its
+      // id and identity fingerprint are unchanged, up to its commit. Without a
+      // fingerprint (an older Elitogram) the move is refused, not sent unbound.
+      if (!Number.isInteger(seen.id) || seen.id < 1 || typeof seen.rev !== 'string' || !/^[0-9a-f]{64}$/.test(seen.rev)) {
+        return fail(res, 424, 'Elitogram cannot bind this move to the creator; update Elitogram');
+      }
+      src.author = { creator: handle, id: seen.id, rev: seen.rev };
     }
     if (route.upload) return uploadPost(req, res, cur, lane, headers);
     if (req.method !== 'GET' && req.method !== 'HEAD') {

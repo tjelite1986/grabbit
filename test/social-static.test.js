@@ -143,7 +143,7 @@ test('notifications, settings and post editing use only allowlisted gateway rout
   assert.match(js, /call\('me', \{ method: 'PATCH', body: \{ display_name: name\.value\.trim\(\), bio: bio\.value \} \}\)/);
   assert.match(js, /call\('me\/password', \{ method: 'POST', body: \{ current: cur\.value, password: next\.value \} \}\)/);
   assert.match(js, /single && p\.can_edit \? ownerBar\(p, lane, caption\)/);
-  assert.match(js, /const body = \{ caption \};\n\s+if \(moving\) body\.author = \{ creator: handle \};/);
+  assert.match(js, /const body = \{\};\n\s+if \(captionEdited\) body\.caption = caption;\n\s+if \(moving\) body\.author = \{ creator: handle \};/);
   assert.match(js, /call\(`posts\/\$\{id\}`, \{ method: 'PATCH', body, lane \}\)/);
   assert.ok(gw.includes("r('PATCH', `api/posts/${ID}`, { body: ['audience', 'caption', 'author'], parent: 'path', author: true })"));
   // The standalone-only list is on the settings page.
@@ -406,6 +406,16 @@ test('Edit post asks before a creator change moves the post', () => {
   const ask = body.indexOf('if (moving && !confirm(');
   assert.ok(ask > 0, 'confirm on a move');
   assert.ok(ask < body.indexOf("call(`posts/${id}`, { method: 'PATCH'"), 'before the PATCH');
+});
+
+// Codex r9 (R9-02): a creator-only edit leaves the stored caption alone.
+test('Edit post sends the caption only when description or tags changed', () => {
+  const at = js.indexOf('function editPostSheet');
+  const body = js.slice(at, js.indexOf('function postMenu', at));
+  assert.match(body, /const captionEdited = desc\.value !== split\.desc \|\| tags\.value !== split\.tags;/);
+  assert.match(body, /const body = \{\};\n\s+if \(captionEdited\) body\.caption = caption;\n\s+if \(moving\) body\.author = \{ creator: handle \};/);
+  assert.match(body, /if \(!moving && !captionEdited\) \{ closeSheet\(\); return; \}/);
+  assert.doesNotMatch(body, /const body = \{ caption \};/);
 });
 
 // Hermes final review (A1, A2): Duplicate Manager dialogs.

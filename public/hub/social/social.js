@@ -734,7 +734,13 @@
         const caption = [desc.value.trim(), tagList.map((t) => `#${t}`).join(' ')].filter(Boolean).join('\n\n');
         const handle = creator.value.trim().replace(/^@/, '').toLowerCase();
         const moving = !!handle && handle !== was.toLowerCase();
-        const body = { caption };
+        // The caption is sent only when description or tags were edited: a
+        // rebuilt caption is not the stored one (tags are capped and
+        // deduplicated), and a creator-only edit must not rewrite it.
+        const captionEdited = desc.value !== split.desc || tags.value !== split.tags;
+        if (!moving && !captionEdited) { closeSheet(); return; }
+        const body = {};
+        if (captionEdited) body.caption = caption;
         if (moving) body.author = { creator: handle };
         if (moving && !confirm(`Move this post to @${handle}? Its files move with it, and it can leave this list${lane === 'review' ? '' : ' and wait in the Review lane until it is classified'}.`)) return;
         btn.disabled = true;

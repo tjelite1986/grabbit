@@ -281,7 +281,8 @@ test('a write carries only the keys its route allows', async () => {
 });
 
 test('an edit may move a post only to a creator this lane would show', async () => {
-  const creator = (handle, extra = {}) => ({ id: 9, handle, post_count: 1, mentioned_count: 0, follower_count: 0, audience: 'general', ...extra });
+  const REV = 'a'.repeat(64);
+  const creator = (handle, extra = {}) => ({ id: 9, handle, post_count: 1, mentioned_count: 0, follower_count: 0, audience: 'general', identity_rev: REV, ...extra });
   handlers['/api/posts/5'] = json(200, { id: 5, caption: '', author: { handle: 'ann' }, media: [], audience: 'general' });
   handlers['PATCH /api/posts/5'] = json(200, { id: 5, caption: 'x', can_edit: true, audience: 'general' });
   handlers['/api/creators/dana'] = json(200, creator('dana'));
@@ -291,11 +292,12 @@ test('an edit may move a post only to a creator this lane would show', async () 
   handlers['/api/creators/nobody'] = json(404, { error: 'Profile not found' });
   adultSet = new Set(['eve18']);
   try {
-    // A general creator: passes, re-encoded as the canonical handle only.
+    // A general creator: passes, re-encoded as the canonical handle bound to
+    // the id and identity fingerprint read with the check (R9-01).
     const ok = await call('PATCH', '/api/egram/api/posts/5', { body: { caption: 'x', author: { creator: ' @Dana ' } } });
     assert.equal(ok.status, 200);
     assert.equal(last().method, 'PATCH');
-    assert.deepEqual(JSON.parse(last().body), { caption: 'x', author: { creator: 'dana' } });
+    assert.deepEqual(JSON.parse(last().body), { caption: 'x', author: { creator: 'dana', id: 9, rev: REV } });
     // The review lane checks the creator in that lane.
     assert.equal((await call('PATCH', '/api/egram/api/posts/5?lane=review', { body: { author: { creator: 'dana' } } })).status, 404, 'post 5 is not in review');
     const refused = async (author, why, status = 400) => {
@@ -308,6 +310,13 @@ test('an edit may move a post only to a creator this lane would show', async () 
     await refused({ creator: 'rev' }, 'creator not in this lane');
     await refused({ creator: 'alias1' }, 'an alias of another creator');
     await refused({ creator: 'nobody' }, 'unknown creator');
+    // A client may not supply the binding itself; extra keys are refused.
+    await refused({ creator: 'dana', id: 9, rev: REV }, 'client-supplied binding');
+    // An Elitogram that sends no fingerprint gets no unbound move.
+    handlers['/api/creators/oldeg'] = json(200, creator('oldeg', { identity_rev: undefined }));
+    await refused({ creator: 'oldeg' }, 'no identity_rev', 424);
+    handlers['/api/creators/badrev'] = json(200, creator('badrev', { identity_rev: 'x' }));
+    await refused({ creator: 'badrev' }, 'malformed identity_rev', 424);
     await refused({ self: true }, 'an account');
     await refused({ creator: 'dana', self: true }, 'extra keys');
     await refused('dana', 'not an object');

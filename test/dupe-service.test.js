@@ -837,6 +837,15 @@ test('clearing the read speed limit goes back to the server limit without a rest
   delete svc.scanner;
 });
 
+// Codex r9 (R9-03): an env limit above 500 is clamped at boot, not only on clear.
+test('the scan read limit is clamped to 500 MB/s from the start', (t) => {
+  const { s, candidates } = setup(t);
+  const sc = new DupeScanner({ store: s, roots: planRoots(candidates), mbPerSec: 650, defaultMbPerSec: 650, pauseMs: 0, log: () => {} });
+  assert.equal(sc.mbPerSec, 500);
+  assert.equal(sc.defaultMbPerSec, 500);
+  assert.equal(sc.setRate(null), 500, 'clearing keeps the same limit');
+});
+
 test('settings are sanitised and stored in items.db settings, not as a schema change', async (t) => {
   const { svc, s } = setup(t);
   const next = svc.setCfg({ trashRetentionDays: 3, defaultRule: 'bogus', prevention: { exact: 'explode', perceptual: 'delete' } });
