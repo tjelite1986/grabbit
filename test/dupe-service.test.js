@@ -128,8 +128,8 @@ function stubAdapter(o = {}) {
       if (o.link) return o.link(keep, drop, sha256);
       return { id: 100 + calls.length, uid: String(100 + calls.length).padStart(32, '0'), bytes: 1 };
     },
-    async restore(id) { calls.push(['restore', id]); return { ok: true }; },
-    async purge(id) { calls.push(['purge', id]); return { ok: true }; },
+    async restore(id) { calls.push(['restore', id]); return { id: Number(String(id).split(':')[0]) }; },
+    async purge(id) { calls.push(['purge', id]); return { id: Number(String(id).split(':')[0]), bytes: 1 }; },
     async lookup(rels) {
       calls.push(['lookup', rels]);
       if (o.lookup) return o.lookup(rels);
@@ -903,4 +903,85 @@ test('a merged name keeps its hash and its library link without waiting for a ne
   const r = await svc.act(exactGroup(svc, body).key, 'merge', { by: 'owner' });
   assert.equal(r.done.length, 1);
   assert.deepEqual(row(), before, 'same hash and item link right after the merge');
+});
+
+// Round 7: once the app has done a change, a local write failure is not the
+// app refusing. The operation stays pending with the app's reference.
+test('a local write failure after the app merged or restored keeps the operation pending with its reference', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  const ad = stubAdapter();
+  adapters.set(ctx.tik, ad);
+  const { tik, svc, scan, dx } = ctx;
+  const body = 'local write fails';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  await scan();
+  const add = dx.appTrashAdd;
+  dx.appTrashAdd = () => { throw new Error('database is locked'); };
+  const r = await svc.act(exactGroup(svc, body).key, 'merge');
+  dx.appTrashAdd = add;
+  assert.equal(r.done.length, 0);
+  assert.match(r.refused[0].error, /carried this out, but Grabbit could not record it/);
+  const ops = dx.opsRecent();
+  assert.deepEqual(ops.map((o) => o.state), ['pending'], 'never closed as failed');
+  const note = JSON.parse(ops[0].result);
+  assert.equal(note.appRef, `101:${'101'.padStart(32, '0')}`, 'the returned reference is kept');
+  assert.equal(note.appDone, true);
+
+  // A restore the app carried out: the trash row and the journal close
+  // together, or neither does.
+  const r2 = await svc.act(exactGroup(svc, body).key, 'merge');
+  assert.equal(r2.done.length, 1);
+  const item = svc.trashList({ adult: 'show' }).items[0];
+  const done = dx.appTrashDone;
+  dx.appTrashDone = () => { throw new Error('disk I/O error'); };
+  const rr = await svc.trashRestore([item.id]);
+  dx.appTrashDone = done;
+  assert.equal(rr.done.length, 0);
+  assert.match(rr.refused[0].error, /could not record it/);
+  const restoreOp = dx.opsRecent().find((o) => o.op === 'restore');
+  assert.equal(restoreOp.state, 'pending');
+  assert.equal(JSON.parse(restoreOp.result).appDone, true);
+});
+
+test('the journal row and the trash update are written in one transaction', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  adapters.set(ctx.tik, stubAdapter());
+  const { tik, svc, scan, dx } = ctx;
+  const body = 'one transaction';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  await scan();
+  await svc.act(exactGroup(svc, body).key, 'merge');
+  const item = svc.trashList({ adult: 'show' }).items[0];
+  // The journal write fails after the trash row was updated: both roll back.
+  const end = dx.opEnd;
+  dx.opEnd = () => { throw new Error('disk I/O error'); };
+  const rr = await svc.trashRestore([item.id]);
+  dx.opEnd = end;
+  assert.equal(rr.done.length, 0);
+  assert.equal(svc.trashList({ adult: 'show' }).total, 1, 'the trash row was rolled back with the journal');
+});
+
+test('only a cursor the app rejects as invalid is reported as bad_cursor; other rebuild failures are not', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  let reply = null;
+  const egram = stubAdapter({ id: 'egram', app: 'egram', caps: ['lookup', 'cache'] });
+  egram.call = async () => { throw reply; };
+  adapters.set(ctx.lib, egram);
+  const { svc } = ctx;
+  await assert.rejects(svc.cacheAction('egram', 'rebuild', false, 'owner', { cursor: 'bad cursor!' }), (e) => e.code === 'bad_cursor' && e.status === 400);
+  reply = new AdapterError('Invalid cursor', { status: 409 });
+  await assert.rejects(svc.cacheAction('egram', 'rebuild', false, 'owner', { cursor: 'm:12' }), (e) => e.code === 'bad_cursor');
+  for (const err of [
+    new AdapterError('egram did not answer in time', { status: 424, stalled: true }),
+    new AdapterError('egram is not reachable right now', { status: 424 }),
+    new AdapterError('Another rebuild is running', { status: 409 }),
+  ]) {
+    reply = err;
+    await assert.rejects(svc.cacheAction('egram', 'rebuild', false, 'owner', { cursor: 'm:12' }), (e) => e.code !== 'bad_cursor', err.message);
+  }
 });

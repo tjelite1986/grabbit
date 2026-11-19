@@ -140,7 +140,9 @@ class AppAdapter {
     // 422 may have lost its `mayHaveChanged`), a success status that says
     // ok: false, and a marked answer all leave the operation pending.
     const isObj = j && typeof j === 'object' && !Array.isArray(j);
-    const definiteRefusal = res.status >= 400 && res.status < 500 && isObj && typeof j.error === 'string' && j.mayHaveChanged !== true;
+    // Any `mayHaveChanged` at all (false and null included) keeps it open:
+    // only an answer that does not raise the question is a refusal.
+    const definiteRefusal = res.status >= 400 && res.status < 500 && isObj && typeof j.error === 'string' && !('mayHaveChanged' in j);
     if (mutation && (!res.ok || j.ok === false) && !definiteRefusal) {
       const ref = isObj && Number.isSafeInteger(j.id) && j.id > 0 ? (j.uid != null && /^[A-Za-z0-9_-]{1,64}$/.test(String(j.uid)) ? `${j.id}:${j.uid}` : String(j.id)) : null;
       throw new AdapterError((isObj && typeof j.error === 'string' && j.error) || `${this.app} failed while carrying out the request (HTTP ${res.status})`, {
@@ -170,25 +172,50 @@ class AppAdapter {
     return out;
   }
 
+  // A change succeeded only when its 2xx answer has the shape that change
+  // promises. Anything else (an array, {}, another entry's id) is no proof
+  // either way, so the operation stays pending for the owner to check.
+  confirm(j, ok, what) {
+    const isObj = j && typeof j === 'object' && !Array.isArray(j);
+    if (isObj && ok(j)) return j;
+    throw new AdapterError(`${this.app} answered the ${what} in a form Grabbit does not recognise`, {
+      status: 424, stalled: true,
+      fix: `The request may have been carried out; check the item in ${this.app} before trying again.`,
+    });
+  }
+
   async link(keepRel, dropRel, sha256) {
     if (!this.caps.has('link')) throw new AdapterError(`${this.app} cannot share one file between posts`);
-    return this.call('POST', 'link', { keep: this.appPath(keepRel), drop: this.appPath(dropRel), sha256 });
+    const j = await this.call('POST', 'link', { keep: this.appPath(keepRel), drop: this.appPath(dropRel), sha256 });
+    return this.confirm(j, (x) => Number.isSafeInteger(x.id) && x.id > 0, 'merge');
   }
 
   // A held entry is named by the app's id plus the random uid its link
   // answer carried ("<id>:<uid>"), so an id the app reuses after a database
   // restore never points at another merge. The app refuses a missing uid.
-  restore(ref) { return this.call('POST', 'restore', refBody(ref)); }
-  purge(ref) { return this.call('POST', 'purge', refBody(ref)); }
+  // The answer must name that same entry.
+  async restore(ref) {
+    const body = refBody(ref);
+    const j = await this.call('POST', 'restore', body);
+    return this.confirm(j, (x) => x.id === body.id, 'restore');
+  }
+
+  async purge(ref) {
+    const body = refBody(ref);
+    const j = await this.call('POST', 'purge', body);
+    return this.confirm(j, (x) => x.id === body.id && (x.bytes == null || (Number.isFinite(x.bytes) && x.bytes >= 0)), 'delete');
+  }
 
   async cache() {
     if (!this.caps.has('cache')) return null;
     return this.call('GET', 'cache');
   }
 
-  cacheClean(dryRun) {
+  async cacheClean(dryRun) {
     if (!this.caps.has('cache')) throw new AdapterError(`${this.app} has no cache cleanup`);
-    return this.call('POST', 'cache/clean', { dryRun: Boolean(dryRun) });
+    const j = await this.call('POST', 'cache/clean', { dryRun: Boolean(dryRun) });
+    const count = (n) => Number.isSafeInteger(n) && n >= 0;
+    return this.confirm(j, (x) => count(x.files) && count(x.bytes), 'cache cleanup');
   }
 }
 

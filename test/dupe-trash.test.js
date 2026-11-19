@@ -241,6 +241,13 @@ async function duringLink(when, then, fn) {
   }
 }
 
+// Runs `fn` with console.error silenced (expected "copy stays" logs).
+async function quiet(fn) {
+  const err = console.error;
+  console.error = () => {};
+  try { return await fn(); } finally { console.error = err; }
+}
+
 // Replaces `file` with a new inode holding `body`, as an atomic writer does.
 function replaceFile(file, body) {
   const tmp = `${file}.writer`;
@@ -251,13 +258,17 @@ function replaceFile(file, body) {
 test('merge stops and changes nothing when the file is replaced while the trash copy is placed', async () => {
   const { g, trash, trashDir, t } = mergeFixture();
   const b = path.join(g, 'b.mp4');
-  await duringLink((to) => to.startsWith(trashDir + path.sep), () => replaceFile(b, 'newer bytes'), async () => {
+  const original = fs.statSync(b).ino;
+  await quiet(() => duringLink((to) => to.startsWith(trashDir + path.sep), () => replaceFile(b, 'newer bytes'), async () => {
     await assert.rejects(t.mergeLocal(2, 1), /changed while it was being merged/);
-  });
+  }));
   assert.equal(fs.readFileSync(b, 'utf8'), 'newer bytes', 'the writer\'s file is untouched');
   assert.notEqual(fs.statSync(b).ino, fs.statSync(path.join(g, 'a.mp4')).ino);
   assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no merge temp left behind');
-  assert.deepEqual(fs.readdirSync(trashDir), [], 'no trash copy left behind');
+  // Round 7: the held link is now the last name of the original inode.
+  const left = fs.readdirSync(trashDir);
+  assert.equal(left.length, 1, 'the last name of the original stays in the trash folder');
+  assert.equal(fs.statSync(path.join(trashDir, left[0])).ino, original);
   assert.equal(trash.length, 0, 'no trash row recorded');
 });
 
@@ -346,7 +357,7 @@ test('a name of multi-byte characters gets a trash name under the 255-byte limit
 
 // Round 4: a cross-mount move must not remove a file a writer published at
 // the source name while the copy was being made.
-test('a move across mounts keeps a source replaced during the copy and undoes the copy', async () => {
+test('a move across mounts keeps a source replaced during the copy, and keeps the copy too', async () => {
   const { moveFile } = require('../dupe-trash');
   const { g, dir } = mergeFixture();
   const src = path.join(g, 'b.mp4');
@@ -364,12 +375,14 @@ test('a move across mounts keeps a source replaced during the copy and undoes th
     return r;
   };
   try {
-    await assert.rejects(moveFile(src, dest, null, expect), /changed while it was being moved/);
+    await quiet(() => assert.rejects(moveFile(src, dest, null, expect), /changed while it was being moved/));
   } finally {
     fs.linkSync = link;
   }
   assert.equal(fs.readFileSync(src, 'utf8'), 'published meanwhile', 'the replacement is never unlinked');
-  assert.deepEqual(fs.readdirSync(destDir), [], 'the verified copy is undone, no .part left');
+  // Round 7: the verified copy may be the last copy of the hashed bytes.
+  assert.deepEqual(fs.readdirSync(destDir), ['held.mp4'], 'the verified copy stays, no .part left');
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'same bytes');
 });
 
 test('a move refuses a source that is no longer the file that was hashed', async () => {
@@ -595,4 +608,86 @@ test('a hard-link move whose new name vanishes during the sync refuses cleanly',
     fs.openSync = open;
   }
   assert.equal(fs.readFileSync(src, 'utf8'), 'same bytes');
+});
+
+// Round 7: no identity is ever taken by reopening a name, a copy that may be
+// the last one of the hashed bytes is never undone, and the last look at
+// every file a merge or a merged restore relies on comes right before the
+// rename and the unlink, after the slow work.
+test('where hard links are refused, the published copy is identified through its own descriptor', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const { g, dir } = mergeFixture();
+  const src = path.join(g, 'b.mp4');
+  const destDir = path.join(dir, 'nolinks');
+  fs.mkdirSync(destDir);
+  const dest = path.join(destDir, 'held.mp4');
+  const expect = fs.lstatSync(src);
+  const link = fs.linkSync;
+  const open = fs.openSync;
+  const reopened = [];
+  fs.linkSync = () => { const e = new Error('no links'); e.code = 'EPERM'; throw e; };
+  // Opening the published name again could open a file a writer put there.
+  fs.openSync = (p, flags, ...rest) => {
+    if (p === dest && flags !== 'wx') reopened.push(flags);
+    return open(p, flags, ...rest);
+  };
+  try {
+    await moveFile(src, dest, null, expect);
+  } finally {
+    fs.linkSync = link;
+    fs.openSync = open;
+  }
+  assert.deepEqual(reopened, [], 'the copy is never opened by name after its exclusive create');
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'same bytes');
+  assert.ok(!fs.existsSync(src));
+  assert.deepEqual(fs.readdirSync(destDir), ['held.mp4'], 'no .part left');
+});
+
+test('merge refuses when the drop is replaced while its trash row is written', async () => {
+  const { g, trash, t } = mergeFixture();
+  const b = path.join(g, 'b.mp4');
+  const add = t.store.trashAdd;
+  t.store.trashAdd = (x) => { const r = add(x); replaceFile(b, 'written meanwhile'); return r; };
+  await quiet(() => assert.rejects(t.mergeLocal(2, 1), /changed while it was being merged/));
+  assert.equal(fs.readFileSync(b, 'utf8'), 'written meanwhile', "the writer's file is never renamed over");
+  assert.notEqual(fs.statSync(b).ino, fs.statSync(path.join(g, 'a.mp4')).ino);
+  assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no merge temp left behind');
+  assert.equal(trash[0].purged_at, 1, 'the trash row is closed');
+});
+
+test('restoring a merge refuses a stage replaced while it is synced', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const id = await t.mergeLocal(2, 1);
+  const held = path.join(trashDir, trash[id - 1].trash_name);
+  const original = fs.statSync(held).ino;
+  const open = fs.openSync;
+  fs.openSync = (p, ...rest) => {
+    if (p === g) {
+      const stage = fs.readdirSync(g).find((n) => n.includes('.restore-'));
+      if (stage) replaceFile(path.join(g, stage), 'not the original');
+    }
+    return open(p, ...rest);
+  };
+  try {
+    await assert.rejects(t.restore(id), /changed while restoring/);
+  } finally {
+    fs.openSync = open;
+  }
+  assert.equal(fs.statSync(held).ino, original, 'the trash still holds the original');
+  assert.equal(fs.readFileSync(path.join(g, 'b.mp4'), 'utf8'), 'same bytes');
+  assert.equal(fs.statSync(path.join(g, 'b.mp4')).ino, fs.statSync(path.join(g, 'a.mp4')).ino, 'the link is untouched');
+  assert.equal(trash[id - 1].restored_at, undefined);
+});
+
+test('restoring a merge keeps the trash copy when the restored name is replaced during the record', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const id = await t.mergeLocal(2, 1);
+  const held = path.join(trashDir, trash[id - 1].trash_name);
+  const b = path.join(g, 'b.mp4');
+  const done = t.store.trashRestored;
+  t.store.trashRestored = (x) => { done(x); replaceFile(b, 'written meanwhile'); };
+  await quiet(() => t.restore(id));
+  assert.equal(fs.readFileSync(b, 'utf8'), 'written meanwhile');
+  assert.ok(fs.existsSync(held), 'the held original stays: it is its last name');
+  assert.equal(fs.readFileSync(held, 'utf8'), 'same bytes');
 });

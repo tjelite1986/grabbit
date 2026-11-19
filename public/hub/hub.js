@@ -117,7 +117,9 @@
     if (r.status === 401) { location.href = '/login'; throw new Error('Signed out'); }
     let d;
     try { d = await r.json(); } catch { throw new Error(`HTTP ${r.status}`); }
-    if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
+    // The status and the server's error code ride along for callers that
+    // must tell one refusal from another.
+    if (!r.ok || d.ok === false) throw Object.assign(new Error(d.error || `HTTP ${r.status}`), { status: r.status, code: (d && d.code) || null });
     return d;
   }
   const post = (path) => api(path, { method: 'POST' });

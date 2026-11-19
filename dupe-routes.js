@@ -26,7 +26,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
 
   const fail = (res, e) => {
     if (e instanceof DupeError || e instanceof AdapterError) {
-      return res.status(e.status && e.status < 500 ? e.status : 424).json({ ok: false, error: e.message, fix: e.fix || null });
+      return res.status(e.status && e.status < 500 ? e.status : 424).json({ ok: false, error: e.message, fix: e.fix || null, ...(e.code ? { code: e.code } : {}) });
     }
     if (e instanceof TrashError) return res.status(409).json({ ok: false, error: e.message });
     console.error(`dupes: ${e.stack || e.message}`);

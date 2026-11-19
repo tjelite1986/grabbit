@@ -736,9 +736,11 @@
                   try {
                     x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0, ...(cursor != null ? { cursor } : {}) })).result || {};
                   } catch (err) {
-                    // A saved place the app no longer accepts is dropped, so the
-                    // next run starts over instead of failing the same way.
-                    if (round === 0 && resumed != null) saveCursor(a.id, null);
+                    // Only a place the app says it no longer accepts is
+                    // dropped, so the next run starts over instead of failing
+                    // the same way. A timeout or an outage keeps it: the next
+                    // run goes on from there.
+                    if (err && err.code === 'bad_cursor') saveCursor(a.id, null);
                     throw err;
                   }
                   made += x.made || 0;

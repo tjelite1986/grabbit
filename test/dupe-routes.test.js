@@ -365,3 +365,15 @@ test('a group action without a choice accepts an empty keep list; keep_selected 
   assert.equal(action, 'mark_known');
   assert.deepEqual(opts.keep, []);
 });
+
+// Round 7: the page forgets a saved rebuild position only on this code.
+test('an error code from the service reaches the page', async (t) => {
+  quiet(t);
+  const err = Object.assign(new DupeError('The saved rebuild position is no longer valid', 400), { code: 'bad_cursor' });
+  const s = await mount(t, { service: stubService({ overview: () => { throw err; } }) });
+  const r = await s.get('/overview');
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, 'bad_cursor');
+  const plain = await mount(t, { service: stubService({ overview: () => { throw new DupeError('Busy', 409); } }) });
+  assert.equal((await plain.get('/overview')).body.code, undefined);
+});

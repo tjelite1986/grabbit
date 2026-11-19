@@ -20,6 +20,13 @@ function stubFetch(reply) {
   fn.calls = calls;
   return fn;
 }
+// A well-formed success answer for each change (echoing the entry id).
+const okReply = (url, init) => {
+  const body = init.body ? JSON.parse(init.body) : {};
+  if (/\/cache\/clean$/.test(url)) return jsonRes(200, { files: 0, bytes: 0 });
+  if (/\/(restore|purge)$/.test(url)) return jsonRes(200, { id: body.id, bytes: 0 });
+  return jsonRes(200, { ok: true });
+};
 const jsonRes = (status, body) => ({
   status,
   ok: status >= 200 && status < 300,
@@ -142,7 +149,7 @@ test('link sends keep, drop and sha256 as app paths', async () => {
 });
 
 test('restore, purge and cacheClean coerce their inputs; cache is a GET without a body', async () => {
-  const fetchImpl = stubFetch(() => jsonRes(200, { ok: true }));
+  const fetchImpl = stubFetch(okReply);
   const a = adapter({ fetchImpl });
   await a.restore('12');
   await a.purge(13);
@@ -166,7 +173,7 @@ test('caps gate the operations: lookup without the cap is an empty Map, link and
   assert.ok(m instanceof Map);
   assert.equal(m.size, 0);
   await rejectsAdapter(a.link('a.mp4', 'b.mp4', 'f'.repeat(64)), { message: /cannot share one file/ });
-  assert.throws(() => a.cacheClean(true), (e) => e instanceof AdapterError && /no cache cleanup/.test(e.message));
+  await assert.rejects(a.cacheClean(true), (e) => e instanceof AdapterError && /no cache cleanup/.test(e.message));
   assert.equal(await a.cache(), null);
   assert.equal(fetchImpl.calls.length, 0, 'a missing cap never reaches the app');
   // The server's own wiring: egram has lookup + cache, no link.
@@ -305,7 +312,7 @@ test('a change request that times out before the answer stays open (stalled), a 
 });
 
 test('restore and purge send the id and uid of an "id:uid" reference, and the id alone for an old one', async () => {
-  const fetchImpl = stubFetch(() => jsonRes(200, { ok: true }));
+  const fetchImpl = stubFetch(okReply);
   const a = adapter({ fetchImpl });
   await a.restore('12:abc');
   await a.purge('13');
@@ -326,4 +333,32 @@ test('a 5xx, a proxy page or an app that may have acted leaves a change pending,
   await assert.rejects(adapter({ fetchImpl: no }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), (e) => !e.stalled && e.status === 409);
   // A lookup is never pending.
   await assert.rejects(adapter({ fetchImpl: stubFetch(() => html), caps: ['lookup'] }).lookup(['a.mp4']), (e) => !e.stalled);
+});
+
+// Round 7: a 2xx closes a change only with the shape that change promises,
+// and any mayHaveChanged at all keeps a refusal open.
+test('a 2xx that is not the promised answer leaves a change pending', async () => {
+  const ref = '12:' + 'a'.repeat(32);
+  for (const body of [[], {}, { ok: true }, { id: 13 }, { id: '12' }]) {
+    const fetchImpl = stubFetch(() => jsonRes(200, body));
+    await assert.rejects(adapter({ fetchImpl }).restore(ref), (e) => e.stalled === true && e.status === 424, `restore ${JSON.stringify(body)}`);
+    await assert.rejects(adapter({ fetchImpl }).purge(ref), (e) => e.stalled === true, `purge ${JSON.stringify(body)}`);
+    await assert.rejects(adapter({ fetchImpl }).cacheClean(false), (e) => e.stalled === true, `clean ${JSON.stringify(body)}`);
+  }
+  for (const body of [[], {}, { id: 0 }, { id: 'x' }]) {
+    const fetchImpl = stubFetch(() => jsonRes(200, body));
+    await assert.rejects(adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), (e) => e.stalled === true, `link ${JSON.stringify(body)}`);
+  }
+  await assert.rejects(adapter({ fetchImpl: stubFetch(() => jsonRes(200, { id: 12, bytes: -1 })) }).purge(ref), (e) => e.stalled === true);
+  // The promised answers pass.
+  assert.equal((await adapter({ fetchImpl: stubFetch(() => jsonRes(200, { id: 12, restored: 'main/b.mp4' })) }).restore(ref)).id, 12);
+  assert.equal((await adapter({ fetchImpl: stubFetch(() => jsonRes(200, { id: 12, bytes: 9 })) }).purge(ref)).bytes, 9);
+  assert.equal((await adapter({ fetchImpl: stubFetch(() => jsonRes(200, { files: 2, bytes: 30, skipped: 0 })) }).cacheClean(false)).files, 2);
+});
+
+test('a refusal carrying mayHaveChanged in any form stays pending', async () => {
+  for (const flag of [false, null, 'yes', 0]) {
+    const fetchImpl = stubFetch(() => jsonRes(422, { error: 'Partly done', mayHaveChanged: flag }));
+    await assert.rejects(adapter({ fetchImpl }).purge('1:' + 'a'.repeat(32)), (e) => e.stalled === true, `mayHaveChanged ${JSON.stringify(flag)}`);
+  }
 });

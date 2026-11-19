@@ -156,6 +156,48 @@ function fsyncDir(dir) {
 const sameStat = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
 const sameNode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 
+// Writes `from` into a new file `to` that this call creates exclusively
+// ('wx'), all through the one descriptor that create returned: the bytes, the
+// flush and the identity. The name is never opened a second time, so a file
+// a writer puts at `to` later can never be taken for this copy. The bytes are
+// hashed again and must match `sha256`. On failure the new name is removed
+// only while it still is this file.
+async function streamExclusive(from, to, sha256) {
+  let fd;
+  try {
+    fd = fs.openSync(to, 'wx');
+  } catch (e) {
+    if (e.code === 'EEXIST') throw new TrashError('Target already exists');
+    throw e;
+  }
+  let made = null;
+  try {
+    const st0 = fs.fstatSync(fd);
+    made = { dev: st0.dev, ino: st0.ino };
+    const h = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(null, { fd, autoClose: false });
+      const src = fs.createReadStream(from);
+      src.on('error', (e) => { out.destroy(); reject(e); });
+      out.on('error', reject);
+      src.on('data', (c) => h.update(c));
+      out.on('finish', resolve);
+      src.pipe(out);
+    });
+    if (sha256 && h.digest('hex') !== sha256) throw new TrashError('The copy does not match the original; nothing changed');
+    fs.fsyncSync(fd);
+    const st = fs.fstatSync(fd);
+    return { dev: st.dev, ino: st.ino };
+  } catch (e) {
+    if (made) {
+      try { if (sameNode(fs.lstatSync(to), made)) fs.unlinkSync(to); } catch {}
+    }
+    throw e;
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+}
+
 // Copies `from` to a new file `to` without blocking the event loop: streamed
 // to a .part beside the target, flushed, hashed on the way and compared with
 // `sha256` (when given), then published without clobbering. The source is
@@ -184,27 +226,15 @@ async function copyVerified(from, to, sha256 = null) {
     const digest = h.digest('hex');
     if (sha256 && digest !== sha256) throw new TrashError('The copy does not match the original; nothing changed');
     // Publish without clobbering: a link fails on an existing name. Where
-    // the filesystem refuses hard links, an exclusive create (COPYFILE_EXCL)
-    // stands in; an overwriting rename is never used.
+    // the filesystem refuses hard links, an exclusive create stands in; an
+    // overwriting rename is never used.
     try {
       fs.linkSync(part, to);
       fs.unlinkSync(part);
     } catch (e) {
       if (e.code === 'EEXIST') throw new TrashError('Target already exists');
       if (e.code !== 'EPERM' && e.code !== 'ENOTSUP' && e.code !== 'EXDEV') throw e;
-      try {
-        fs.copyFileSync(part, to, fs.constants.COPYFILE_EXCL);
-      } catch (e2) {
-        if (e2.code === 'EEXIST') throw new TrashError('Target already exists');
-        throw e2;
-      }
-      // The exclusive create made this name; its fd is that very file.
-      const fd2 = fs.openSync(to, 'r');
-      try {
-        fs.fsyncSync(fd2);
-        const st = fs.fstatSync(fd2);
-        published = { dev: st.dev, ino: st.ino };
-      } finally { fs.closeSync(fd2); }
+      published = await streamExclusive(part, to, digest);
       fs.unlinkSync(part);
     }
     fsyncDir(path.dirname(to));
@@ -217,7 +247,10 @@ async function copyVerified(from, to, sha256 = null) {
 
 // Puts a second copy of `from` at the new path `to` and leaves `from` where
 // it is: a hard link on the same disk, else a verified copy. Bind mounts make
-// a link across folders fail with EXDEV even on one disk.
+// a link across folders fail with EXDEV even on one disk. Returns the
+// identity of the file now at `to` ({ dev, ino, linked }); for a link that is
+// whatever inode the name `from` held at the moment of linking, so a caller
+// compares it with the file it hashed.
 async function placeCopy(from, to, sha256 = null) {
   let linked = false;
   try {
@@ -228,10 +261,33 @@ async function placeCopy(from, to, sha256 = null) {
     if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
   }
   if (linked) {
+    // Only this call can have made the name, and nothing has run since the
+    // link: lstat sees the linked inode.
+    const st = fs.lstatSync(to);
     fsyncDir(path.dirname(to));
+    return { dev: st.dev, ino: st.ino, linked: true };
+  }
+  return { ...(await copyVerified(from, to, sha256)), linked: false };
+}
+
+// Undoes a copy this code put at `copy` ({ dev, ino } in `made`) only while
+// it is redundant: the name `orig` still holds the very inode (a hard link),
+// or still holds the file as it was hashed (`origStat`). Otherwise the copy
+// may be the last one of those bytes, so it stays and its place is logged:
+// an extra file, never a lost one.
+function undoCopy(copy, made, orig, origStat, what) {
+  let cur = null;
+  let now = null;
+  try { cur = fs.lstatSync(copy); } catch {}
+  if (!cur || !made || !sameNode(cur, made)) return; // not ours (any more)
+  try { now = fs.lstatSync(orig); } catch {}
+  const redundant = !!now && now.isFile() && (sameNode(now, cur) || (origStat && sameStat(now, origStat)));
+  if (redundant) {
+    try { fs.unlinkSync(copy); } catch {}
+    try { fsyncDir(path.dirname(copy)); } catch {}
     return;
   }
-  await copyVerified(from, to, sha256);
+  console.error(`dupes: ${what} changed meanwhile; its earlier copy stays at ${copy}`);
 }
 
 // Moves `from` to `to`: a hard link and an unlink where possible, else a
@@ -268,16 +324,12 @@ async function moveFile(from, to, sha256 = null, expect = null) {
   try { dest = fs.lstatSync(to); } catch {}
   const destOk = !!dest && dest.isFile() && sameNode(dest, placed);
   if (!now || !sameStat(now, before) || !destOk) {
-    // Only the name this move made is ever removed again. A hard link whose
-    // source name now holds another file is the last name of the original:
-    // it stays (an extra copy in the trash folder, never none).
-    const lastName = destOk && linked && !(now && sameNode(now, dest));
-    if (destOk && !lastName) {
-      try { fs.unlinkSync(to); } catch {}
-      try { fsyncDir(path.dirname(to)); } catch {}
-    } else if (destOk) {
-      console.error(`dupes: ${path.basename(from)} was replaced while moving; its earlier copy stays at ${to}`);
-    }
+    // Only the name this move made is ever removed again, and only while the
+    // source still holds the same bytes. A hard link whose source name now
+    // holds another file is the last name of the original, and a verified
+    // copy of a source that changed or vanished may be the last copy of the
+    // hashed bytes: either stays (an extra copy in the trash folder).
+    if (destOk) undoCopy(to, placed, from, before, path.basename(from));
     throw changed();
   }
   fs.unlinkSync(from);
@@ -461,27 +513,51 @@ class DupeTrash {
     }
     const trashName = this.trashNameFor(row);
     const held = path.join(this.dir, trashName);
+    let heldId = null;
     try {
-      await placeCopy(doomed.abs, held, row.sha256);
+      heldId = await placeCopy(doomed.abs, held, row.sha256);
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch {}
       throw e instanceof TrashError ? e : new TrashError(`The original could not be kept in the trash (${e.code || e.message}); nothing changed`);
     }
-    // Copying to another disk can take a while: if a writer replaced the
-    // file meanwhile, the held copy is of the old bytes, so stop here.
-    let now = null;
-    try { now = fs.lstatSync(doomed.abs); } catch {}
-    if (!now || !now.isFile() || !sameNode(now, doomed.stat) || now.size !== doomed.stat.size || now.mtimeMs !== doomed.stat.mtimeMs) {
-      try { fs.unlinkSync(tmp); } catch {}
-      try { fs.unlinkSync(held); } catch {}
-      throw new TrashError('The file changed while it was being merged; nothing changed, scan again');
+    // Undoes the staging. The merge temp is a link to the kept file and can
+    // always go; the held copy goes only while the live name still holds
+    // the same bytes (undoCopy), since otherwise it may be their last copy.
+    const undo = () => {
+      try { if (sameNode(fs.lstatSync(tmp), kept.stat)) fs.unlinkSync(tmp); } catch {}
+      undoCopy(held, heldId, doomed.abs, doomed.stat, row.rel);
+    };
+    // The live drop, the staged link and the held copy must all still be
+    // the files this merge hashed and made. Copying to another disk and the
+    // database write both take time, so this runs again right before the
+    // rename, with nothing slow in between.
+    const intact = () => {
+      let now = null;
+      let st = null;
+      let h = null;
+      try { now = fs.lstatSync(doomed.abs); } catch {}
+      try { st = fs.lstatSync(tmp); } catch {}
+      try { h = fs.lstatSync(held); } catch {}
+      return !!now && now.isFile() && sameStat(now, doomed.stat)
+        && !!st && st.isFile() && sameStat(st, kept.stat)
+        && !!h && h.isFile() && sameNode(h, heldId) && (!heldId.linked || sameNode(h, doomed.stat));
+    };
+    const changed = () => new TrashError('The file changed while it was being merged; nothing changed, scan again');
+    if (!intact()) {
+      undo();
+      throw changed();
     }
     const id = this.record(row, trashName, { by, keepRow, reason: 'merged' });
+    // The record is written: the last look comes right before the rename.
+    if (!intact()) {
+      undo();
+      this.store.trashPurged(id, this.now());
+      throw changed();
+    }
     try {
       fs.renameSync(tmp, doomed.abs);
     } catch (e) {
-      try { fs.unlinkSync(tmp); } catch {}
-      try { fs.unlinkSync(held); } catch {}
+      undo();
       this.store.trashPurged(id, this.now());
       throw new TrashError(`The files could not share one copy (${e.code || e.message}); nothing changed`);
     }
@@ -641,19 +717,27 @@ class DupeTrash {
       // The trash keeps its copy until the original is back under its name:
       // a crash at any step leaves at worst one extra copy, never none.
       const stage = path.join(path.dirname(abs), `.${clampName(path.basename(abs), 180)}.restore-${rand()}`);
-      await placeCopy(from, stage, t.sha256);
+      const staged = await placeCopy(from, stage, t.sha256);
+      // The stage is removed again only while it is the file placed here;
+      // the trash still holds the original in every failure below.
+      const dropStage = () => { try { if (sameNode(fs.lstatSync(stage), staged)) fs.unlinkSync(stage); } catch {} };
       // The staging may have taken a while: a file written to that name
-      // meanwhile is newer than the link we checked and must not be replaced.
+      // meanwhile is newer than the link we checked and must not be replaced,
+      // and the stage itself must still be the copy of the held original
+      // (for a link: the held inode itself). Nothing slow follows this look.
       let now = null;
+      let st = null;
       try { now = fs.lstatSync(abs); } catch {}
-      if (!now || !sameNode(now, live)) {
-        try { fs.unlinkSync(stage); } catch {}
+      try { st = fs.lstatSync(stage); } catch {}
+      const stageOk = !!st && st.isFile() && sameNode(st, staged) && (!staged.linked || sameNode(st, f.stat));
+      if (!now || !sameNode(now, live) || !stageOk) {
+        dropStage();
         throw new TrashError('The file in its place changed while restoring; the trash still holds the original, try again');
       }
       try {
         fs.renameSync(stage, abs);
       } catch (e) {
-        try { fs.unlinkSync(stage); } catch {}
+        dropStage();
         throw new TrashError(`The original could not be put back (${e.code || e.message}); the trash still holds it`);
       }
       // The name is durable before the held copy goes.
@@ -661,10 +745,21 @@ class DupeTrash {
       // Recorded before the held copy goes, so a crash in between leaves an
       // extra copy in the trash folder rather than an active row with none.
       this.store.trashRestored(t.id, this.now());
-      try {
-        fs.unlinkSync(from);
-      } catch (e) {
-        console.error(`dupes: restored trash entry ${t.id}, but its trash copy stayed (${e.code || e.message})`);
+      // The sync and the database write took time: the held copy goes only
+      // while the name shows the restored file and the held name is still
+      // the original. Otherwise it stays, as an extra copy.
+      let pub = null;
+      let hold = null;
+      try { pub = fs.lstatSync(abs); } catch {}
+      try { hold = fs.lstatSync(from); } catch {}
+      if (!pub || !pub.isFile() || !sameNode(pub, staged) || !hold || !hold.isFile() || !sameNode(hold, f.stat)) {
+        console.error(`dupes: restored trash entry ${t.id}, but its place changed meanwhile; the trash copy stays at ${from}`);
+      } else {
+        try {
+          fs.unlinkSync(from);
+        } catch (e) {
+          console.error(`dupes: restored trash entry ${t.id}, but its trash copy stayed (${e.code || e.message})`);
+        }
       }
     } else {
       // A newer file in its place is never overwritten: the copy comes back

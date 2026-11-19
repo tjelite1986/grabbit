@@ -383,6 +383,9 @@ function attach(db, file) {
       return db.prepare("UPDATE dx.ops SET state = 'failed', error = ?, done_at = ? WHERE id = ? AND state = 'pending'")
         .run(`Checked by ${by || 'the owner'} after the app stopped answering`, now, Number(id)).changes;
     },
+    // Runs `fn` as one transaction: a bookkeeping row and the journal row
+    // that closes its operation are written together or not at all.
+    tx: (fn) => db.transaction(fn)(),
     opsPending: () => db.prepare("SELECT * FROM dx.ops WHERE state = 'pending' ORDER BY id").all(),
     opsRecent: (limit = 50) => db.prepare('SELECT * FROM dx.ops ORDER BY id DESC LIMIT ?').all(Math.min(500, Number(limit) || 50)),
 

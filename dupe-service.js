@@ -105,6 +105,7 @@ class DupeService {
   // answering half way stays pending: the app may have carried it out, so
   // the trash page lists it until the owner has checked it in the app.
   opFailed(opId, err) {
+    if (err && err.appDone) return; // the app did it; recordAppDone kept it pending
     if (err && err.stalled) {
       if (err.appRef) {
         try { this.dx.opNote(opId, { appRef: err.appRef }); } catch {}
@@ -112,6 +113,27 @@ class DupeService {
       return;
     }
     this.dx.opEnd(opId, false, { error: err && err.message }, this.now());
+  }
+
+  // The app reported the change done; Grabbit's own record of it (`write`)
+  // and the journal row that closes the operation go in one transaction. A
+  // local failure there is not the app refusing: the operation stays
+  // pending with the app's reference noted, so the owner can find it.
+  recordAppDone(opId, ad, { ref = null, result = {} }, write) {
+    try {
+      const run = () => {
+        const out = write();
+        this.dx.opEnd(opId, true, { result }, this.now());
+        return out;
+      };
+      return this.dx.tx ? this.dx.tx(run) : run();
+    } catch (e) {
+      try { this.dx.opNote(opId, { appRef: ref, appDone: true }); } catch {}
+      this.log(`${ad.app} carried out operation ${opId}, but Grabbit could not record it: ${e.message}`);
+      throw Object.assign(new DupeError(`${ad.app} carried this out, but Grabbit could not record it (${e.message})`, 424), {
+        appDone: true, fix: `It is listed under unfinished operations${ref ? ` (${ad.app} entry ${ref})` : ''}; nothing needs to be done in ${ad.app}.`,
+      });
+    }
   }
 
   // Pending journal rows older than any running call (the adapter gives up
@@ -133,7 +155,8 @@ class DupeService {
         : o.op === 'restore' ? `Check whether the item is back in ${app}; if not, restore it again.`
           : o.op === 'purge' ? `Check whether the copy is still in ${app}'s trash; if so, delete it again.`
             : `Check ${app}'s cache page.`;
-      const note = res.appRef ? ` ${app} reported held entry ${res.appRef}.` : '';
+      const note = res.appDone ? ` ${app} reported it done${res.appRef ? ` (held entry ${res.appRef})` : ''}, but Grabbit could not record it.`
+        : res.appRef ? ` ${app} reported held entry ${res.appRef}.` : '';
       return { id: o.id, app, op: o.op, what, check: check + note, appRef: res.appRef || null, at: o.at };
     });
   }
@@ -717,11 +740,11 @@ class DupeService {
         if (!r || !Number.isSafeInteger(r.id) || r.id < 1 || badUid) {
           throw new AdapterError(`${ad.app} answered the merge without a valid entry id`, { status: 424, stalled: true, fix: `Check the item in ${ad.app}; it may have been merged.` });
         }
-        const tid = this.dx.appTrashAdd({
-          adapter: ad.id, ref: r.uid ? `${r.id}:${r.uid}` : String(r.id), root: m.root, rel: m.rel, sha256: m.sha256, bytes: m.bytes,
+        const ref = r.uid ? `${r.id}:${r.uid}` : String(r.id);
+        const tid = this.recordAppDone(opId, ad, { ref, result: r }, () => this.dx.appTrashAdd({
+          adapter: ad.id, ref, root: m.root, rel: m.rel, sha256: m.sha256, bytes: m.bytes,
           keep_root: target.root, keep_rel: target.rel, reason: 'Merged in the app (both posts kept)', kind: m.kind, audience: m.audience, app: ad.app, by,
-        }, this.now());
-        this.dx.opEnd(opId, true, { result: r }, this.now());
+        }, this.now()));
         // The app merged but could not confirm its folder reached the disk.
         if (r.durable === false) this.log(`${ad.app} merged ${m.rel} (entry ${r.id}) without confirming it on disk`);
         return { trash: `a${tid}`, merged: true };
@@ -879,9 +902,8 @@ class DupeService {
             if (!ad) throw new DupeError(`${e.app} is not connected`);
             const opId = this.dx.opBegin(ad.id, 'restore', { ref: e.ref }, by, this.now());
             try {
-              await ad.restore(e.ref);
-              this.dx.appTrashDone(t.id, 'restored_at', this.now());
-              this.dx.opEnd(opId, true, {}, this.now());
+              const r = await ad.restore(e.ref);
+              this.recordAppDone(opId, ad, { ref: e.ref, result: r }, () => this.dx.appTrashDone(t.id, 'restored_at', this.now()));
             } catch (err) {
               this.opFailed(opId, err);
               throw err;
@@ -924,8 +946,7 @@ class DupeService {
     const opId = this.dx.opBegin(ad.id, 'purge', { ref: e.ref }, by, this.now());
     try {
       const r = await ad.purge(e.ref);
-      this.dx.appTrashDone(t.id, 'purged_at', this.now());
-      this.dx.opEnd(opId, true, { result: r }, this.now());
+      this.recordAppDone(opId, ad, { ref: e.ref, result: r }, () => this.dx.appTrashDone(t.id, 'purged_at', this.now()));
       return { bytes: e.bytes };
     } catch (err) {
       this.opFailed(opId, err);
@@ -1019,17 +1040,25 @@ class DupeService {
     const ad = [...new Set(this.adapters.values())].find((a) => a.id === appId);
     if (!ad) throw new DupeError('Unknown app', 404);
     if (!['clean', 'rebuild'].includes(action)) throw new DupeError('Unknown cache action');
+    // A resume point that is not (or no longer) valid is the one error that
+    // tells the page to forget it: code 'bad_cursor'. Any other failure
+    // (a timeout, an outage, a busy app) keeps the saved place.
+    const badCursor = () => Object.assign(new DupeError('The saved rebuild position is no longer valid; start the rebuild again', 400), { code: 'bad_cursor' });
     if (cursor != null && !(typeof cursor === 'string' ? /^[A-Za-z0-9_:.-]{1,200}$/.test(cursor) : Number.isSafeInteger(cursor) && cursor >= 0)) {
-      throw new DupeError('Bad rebuild cursor', 400);
+      throw badCursor();
     }
     const body = { dryRun: Boolean(dryRun), retryFailed: Boolean(retryFailed), ...(cursor != null ? { cursor } : {}) };
-    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.call('POST', 'cache/rebuild', body));
+    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.call('POST', 'cache/rebuild', body).catch((e) => {
+      // egram answers a cursor it did not hand out with 400 "Invalid cursor".
+      if (cursor != null && e instanceof AdapterError && !e.stalled && /^Invalid cursor$/i.test(e.message)) throw badCursor();
+      throw e;
+    }));
     if (dryRun) return run();
     return this.exclusive(`cache ${action}`, async () => {
       const opId = this.dx.opBegin(ad.id, `cache-${action}`, {}, by, this.now());
       try {
         const r = await run();
-        this.dx.opEnd(opId, true, { result: r }, this.now());
+        this.recordAppDone(opId, ad, { result: r }, () => null);
         this.log(`cache ${action} in ${ad.app} by ${by || 'owner'}: ${JSON.stringify(r).slice(0, 200)}`);
         return r;
       } catch (e) {
