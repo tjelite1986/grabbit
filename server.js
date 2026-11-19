@@ -7314,7 +7314,7 @@ app.get('/api/download', async (req, res) => {
         title: job.title, thumbnail: job.thumbnail, reason: error,
       });
     }
-    if (!res.headersSent) res.status(502).send('Download failed: ' + error);
+    if (!res.headersSent) res.status(422).send('Download failed: ' + error);
     else res.destroy();
   } finally {
     for (const f of cleanup) fs.rm(f, { force: true }, () => {});
@@ -9578,7 +9578,7 @@ async function downloadAudio(res, job, url, afmt, dest) {
     await pipeline(fs.createReadStream(outPath), res);
   } catch (e) {
     console.error('audio download failed:', e);
-    if (!res.headersSent) res.status(502).send('Audio download failed: ' + String(e.message || e));
+    if (!res.headersSent) res.status(422).send('Audio download failed: ' + String(e.message || e));
     else res.destroy();
   } finally {
     for (const f of cleanup) fs.rm(f, { force: true }, () => {});
@@ -9636,7 +9636,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     await pipeline(fs.createReadStream(finalPath), res);
   } catch (e) {
     console.error('server download failed:', e);
-    if (!res.headersSent) res.status(502).send('Download failed: ' + String(e.message || e));
+    if (!res.headersSent) res.status(422).send('Download failed: ' + String(e.message || e));
     else res.destroy();
   } finally {
     for (const f of cleanup) fs.rm(f, { force: true }, () => {});

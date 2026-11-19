@@ -126,7 +126,7 @@ function stubAdapter(o = {}) {
     async link(keep, drop, sha256) {
       calls.push(['link', keep, drop, sha256]);
       if (o.link) return o.link(keep, drop, sha256);
-      return { id: 100 + calls.length, bytes: 1 };
+      return { id: 100 + calls.length, uid: String(100 + calls.length).padStart(32, '0'), bytes: 1 };
     },
     async restore(id) { calls.push(['restore', id]); return { ok: true }; },
     async purge(id) { calls.push(['purge', id]); return { ok: true }; },
@@ -220,7 +220,7 @@ test('an app copy goes only through its adapter, which keeps both posts; Grabbit
   assert.equal(list.items[0].preview, false);
   const rr = await svc.trashRestore([list.items[0].id]);
   assert.equal(rr.done.length, 1);
-  assert.deepEqual(ad.calls[1], ['restore', '101']);
+  assert.deepEqual(ad.calls[1], ['restore', `101:${'101'.padStart(32, '0')}`], 'the ref carries the uid');
   assert.equal(svc.trashList({ adult: 'show' }).total, 0);
   const again = await svc.trashRestore([list.items[0].id]);
   assert.match(again.refused[0].error, /Not in the trash/);

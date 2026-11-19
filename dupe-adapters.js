@@ -31,6 +31,9 @@ function refBody(ref) {
   return uid ? { id: Number(id), uid } : { id: Number(id) };
 }
 
+// Transport errors that mean the request never reached the app.
+const NEVER_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ERR_INVALID_URL']);
+
 class AdapterError extends Error {
   constructor(message, { status = 409, fix = null, stalled = false } = {}) {
     super(message);
@@ -78,6 +81,7 @@ class AppAdapter {
   async call(method, route, body) {
     const ready = this.ready();
     if (!ready.ok) throw new AdapterError(ready.why, { fix: ready.fix });
+    const mutation = method !== 'GET' && route !== 'lookup';
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     let res;
@@ -95,8 +99,14 @@ class AppAdapter {
       // happened: the app may have done the change and been slow to reply.
       // Changes are then treated like an answer that stopped half way, so
       // the operation stays pending for the owner to check.
-      if (ctrl.signal.aborted && method !== 'GET' && route !== 'lookup') {
+      if (ctrl.signal.aborted && mutation) {
         throw new AdapterError(`${this.app} did not answer in time`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.`, stalled: true });
+      }
+      // Only a connection that never opened proves nothing happened. A reset
+      // or hang-up after the request went out may follow a committed change.
+      const code = (e && e.cause && e.cause.code) || (e && e.code) || '';
+      if (mutation && !NEVER_SENT.has(code)) {
+        throw new AdapterError(`${this.app} dropped the connection before answering`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.`, stalled: true });
       }
       throw new AdapterError(`${this.app} is not reachable right now`, { status: 424, fix: `Check that ${this.app} is running; nothing was changed.` });
     }
@@ -116,6 +126,9 @@ class AppAdapter {
     } finally {
       clearTimeout(timer);
     }
+    // A success status without a readable answer (a proxy page, a cut body)
+    // says the app may have acted; a change then stays pending too.
+    if (!stalled && mutation && res.ok && (!j || typeof j !== 'object')) stalled = true;
     if (stalled) {
       throw new AdapterError(`${this.app} stopped answering half way`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.`, stalled: true });
     }

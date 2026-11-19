@@ -700,7 +700,7 @@
       if (!live(gen)) return;
       const appCards = c.apps.map((a) => {
         const out = h('div', { class: 'small' });
-        const run = (action, dry) => async (e) => {
+        const run = (action, dry, retryFailed = false) => async (e) => {
           const btn = e.currentTarget;
           await busyBtn(btn, async () => {
             try {
@@ -712,14 +712,26 @@
                 let x = {};
                 for (let round = 0; round < 50; round++) {
                   btn.textContent = made ? `Rebuilding ... ${num(made)} made` : 'Rebuilding ...';
-                  x = (await post(`cache/${a.id}/rebuild`, { dryRun: false })).result || {};
+                  x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0 })).result || {};
                   made += x.made || 0;
                   failed += x.failed || 0;
                   const more = (x.stoppedEarly && x.stopReason === 'time') || (x.remaining || 0) > 0;
                   if (!more || x.stopReason === 'disconnected' || (!x.made && !x.inProgress)) break;
                 }
                 const left = x.remaining || 0;
-                toast(`${num(made)} thumbnails made${failed ? `, ${num(failed)} failed` : ''}${left ? `; ${num(left)} still missing` : ''}.`);
+                // egram sets aside, for 30 minutes, the files that failed or are
+                // still being made, so one bad video cannot stall the batches.
+                const skipped = x.skipped || 0;
+                toast(`${num(made)} thumbnails made${failed ? `, ${num(failed)} failed` : ''}${left ? `; ${num(left)} still missing` : ''}${skipped ? `; ${num(skipped)} set aside (failed recently or still being made)` : ''}.`);
+                if (skipped && !left && !retryFailed) {
+                  const again = await dialog('Retry the files set aside?', [
+                    h('p', null, `${num(skipped)} files in ${a.app} failed in the last 30 minutes or are still being made, so the rebuild skipped them.`),
+                    ...(Array.isArray(x.failures) && x.failures.length
+                      ? [h('ul', null, x.failures.slice(0, 5).map((f) => h('li', null, `#${f.id}: ${String(f.error || 'failed').slice(0, 120)}`)))]
+                      : []),
+                  ], [{ label: 'Retry them', value: true }]);
+                  if (again) return run(action, false, true)({ currentTarget: btn });
+                }
                 viewCache(body, generation, r);
                 return null;
               }

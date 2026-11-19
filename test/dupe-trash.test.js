@@ -343,3 +343,98 @@ test('a name of multi-byte characters gets a trash name under the 255-byte limit
   assert.ok(Buffer.byteLength(trash[0].trash_name) <= 255, `${Buffer.byteLength(trash[0].trash_name)} bytes`);
   assert.ok(!fs.existsSync(path.join(g, long)));
 });
+
+// Round 4: a cross-mount move must not remove a file a writer published at
+// the source name while the copy was being made.
+test('a move across mounts keeps a source replaced during the copy and undoes the copy', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const { g, dir } = mergeFixture();
+  const src = path.join(g, 'b.mp4');
+  const destDir = path.join(dir, 'other-mount');
+  fs.mkdirSync(destDir);
+  const dest = path.join(destDir, 'held.mp4');
+  const expect = fs.lstatSync(src);
+  const link = fs.linkSync;
+  fs.linkSync = (from, to) => {
+    // The source's own link fails as on another mount; the .part publish
+    // inside the target folder works, and a writer replaces the source then.
+    if (from === src) { const e = new Error('cross-device'); e.code = 'EXDEV'; throw e; }
+    const r = link(from, to);
+    if (to === dest) replaceFile(src, 'published meanwhile');
+    return r;
+  };
+  try {
+    await assert.rejects(moveFile(src, dest, null, expect), /changed while it was being moved/);
+  } finally {
+    fs.linkSync = link;
+  }
+  assert.equal(fs.readFileSync(src, 'utf8'), 'published meanwhile', 'the replacement is never unlinked');
+  assert.deepEqual(fs.readdirSync(destDir), [], 'the verified copy is undone, no .part left');
+});
+
+test('a move refuses a source that is no longer the file that was hashed', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const { g, trashDir } = mergeFixture();
+  const src = path.join(g, 'b.mp4');
+  const expect = fs.lstatSync(src);
+  replaceFile(src, 'same bytes');
+  fs.mkdirSync(trashDir, { recursive: true });
+  await assert.rejects(moveFile(src, path.join(trashDir, 'x.mp4'), null, expect), /changed while it was being moved/);
+  assert.ok(fs.existsSync(src));
+  assert.deepEqual(fs.readdirSync(trashDir), []);
+});
+
+test('merge stops when the copy that stays is replaced after it was hashed', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const a = path.join(g, 'a.mp4');
+  const link = fs.linkSync;
+  fs.linkSync = (from, to) => {
+    if (path.basename(to).includes('.merge-')) replaceFile(a, 'other bytes');
+    return link(from, to);
+  };
+  try {
+    await assert.rejects(t.mergeLocal(2, 1), /copy that stays changed/);
+  } finally {
+    fs.linkSync = link;
+  }
+  assert.equal(fs.readFileSync(path.join(g, 'b.mp4'), 'utf8'), 'same bytes', 'the drop keeps its own bytes');
+  assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no merge temp left behind');
+  assert.ok(!fs.existsSync(trashDir) || fs.readdirSync(trashDir).length === 0);
+  assert.equal(trash.length, 0);
+});
+
+test('a restore beside a reused 255-byte name stays within the name limit', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const long = `${'é'.repeat(125)}x.mp4`; // 250 + 1 + 4 = 255 bytes
+  assert.equal(Buffer.byteLength(long), 255);
+  fs.mkdirSync(trashDir, { recursive: true });
+  fs.writeFileSync(path.join(trashDir, 'held-1'), 'old bytes');
+  fs.writeFileSync(path.join(g, long), 'a newer file');
+  trash.push({ id: 1, root: g, rel: long, sha256: null, bytes: 9, trash_name: 'held-1' });
+  t.mergeOf = () => null;
+  const r = await t.restore(1);
+  assert.equal(r.renamed, true);
+  assert.ok(Buffer.byteLength(r.restoredRel) <= 255, `${Buffer.byteLength(r.restoredRel)} bytes`);
+  assert.match(r.restoredRel, / \(restored\)\.mp4$/);
+  assert.equal(fs.readFileSync(path.join(g, r.restoredRel), 'utf8'), 'old bytes');
+  assert.equal(fs.readFileSync(path.join(g, long), 'utf8'), 'a newer file');
+});
+
+test('where hard links are refused, a published copy never replaces a name that appeared meanwhile', async () => {
+  const { placeCopy } = require('../dupe-trash');
+  const { g, dir } = mergeFixture();
+  const to = path.join(dir, 'target.mp4');
+  const link = fs.linkSync;
+  fs.linkSync = (from, dst) => {
+    // No hard links on this filesystem; a writer takes the name first.
+    if (dst === to) fs.writeFileSync(to, 'writer was first');
+    const e = new Error('no links'); e.code = 'EPERM'; throw e;
+  };
+  try {
+    await assert.rejects(placeCopy(path.join(g, 'a.mp4'), to), /already exists/);
+  } finally {
+    fs.linkSync = link;
+  }
+  assert.equal(fs.readFileSync(to, 'utf8'), 'writer was first');
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.part')), []);
+});

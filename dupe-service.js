@@ -704,7 +704,9 @@ class DupeService {
         // The answer names the held entry. Without a usable id there is
         // nothing to restore or purge later, yet the app may have merged:
         // the operation stays pending for the owner to check.
-        if (!r || !Number.isInteger(r.id) || r.id < 1 || (r.uid != null && !/^[A-Za-z0-9_-]{1,64}$/.test(String(r.uid)))) {
+        // TikShortis always answers with a 32-hex uid; the other apps may omit it.
+        const badUid = ad.id === 'tikshortis' ? !/^[0-9a-f]{32}$/i.test(String(r && r.uid)) : (r && r.uid != null && !/^[A-Za-z0-9_-]{1,64}$/.test(String(r.uid)));
+        if (!r || !Number.isSafeInteger(r.id) || r.id < 1 || badUid) {
           throw new AdapterError(`${ad.app} answered the merge without a valid entry id`, { status: 424, stalled: true, fix: `Check the item in ${ad.app}; it may have been merged.` });
         }
         const tid = this.dx.appTrashAdd({
@@ -1000,11 +1002,13 @@ class DupeService {
     };
   }
 
-  async cacheAction(appId, action, dryRun, by) {
+  // retryFailed (rebuild only): egram retries the thumbnails that failed in
+  // the last 30 minutes instead of skipping them.
+  async cacheAction(appId, action, dryRun, by, { retryFailed = false } = {}) {
     const ad = [...new Set(this.adapters.values())].find((a) => a.id === appId);
     if (!ad) throw new DupeError('Unknown app', 404);
     if (!['clean', 'rebuild'].includes(action)) throw new DupeError('Unknown cache action');
-    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.call('POST', 'cache/rebuild', { dryRun: Boolean(dryRun) }));
+    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.call('POST', 'cache/rebuild', { dryRun: Boolean(dryRun), retryFailed: Boolean(retryFailed) }));
     if (dryRun) return run();
     return this.exclusive(`cache ${action}`, async () => {
       const opId = this.dx.opBegin(ad.id, `cache-${action}`, {}, by, this.now());

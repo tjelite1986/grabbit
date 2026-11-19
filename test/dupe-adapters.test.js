@@ -176,7 +176,8 @@ test('caps gate the operations: lookup without the cap is an empty Map, link and
 });
 
 test('an unreachable app is a 424 that says nothing was changed', async () => {
-  const fetchImpl = stubFetch(() => { throw new TypeError('fetch failed'); });
+  // undici reports a refused connection as TypeError('fetch failed') with the code on `cause`.
+  const fetchImpl = stubFetch(() => { throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }); });
   await rejectsAdapter(adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), { status: 424, message: /not reachable/ });
   try {
     await adapter({ fetchImpl }).restore(1);
@@ -240,11 +241,25 @@ test('5xx from the app is a 424, never passed through as 5xx', async () => {
   }
 });
 
-test('other refusals are 409: 4xx, ok:false on a 200, and a 200 with no JSON', async () => {
-  for (const [status, body] of [[403, { error: 'Bad token' }], [200, { ok: false, error: 'Bytes differ' }], [200, undefined], [400, undefined]]) {
+test('other refusals are 409: 4xx and ok:false on a 200', async () => {
+  for (const [status, body] of [[403, { error: 'Bad token' }], [200, { ok: false, error: 'Bytes differ' }], [400, undefined]]) {
     const fetchImpl = stubFetch(() => jsonRes(status, body));
     await rejectsAdapter(adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), { status: 409 });
   }
+});
+
+test('a change whose outcome is unknown stays open (stalled): a reset after sending, or a 2xx with no JSON', async () => {
+  for (const fetchImpl of [
+    stubFetch(() => { throw new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } }); }),
+    stubFetch(() => { throw new TypeError('fetch failed', { cause: { code: 'UND_ERR_SOCKET' } }); }),
+    stubFetch(() => jsonRes(200, undefined)),
+  ]) {
+    await assert.rejects(adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), (e) => e.stalled === true && e.status === 424 && /may have been carried out/.test(e.fix));
+    await assert.rejects(adapter({ fetchImpl }).restore('1:' + 'a'.repeat(32)), (e) => e.stalled === true);
+  }
+  // A lookup changes nothing, so a reset there is a plain failure.
+  const reset = stubFetch(() => { throw new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } }); });
+  await assert.rejects(adapter({ fetchImpl: reset, caps: ['lookup'] }).lookup(['a.mp4']), (e) => !e.stalled && /not reachable/.test(e.message));
 });
 
 test('noAdapterReason explains why an app copy cannot go', () => {

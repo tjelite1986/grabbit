@@ -175,7 +175,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
   r.get('/cache', wrap(() => service.cacheReport()));
   r.post('/cache/:app/:action', wrap(async (req) => {
     if (!/^[a-z]{2,20}$/.test(req.params.app)) throw new DupeError('Unknown app');
-    return { result: await service.cacheAction(req.params.app, req.params.action, (req.body || {}).dryRun !== false, who(req)) };
+    return { result: await service.cacheAction(req.params.app, req.params.action, (req.body || {}).dryRun !== false, who(req), { retryFailed: (req.body || {}).retryFailed === true }) };
   }));
 
   // --- engines
