@@ -386,6 +386,21 @@ async function moveFile(from, to, sha256 = null, expect = null, keep = null) {
   }
   // The file now at `to` must be the one this move put there: the source's
   // inode for a link, the published copy's inode for a copy.
+  if (linked) {
+    // The link is made by name: a writer can swap the source between the
+    // look above and the link, and the new name then holds the substitute.
+    // It must be the very file that was looked at; otherwise only the name
+    // this call made is undone (while the source name still holds that
+    // inode), so the substitute never stays at the target.
+    let st = null;
+    try { st = fs.lstatSync(to); } catch {}
+    if (!st || !st.isFile() || !sameStat(st, before)) {
+      const err = changed();
+      const kept = st ? undoCopy(to, { dev: st.dev, ino: st.ino }, from, null, path.basename(from)) : null;
+      if (kept) err.keptCopy = kept;
+      throw err;
+    }
+  }
   const placed = linked ? { dev: before.dev, ino: before.ino } : await copyVerified(from, to, sha256);
   // Its new name is durable before the old one goes. The sync is slow disk
   // I/O, so it comes before the last look, never between it and the unlink.
@@ -691,29 +706,39 @@ class DupeTrash {
 
   // Removes the suggested extra copies of the given groups (all open groups
   // when none are named). One file at a time; a failure skips that copy only.
-  async removeAll({ by = null, dryRun = false, sha256s = null, reason = null } = {}) {
+  // The whole plan is made first; its `fingerprint` (a hash of every group,
+  // kept copy and copy to move) comes back from a dry run, and a run given
+  // `fingerprint` moves nothing unless the plan is still exactly that one.
+  async removeAll({ by = null, dryRun = false, sha256s = null, reason = null, fingerprint = null } = {}) {
     const groups = sha256s
       ? sha256s.map((s) => ({ sha256: s, members: this.store.dupeMembers(s) })).filter((g) => g.members.length > 1)
       : this.store.openDupeGroups();
-    const out = { groups: 0, files: 0, bytes: 0, failed: [] };
+    const plan = [];
     for (const g of groups) {
       const p = planGroup(g.members, this.rootOf);
       const go = p.members.filter((m) => m.suggested);
       if (!go.length) continue;
-      out.groups++;
-      for (const m of go) {
-        const row = g.members.find((x) => x.id === m.id);
+      plan.push({ sha256: g.sha256, keepId: p.keepId, rows: go.map((m) => g.members.find((x) => x.id === m.id)) });
+    }
+    const keys = plan.flatMap((g) => g.rows.map((r) => `${g.sha256}:${g.keepId}:${r.id}:${r.bytes}`)).sort();
+    const fp = crypto.createHash('sha256').update(keys.join('\n')).digest('hex');
+    if (!dryRun && fingerprint != null && fingerprint !== fp) {
+      throw Object.assign(new TrashError('The duplicates changed since you confirmed; check them again'), { stale: true });
+    }
+    const out = { groups: plan.length, files: 0, bytes: 0, failed: [], fingerprint: fp };
+    for (const g of plan) {
+      for (const row of g.rows) {
         if (dryRun) {
           out.files++;
           out.bytes += row.bytes;
           continue;
         }
         try {
-          await this.remove(m.id, { by, plannedKeep: p.keepId, reason });
+          await this.remove(row.id, { by, plannedKeep: g.keepId, reason });
           out.files++;
           out.bytes += row.bytes;
         } catch (e) {
-          out.failed.push({ id: m.id, rel: row.rel, error: e.message });
+          out.failed.push({ id: row.id, rel: row.rel, error: e.message });
         }
       }
     }
@@ -757,28 +782,24 @@ class DupeTrash {
     return this.deleteRow(t);
   }
 
-  // Another copy that is known to remain: a file that hashes to the held
-  // bytes, or, for a near duplicate the owner chose, the copy kept in its
-  // place with the bytes it had at the move. Import folders do not count
-  // (their app may still reject or delete the file). Returns { abs, stat }
-  // with the stat taken after the hash, or null.
+  // Another copy that is known to remain: a file outside import folders
+  // (their app may still reject or delete it) that hashes to the held bytes,
+  // with its stat taken after the hash. A near duplicate kept in its place
+  // has other bytes, so it never counts. Returns { abs, stat } or null.
   async survivorOf(t) {
+    if (!t.sha256) return null;
     const cands = [];
     const keep = this.keepOf ? this.keepOf(t.id) : null;
-    if (keep && keep.keep_root && keep.keep_rel) {
-      cands.push({ root: keep.keep_root, rel: keep.keep_rel, shas: [t.sha256, keep.keep_sha256].filter(Boolean) });
-    }
-    if (t.sha256) {
-      if (t.root && t.rel) cands.push({ root: t.root, rel: t.rel, shas: [t.sha256] });
-      let members = [];
-      try { members = this.store.dupeMembers(t.sha256) || []; } catch {}
-      for (const m of members) cands.push({ root: m.root, rel: m.rel, shas: [t.sha256] });
-    }
+    if (keep && keep.keep_root && keep.keep_rel) cands.push({ root: keep.keep_root, rel: keep.keep_rel });
+    if (t.root && t.rel) cands.push({ root: t.root, rel: t.rel });
+    let members = [];
+    try { members = this.store.dupeMembers(t.sha256) || []; } catch {}
+    for (const m of members) cands.push({ root: m.root, rel: m.rel });
     const seen = new Set();
     let tried = 0;
     for (const c of cands) {
       const key = `${c.root}\0${c.rel}`;
-      if (!c.shas.length || seen.has(key)) continue;
+      if (seen.has(key)) continue;
       seen.add(key);
       const r = this.rootOf(c.root);
       if (!r || isImport(r)) continue;
@@ -789,27 +810,55 @@ class DupeTrash {
       try { h = await sha256Of(rf.abs); } catch { continue; }
       let after = null;
       try { after = fs.lstatSync(rf.abs); } catch {}
-      if (!after || !after.isFile() || !sameStat(after, rf.stat) || !c.shas.includes(h)) continue;
+      if (!after || !after.isFile() || !sameStat(after, rf.stat) || h !== t.sha256) continue;
       return { abs: rf.abs, stat: after };
     }
     return null;
   }
 
-  // A held copy goes only while another verified copy remains: the owner's
-  // confirmation alone never deletes what may be the last copy.
-  async deleteRow(t) {
+  // The held file, authenticated: it must still hash to the bytes that went
+  // into the trash. Returns its stat taken after the hash, or null.
+  async heldIntact(t, f) {
+    try {
+      const h = await sha256Of(f.abs);
+      const after = fs.lstatSync(f.abs);
+      return h === t.sha256 && after.isFile() && sameStat(after, f.stat) ? after : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // A held copy goes only while it is still the bytes that were trashed and
+  // another verified copy of exactly those bytes remains: the owner's
+  // confirmation alone never deletes what may be the last copy. `still(row)`
+  // is asked again after the slow hashing (a purge passes the current
+  // retention), so a setting changed meanwhile stops the delete.
+  async deleteRow(t, { still = null } = {}) {
     const f = this.trashedFile(t);
+    const current = () => {
+      const cur = this.store.trashGet(t.id);
+      if (!cur || cur.restored_at || cur.purged_at || cur.trash_name !== t.trash_name) throw new TrashError('Not in the trash');
+      if (still && !still(cur)) throw new TrashError('No longer due for deletion');
+    };
     if (f) {
-      const s = await this.survivorOf(t);
+      if (!t.sha256) throw new TrashError('No hash was recorded for this file, so it stays in the trash; restore it if you still need it');
+      const [s, held] = await Promise.all([this.survivorOf(t), this.heldIntact(t, f)]);
+      if (!held) throw new TrashError('The trashed file no longer matches what was moved to the trash; nothing was deleted, check the trash folder by hand');
       if (!s) {
-        throw new TrashError('No other copy of this file could be verified, so it stays in the trash; restore it if you still need it');
+        const keep = this.keepOf ? this.keepOf(t.id) : null;
+        const near = !!(keep && keep.keep_sha256 && keep.keep_sha256 !== t.sha256);
+        throw new TrashError(near
+          ? 'This was a near duplicate: the copy kept in its place has other bytes, so no exact copy remains. It stays in the trash; restore it if you still need it'
+          : 'No other copy of this file could be verified, so it stays in the trash; restore it if you still need it');
       }
-      // Nothing slow from here on: the original place, the copy that stays
-      // and the held name are looked at again, and the held name goes at once.
+      // The row and the retention may have changed while hashing (a restore,
+      // a switch to manual cleanup). Read before the last looks, which are
+      // stats only: nothing slow, no write, between them and the removal.
+      current();
       if (t.root && t.rel) {
         try {
           const live = fs.statSync(path.resolve(t.root, t.rel));
-          if (live.ino === f.stat.ino && live.dev === f.stat.dev) throw new TrashError('This file is in use at its original place');
+          if (live.ino === held.ino && live.dev === held.dev) throw new TrashError('This file is in use at its original place');
         } catch (e) {
           if (e instanceof TrashError) throw e;
         }
@@ -817,9 +866,11 @@ class DupeTrash {
       let now = null;
       try { now = fs.lstatSync(s.abs); } catch {}
       if (!now || !sameStat(now, s.stat)) throw new TrashError('The copy that stays changed meanwhile; nothing was deleted, try again');
-      if (!removeIfSame(f.abs, (x) => x.isFile() && sameStat(x, f.stat))) {
+      if (!removeIfSame(f.abs, (x) => x.isFile() && sameStat(x, held))) {
         throw new TrashError('The trashed file changed meanwhile; nothing was deleted');
       }
+    } else {
+      current();
     }
     this.store.trashPurged(t.id, this.now());
     return { id: t.id, bytes: f ? f.stat.size : 0 };
@@ -979,9 +1030,16 @@ class DupeTrash {
     const hold = this.holdMs;
     if (!hold) return 0; // manual cleanup only
     let n = 0;
+    // Retention is read again for every row, after its hashing: switching to
+    // manual cleanup, or a longer hold, stops a purge that is under way.
+    const still = (cur) => {
+      const h = this.holdMs;
+      return h > 0 && cur.at < this.now() - h;
+    };
     for (const t of this.store.trashDue(this.now() - hold)) {
+      if (!still(t)) continue;
       try {
-        await this.deleteRow(t);
+        await this.deleteRow(t, { still });
         n++;
       } catch {
         // Left for the owner to look at.

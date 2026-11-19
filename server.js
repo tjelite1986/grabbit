@@ -4678,8 +4678,9 @@ app.post('/api/hub/dupes/remove', async (req, res) => {
 // POST /api/hub/dupes/remove-all { confirm?, expect?, sha256? } -> every
 // suggested extra copy of every open group (or of one group), best copy kept.
 // Without `confirm: true` it is a dry run (an empty request moves nothing).
-// A confirmed run over every group also needs `expect` ({ files, bytes }, the
-// dry run the owner saw); if the plan changed since, nothing moves.
+// A confirmed run over every group also needs `expect` ({ files, bytes,
+// fingerprint }, the dry run the owner saw); if the plan changed since in any
+// way (another kept copy, other copies of the same total), nothing moves.
 app.post('/api/hub/dupes/remove-all', async (req, res) => {
   if (!metaStore(res) || trashOff(res)) return;
   const body = req.body || {};
@@ -4687,8 +4688,8 @@ app.post('/api/hub/dupes/remove-all', async (req, res) => {
   const dryRun = body.confirm !== true;
   const sha256s = body.sha256 ? [String(body.sha256)] : null;
   const expect = body.expect && typeof body.expect === 'object' ? body.expect : null;
-  if (!dryRun && !sha256s && (!expect || !Number.isSafeInteger(expect.files) || !Number.isSafeInteger(expect.bytes))) {
-    return res.status(400).json({ ok: false, error: 'Removing every extra copy needs the counts you confirmed (expect)' });
+  if (!dryRun && !sha256s && (!expect || !Number.isSafeInteger(expect.files) || !Number.isSafeInteger(expect.bytes) || !SHA256_RE.test(String(expect.fingerprint || '')))) {
+    return res.status(400).json({ ok: false, error: 'Removing every extra copy needs the plan you confirmed (expect)' });
   }
   if (!dryRun && dupeRemoveBusy) return res.status(409).json({ ok: false, error: 'Another removal is running' });
   if (!dryRun) dupeRemoveBusy = true;
@@ -4700,7 +4701,14 @@ app.post('/api/hub/dupes/remove-all', async (req, res) => {
           throw Object.assign(new Error('The duplicates changed since you confirmed; check them again'), { status: 409 });
         }
       }
-      return DUPE_TRASH.removeAll({ by: actorOf(req), dryRun, sha256s });
+      // The run itself plans again and moves nothing unless that plan is the
+      // one confirmed (same groups, kept copies and copies to move).
+      try {
+        return await DUPE_TRASH.removeAll({ by: actorOf(req), dryRun, sha256s, fingerprint: !dryRun && !sha256s ? String(expect.fingerprint) : null });
+      } catch (e) {
+        if (e.stale) throw Object.assign(new Error(e.message), { status: 409 });
+        throw e;
+      }
     };
     let r;
     try {

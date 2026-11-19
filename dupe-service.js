@@ -47,6 +47,8 @@ class DupeError extends Error {
 const TABS = ['identical', 'photos', 'videos', 'cache'];
 const SORTS = ['space', 'similarity', 'size', 'newest', 'oldest', 'type'];
 const MAX_BATCH_GROUPS = 2000;
+// How long an app's audience answer for one of its copies holds.
+const AUD_TTL_MS = 60 * 1000;
 
 const sha256File = (file) => new Promise((resolve, reject) => {
   const h = crypto.createHash('sha256');
@@ -69,7 +71,9 @@ class DupeService {
     this.now = o.now || Date.now;
     this.cache = null;
     // What a mixed-audience app (egram) reported for its copies:
-    // "root\0rel" -> { aud: 'general' | 'adult', ino, mtime }.
+    // "root\0rel" -> { aud: 'general' | 'adult', ino, mtime, at }. An answer
+    // holds for AUD_TTL_MS only: a post's audience can change in the app
+    // without the media file changing, so it is asked again after that.
     this.appAud = new Map();
     this.audBusy = null;
     this.audRetryAt = new Map(); // root -> time before which a failed app is not asked again
@@ -245,17 +249,23 @@ class DupeService {
 
   // A copy in a mixed-audience app library counts as 18+ until the app has
   // reported it (for this inode and mtime) as used only by general posts.
+  // An app answer that is still current: for this inode and mtime, and
+  // younger than AUD_TTL_MS. A stale one counts as no answer (18+).
+  appAnswer(row) {
+    const c = this.appAud.get(`${row.root}\0${row.rel}`);
+    return c && c.ino === String(row.ino) && c.mtime === row.mtime_ms && this.now() - c.at < AUD_TTL_MS ? c : null;
+  }
+
   audienceFor(r, row) {
     const base = audienceOf(r, row.item_audience);
     if (base === 'adult' || !r.mixedAudience) return base;
-    const c = this.appAud.get(`${row.root}\0${row.rel}`);
-    return c && c.ino === String(row.ino) && c.mtime === row.mtime_ms && c.aud === 'general' ? 'general' : 'adult';
+    const c = this.appAnswer(row);
+    return c && c.aud === 'general' ? 'general' : 'adult';
   }
 
   audienceUnverified(r, row) {
     if (!r.mixedAudience) return false;
-    const c = this.appAud.get(`${row.root}\0${row.rel}`);
-    return !(c && c.ino === String(row.ino) && c.mtime === row.mtime_ms);
+    return !this.appAnswer(row);
   }
 
   // Asks the mixed-audience apps about every copy of theirs in a group that
@@ -264,6 +274,15 @@ class DupeService {
   async refreshAppAudience() {
     if (this.audBusy) return this.audBusy;
     this.audBusy = (async () => {
+      // Expired answers go first; a cached list built on a 'general' one is
+      // rebuilt, so the copy counts as 18+ until the app confirms it again.
+      let expired = false;
+      for (const [k, c] of this.appAud) {
+        if (this.now() - c.at < AUD_TTL_MS) continue;
+        this.appAud.delete(k);
+        if (c.aud === 'general') expired = true;
+      }
+      if (expired) this.invalidate();
       const byRoot = new Map();
       for (const g of this.build().groups) {
         for (const m of g.members) {
@@ -293,7 +312,7 @@ class DupeService {
             if (!it) continue;
             const refs = Array.isArray(it.refs) ? it.refs : [];
             const aud = refs.length && refs.every((x) => x && x.audience === 'general') ? 'general' : 'adult';
-            this.appAud.set(`${m.root}\0${m.rel}`, { aud, ino: String(m.ino), mtime: m.mtime_ms });
+            this.appAud.set(`${m.root}\0${m.rel}`, { aud, ino: String(m.ino), mtime: m.mtime_ms, at: this.now() });
             changed = true;
           }
         }

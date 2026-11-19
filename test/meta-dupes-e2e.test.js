@@ -423,10 +423,16 @@ test('removing copies: app copies stay, the oldest Grabbit copy is kept, removed
   assert.equal(empty.body.dryRun, true);
   assert.ok(fs.existsSync(a[0]) && fs.existsSync(a[2]) && fs.existsSync(bNew), 'an empty request moves nothing');
   assert.equal((await s.post('/api/hub/dupes/remove-all', { confirm: true })).status, 400);
-  const stale = await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files + 1, bytes: dry.body.bytes } });
+  const fingerprint = dry.body.fingerprint;
+  assert.match(fingerprint, /^[0-9a-f]{64}$/);
+  assert.equal((await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files, bytes: dry.body.bytes } })).status, 400, 'the counts alone are not the plan');
+  const stale = await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files + 1, bytes: dry.body.bytes, fingerprint } });
   assert.equal(stale.status, 409);
+  // Same counts, another plan: refused too.
+  const other = await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files, bytes: dry.body.bytes, fingerprint: 'f'.repeat(64) } });
+  assert.equal(other.status, 409);
   assert.ok(fs.existsSync(a[0]) && fs.existsSync(a[2]) && fs.existsSync(bNew), 'a stale confirm moves nothing');
-  const all = await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files, bytes: dry.body.bytes } });
+  const all = await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files, bytes: dry.body.bytes, fingerprint } });
   assert.equal(all.status, 200);
   assert.deepEqual([all.body.files, all.body.failed.length], [3, 0]);
   for (const f of [...a, bNew]) assert.ok(!fs.existsSync(f), `${f} moved`);

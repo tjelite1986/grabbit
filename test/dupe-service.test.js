@@ -1116,6 +1116,8 @@ test('copies in a mixed-audience app library stay hidden as 18+ until the app re
     },
   }));
   await scan();
+  let clock = Date.now();
+  svc.now = () => clock;
   const hidden = () => svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 });
   // egram not reachable: both groups count as 18+ and stay out of the default view.
   await svc.refreshAppAudience();
@@ -1129,6 +1131,29 @@ test('copies in a mixed-audience app library stay hidden as 18+ until the app re
   assert.equal(shown.length, 1);
   assert.equal(shown[0].key, `exact:${sha('general post bytes')}`);
   assert.ok(shown[0].members.every((m) => m.preview !== false || m.kind !== 'image'));
+  // A post in egram turns 18+ while the media file stays the same: once the
+  // answer is a minute old the app is asked again, and the copy is hidden.
+  aud['general.jpg'] = 'adult';
+  clock += 30 * 1000;
+  await svc.refreshAppAudience();
+  assert.equal(hidden().items.length, 1, 'a fresh answer still holds');
+  clock += 31 * 1000;
+  await svc.refreshAppAudience();
+  assert.equal(hidden().items.length, 0, 'an expired answer is asked again');
+  // An expired answer the app cannot confirm counts as 18+ (fail closed).
+  aud['general.jpg'] = 'general';
+  clock += 61 * 1000;
+  await svc.refreshAppAudience();
+  assert.equal(hidden().items.length, 1);
+  const gen = svc.build().groups.flatMap((g) => g.members).find((m) => m.rel === 'general.jpg');
+  assert.equal(svc.audienceFor(svc.rootInfo(gen.root), { ...gen, item_audience: null }), 'general');
+  reachable = false;
+  clock += 61 * 1000;
+  await svc.refreshAppAudience();
+  assert.equal(hidden().items.length, 0);
+  assert.equal(svc.audienceFor(svc.rootInfo(gen.root), { ...gen, item_audience: null }), 'adult', 'a preview of a stale answer is refused');
+  svc.audRetryAt.clear();
+  reachable = true;
   // A rewritten file is unverified again.
   write(path.join(mixedDir, 'general.jpg'), 'general post bytes', 5000);
   await scan();

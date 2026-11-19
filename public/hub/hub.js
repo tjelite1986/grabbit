@@ -2834,7 +2834,7 @@
         if (!confirm(`Move ${p.files} extra copies in ${p.groups} groups (${bytes(p.bytes)}) to the trash?\n\nOne copy of each group stays: the one an app reads, else the one linked to an item, else the oldest. Groups marked known/OK are left alone. You can restore for 30 days.`)) return;
         removeAllBtn.disabled = true;
         removeAllBtn.textContent = 'Removing ...';
-        const r = await jsonPost('/api/hub/dupes/remove-all', { confirm: true, expect: { files: p.files, bytes: p.bytes } });
+        const r = await jsonPost('/api/hub/dupes/remove-all', { confirm: true, expect: { files: p.files, bytes: p.bytes, fingerprint: p.fingerprint } });
         toast(`${r.files} copies (${bytes(r.bytes)}) moved to the trash${r.failed.length ? `; ${r.failed.length} refused (${r.failed[0].error})` : ''}.`);
       } catch (e) { toast(e.message); }
       removeAllBtn.disabled = false;

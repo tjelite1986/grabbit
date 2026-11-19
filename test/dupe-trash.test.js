@@ -54,6 +54,7 @@ test('purge deletes only trashed files past the hold time, and only while anothe
   const purged = [];
   const store = {
     trashDue: (before) => rows.filter((r) => r.at < before && !purged.includes(r.id)),
+    trashGet: (id) => rows.find((r) => r.id === id && !purged.includes(r.id)) || null,
     trashPurged: (id) => (purged.push(id), 1),
     dupeMembers: () => [{ root: lib, rel: 'keep.mp4' }],
   };
@@ -93,12 +94,16 @@ test('a permanent delete keeps the last copy: no verified survivor, nothing is d
   await assert.rejects(() => t.deletePermanently(1), /No other copy of this file could be verified/);
   assert.ok(fs.existsSync(path.join(dir, 'held')));
   assert.deepEqual(purged, []);
-  // A near duplicate kept in its place counts only with the bytes it had at the move.
+  // A near duplicate kept in its place never counts, not even with the very
+  // bytes it had at the move: it is not a copy of what would be deleted.
   fs.writeFileSync(path.join(lib, 'similar.jpg'), 'similar v2');
-  keep = { keep_root: lib, keep_rel: 'similar.jpg', keep_sha256: sha('similar v1') };
-  members = [];
-  await assert.rejects(() => t.deletePermanently(1), /No other copy/);
   keep = { keep_root: lib, keep_rel: 'similar.jpg', keep_sha256: sha('similar v2') };
+  members = [];
+  await assert.rejects(() => t.deletePermanently(1), /near duplicate.*no exact copy remains/);
+  assert.ok(fs.existsSync(path.join(dir, 'held')));
+  // An exact copy anywhere outside an import folder does.
+  fs.writeFileSync(path.join(lib, 'exact.mp4'), 'original');
+  members = [{ root: lib, rel: 'exact.mp4' }];
   const r = await t.deletePermanently(1);
   assert.equal(r.bytes, 8);
   assert.ok(!fs.existsSync(path.join(dir, 'held')));
@@ -911,4 +916,134 @@ test('restore refuses a held file whose bytes are not the ones moved to the tras
   assert.ok(!fs.existsSync(b), 'nothing was published');
   assert.ok(fs.existsSync(held), 'the held file stays');
   assert.equal(trash[id - 1].restored_at || null, null);
+});
+
+test('a permanent delete authenticates the held file: a substitute at the held name is never deleted', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-lib-'));
+  test.after(() => fs.rmSync(lib, { recursive: true, force: true }));
+  const crypto = require('crypto');
+  const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+  // The trashed bytes A still have an exact live copy, but the held name now
+  // holds unrelated bytes B (whose only copy this is).
+  fs.writeFileSync(path.join(lib, 'a.mp4'), 'bytes A');
+  fs.writeFileSync(path.join(dir, 'held'), 'bytes B, unique');
+  const row = { id: 1, trash_name: 'held', at: 1, sha256: sha('bytes A'), root: lib, rel: 'gone.mp4' };
+  const purged = [];
+  const store = {
+    trashGet: () => (purged.length ? { ...row, purged_at: 2 } : row),
+    trashPurged: (id) => (purged.push(id), 1),
+    dupeMembers: () => [{ root: lib, rel: 'a.mp4' }],
+  };
+  const t = new DupeTrash({ store, trashDir: dir, rootOf: (p) => (p === lib ? { owner: 'grabbit' } : null) });
+  await assert.rejects(() => t.deletePermanently(1), /no longer matches what was moved to the trash/);
+  assert.equal(fs.readFileSync(path.join(dir, 'held'), 'utf8'), 'bytes B, unique');
+  assert.deepEqual(purged, []);
+  // Swapped after the hash: the post-hash identity no longer matches the name.
+  fs.writeFileSync(path.join(dir, 'held'), 'bytes A');
+  const real = t.heldIntact.bind(t);
+  t.heldIntact = async (tt, f) => {
+    const st = await real(tt, f);
+    fs.rmSync(path.join(dir, 'held'));
+    fs.writeFileSync(path.join(dir, 'held'), 'bytes B, unique');
+    return st;
+  };
+  await assert.rejects(() => t.deletePermanently(1), /changed meanwhile; nothing was deleted/);
+  assert.equal(fs.readFileSync(path.join(dir, 'held'), 'utf8'), 'bytes B, unique');
+  assert.deepEqual(purged, []);
+});
+
+test('a purge rechecks the retention and the row after hashing: manual cleanup or a restore stops it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-lib-'));
+  test.after(() => fs.rmSync(lib, { recursive: true, force: true }));
+  const sha = require('crypto').createHash('sha256').update('x').digest('hex');
+  const now = 10 * HOLD_MS;
+  const rows = [
+    { id: 1, trash_name: 'a', at: 1, sha256: sha },
+    { id: 2, trash_name: 'b', at: 2, sha256: sha },
+  ];
+  for (const r of rows) fs.writeFileSync(path.join(dir, r.trash_name), 'x');
+  fs.writeFileSync(path.join(lib, 'keep.mp4'), 'x');
+  const purged = [];
+  let hold = HOLD_MS;
+  const store = {
+    trashDue: (before) => rows.filter((r) => r.at < before && !purged.includes(r.id)),
+    trashGet: (id) => rows.find((r) => r.id === id) || null,
+    trashPurged: (id) => (purged.push(id), 1),
+    dupeMembers: () => [{ root: lib, rel: 'keep.mp4' }],
+  };
+  const t = new DupeTrash({ store, trashDir: dir, rootOf: (p) => (p === lib ? { owner: 'grabbit' } : null), now: () => now, holdMs: () => hold });
+  // The owner switches to manual cleanup while the first survivor is hashed.
+  const real = t.survivorOf.bind(t);
+  t.survivorOf = async (tt) => {
+    const s = await real(tt);
+    hold = 0;
+    return s;
+  };
+  assert.equal(await t.purge(), 0);
+  assert.deepEqual(purged, []);
+  assert.ok(fs.existsSync(path.join(dir, 'a')) && fs.existsSync(path.join(dir, 'b')));
+  // A restore recorded while hashing stops the delete too.
+  hold = HOLD_MS;
+  t.survivorOf = async (tt) => {
+    const s = await real(tt);
+    rows[0].restored_at = 5;
+    return s;
+  };
+  await assert.rejects(() => t.deletePermanently(1), /Not in the trash/);
+  assert.ok(fs.existsSync(path.join(dir, 'a')));
+});
+
+test('a same-disk move whose source is swapped before the link leaves no substitute at the target', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-move-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const from = path.join(dir, 'src.mp4');
+  const to = path.join(dir, 'dst.mp4');
+  fs.writeFileSync(from, 'hashed');
+  const expect = fs.lstatSync(from);
+  // A writer swaps the source in the moment between the look and the link.
+  const realLink = fs.linkSync;
+  let swapped = false;
+  fs.linkSync = (a, b) => {
+    if (!swapped && a === from) {
+      swapped = true;
+      // Renamed, not removed: the hashed inode stays alive, so the new file
+      // cannot reuse its number.
+      fs.renameSync(from, path.join(dir, 'hashed.mp4'));
+      fs.writeFileSync(from, 'substitute');
+    }
+    return realLink(a, b);
+  };
+  try {
+    await assert.rejects(() => moveFile(from, to, null, expect), /changed while it was being moved/);
+  } finally {
+    fs.linkSync = realLink;
+  }
+  assert.ok(!fs.existsSync(to), 'the substitute is not left at the target');
+  assert.equal(fs.readFileSync(from, 'utf8'), 'substitute', 'the writer keeps its file');
+});
+
+test('remove all moves nothing when the plan changed, even with the same counts', async () => {
+  const sha = 'a'.repeat(64);
+  let members = [m(1, '/g', { sha256: sha, bytes: 5 }), m(2, '/g', { sha256: sha, bytes: 5 })];
+  const removed = [];
+  const store = { openDupeGroups: () => [{ sha256: sha, members }] };
+  const t = new DupeTrash({ store, trashDir: '/nonexistent', rootOf });
+  t.remove = async (id) => { removed.push(id); return 1; };
+  const dry = await t.removeAll({ dryRun: true });
+  assert.deepEqual([dry.files, dry.bytes], [1, 5]);
+  assert.match(dry.fingerprint, /^[0-9a-f]{64}$/);
+  // The other copy is now the older one: it is kept, and the first would go.
+  members = [m(1, '/g', { sha256: sha, bytes: 5, mtime_ms: 9000 }), m(2, '/g', { sha256: sha, bytes: 5, mtime_ms: 10 })];
+  const again = await t.removeAll({ dryRun: true });
+  assert.deepEqual([again.files, again.bytes], [1, 5]);
+  assert.notEqual(again.fingerprint, dry.fingerprint);
+  await assert.rejects(() => t.removeAll({ fingerprint: dry.fingerprint }), (e) => e.stale === true);
+  assert.deepEqual(removed, []);
+  const ok = await t.removeAll({ fingerprint: again.fingerprint });
+  assert.deepEqual([ok.files, removed], [1, [1]]);
 });
