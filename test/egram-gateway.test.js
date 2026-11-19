@@ -340,10 +340,31 @@ test('a post keeps only the mentions that are not 18+ in Grabbit', async () => {
   // The same holds for a single post and for a creator's "Mentioned in" list.
   handlers['/api/posts/1'] = json(200, post(1));
   assert.deepEqual((await (await call('GET', '/api/egram/api/posts/1')).json()).mentions.map((m) => m.handle), ['ann']);
+  const creator = (handle, extra = {}) => ({ id: 9, handle, post_count: 0, mentioned_count: 1, follower_count: 0, audience: 'general', ...extra });
+  handlers['/api/creators/ann'] = json(200, creator('ann'));
   handlers['/api/creators/ann/mentioned'] = json(200, { items: [post(1), { ...post(2), author: { handle: 'secretly18', type: 'creator' } }], next: null });
   const m = await (await call('GET', '/api/egram/api/creators/ann/mentioned')).json();
   assert.deepEqual(m.items.map((x) => x.id), [1]);
   assert.deepEqual(m.items[0].mentions.map((x) => x.handle), ['ann']);
+  delete identities['u-sam'];
+  identities['u-sam'] = ['alias18'];
+  // A creator 18+ in Grabbit (by handle or by another name), outside the
+  // scope, or of another audience has no "Mentioned in" list either, though
+  // the posts on it are other authors': the list is not even asked for.
+  handlers['/api/creators/secretly18'] = json(200, creator('secretly18'));
+  handlers['/api/creators/u-sam'] = json(200, creator('u-sam', { limited: true }));
+  handlers['/api/creators/u-gone'] = json(404, { error: 'Profile not found' });
+  handlers['/api/creators/cy'] = json(200, creator('cy', { audience: 'unknown' }));
+  handlers['/api/creators/liar'] = json(200, creator('ann'));
+  for (const h of ['secretly18', 'u-sam', 'u-gone', 'cy', 'liar']) {
+    handlers[`/api/creators/${h}/mentioned`] = json(200, { items: [post(1)], next: null });
+    const before = seen.length;
+    assert.equal((await call('GET', `/api/egram/api/creators/${h}/mentioned`)).status, 404, h);
+    assert.ok(seen.slice(before).every((q) => !q.url.includes('/mentioned')), `${h}: the list was asked for`);
+  }
+  // Follow and the published list are judged on the creator the same way.
+  assert.equal((await call('POST', '/api/egram/api/creators/secretly18/follow')).status, 404);
+  assert.equal((await call('GET', '/api/egram/api/creators/u-sam/posts')).status, 404);
   delete identities['u-sam'];
   hidden.delete('u-gone');
   adultSet = new Set();

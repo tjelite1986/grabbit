@@ -103,6 +103,11 @@ function laneOf(req) {
 //           post in the lane and passes the request on only if the post itself
 //           would be passed back; a comment or a like never carries enough to
 //           be judged on its own.
+//   subject the creator named in the path. The gateway first fetches that
+//           creator in the lane and passes the request on only if the creator
+//           itself would be passed back. Needed where the answer lists posts the
+//           creator did not write ("Mentioned in"), so filtering the answer by
+//           author would let a Grabbit 18+ creator's page through.
 const ID = '(\\d{1,12})';
 // What a post's audience may be set to through the gateway (PATCH api/posts/:id).
 const AUDIENCE_WRITES = ['general', 'unknown', 'adult'];
@@ -132,10 +137,10 @@ const ROUTES = [
   // Creators
   r('GET', 'api/creators'),
   r('GET', `api/creators/${HANDLE}`),
-  r('GET', `api/creators/${HANDLE}/posts`),
-  r('GET', `api/creators/${HANDLE}/mentioned`),
-  r('POST', `api/creators/${HANDLE}/follow`),
-  r('DELETE', `api/creators/${HANDLE}/follow`),
+  r('GET', `api/creators/${HANDLE}/posts`, { subject: true }),
+  r('GET', `api/creators/${HANDLE}/mentioned`, { subject: true }),
+  r('POST', `api/creators/${HANDLE}/follow`, { subject: true }),
+  r('DELETE', `api/creators/${HANDLE}/follow`, { subject: true }),
   // Photos, categories, collections, favorites, history
   r('GET', 'api/photos'),
   r('GET', 'api/categories'),
@@ -636,6 +641,18 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     return value !== null && dropped === 0 && value.audience === LANES[lane];
   }
 
+  // Would the creator `handle` be passed back in this lane? -> true | false | 401
+  async function subjectVerdict(req, cur, lane, handle, downstream = null) {
+    const r = await upstream(req, { method: 'GET', path: `/api/creators/${encodeURIComponent(handle)}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
+    if (r.statusCode === 401) { r.resume(); return 401; }
+    if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
+    const d = await readJson(r);
+    if (!d || typeof d !== 'object' || norm(d.handle) !== handle) return false;
+    const ids = await identitiesFor(req, cur, lane, [...new Set([...handlesIn(d), `c:${handle}`])], downstream);
+    const { value, dropped } = filterAnswer(d, LANES[lane], adultTest(ids));
+    return value !== null && dropped === 0 && value.audience === LANES[lane] && !adultTest(ids)?.(handle, 'c');
+  }
+
   // The notification ids this lane lists after Grabbit's filter. -> Set | 401
   async function visibleNotificationIds(req, cur, lane, downstream) {
     const r = await upstream(req, { method: 'GET', path: '/api/notifications', headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
@@ -743,6 +760,16 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       let verdict;
       try { verdict = await parentVerdict(req, cur, lane, pid, res); } catch (e) {
         log.warn(`[egram] parent check ${rest}: ${e.message}`);
+        return fail(res, 424, 'Elitogram is not reachable right now');
+      }
+      if (verdict === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
+      if (verdict !== true) return fail(res, 404, 'Not found');
+    }
+    if (route.subject) {
+      const handle = route.p.exec(rest)[1];
+      let verdict;
+      try { verdict = await subjectVerdict(req, cur, lane, handle, res); } catch (e) {
+        log.warn(`[egram] creator check ${rest}: ${e.message}`);
         return fail(res, 424, 'Elitogram is not reachable right now');
       }
       if (verdict === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
