@@ -438,6 +438,8 @@ test('contract: a limited profile and mention links to it pass only when the ide
       handlers[`/api/creators/${lim}`] = json(200, profile(audience));
       handlers[`/api/creators/${lim}/mentioned`] = json(200, { items: [post(71, 'bob', audience)], next: null });
       handlers['/api/feed'] = json(200, { items: [post(71, 'bob', audience)], next: null });
+      // Elitogram answers a limited creator with only the name its profile shows.
+      identities[lim] = ['_lim'];
       // The identity lookup answers for the creator: profile, list and link survive.
       const p = await call('GET', `/api/egram/api/creators/${lim}${lane}`);
       assert.equal(p.status, 200, `${audience} profile`);
@@ -456,11 +458,9 @@ test('contract: a limited profile and mention links to it pass only when the ide
       assert.deepEqual(fh.items[0].mentions, [], `${audience} hidden mention link`);
       hidden.delete(lim);
       // The display name it is known by is 18+ in Grabbit.
-      identities[lim] = ['_lim'];
       adultSet = new Set(['_lim']);
       assert.equal((await call('GET', `/api/egram/api/creators/${lim}${lane}`)).status, 404, `${audience} 18+ name`);
       adultSet = new Set();
-      delete identities[lim];
       // The creator is clean, but the only post that mentions it is by an
       // author that is 18+ in Grabbit: nothing makes it reachable.
       identities.bob = ['bob.alias18'];
@@ -471,6 +471,18 @@ test('contract: a limited profile and mention links to it pass only when the ide
       assert.equal((await call('POST', `/api/egram/api/creators/${lim}/follow${lane}`)).status, 404, `${audience} unreachable follow`);
       assert.ok(seen.length > before, 'the checks reached Elitogram');
       assert.ok(seen.slice(before).every((q) => q.method === 'GET'), 'no follow reached Elitogram');
+      // The first page holds only posts Grabbit hides; a later page holds a
+      // visible one: the check pages on and the profile opens.
+      handlers[`/api/creators/${lim}/mentioned`] = (req, res) => {
+        const c = new URLSearchParams(req.url.split('?')[1] || '').get('cursor');
+        json(200, c === 'p2' ? { items: [post(72, 'carl', audience)], next: null } : { items: [post(71, 'bob', audience)], next: 'p2' })(req, res);
+      };
+      assert.equal((await call('GET', `/api/egram/api/creators/${lim}${lane}`)).status, 200, `${audience} reachable on page 2`);
+      // A list that never ends without a visible post stays closed, after a bounded number of pages.
+      let pages = 0;
+      handlers[`/api/creators/${lim}/mentioned`] = (req, res) => { pages++; json(200, { items: [post(71, 'bob', audience)], next: `p${pages + 1}` })(req, res); };
+      assert.equal((await call('GET', `/api/egram/api/creators/${lim}${lane}`)).status, 404, `${audience} never reachable`);
+      assert.ok(pages >= 2 && pages <= 5, `${audience} pages read: ${pages}`);
       adultSet = new Set();
       delete identities.bob;
     }

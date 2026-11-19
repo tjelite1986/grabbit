@@ -42,6 +42,9 @@ const EGRAM_COOKIE = 'grabbit_egram';
 const EGRAM_COOKIE_SECURE = '__Host-grabbit_egram';
 const COOKIE_PATH = '/api/egram';
 const SESSION_DAYS = 30;
+// How many "Mentioned in" pages (36 posts each) a limited profile check reads
+// before it gives up and keeps the profile closed.
+const MENTION_REACH_PAGES = 5;
 const UPSTREAM_COOKIE = 'eg_session';
 const SEAL_PURPOSE = 'egram';
 
@@ -665,17 +668,28 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
 
   // A limited creator (known only from mentions) is reachable in this lane
   // only through a post that mentions it, so it opens only when at least one
-  // post on the first page of its "Mentioned in" list survives Grabbit's own
-  // filter. Elitogram's mention count may include posts by authors Grabbit
-  // has as 18+. -> true | false | 401
+  // post of its "Mentioned in" list survives Grabbit's own filter. Elitogram's
+  // mention count may include posts by authors Grabbit has as 18+, so the list
+  // is paged until a post survives, the list ends or MENTION_REACH_PAGES pages
+  // were read (then it stays closed: unverified means not reachable).
+  // -> true | false | 401
   async function mentionReachable(req, cur, lane, handle, downstream = null) {
-    const r = await upstream(req, { method: 'GET', path: `/api/creators/${encodeURIComponent(handle)}/mentioned`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
-    if (r.statusCode === 401) { r.resume(); return 401; }
-    if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
-    const d = await readJson(r);
-    const ids = await identitiesFor(req, cur, lane, handlesIn(d), downstream);
-    const { value } = filterAnswer(d, LANES[lane], adultTest(ids));
-    return !!value && Array.isArray(value.items) && value.items.some((p) => p && typeof p === 'object' && looksLikePost(p) && p.audience === LANES[lane]);
+    let cursor = null;
+    for (let page = 0; page < MENTION_REACH_PAGES; page++) {
+      const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+      const r = await upstream(req, { method: 'GET', path: `/api/creators/${encodeURIComponent(handle)}/mentioned${q}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
+      if (r.statusCode === 401) { r.resume(); return 401; }
+      if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
+      const d = await readJson(r);
+      const ids = await identitiesFor(req, cur, lane, handlesIn(d), downstream);
+      const { value } = filterAnswer(d, LANES[lane], adultTest(ids));
+      if (!value || !Array.isArray(value.items)) return false;
+      if (value.items.some((p) => p && typeof p === 'object' && looksLikePost(p) && p.audience === LANES[lane])) return true;
+      const next = d && typeof d === 'object' ? d.next : null;
+      if ((typeof next !== 'string' && typeof next !== 'number') || String(next) === '' || String(next) === String(cursor)) return false;
+      cursor = String(next);
+    }
+    return false;
   }
 
   // The notification ids this lane lists after Grabbit's filter. -> Set | 401
