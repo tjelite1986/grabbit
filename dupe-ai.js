@@ -87,6 +87,10 @@ function hashFileSync(file) {
   return h.digest('hex');
 }
 
+// The whole model transfer must finish within this time (the heavy model is
+// 609 MB; 30 minutes is about 340 kB/s).
+const DOWNLOAD_DEADLINE_MS = 30 * 60 * 1000;
+
 class ModelManager {
   constructor({ dir, fetchImpl = globalThis.fetch, log = console.log } = {}) {
     this.dir = dir;
@@ -127,6 +131,7 @@ class ModelManager {
     return Object.values(MODELS).map((m) => ({
       id: m.id, label: m.label, bytes: m.bytes, ramMb: m.ramMb, installed: this.installed(m.id),
       downloading: this.downloading === m.id ? this.progress : null,
+      lastError: this.lastError && this.lastError.id === m.id ? this.lastError.error : null,
     }));
   }
 
@@ -142,10 +147,12 @@ class ModelManager {
     if (this.downloading) throw new Error('A model download is already running');
     this.downloading = id;
     this.progress = { bytes: 0, total: spec.bytes };
-    fs.mkdirSync(this.dir, { recursive: true });
+    this.lastError = null;
     const part = `${this.fileOf(id)}.part`;
     try {
-      const res = await this.fetch(RELEASE + spec.file, { redirect: 'follow' });
+      fs.mkdirSync(this.dir, { recursive: true });
+      // A stalled transfer must not hold the download slot until a restart.
+      const res = await this.fetch(RELEASE + spec.file, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_DEADLINE_MS) });
       if (!res.ok || !res.body) throw new Error(`Download failed (HTTP ${res.status})`);
       const hash = crypto.createHash('sha256');
       const fd = fs.openSync(part, 'w');
@@ -169,6 +176,7 @@ class ModelManager {
       return { installed: true, sha256: digest };
     } catch (e) {
       try { fs.unlinkSync(part); } catch {}
+      this.lastError = { id, error: e.name === 'TimeoutError' ? 'The download took too long and was stopped' : e.message, at: Date.now() };
       throw e;
     } finally {
       this.downloading = null;

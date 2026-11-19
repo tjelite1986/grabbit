@@ -859,7 +859,8 @@
               const btn = e.currentTarget;
               await busyBtn(btn, async () => { try { await post(`models/${x.id}/download`); toast('Download started. It continues in the background.'); } catch (err) { toast(err.message); } });
               setTimeout(() => { if (live(gen)) viewSettings(body, gen); }, 3000);
-            } }, `Download (${bytes(x.bytes)})`)));
+            } }, `Download (${bytes(x.bytes)})`),
+        x.lastError ? h('p', { class: 'dm-err' }, `Last download failed: ${x.lastError}`) : null));
       const prev = s.prevention;
       fill(form,
         h('section', { class: 'card dm-card' }, h('h2', null, ic('scan'), 'Exact Match scan'),

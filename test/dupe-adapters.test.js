@@ -85,16 +85,22 @@ test('a call without url or token never reaches the network', async () => {
   assert.equal(fetchImpl.calls.length, 0);
 });
 
-test('appPath without a prefix passes the rel through with forward slashes', () => {
+test('appPath without a prefix passes the rel through unchanged', () => {
   const a = adapter();
   assert.equal(a.appPath('main/ann/clip.mp4'), 'main/ann/clip.mp4');
-  assert.equal(a.appPath('main\\ann\\clip.mp4'), 'main/ann/clip.mp4');
+});
+
+test('appPath refuses a backslash, a legal Linux name character, instead of turning it into a slash', () => {
+  for (const a of [adapter(), adapter({ prefix: 'tik' })]) {
+    for (const bad of ['main\\ann\\clip.mp4', 'tik\\main\\clip.mp4', 'tik/main/a\\b.mp4']) {
+      assert.throws(() => a.appPath(bad), (e) => e instanceof AdapterError && /backslash/.test(e.message), bad);
+    }
+  }
 });
 
 test('appPath with a prefix strips it and refuses anything outside it', () => {
   const a = adapter({ prefix: 'tik' });
   assert.equal(a.appPath('tik/main/clip.mp4'), 'main/clip.mp4');
-  assert.equal(a.appPath('tik\\main\\clip.mp4'), 'main/clip.mp4');
   for (const bad of ['other/clip.mp4', 'tikshortis/clip.mp4', 'tik', 'clip.mp4', '/tik/clip.mp4', '']) {
     assert.throws(() => a.appPath(bad), (e) => e instanceof AdapterError && /Not a TikShortis library file/.test(e.message), bad);
   }

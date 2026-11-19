@@ -59,7 +59,10 @@ class AppAdapter {
   }
 
   appPath(rel) {
-    const r = String(rel).split('\\').join('/');
+    const r = String(rel);
+    // On Linux a backslash is part of a file name. Translating it would point
+    // the app at a different file, so such names are refused instead.
+    if (r.includes('\\')) throw new AdapterError(`${this.app} cannot be asked about a file name with a backslash`);
     if (!this.prefix) return r;
     if (!r.startsWith(`${this.prefix}/`)) throw new AdapterError(`Not a ${this.app} library file`);
     return r.slice(this.prefix.length + 1);

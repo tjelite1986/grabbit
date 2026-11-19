@@ -117,6 +117,19 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
   // content and kept in Grabbit's data folder, so result lists never load
   // full pictures or video players. The file is found by scan row id.
   const thumbBusy = new Map();
+  // At most two ffmpeg processes make thumbnails at a time; a results page
+  // asks for dozens at once and the Pi has four cores.
+  let thumbRunning = 0;
+  const thumbWaiting = [];
+  const thumbSlot = async (fn) => {
+    if (thumbRunning >= 2) await new Promise((r) => thumbWaiting.push(r));
+    thumbRunning++;
+    try { return await fn(); } finally {
+      thumbRunning--;
+      const next = thumbWaiting.shift();
+      if (next) next();
+    }
+  };
   r.get('/thumb/:id', async (req, res) => {
     const notFound = () => { if (!res.headersSent) res.status(404).json({ ok: false, error: 'Not available' }); };
     try {
@@ -131,7 +144,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
         const src = safePath(row.root, row.rel);
         if (!src) return notFound();
         if (!thumbBusy.has(out)) {
-          thumbBusy.set(out, (async () => {
+          thumbBusy.set(out, thumbSlot(async () => {
             fs.mkdirSync(path.dirname(out), { recursive: true });
             const tmp = `${out}.${process.pid}.tmp`;
             let seek = [];
@@ -142,7 +155,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
             await media.run('ffmpeg', ['-nostdin', '-v', 'error', ...seek, '-i', src, '-frames:v', '1',
               '-vf', 'scale=360:360:force_original_aspect_ratio=decrease', '-q:v', '5', '-f', 'mjpeg', '-y', tmp], { timeoutMs: 60000 });
             fs.renameSync(tmp, out);
-          })().finally(() => thumbBusy.delete(out)));
+          }).finally(() => thumbBusy.delete(out)));
         }
         await thumbBusy.get(out);
       }

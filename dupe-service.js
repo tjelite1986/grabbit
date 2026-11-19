@@ -584,7 +584,10 @@ class DupeService {
       return g.members.filter((m) => !keepSet.has(m.id));
     }
     if (g.match !== 'exact') throw new DupeError('Choose the copies to keep yourself: a similarity match is never removed for you');
-    return g.members.filter((m) => m.suggested && m.action && (action !== 'merge' || ['merge', 'link'].includes(m.action)));
+    // trash_extras moves copies to the trash and nothing else: a merge or an
+    // app link is its own confirmed action, never a side effect of this one.
+    const kinds = action === 'merge' ? ['merge', 'link'] : ['trash'];
+    return g.members.filter((m) => m.suggested && kinds.includes(m.action));
   }
 
   async applyGroup(g, action, { keep, by }) {
@@ -630,7 +633,9 @@ class DupeService {
     }
     if (m.action === 'link') {
       const ad = this.adapters.get(m.root);
-      const target = g.members.find((x) => x.id === (m.linkTo || keepId) && x.root === m.root) || g.members.find((x) => x.id === keepId && x.root === m.root);
+      // The copy the owner keeps wins when it is in the same app; the
+      // suggested target is only used when it is not.
+      const target = g.members.find((x) => x.id === keepId && x.root === m.root) || g.members.find((x) => x.id === m.linkTo && x.root === m.root);
       if (!ad || !target) throw new DupeError('No copy in the same app to share with');
       const opId = this.dx.opBegin(ad.id, 'link', { keep: target.rel, drop: m.rel, sha256: m.sha256 }, by, this.now());
       try {
@@ -1000,6 +1005,14 @@ class DupeService {
           const tmp = `${abs}.dedupe-${process.pid}`;
           fs.linkSync(keepAbs, tmp);
           if ((await sha256File(tmp)) !== sha) { fs.unlinkSync(tmp); throw new Error('the existing copy changed'); }
+          // The download must still be the file that was hashed; a newer file
+          // in its place is never overwritten.
+          let now = null;
+          try { now = fs.lstatSync(abs); } catch {}
+          if (!now || now.dev !== st.dev || now.ino !== st.ino || now.size !== st.size) {
+            fs.unlinkSync(tmp);
+            throw new Error('the new file changed while it was checked');
+          }
           fs.renameSync(tmp, abs);
           detail = `Now stored once with ${oInfo.label}/${o.rel}`;
         } catch (e) {

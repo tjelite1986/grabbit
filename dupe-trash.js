@@ -378,31 +378,46 @@ class DupeTrash {
     const f = this.trashedFile(t);
     if (!f) throw new TrashError('The trashed file is missing');
     const from = f.abs;
-    // A merged copy: its name now points at the kept file (a hard link). The
-    // link goes, and the original comes back under its own name.
-    const meta = this.mergeOf ? this.mergeOf(t.id) : null;
-    if (meta && meta.keep_root && meta.keep_rel) {
-      try {
-        const live = fs.lstatSync(abs);
-        const keep = fs.statSync(path.resolve(meta.keep_root, meta.keep_rel));
-        if (live.isFile() && live.ino === keep.ino && live.dev === keep.dev) fs.unlinkSync(abs);
-      } catch {}
-    }
-    // A newer file in its place is never overwritten: the copy comes back
-    // beside it as "name (restored).ext", "name (restored 2).ext", ...
-    let target = abs;
-    for (let n = 1; fs.existsSync(target); n++) {
-      if (n > 50) throw new TrashError('Too many files with that name are back in its place');
-      const ext = path.extname(abs);
-      target = path.join(path.dirname(abs), `${path.basename(abs, ext)} (restored${n > 1 ? ` ${n}` : ''})${ext}`);
-    }
-    const restoredRel = path.relative(root, target);
+    // Every check comes before the first change: the folder must be inside
+    // the root without a symlink on the way.
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     const realRoot = fs.realpathSync(root);
     if (fs.realpathSync(path.dirname(abs)) !== path.join(realRoot, path.relative(root, path.dirname(abs)))) {
       throw new TrashError('Path runs through a symlink');
     }
-    moveFile(from, target);
+    // A merged copy: its name now points at the kept file (a hard link). The
+    // original replaces that link in one rename, so the name never goes
+    // missing; it is staged beside it first (the trash may be on another disk).
+    const meta = this.mergeOf ? this.mergeOf(t.id) : null;
+    let replaceLink = false;
+    if (meta && meta.keep_root && meta.keep_rel) {
+      try {
+        const live = fs.lstatSync(abs);
+        const keep = fs.statSync(path.resolve(meta.keep_root, meta.keep_rel));
+        replaceLink = live.isFile() && live.ino === keep.ino && live.dev === keep.dev;
+      } catch {}
+    }
+    let target = abs;
+    if (replaceLink) {
+      const stage = path.join(path.dirname(abs), `.${path.basename(abs).slice(0, 180)}.restore-${process.pid}`);
+      moveFile(from, stage);
+      try {
+        fs.renameSync(stage, abs);
+      } catch (e) {
+        try { moveFile(stage, from); } catch {}
+        throw new TrashError(`The original could not be put back (${e.code || e.message}); the trash still holds it`);
+      }
+    } else {
+      // A newer file in its place is never overwritten: the copy comes back
+      // beside it as "name (restored).ext", "name (restored 2).ext", ...
+      for (let n = 1; fs.existsSync(target); n++) {
+        if (n > 50) throw new TrashError('Too many files with that name are back in its place');
+        const ext = path.extname(abs);
+        target = path.join(path.dirname(abs), `${path.basename(abs, ext)} (restored${n > 1 ? ` ${n}` : ''})${ext}`);
+      }
+      moveFile(from, target);
+    }
+    const restoredRel = path.relative(root, target);
     this.store.trashRestored(t.id, this.now());
     try { this.store.fileSeen(t.root, restoredRel, fs.statSync(target), this.now()); } catch {}
     return { ...t, restoredRel, renamed: target !== abs };

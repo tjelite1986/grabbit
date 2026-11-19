@@ -200,7 +200,11 @@ test('an app copy goes only through its adapter, which keeps both posts; Grabbit
   assert.equal(m['one.mp4'].recommended, true);
   assert.equal(m['two.mp4'].action, 'link');
   assert.equal(m['two.mp4'].linkTo, m['one.mp4'].id);
-  const r = await svc.act(g.key, 'trash_extras');
+  // "Move extra copies to the trash" never links in an app as a side effect.
+  const none = await svc.act(g.key, 'trash_extras');
+  assert.deepEqual([none.done, none.refused], [[], []]);
+  assert.deepEqual(ad.calls, []);
+  const r = await svc.act(exactGroup(svc, body).key, 'merge');
   assert.equal(r.done.length, 1);
   assert.match(r.done[0].trash, /^a\d+$/);
   assert.deepEqual(ad.calls, [['link', 'one.mp4', 'two.mp4', sha(body)]]);
@@ -244,7 +248,7 @@ test('an adapter that is not ready or refuses leaves the app copy and records no
   svc.invalidate();
   m = byName(exactGroup(svc, body));
   assert.equal(m['two.mp4'].action, 'link');
-  r = await svc.act(exactGroup(svc, body).key, 'trash_extras');
+  r = await svc.act(exactGroup(svc, body).key, 'merge');
   assert.deepEqual(r.done, []);
   assert.equal(r.refused[0].error, 'TikShortis refused');
   assert.equal(r.refused[0].fix, 'Check the app.');
@@ -487,6 +491,28 @@ test('merge stores two item-linked copies once, keeps both names working, and ca
   assert.equal(ino(path.join(own, 'b.mp4')), origB);
   assert.notEqual(ino(path.join(own, 'a.mp4')), origB);
   assert.equal(fs.readFileSync(path.join(own, 'a.mp4'), 'utf8'), body);
+});
+
+test('restoring a merge checks the folder before it changes anything: a symlinked folder keeps its file', async (t) => {
+  const { own, svc, scan, s } = setup(t);
+  const body = 'merged under a folder';
+  s.upsert({ key: 'id:x:11', filename: 'a.mp4', creator: 'ann' });
+  s.upsert({ key: 'id:x:12', filename: 'b.mp4', creator: 'bob' });
+  write(path.join(own, 'a.mp4'), body, 1000);
+  write(path.join(own, 'sub', 'b.mp4'), body, 2000);
+  await scan();
+  const g = exactGroup(svc, body);
+  const r = await svc.act(g.key, 'merge', { by: 'owner' });
+  assert.equal(r.done.length, 1);
+  const entry = svc.trashList().items[0];
+  // The folder is swapped for a symlink to a folder holding the same link.
+  fs.renameSync(path.join(own, 'sub'), path.join(own, 'sub-real'));
+  fs.symlinkSync(path.join(own, 'sub-real'), path.join(own, 'sub'));
+  const rr = await svc.trashRestore([entry.id]);
+  assert.equal(rr.done.length, 0);
+  assert.match(rr.refused[0].error, /symlink/);
+  assert.equal(ino(path.join(own, 'sub-real', 'b.mp4')), ino(path.join(own, 'a.mp4')), 'the link behind the symlink is untouched');
+  assert.equal(svc.trashList().total, 1, 'the original still waits in the trash');
 });
 
 test('merge refuses a kept copy outside Grabbit\'s folders', async (t) => {
