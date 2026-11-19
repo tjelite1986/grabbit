@@ -15,5 +15,8 @@
     "express": "^4.19.2",
     "html-to-image": "^1.11.13",
     "web-push": "^3.6.7"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "1.22.0"
   }
 }

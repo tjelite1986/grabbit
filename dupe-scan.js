@@ -102,6 +102,45 @@ class DupeScanner {
     this.phase = null;
     this.lastError = null;
     this.readBytes = 0;
+    // Throughput samples for the current speed and the time left.
+    this.samples = [];
+    // Called with ('start' | 'end', info) around each full pass (scan history).
+    this.onPass = opts.onPass || null;
+    this.passStartedAt = null;
+    this.passFiles = 0;
+    this.passBytes = 0;
+  }
+
+  // The read cap can change while the scan runs (Settings).
+  setRate(mbPerSec) {
+    this.mbPerSec = Math.max(1, Math.min(500, Number(mbPerSec) || 20));
+    return this.mbPerSec;
+  }
+
+  // Stop: like pause, but the next start begins a new pass from the top.
+  stop() {
+    this.store.setSetting(STATE_KEY, 'stopped');
+    return this.status();
+  }
+
+  // Rescan now: forget when the last pass ended, so the loop walks every
+  // folder again at once. Unchanged files are still not read again.
+  rescan() {
+    this.store.setSetting(LAST_PASS_KEY, 0);
+    return this.start();
+  }
+
+  sample() {
+    const t = this.now();
+    this.samples.push({ t, b: this.readBytes });
+    while (this.samples.length > 2 && t - this.samples[0].t > 30000) this.samples.shift();
+  }
+
+  speed() {
+    if (this.samples.length < 2) return 0;
+    const a = this.samples[0];
+    const b = this.samples[this.samples.length - 1];
+    return b.t > a.t ? ((b.b - a.b) * 1000) / (b.t - a.t) : 0;
   }
 
   get state() {
@@ -162,6 +201,10 @@ class DupeScanner {
   // when paused part-way.
   async pass() {
     this.roots = this.rootsFn();
+    this.passStartedAt = this.now();
+    this.passFiles = 0;
+    this.passBytes = 0;
+    if (this.onPass) { try { this.onPass('start', {}); } catch {} }
     for (const r of this.roots) {
       if (!this.running()) return false;
       await this.walkRoot(r);
@@ -179,6 +222,7 @@ class DupeScanner {
     }
     this.phase = null;
     this.current = null;
+    if (this.onPass) { try { this.onPass('end', { files: this.passFiles, bytes: this.passBytes }); } catch {} }
     return true;
   }
 
@@ -269,6 +313,8 @@ class DupeScanner {
         this.store.fileSeen(row.root, row.rel, after, this.now());
         return null;
       }
+      this.passFiles++;
+      this.passBytes += row.bytes;
       const link = this.store.fileLink(path.basename(row.rel));
       return this.store.fileHashed(row.id, { sha256: sha, link: link.link, itemId: link.itemId }, this.now());
     } catch (e) {
@@ -292,6 +338,7 @@ class DupeScanner {
       hash.update(buf.subarray(0, bytesRead));
       pos += bytesRead;
       this.readBytes += bytesRead;
+      this.sample();
       const ahead = pos / bytesPerMs - (this.now() - t0);
       if (ahead > 5) await sleep(ahead);
     }
@@ -301,9 +348,14 @@ class DupeScanner {
   status() {
     const counts = this.store.scanCounts();
     const sum = (k) => counts.reduce((a, c) => a + (Number(c[k]) || 0), 0);
+    const speed = this.state === 'running' && this.phase === 'hashing' ? this.speed() : 0;
+    const left = sum('bytes') - sum('hashed_bytes');
     return {
       state: this.state,
       active: Boolean(this.loop),
+      speedBps: Math.round(speed),
+      etaSeconds: speed > 0 ? Math.round(left / speed) : null,
+      passStartedAt: this.passStartedAt,
       phase: this.phase,
       current: this.current,
       lastPassAt: Number(this.store.setting(LAST_PASS_KEY)) || null,

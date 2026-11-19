@@ -207,7 +207,9 @@
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
     { id: 'review', label: 'Review', icon: 'review', badge: () => (state.review ? state.review.creators.unclassified : 0), view: viewReview },
     { id: 'inbox', label: 'Inbox', icon: 'inbox', badge: () => (state.inbox && state.inbox.counts ? state.inbox.counts.held || 0 : 0), view: viewInbox },
-    { id: 'duplicates', label: 'Duplicates', icon: 'dupes', ownData: true, view: viewDuplicates },
+    // Grabbit 3.0.4: the Smart Duplicate Manager (public/hub/dupes/); the
+    // 3.0.3 page stays as the fallback if the module did not load.
+    { id: 'duplicates', label: 'Duplicates', icon: 'dupes', ownData: true, view: viewDuplicatesPage, subnav: () => (dupesNative ? dupesNative.subnav(route()) : null) },
     { id: 'conversion', label: 'Conversion', icon: 'convert', view: viewConversion },
     { id: 'metadata', label: 'Metadata & tags', icon: 'tags', ownData: true, view: viewMetadata },
     { id: 'distribution', label: 'Distribution', icon: 'share', view: viewDistribution },
@@ -277,6 +279,7 @@
     // under it is replaced (also when it is redrawn in place).
     if (tikNative) tikNative.leave();
     if (socialNative) socialNative.leave();
+    if (dupesNative) dupesNative.leave();
     renderedKey = pageKey();
     const r = route();
     const view = $('#view');
@@ -1083,6 +1086,21 @@
   function viewSocialPage(params, r) {
     if (socialOn()) return socialNative.view(r);
     return [h('h1', null, 'Social & Photos'), h('p', { class: 'empty' }, state.config ? 'Social & Photos is off on this server (EGRAM_MODE is not native).' : 'Loading ...')];
+  }
+
+  // --- Smart Duplicate Manager (Grabbit 3.0.4) --------------------------------
+  const dupesDef = (window.GrabbitModules || []).find((m) => m && m.id === 'dupes');
+  const dupesNative = (() => {
+    if (!dupesDef) return null;
+    try {
+      return dupesDef.create({ h, api, toast, num, ago, bytes, route });
+    } catch (e) {
+      console.error('Duplicate Manager module failed to start', e);
+      return null;
+    }
+  })();
+  function viewDuplicatesPage(params, r) {
+    return dupesNative ? dupesNative.view(r) : viewDuplicates();
   }
 
   function viewTikshortis(params) {

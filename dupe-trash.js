@@ -142,13 +142,24 @@ function moveFile(from, to) {
 }
 
 class DupeTrash {
-  constructor({ store, trashDir, rootOf, now = Date.now, holdMs = HOLD_MS }) {
+  // holdMs: a number, or a function returning one (the retention setting);
+  // 0 means manual cleanup only, nothing is purged automatically.
+  // onRemoved(trashId, row, info): lets the caller record 3.0.4 metadata.
+  constructor({ store, trashDir, rootOf, now = Date.now, holdMs = HOLD_MS, onRemoved = null, mergeOf = null }) {
     this.store = store;
     this.dir = trashDir;
     this.rootOf = rootOf;
     this.now = now;
-    this.holdMs = holdMs;
+    this.holdFn = typeof holdMs === 'function' ? holdMs : () => holdMs;
+    this.onRemoved = onRemoved;
+    // mergeOf(trashId) -> { keep_root, keep_rel } for a merged copy, else null.
+    this.mergeOf = mergeOf;
     this.busy = false;
+  }
+
+  get holdMs() {
+    const v = Number(this.holdFn());
+    return Number.isFinite(v) && v >= 0 ? v : HOLD_MS;
   }
 
   plan(members) {
@@ -156,7 +167,7 @@ class DupeTrash {
   }
 
   // Removes one copy. Returns the trash entry id.
-  async remove(fileId, { by = null, plannedKeep = null } = {}) {
+  async remove(fileId, { by = null, plannedKeep = null, reason = null } = {}) {
     const row = this.store.dupeFile(fileId);
     if (!row || !row.sha256) throw new TrashError('No such file in a duplicate group');
     const members = this.store.dupeMembers(row.sha256);
@@ -180,12 +191,79 @@ class DupeTrash {
     moveFile(doomed.abs, to);
     const id = this.store.trashAdd({ file_id: row.id, root: row.root, rel: row.rel, sha256: row.sha256, bytes: row.bytes, trash_name: trashName, by }, this.now());
     this.store.fileGoneNow(row.id, this.now());
+    if (this.onRemoved) {
+      try { this.onRemoved(id, row, { keep: keepRow, reason }); } catch {}
+    }
+    return id;
+  }
+
+  // Removes one copy of a picture or video whose bytes differ from the copy
+  // that stays (a near duplicate the owner chose). Same safety as remove():
+  // only Grabbit's own folders, never a copy linked to a library item, and
+  // both files are read again and must still have the bytes the scan saw.
+  async removeSimilar(fileId, keepId, { by = null, reason = null } = {}) {
+    const row = this.store.dupeFile(fileId);
+    const keepRow = this.store.dupeFile(keepId);
+    if (!row || !row.sha256) throw new TrashError('That copy is no longer there; scan again');
+    if (!keepRow || !keepRow.sha256) throw new TrashError('The copy that stays is gone; scan again');
+    if (row.id === keepRow.id) throw new TrashError('Choose another copy to keep');
+    const r = this.rootOf(row.root);
+    if (!r || r.owner !== 'grabbit') throw new TrashError(r && r.app ? `${r.app} owns this file` : 'Unknown folder');
+    if (row.link === 'filename' && row.item_id != null) throw new TrashError('Kept: a library item uses this file');
+    const doomed = realFileOf(row);
+    const kept = realFileOf(keepRow);
+    if (doomed.stat.size !== row.bytes || kept.stat.size !== keepRow.bytes) throw new TrashError('A file changed since the scan; scan again first');
+    const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
+    if (a !== row.sha256 || b !== keepRow.sha256) throw new TrashError('The bytes no longer match; scan again first');
+    return this.moveToTrash(row, doomed, { by, keepRow, reason });
+  }
+
+  moveToTrash(row, doomed, { by, keepRow, reason }) {
+    fs.mkdirSync(this.dir, { recursive: true });
+    const trashName = `${this.now()}-${row.id}-${path.basename(row.rel).slice(0, 150)}`;
+    const to = path.join(this.dir, trashName);
+    moveFile(doomed.abs, to);
+    const id = this.store.trashAdd({ file_id: row.id, root: row.root, rel: row.rel, sha256: row.sha256, bytes: row.bytes, trash_name: trashName, by }, this.now());
+    this.store.fileGoneNow(row.id, this.now());
+    if (this.onRemoved) {
+      try { this.onRemoved(id, row, { keep: keepRow, reason }); } catch {}
+    }
+    return id;
+  }
+
+  // Merge references inside Grabbit's own folders: two identical files become
+  // one stored file with two names (a hard link), so every library entry that
+  // uses either name keeps working. The extra copy's original goes to the
+  // trash (restorable); the space comes back when the trash is emptied.
+  async mergeLocal(dropId, keepId, { by = null } = {}) {
+    const row = this.store.dupeFile(dropId);
+    const keepRow = this.store.dupeFile(keepId);
+    if (!row || !keepRow || !row.sha256 || row.sha256 !== keepRow.sha256) throw new TrashError('These copies are not identical any more; scan again');
+    for (const x of [row, keepRow]) {
+      const r = this.rootOf(x.root);
+      if (!r || r.owner !== 'grabbit') throw new TrashError(r && r.app ? `${r.app} owns ${path.basename(x.rel)}` : 'Unknown folder');
+    }
+    const doomed = realFileOf(row);
+    const kept = realFileOf(keepRow);
+    if (doomed.stat.dev !== kept.stat.dev) throw new TrashError('The copies are on different disks, so they cannot share one file');
+    if (doomed.stat.ino === kept.stat.ino) throw new TrashError('Already stored once');
+    const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
+    if (a !== row.sha256 || b !== row.sha256) throw new TrashError('The bytes no longer match; scan again first');
+    const id = this.moveToTrash(row, doomed, { by, keepRow, reason: 'merged' });
+    try {
+      fs.linkSync(kept.abs, doomed.abs);
+    } catch (e) {
+      // Put the original back; the merge did not happen.
+      try { this.restore(id); } catch {}
+      throw new TrashError(`The files could not share one copy (${e.code || e.message}); nothing changed`);
+    }
+    try { this.store.fileSeen(row.root, row.rel, fs.statSync(doomed.abs), this.now()); } catch {}
     return id;
   }
 
   // Removes the suggested extra copies of the given groups (all open groups
   // when none are named). One file at a time; a failure skips that copy only.
-  async removeAll({ by = null, dryRun = false, sha256s = null } = {}) {
+  async removeAll({ by = null, dryRun = false, sha256s = null, reason = null } = {}) {
     const groups = sha256s
       ? sha256s.map((s) => ({ sha256: s, members: this.store.dupeMembers(s) })).filter((g) => g.members.length > 1)
       : this.store.openDupeGroups();
@@ -203,7 +281,7 @@ class DupeTrash {
           continue;
         }
         try {
-          await this.remove(m.id, { by, plannedKeep: p.keepId });
+          await this.remove(m.id, { by, plannedKeep: p.keepId, reason });
           out.files++;
           out.bytes += row.bytes;
         } catch (e) {
@@ -215,7 +293,78 @@ class DupeTrash {
   }
 
   held() {
-    return this.store.trashHeld().map((t) => ({ ...t, purgeAt: t.at + this.holdMs }));
+    const hold = this.holdMs;
+    return this.store.trashHeld().map((t) => ({ ...t, purgeAt: hold ? t.at + hold : null }));
+  }
+
+  // The trashed file of an entry, checked: the stored name must be a plain
+  // file name, and its real path must sit directly in the trash folder. A
+  // database row can never point this at another path.
+  trashedFile(t) {
+    const name = String(t.trash_name || '');
+    if (!name || name !== path.basename(name) || name === '.' || name === '..' || name.includes('\0')) {
+      throw new TrashError('Not a trash entry');
+    }
+    const abs = path.join(this.dir, name);
+    let st;
+    try {
+      st = fs.lstatSync(abs);
+    } catch (e) {
+      if (e.code === 'ENOENT') return null;
+      throw e;
+    }
+    if (!st.isFile()) throw new TrashError('Not a regular file in the trash');
+    const realDir = fs.realpathSync(this.dir);
+    if (path.dirname(fs.realpathSync(abs)) !== realDir) throw new TrashError('Outside the trash folder');
+    return { abs, stat: st };
+  }
+
+  // Deletes one held entry for good. Only a file inside the trash folder,
+  // recorded in the trash table, not restored and not purged, can go. A file
+  // whose bytes are back in service under its original path is refused: the
+  // restore did not get recorded, and deleting it could take a live copy.
+  deletePermanently(trashId) {
+    const t = this.store.trashGet(trashId);
+    if (!t || t.restored_at || t.purged_at) throw new TrashError('Not in the trash');
+    return this.deleteRow(t);
+  }
+
+  deleteRow(t) {
+    const f = this.trashedFile(t);
+    if (f) {
+      if (t.root && t.rel) {
+        try {
+          const live = fs.statSync(path.resolve(t.root, t.rel));
+          if (live.ino === f.stat.ino && live.dev === f.stat.dev) throw new TrashError('This file is in use at its original place');
+        } catch (e) {
+          if (e instanceof TrashError) throw e;
+        }
+      }
+      fs.unlinkSync(f.abs);
+    }
+    this.store.trashPurged(t.id, this.now());
+    return { id: t.id, bytes: f ? f.stat.size : 0 };
+  }
+
+  // Empties the whole trash. `expect` ({ files, bytes }) is what the owner
+  // confirmed; if the trash changed since, nothing is deleted.
+  emptyAll(expect) {
+    const held = this.store.trashHeld();
+    const bytes = held.reduce((n, t) => n + t.bytes, 0);
+    if (!expect || Number(expect.files) !== held.length || Number(expect.bytes) !== bytes) {
+      throw new TrashError('The trash changed since you opened it; check it again');
+    }
+    const out = { files: 0, bytes: 0, failed: [] };
+    for (const t of held) {
+      try {
+        const r = this.deletePermanently(t.id);
+        out.files++;
+        out.bytes += r.bytes;
+      } catch (e) {
+        out.failed.push({ id: t.id, error: e.message });
+      }
+    }
+    return out;
   }
 
   restore(trashId) {
@@ -226,33 +375,54 @@ class DupeTrash {
     const root = path.resolve(t.root);
     const abs = path.resolve(root, t.rel);
     if (!abs.startsWith(root + path.sep)) throw new TrashError('Path outside its folder');
-    if (fs.existsSync(abs)) throw new TrashError('A file with that name is back in its place');
-    const from = path.join(this.dir, t.trash_name);
-    if (!fs.existsSync(from)) throw new TrashError('The trashed file is missing');
+    const f = this.trashedFile(t);
+    if (!f) throw new TrashError('The trashed file is missing');
+    const from = f.abs;
+    // A merged copy: its name now points at the kept file (a hard link). The
+    // link goes, and the original comes back under its own name.
+    const meta = this.mergeOf ? this.mergeOf(t.id) : null;
+    if (meta && meta.keep_root && meta.keep_rel) {
+      try {
+        const live = fs.lstatSync(abs);
+        const keep = fs.statSync(path.resolve(meta.keep_root, meta.keep_rel));
+        if (live.isFile() && live.ino === keep.ino && live.dev === keep.dev) fs.unlinkSync(abs);
+      } catch {}
+    }
+    // A newer file in its place is never overwritten: the copy comes back
+    // beside it as "name (restored).ext", "name (restored 2).ext", ...
+    let target = abs;
+    for (let n = 1; fs.existsSync(target); n++) {
+      if (n > 50) throw new TrashError('Too many files with that name are back in its place');
+      const ext = path.extname(abs);
+      target = path.join(path.dirname(abs), `${path.basename(abs, ext)} (restored${n > 1 ? ` ${n}` : ''})${ext}`);
+    }
+    const restoredRel = path.relative(root, target);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     const realRoot = fs.realpathSync(root);
     if (fs.realpathSync(path.dirname(abs)) !== path.join(realRoot, path.relative(root, path.dirname(abs)))) {
       throw new TrashError('Path runs through a symlink');
     }
-    moveFile(from, abs);
+    moveFile(from, target);
     this.store.trashRestored(t.id, this.now());
-    try { this.store.fileSeen(t.root, t.rel, fs.statSync(abs), this.now()); } catch {}
-    return t;
+    try { this.store.fileSeen(t.root, restoredRel, fs.statSync(target), this.now()); } catch {}
+    return { ...t, restoredRel, renamed: target !== abs };
   }
 
   // Deletes trashed files past the hold time. Returns how many.
   purge() {
+    const hold = this.holdMs;
+    if (!hold) return 0; // manual cleanup only
     let n = 0;
-    for (const t of this.store.trashDue(this.now() - this.holdMs)) {
+    for (const t of this.store.trashDue(this.now() - hold)) {
       try {
-        fs.unlinkSync(path.join(this.dir, t.trash_name));
-      } catch (e) {
-        if (e.code !== 'ENOENT') continue;
+        this.deleteRow(t);
+        n++;
+      } catch {
+        // Left for the owner to look at.
       }
-      n += this.store.trashPurged(t.id, this.now());
     }
     return n;
   }
 }
 
-module.exports = { DupeTrash, TrashError, planGroup, checkRemoval, HOLD_MS };
+module.exports = { DupeTrash, TrashError, planGroup, checkRemoval, HOLD_MS, realFileOf, sha256Of };

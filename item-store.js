@@ -715,6 +715,8 @@ function wrap(db, migrationBackup) {
       fs.renameSync(part, file);
     },
     close: () => db.close(),
+    // The connection itself, for dupe-store.js (it ATTACHes dupes.db here).
+    raw: db,
     // Metadata, tags and duplicate records (schema v4): item-meta.js.
     // Only on a v4 database (the migration tests open older schemas).
     ...(db.pragma('user_version', { simple: true }) >= 4 ? itemMeta.attach(db) : {}),

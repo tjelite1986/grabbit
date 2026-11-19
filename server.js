@@ -40,6 +40,12 @@ const sourceMeta = require('./source-meta');
 const itemMeta = require('./item-meta');
 const dupeScan = require('./dupe-scan');
 const { DupeTrash, TrashError } = require('./dupe-trash');
+const dupeStore = require('./dupe-store');
+const { Analyzer: DupeAnalyzer, readCfg: readDupeCfg } = require('./dupe-analyzer');
+const { ModelManager: DupeModels } = require('./dupe-ai');
+const { AppAdapter, readToken: readDedupeToken } = require('./dupe-adapters');
+const { DupeService } = require('./dupe-service');
+const dupeRoutes = require('./dupe-routes');
 
 const PORT = process.env.PORT || 3000;
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
@@ -683,6 +689,13 @@ function snapshotState() {
         ITEM_STORE.snapshotTo(path.join(dir, 'items.db'));
       } catch (e) {
         console.warn('items.db snapshot failed:', e.message);
+      }
+    }
+    if (DUPE_DX) {
+      try {
+        DUPE_DX.snapshotTo(path.join(dir, 'dupes.db'));
+      } catch (e) {
+        console.warn('dupes.db snapshot failed:', e.message);
       }
     }
     // Prune whole days past the retention window.
@@ -1638,6 +1651,9 @@ const REVALIDATE = new Set([
   // Grabbit 3.0 native TikShortis pages (public/hub/tik/).
   'tik.js',
   'tik.css',
+  // Grabbit 3.0.4 Smart Duplicate Manager (public/hub/dupes/).
+  'dupes.js',
+  'dupes.css',
 ]);
 
 // The hub is the start page. Grabbit 1's interface lives on at /classic/; it
@@ -3471,9 +3487,39 @@ const DUPE_ROOT_CANDIDATES = [
 // importFor is null when that library is not mounted here.
 const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
 const dupeRootOf = (p) => DUPE_ROOT_CANDIDATES.find((r) => r.path && r.path === p) || null;
-// Removed duplicate copies wait here (outside every scan root) for 30 days.
+// Smart Duplicate Manager 2.0 state: dupes.db, attached to items.db's
+// connection (dupe-store.js). items.db itself keeps schema 6, so 3.0.3 can
+// still open it after a rollback.
+let DUPE_DX = null;
+if (ITEM_STORE && ITEM_STORE.raw && ITEM_STORE.trashAdd) {
+  try {
+    DUPE_DX = dupeStore.attach(ITEM_STORE.raw, path.join(DATA_DIR, 'dupes.db'));
+  } catch (e) {
+    console.error(`dupes: dupes.db could not be opened (${e.message}); the Duplicate Manager runs without it`);
+  }
+}
+// Removed duplicate copies wait here (outside every scan root). How long is
+// the owner's retention setting (30 days by default; 0 = manual cleanup).
 const DUPE_TRASH_DIR = path.join(DATA_DIR, 'dupe-trash');
-const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({ store: ITEM_STORE, trashDir: DUPE_TRASH_DIR, rootOf: dupeRootOf }) : null;
+const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({
+  store: ITEM_STORE,
+  trashDir: DUPE_TRASH_DIR,
+  rootOf: dupeRootOf,
+  holdMs: () => (ITEM_STORE ? readDupeCfg(ITEM_STORE).trashRetentionDays * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000),
+  onRemoved: DUPE_DX ? (id, row, info) => {
+    const r = dupeRootOf(row.root) || {};
+    const kind = require('./dupe-classify').kindOf(row.rel);
+    const k = info.keep || {};
+    DUPE_DX.putTrashMeta(id, {
+      reason: info.reason || 'Identical copy', app: r.app || 'Grabbit', kind,
+      audience: require('./dupe-classify').audienceOf(r, null), keep_root: k.root || null, keep_rel: k.rel || null,
+    });
+  } : null,
+  mergeOf: DUPE_DX ? (id) => {
+    const m = DUPE_DX.trashMeta(id);
+    return m && m.reason === 'merged' ? m : null;
+  } : null,
+}) : null;
 if (DUPE_TRASH) {
   const purge = () => {
     try {
@@ -3482,22 +3528,69 @@ if (DUPE_TRASH) {
     } catch (e) {
       console.error(`dupes: trash purge failed (${e.message})`);
     }
+    if (DUPE_SERVICE) {
+      DUPE_SERVICE.purgeAppTrash()
+        .then((n) => { if (n) console.log(`dupes: ${n} app-held copies purged past the hold time`); })
+        .catch((e) => console.error(`dupes: app trash purge failed (${e.message})`));
+    }
   };
   setTimeout(purge, 60 * 1000).unref();
   setInterval(purge, 60 * 60 * 1000).unref();
 }
 let DUPE_SCANNER = null;
 if (ITEM_STORE && ITEM_STORE.fileSeen && String(process.env.DUPES_SCAN || '').toLowerCase() !== 'off') {
+  let passHistory = null;
   DUPE_SCANNER = new dupeScan.DupeScanner({
     store: ITEM_STORE,
     roots: dupeRoots,
-    mbPerSec: Number(process.env.DUPES_SCAN_MBPS) || 20,
+    mbPerSec: (DUPE_DX && readDupeCfg(ITEM_STORE).scanMbps) || Number(process.env.DUPES_SCAN_MBPS) || 20,
+    onPass: DUPE_DX ? (phase, info) => {
+      if (phase === 'start') passHistory = DUPE_DX.historyStart('exact');
+      else if (passHistory) {
+        DUPE_DX.historyEnd(passHistory, { files: info.files, bytes: info.bytes, outcome: 'complete' });
+        passHistory = null;
+        if (DUPE_SERVICE) DUPE_SERVICE.invalidate();
+      }
+    } : null,
   });
   try {
     DUPE_SCANNER.boot();
   } catch (e) {
     console.error(`dupes: the scan could not resume (${e.message})`);
   }
+}
+
+// The engines, the app adapters and the service behind the Smart Duplicate
+// Manager (/api/hub/dupes/v2). DUPES_PHOTO / DUPES_AI / DUPES_VIDEO = off
+// switch an analysis engine off; the exact scan does not depend on them.
+const DUPE_MODELS = new DupeModels({ dir: path.join(DATA_DIR, 'models') });
+let DUPE_ANALYZER = null;
+let DUPE_SERVICE = null;
+if (DUPE_DX) {
+  DUPE_ANALYZER = new DupeAnalyzer({ store: ITEM_STORE, dx: DUPE_DX, rootOf: dupeRootOf, models: DUPE_MODELS });
+  const dedupeToken = readDedupeToken(process.env.GRABBIT_DEDUPE_TOKEN_FILE);
+  const adapters = new Map();
+  const tikUrl = (() => { try { return process.env.TIKSHORTIS_API_URL ? new URL(process.env.TIKSHORTIS_API_URL).origin : null; } catch { return null; } })();
+  const egramUrl = (() => { try { return process.env.EGRAM_API_URL ? new URL(process.env.EGRAM_API_URL).origin : null; } catch { return null; } })();
+  if (TIKSHORTIS_ROOT) {
+    adapters.set(TIKSHORTIS_ROOT, new AppAdapter({ id: 'tikshortis', app: 'TikShortis', root: TIKSHORTIS_ROOT, url: tikUrl, token: dedupeToken, caps: ['lookup', 'link'] }));
+  }
+  if (EGRAM_LIBRARY_DIR) {
+    adapters.set(EGRAM_LIBRARY_DIR, new AppAdapter({ id: 'egram', app: 'egram', root: EGRAM_LIBRARY_DIR, url: egramUrl, token: dedupeToken, caps: ['lookup', 'cache'] }));
+  }
+  DUPE_SERVICE = new DupeService({
+    store: ITEM_STORE, dx: DUPE_DX, roots: DUPE_ROOT_CANDIDATES, rootOf: dupeRootOf, trash: DUPE_TRASH,
+    analyzer: DUPE_ANALYZER, scanner: DUPE_SCANNER, adapters, models: DUPE_MODELS,
+  });
+  DUPE_SERVICE.onJobDuplicate = (job, hit) => {
+    if (jobsMap.get(job.id) === job) setJob(job, { duplicate: hit });
+  };
+  try {
+    DUPE_ANALYZER.boot();
+  } catch (e) {
+    console.error(`dupes: the analysis could not resume (${e.message})`);
+  }
+  console.log(`dupes: Smart Duplicate Manager on (adapters: ${[...adapters.values()].map((a) => `${a.app}${a.ready().ok ? '' : ' (not connected)'}`).join(', ') || 'none'})`);
 }
 
 // What the source said about an item (caption, tags, raw record), kept in
@@ -4434,6 +4527,17 @@ function metaError(res, e, what) {
   return res.status(500).json({ ok: false, error: `${what} failed. See the server log.` });
 }
 const SHA256_RE = /^[0-9a-f]{64}$/;
+
+// Smart Duplicate Manager 2.0 (dupe-routes.js).
+if (DUPE_SERVICE) {
+  app.use('/api/hub/dupes/v2', dupeRoutes.createRouter({
+    service: DUPE_SERVICE, scanner: DUPE_SCANNER, analyzer: DUPE_ANALYZER, models: DUPE_MODELS, trash: DUPE_TRASH,
+    actorOf, kindOfName: (n) => mediaViewer.kindOfName(n),
+    thumbDir: path.join(DATA_DIR, 'dupe-thumbs'), media: require('./dupe-media'),
+  }));
+} else {
+  app.use('/api/hub/dupes/v2', (req, res) => res.status(409).json({ ok: false, error: 'The Duplicate Manager needs the item store; see the server log.' }));
+}
 
 // GET /api/hub/dupes?state=open|acked|all&limit=&offset= -> scan status and
 // exact duplicate groups (each member with its folder, app and item).
@@ -7432,7 +7536,7 @@ const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file 
 function publicJob(j) {
   // `watch` is watcher bookkeeping (playlist id + registry key), like params:
   // internal, and nothing the UI renders.
-  const { finalPath, deliverTemp, params, watch, fromSchedule, ...pub } = j;
+  const { finalPath, deliverTemp, params, watch, fromSchedule, savedPaths, ...pub } = j;
   return pub;
 }
 function snapshotJobs() {
@@ -7481,6 +7585,11 @@ function finishJob(job, patch) {
     noteSourceMeta(job, job.filename, job.dest === 'elite' ? job.channel : null, SOURCE_META.get(job) || null);
   }
   if (job.watch) clearWatchFailure(job.watch.playlistId, job.watch.key);
+  // Duplicate Prevention (3.0.4): checked after the save, off the job's path.
+  // A finding lands on the job (job.duplicate) and in the Duplicate Manager.
+  if (job.saved && Array.isArray(job.savedPaths) && job.savedPaths.length && DUPE_SERVICE) {
+    DUPE_SERVICE.checkSaved(job).catch((e) => console.warn(`dupes: prevention check failed for job ${job.id} (${e.message})`));
+  }
   if (job.deliverTemp && job.finalPath) {
     const p = job.finalPath;
     const t = setTimeout(() => fs.rm(p, { force: true }, () => {}), DELIVER_TTL_MS);
@@ -7759,6 +7868,7 @@ async function produceEliteVideo(job, meta, params, onProgress) {
     finishJob(job, {
       saved: !skipImport, channel: params.channel, dir: params.channel, filename: outName, mime: 'video/mp4',
       deliverable: !!params.device, finalPath: params.device ? finalPath : null, deliverTemp: skipImport,
+      savedPaths: skipImport ? null : [finalPath],
       message: skipImport
         ? `Already in ${channelLibrary(params.channel)} — device copy only.`
         : 'Saved to ' + params.channel + ' — importing within ~5 min.',
@@ -7827,6 +7937,7 @@ async function produceServerVideo(job, meta, params, onProgress) {
     finishJob(job, {
       saved: true, dest: 'server', dir: shelf, filename: outName, mime,
       deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
+      savedPaths: [libPath],
       message: 'Saved to library/' + shelf + '.',
     });
   } finally {
@@ -7862,6 +7973,7 @@ async function produceImage(job, meta, params) {
     filename: fileName,
     mime: imageMime(path.extname(fileName).slice(1)),
     deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
+    savedPaths: [libPath],
     message: toPosts ? 'Saved to the posts import folder.' : 'Saved to photos.',
   });
 }
@@ -7920,6 +8032,7 @@ async function produceAudio(job, meta, params, onProgress) {
       finishJob(job, {
         saved: true, dest: 'audiobooks', dir: book.book, filename: finalName, mime,
         deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
+        savedPaths: [libPath],
         message: `Saved to audiobooks/${book.author}/${book.book}.`,
       });
     } else if (params.dest === 'server' || params.dest === 'navidrome') {
@@ -8013,6 +8126,7 @@ async function produceAudio(job, meta, params, onProgress) {
       finishJob(job, {
         saved: true, dest: params.dest, dir: nav ? (kids ? 'kids' : 'music') : 'mp3', filename: finalName, mime,
         deliverable: !!params.device, finalPath: params.device ? libPath : null, deliverTemp: false,
+        savedPaths: [libPath],
         message: nav ? (kids ? 'Saved to Navidrome (kids).' : 'Saved to Navidrome.') : 'Saved to library/mp3.',
       });
     } else {
@@ -8134,6 +8248,7 @@ async function produceCut(job, meta, params, onProgress) {
       deliverable: !!params.device && !!single,
       finalPath: params.device && single ? single : null,
       deliverTemp: false,
+      savedPaths: savedNames.map((n) => path.join(dir, n)),
       message: toBook
         ? `Saved ${savedNames.length} part(s) to audiobooks/${book.author}/${book.book}.`
         : `Saved ${savedNames.length} cut file(s) to library/${serverShelf(params.folder, dir)}.`,

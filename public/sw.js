@@ -12,7 +12,8 @@
 // v13: Grabbit 3.0 phase 2, the Social & Photos pages (public/hub/social/).
 // v14: phase 2 final: comments, share, upload, notifications, settings, the full-screen viewer.
 // v15: Grabbit 3.0.3 (wide feed, clickable @mentions, Mentioned in on profiles).
-const CACHE = 'grabbit-v15';
+// v16: Grabbit 3.0.4, the Smart Duplicate Manager (public/hub/dupes/).
+const CACHE = 'grabbit-v16';
 const SHELL = [
   '/',
   '/classic/',
@@ -22,6 +23,8 @@ const SHELL = [
   '/hub/tik/tik.css',
   '/hub/social/social.js',
   '/hub/social/social.css',
+  '/hub/dupes/dupes.js',
+  '/hub/dupes/dupes.css',
   '/manifest.webmanifest',
   '/favicon-32.png?v=2',
   '/icon-192.png?v=2',
