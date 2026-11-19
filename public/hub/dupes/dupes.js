@@ -218,12 +218,20 @@
       Promise.resolve().then(render).catch((e) => { if (live(gen)) fill(body, h('p', { class: 'empty' }, e.message)); });
       get('overview').then((o) => {
         if (!live(gen)) return;
-        const n = { identical: o.identical.open, photos: o.photos.open, videos: o.videos.open, cache: o.cache.duplicateGroups, trash: o.trash.files };
+        // Each badge counts what the tab asks you to act on. The cache tab has
+        // none: its own page shows files and groups side by side.
+        const n = {
+          identical: [o.identical.open, 'open group', 'open groups'],
+          photos: [o.photos.open, 'open group', 'open groups'],
+          videos: [o.videos.open, 'open group', 'open groups'],
+          trash: [o.trash.files, 'file', 'files'],
+        };
         for (const a of nav.querySelectorAll('.dm-tab')) {
           const b = a.querySelector('.dm-tab-n');
-          const v = n[a.dataset.tab];
+          const [v, one, many] = n[a.dataset.tab] || [0];
           b.hidden = !v;
           b.textContent = v ? num(v) : '';
+          if (v) b.title = plural(v, one, many);
         }
         counts.textContent = `${num(o.totals.files)} files, ${bytes(o.totals.bytes)} scanned`;
       }).catch(() => {});
@@ -245,6 +253,10 @@
       const t = (s.totals || {});
       const pctDone = t.bytes ? Math.min(100, Math.floor((100 * (t.hashedBytes || 0)) / t.bytes)) : 0;
       const lastScan = s.lastPassAt ? ago(s.lastPassAt) : 'never';
+      // A running scanner in its 'waiting' phase has finished a pass and only
+      // watches for new files, so it must not read as "scan running".
+      const idle = s.state === 'running' && s.phase === 'waiting';
+      const scanWord = idle ? 'up to date' : { running: 'scan in progress', paused: 'scan paused', stopped: 'scan stopped', off: 'scan off' }[s.state] || null;
       const stats = h('div', { class: 'dm-stats' },
         statTile('Total scanned files', num(o.totals.files), null, 'scan'),
         statTile('Scanned storage', bytes(o.totals.bytes), null, 'cache'),
@@ -253,7 +265,7 @@
         statTile('Similar video candidates', num(o.videos.groups), o.videos.partial ? `+ ${num(o.videos.partial)} partial` : null, 'video', '#/duplicates/videos'),
         statTile('Reclaimable space', bytes(o.identical.reclaimable), `of ${bytes(o.identical.duplicateBytes)} in identical copies${o.photos.reclaimable ? `; up to ${bytes(o.photos.reclaimable)} more in similar photos you review` : ''}`, 'restore', '#/duplicates/identical?deletable=1'),
         statTile('Trash size', bytes(o.trash.bytes), plural(o.trash.files, 'file', 'files'), 'trash', '#/duplicates/trash'),
-        statTile('Last scan', lastScan, s.state ? `scan ${s.state}` : null, 'overview'));
+        statTile('Last scan', lastScan, scanWord, 'overview'));
 
       const scanBtns = h('div', { class: 'dm-btns' });
       const scanAct = (action) => async (e) => {
@@ -269,7 +281,7 @@
       scanBtns.append(h('button', { class: 'btn small ghost', type: 'button', onclick: scanAct('rescan') }, 'Scan now'));
       const activity = s.state === 'off' ? 'Switched off on this server'
         : s.state !== 'running' ? (s.state === 'paused' ? 'Paused' : 'Stopped')
-          : s.phase === 'walking' ? 'Listing files' : s.phase === 'hashing' ? 'Reading files' : s.phase === 'waiting' ? 'Up to date; checks again later' : 'Starting';
+          : s.phase === 'walking' ? 'Listing files' : s.phase === 'hashing' ? 'Reading files' : idle ? 'Up to date, watching for new files' : 'Starting';
 
       const scanCard = h('section', { class: 'card dm-card' },
         h('h2', null, ic('scan'), 'Scan status'),
@@ -296,7 +308,7 @@
       const aCard = h('section', { class: 'card dm-card' },
         h('h2', null, ic('ai'), 'Photo and video analysis'),
         h('dl', { class: 'dm-facts' },
-          h('dt', null, 'State'), h('dd', null, a.state || 'off', a.phase && a.state === 'running' ? h('span', { class: 'muted small' }, ` - ${a.phase}`) : null),
+          h('dt', null, 'State'), h('dd', null, analysisState(a)),
           h('dt', null, 'Photos analysed'), h('dd', null, num((a.photos || {}).analysed || 0), en.photo ? '' : h('span', { class: 'muted small' }, ' (engine off)'), a.msPerImage ? h('span', { class: 'muted small' }, ` - ${a.msPerImage} ms each`) : null),
           h('dt', null, 'AI comparison'), h('dd', null, en.ai ? `${a.model} model${a.modelInstalled ? '' : ' (not installed yet)'}` : 'Off', a.msPerEmbedding ? h('span', { class: 'muted small' }, ` - ${a.msPerEmbedding} ms each`) : null),
           h('dt', null, 'Videos analysed'), h('dd', null, num((a.videos || {}).analysed || 0), en.video ? '' : h('span', { class: 'muted small' }, ' (engine off)'), a.msPerVideo ? h('span', { class: 'muted small' }, ` - ${(a.msPerVideo / 1000).toFixed(1)} s each`) : null)),
@@ -608,6 +620,18 @@
       return card;
     }
 
+    // One phrase for the analysis state, so "running" never sits next to
+    // "waiting" (the analyser is idle until new files arrive).
+    function analysisState(a) {
+      if (a.state !== 'running') return { paused: 'Paused', stopped: 'Stopped' }[a.state] || 'Off';
+      if (a.phase === 'waiting') return 'Up to date, waiting for new files';
+      if (a.phase === 'photos') return 'Analysing photos';
+      if (a.phase === 'videos') return 'Analysing videos';
+      if (a.phase === 'ai') return 'Comparing photos with AI';
+      if (a.phase && a.phase.startsWith('grouping ')) return `Grouping ${a.phase.slice(9)}`;
+      return 'Starting';
+    }
+
     // --- side-by-side comparison --------------------------------------------------------------
     function compare(g) {
       closeOverlay();
@@ -632,8 +656,8 @@
           members.length > 2 ? h('label', { class: 'dm-field dm-cmp-pick' }, h('span', null, 'Compare with'),
             h('select', { onchange: (e) => { pair = [pair[0], members.find((m) => String(m.id) === e.currentTarget.value)]; draw(); } },
               members.filter((m) => m.id !== pair[0].id).map((m) => h('option', { value: String(m.id) }, m.name)))) : null,
-          h('button', { class: 'dm-iconbtn', type: 'button', 'aria-label': 'Fullscreen', onclick: () => { if (document.fullscreenElement) document.exitFullscreen(); else box.requestFullscreen && box.requestFullscreen().catch(() => {}); } }, ic('fullscreen')),
-          h('button', { class: 'dm-iconbtn', type: 'button', 'aria-label': 'Close', onclick: closeOverlay }, ic('close'))),
+          h('button', { class: 'dm-iconbtn', type: 'button', 'aria-label': 'Fullscreen', title: 'Fullscreen', onclick: () => { if (document.fullscreenElement) document.exitFullscreen(); else box.requestFullscreen && box.requestFullscreen().catch(() => {}); } }, ic('fullscreen')),
+          h('button', { class: 'btn small dm-cmp-close', type: 'button', onclick: closeOverlay }, ic('close', 16), 'Close')),
         panes, controls, table);
       overlay = h('div', { class: 'dm-overlay dm-overlay-cmp' }, box);
       host().append(overlay);
@@ -698,11 +722,13 @@
           ['File size', (m) => bytes(m.bytes), true],
           ['Source app', (m) => m.app || m.rootLabel, true],
           ['Date', (m) => date(m.mtime_ms), true],
-          ['Recommended', (m) => (shown(m) ? 'Yes' : '-'), !partial],
           ['Why', (m) => (m.reasons || []).join(', ') || '-', true],
         ].filter((x) => x[2]);
         fill(table, h('table', { class: 'dm-table' },
-          h('thead', null, h('tr', null, h('th', null, ''), pair.map((m) => h('th', null, partial ? (m.role === 'clip' ? 'Clip' : 'Source') : m.recommended ? 'Recommended' : 'Other copy')))),
+          // Columns are named after the files, as on the cards; the
+          // recommended one carries the same star as its pane.
+          h('thead', null, h('tr', null, h('th', null, ''), pair.map((m) => h('th', { class: 'dm-cmp-th', title: m.name },
+            partial ? `${m.role === 'clip' ? 'Clip' : 'Source'}: ` : null, shown(m) ? h('span', { class: 'dm-recbadge', 'aria-label': 'Recommended' }, ic('star', 12)) : null, m.name)))),
           h('tbody', null, rowsDef.map(([label, fn]) => h('tr', null, h('th', { scope: 'row' }, label), pair.map((m) => h('td', null, fn(m))))))));
       }
       draw();
@@ -818,7 +844,7 @@
       });
       const kinds = h('section', { class: 'card dm-card' }, h('h2', null, ic('cache'), 'Generated files in the scanned folders'),
         c.kinds.length ? h('div', { class: 'dm-scroll' }, h('table', { class: 'dm-table' },
-          h('thead', null, h('tr', null, h('th', null, 'App'), h('th', null, 'Kind'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'), h('th', null, 'Rebuildable'))),
+          h('thead', null, h('tr', null, h('th', null, 'App'), h('th', null, 'Kind'), h('th', { class: 'num' }, 'Files'), h('th', { class: 'num' }, 'Size'), h('th', null, 'Can be rebuilt'))),
           h('tbody', null, c.kinds.map((k) => h('tr', null, h('td', null, k.app), h('td', null, k.what), h('td', { class: 'num' }, num(k.files)), h('td', { class: 'num' }, bytes(k.bytes)), h('td', null, k.regenerable ? 'Yes' : 'No')))))) : h('p', { class: 'empty' }, 'None found.'));
       const stats = h('div', { class: 'dm-stats' },
         statTile('Cache files', num(c.files), null, 'cache'),
@@ -827,7 +853,7 @@
         statTile('Possible space freed', bytes(c.duplicateBytes + c.apps.reduce((n, a) => n + (a.orphanBytes || 0), 0)), null, 'restore'));
       const groupsBox = h('div');
       fill(body, h('p', { class: 'muted dm-intro' }, 'Thumbnails, posters, previews and caches that apps generate. They are left out of the duplicate lists and cleaned through the app that owns them.'),
-        stats, h('div', { class: 'dm-grid2' }, appCards, kinds), h('h2', { class: 'dm-subhead' }, 'Identical generated files'), groupsBox);
+        stats, h('div', { class: 'dm-grid2' }, appCards, kinds), h('h2', { class: 'dm-subhead' }, 'Identical generated files', c.duplicateGroups ? h('span', { class: 'muted small' }, ` - ${plural(c.duplicateGroups, 'group', 'groups')} of ${num(c.duplicateFiles)} files`) : null), groupsBox);
       await viewGroups(groupsBox, gen, 'cache', r);
     }
 
@@ -960,8 +986,11 @@
 
     // --- Settings -----------------------------------------------------------------------------
     async function viewSettings(body, gen) {
-      const d = await get('settings');
+      // The overview carries the scanner's live read limit, shown when the
+      // field is empty so the owner sees what "server default" means here.
+      const [d, ov] = await Promise.all([get('settings'), get('overview').catch(() => null)]);
       if (!live(gen)) return;
+      const liveRate = ov && ov.scan && ov.scan.mbPerSec;
       const s = d.settings;
       const m = d.models;
       const form = h('form', { class: 'dm-settings', onsubmit: (e) => e.preventDefault() });
@@ -981,15 +1010,15 @@
           : x.downloading ? h('span', { class: 'chip' }, `Downloading ${pct(x.downloading.bytes / x.downloading.total)}`)
             : h('button', { class: 'btn small ghost', type: 'button', onclick: async (e) => {
               const btn = e.currentTarget;
-              await busyBtn(btn, async () => { try { await post(`models/${x.id}/download`); toast('Download started. It continues in the background.'); } catch (err) { toast(err.message); } });
+              await busyBtn(btn, async () => { try { await post(`models/${x.id}/download`); toast('Model download started. It continues in the background.'); } catch (err) { toast(err.message); } });
               setTimeout(() => { if (live(gen)) viewSettings(body, gen); }, 3000);
-            } }, `Download (${bytes(x.bytes)})`),
+            } }, `Get model (${bytes(x.bytes)})`),
         x.lastError ? h('p', { class: 'dm-err' }, `Last download failed: ${x.lastError}`) : null));
       const prev = s.prevention;
       fill(form,
         h('section', { class: 'card dm-card' }, h('h2', null, ic('scan'), 'Exact Match scan'),
-          h('label', { class: 'dm-field' }, h('span', null, 'Read speed limit (MB/s)'), h('input', { type: 'number', name: 'scanMbps', min: '1', max: '500', value: s.scanMbps || '', placeholder: 'Server default (20)' }),
-            h('small', { class: 'muted' }, 'Lower it if other apps feel slow while a scan runs.'))),
+          h('label', { class: 'dm-field' }, h('span', null, 'Read speed limit (MB/s)'), h('input', { type: 'number', name: 'scanMbps', min: '1', max: '500', value: s.scanMbps || '' }),
+            h('small', { class: 'muted' }, s.scanMbps ? 'Lower it if other apps feel slow while a scan runs.' : `Empty: the server's own limit is used${liveRate ? ` (now ${liveRate} MB/s)` : ''}. Lower it if other apps feel slow while a scan runs.`))),
         h('section', { class: 'card dm-card' }, h('h2', null, ic('photo'), 'AI Photo Engine'),
           sw('Find similar photos', 'photo', 'Perceptual hashes; cheap and always local.', !m.flags.photo),
           sw('AI comparison (DINOv2)', 'ai', m.runtime ? 'Finds edited and cropped copies more reliably. Runs on this server.' : 'Not available in this build.', !m.flags.ai || !m.runtime),

@@ -64,7 +64,7 @@ a.dm-stat:hover { border-color: var(--accent); }
 .dm-field small { font-size: 12px; }
 .dm-grow { flex: 1 1 220px; }
 .dm-checks { display: flex; gap: 12px; padding-bottom: 7px; }
-.dm-check { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; color: var(--text); }
+.dm-check { display: inline-flex; gap: 8px; align-items: center; font-size: 14px; color: var(--text); }
 .dm-viewsw { display: flex; gap: 4px; margin-left: auto; }
 .dm-iconbtn {
   display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; flex: none;
@@ -155,11 +155,28 @@ a.dm-stat:hover { border-color: var(--accent); }
 .dm-save { grid-column: 1 / -1; }
 .dm-switch, .dm-radio { display: flex; gap: 10px; align-items: flex-start; }
 .dm-switch span, .dm-radio span { display: grid; }
-.dm-switch input, .dm-radio input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--accent); }
+.dm-switch input, .dm-radio input { margin-top: 1px; }
 .dm-models { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .dm-models li { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .dm-row { display: flex; gap: 10px; align-items: center; }
 .dm-row input[type='range'] { flex: 1; accent-color: var(--accent); }
+
+/* Checkboxes and radios in settings and the compare dialog are drawn here:
+   the browser's unchecked outline is dark on these dark panels, and its
+   default box is 13 to 14 px. */
+.dm-switch input, .dm-radio input, .dm-check input {
+  appearance: none; -webkit-appearance: none; flex: none; display: inline-grid; place-items: center;
+  width: 20px; height: 20px; margin-left: 0; margin-right: 0; border: 2px solid #9c97c4; border-radius: 5px; background: var(--panel-2); cursor: pointer;
+}
+.dm-radio input { border-radius: 50%; }
+.dm-switch input:checked, .dm-check input:checked { background: var(--accent); border-color: var(--accent); }
+.dm-switch input:checked::after, .dm-check input:checked::after {
+  content: ''; width: 5px; height: 10px; margin-top: -2px; border: solid #fff; border-width: 0 2.5px 2.5px 0; transform: rotate(45deg);
+}
+.dm-radio input:checked { border-color: var(--accent); }
+.dm-radio input:checked::after { content: ''; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.dm-switch input:focus-visible, .dm-radio input:focus-visible, .dm-check input:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.dm-switch input:disabled, .dm-radio input:disabled, .dm-check input:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* Dialogs and comparison */
 .dm-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 16px; background: rgba(5, 4, 12, 0.72); }
@@ -169,9 +186,20 @@ a.dm-stat:hover { border-color: var(--accent); }
 .dm-sum { margin: 0 0 8px; padding-left: 18px; }
 .dm-blocked ul { margin: 6px 0; padding-left: 18px; font-size: 13px; max-height: 220px; overflow: auto; }
 .dm-overlay-cmp { padding: 0; place-items: stretch; }
-.dm-cmp { display: flex; flex-direction: column; gap: 10px; background: var(--bg); padding: 12px; height: 100dvh; overflow: auto; }
+.dm-cmp {
+  display: flex; flex-direction: column; gap: 10px; background: var(--bg); height: 100dvh; overflow: auto;
+  /* Room under the last table row, above home bars and browser chrome. */
+  padding: 12px 12px calc(28px + env(safe-area-inset-bottom));
+}
 .dm-cmp-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .dm-cmp-top > b { margin-right: auto; }
+/* Close is a labelled button set apart from the Fullscreen icon. */
+.dm-cmp-close { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; }
+.dm-table th.dm-cmp-th { color: var(--text); overflow-wrap: anywhere; word-break: break-word; }
+.dm-cmp-th .dm-recbadge { margin-right: 4px; vertical-align: -1px; }
+@media (pointer: coarse) {
+  .dm-cmp-top .dm-iconbtn, .dm-cmp-controls .dm-iconbtn, .dm-cmp-close { min-width: 44px; min-height: 44px; }
+}
 .dm-cmp-panes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; flex: 1 1 auto; min-height: 220px; }
 .dm-cmp-pane { margin: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; background: #07060e; border: 1px solid var(--line); border-radius: 12px; padding: 6px; min-height: 0; }
 .dm-cmp-pane.dm-rec { border-color: var(--ok); }
@@ -180,7 +208,7 @@ a.dm-stat:hover { border-color: var(--accent); }
 .dm-cmp-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .dm-scrub { flex: 1 1 200px; accent-color: var(--accent); }
 .dm-cmp-table { overflow-x: auto; }
-.dm-cmp:fullscreen { padding: 16px; }
+.dm-cmp:fullscreen { padding: 16px 16px 28px; }
 
 @media (max-width: 1180px) {
   .dm-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -208,4 +236,7 @@ a.dm-stat:hover { border-color: var(--accent); }
   .dm-cmp-pane img, .dm-cmp-pane video { max-height: 34dvh; }
   .dm-facts { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
   .dm-facts dd { margin-bottom: 6px; }
+  /* Narrow tables wrap their headers instead of clipping them. */
+  .dm-table th, .dm-table td { padding: 8px 6px; }
+  .dm-table thead th { white-space: normal; overflow-wrap: anywhere; }
 }
