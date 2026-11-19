@@ -180,7 +180,7 @@ th { color: var(--muted); font-weight: 500; font-size: 13px; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr.selected td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
-.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #231d42; border: 1px solid var(--accent); padding: 10px 16px; border-radius: 12px; z-index: 30; max-width: calc(100vw - 32px); }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #231d42; border: 1px solid var(--accent); padding: 10px 16px; border-radius: 12px; z-index: 30; max-width: calc(100vw - 32px); pointer-events: none; }
 
 /* Tablet: the right column drops under the main one, two-up. */
 @media (max-width: 1180px) {

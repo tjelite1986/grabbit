@@ -1092,6 +1092,9 @@ test('a merge whose answer was lost is resolved by asking the app with its op ke
   assert.equal(held[0].ref, `42:${uid}`);
   assert.equal(held[0].rel, 'two.mp4');
   assert.deepEqual(svc.trashList().unfinished, []);
+  // What the toast promises: the trash page lists it and counts it.
+  assert.ok(svc.trashList().items.some((x) => x.id === r.trash), 'listed in the trash');
+  assert.ok(svc.trashSummary().files >= 1, 'counted in the trash summary');
   // A second merge the app never received: closed as nothing changed.
   write(path.join(tik, 'three.mp4'), body, 3000);
   await scan();

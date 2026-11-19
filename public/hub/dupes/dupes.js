@@ -179,7 +179,9 @@
               buttons.map((b) => h('button', { class: `btn small${b.danger ? ' danger' : ''}${b.ghost ? ' ghost' : ''}`, type: 'button', onclick: () => done(b.value) }, b.label)))));
         host().append(overlay);
         document.addEventListener('keydown', escClose);
-        const first = overlay.querySelector('.dm-dialog-actions .btn:last-child');
+        // A destructive choice never has the focus first: Enter must not confirm it.
+        const danger = buttons.some((b) => b.danger);
+        const first = overlay.querySelector(danger ? '.dm-dialog-actions .btn:first-child' : '.dm-dialog-actions .btn:last-child');
         if (first) first.focus();
       });
     }
@@ -582,7 +584,7 @@
             h('p', null, `${plural(keep.size, 'copy stays', 'copies stay')}. ${plural(can.length, 'copy goes', 'copies go')} to the trash or is merged (restorable).`),
             go.length > can.length ? h('p', { class: 'muted small' }, `${num(go.length - can.length)} other copies cannot be removed here and stay.`) : null,
             g.match !== 'exact' ? h('p', { class: 'dm-warn' }, 'These files are not identical. Check the comparison first: a similar picture can be a different original.') : null,
-          ], [{ label: 'Keep selected', value: true, danger: true }]);
+          ], [{ label: can.length ? `Remove ${plural(can.length, 'copy', 'copies')}` : 'Keep selected', value: true, danger: can.length > 0 }]);
         };
         const extras = g.members.filter((m) => m.suggested && m.action);
         const hasLink = extras.some((m) => m.action === 'link' || m.action === 'merge');

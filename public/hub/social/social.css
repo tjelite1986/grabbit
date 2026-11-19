@@ -343,6 +343,8 @@ html.sg-snap .sg-feed .sg-carousel { max-height: calc(100vh - var(--sg-snap-top,
   position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 80;
   background: #fff; color: #111; padding: 10px 16px; border-radius: 999px; font-size: 14px; box-shadow: 0 6px 20px rgba(0, 0, 0, .4);
   max-width: calc(100vw - 32px);
+  /* Text only: taps pass through to the controls below it. */
+  pointer-events: none;
 }
 .sg-up-tools .sg-act:disabled { visibility: hidden; }
 

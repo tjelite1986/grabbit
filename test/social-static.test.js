@@ -393,3 +393,24 @@ test('three-dot menu and Edit post (creator, description, tags)', () => {
   assert.match(edit, /try \{ await call\(`posts\/\$\{id\}`, \{ lane \}\); \} catch \{ still = false; \}/);
   assert.match(edit, /p\.mentions = d && Array\.isArray\(d\.mentions\) \? d\.mentions : \[\];/);
 });
+
+// Hermes final review (A3, A5): toasts never take taps, and a creator change asks first.
+test('toasts let taps through to the controls below them', () => {
+  assert.match(css, /\.sg-toast\s*\{[^}]*pointer-events:\s*none/);
+  assert.match(hubCss, /\.toast\s*\{[^}]*pointer-events:\s*none/);
+});
+
+test('Edit post asks before a creator change moves the post', () => {
+  const at = js.indexOf('function editPostSheet');
+  const body = js.slice(at, js.indexOf('function postMenu', at));
+  const ask = body.indexOf('if (moving && !confirm(');
+  assert.ok(ask > 0, 'confirm on a move');
+  assert.ok(ask < body.indexOf("call(`posts/${id}`, { method: 'PATCH'"), 'before the PATCH');
+});
+
+// Hermes final review (A1, A2): Duplicate Manager dialogs.
+test('a destructive dialog focuses Cancel, and Keep selected names the removal', () => {
+  const dm = read('hub/dupes/dupes.js');
+  assert.match(dm, /danger \? '\.dm-dialog-actions \.btn:first-child'/);
+  assert.match(dm, /label: can\.length \? `Remove \$\{plural\(can\.length, 'copy', 'copies'\)\}`/);
+});

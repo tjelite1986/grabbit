@@ -736,6 +736,7 @@
         const moving = !!handle && handle !== was.toLowerCase();
         const body = { caption };
         if (moving) body.author = { creator: handle };
+        if (moving && !confirm(`Move this post to @${handle}? Its files move with it, and it can leave this list${lane === 'review' ? '' : ' and wait in the Review lane until it is classified'}.`)) return;
         btn.disabled = true;
         err.hidden = true;
         try {
