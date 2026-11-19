@@ -18,7 +18,7 @@ const { hashFrame } = require('./dupe-phash');
 const { classify } = require('./dupe-classify');
 const ai = require('./dupe-ai');
 const { groupPhotosAsync } = require('./dupe-photo');
-const { groupVideos, packFrames, packProbes, PROBE_AT } = require('./dupe-video');
+const { groupVideosAsync, packFrames, packProbes, PROBE_AT } = require('./dupe-video');
 
 const STATE_KEY = 'dupes.analyze.state';
 const CFG_KEY = 'dupes.cfg';
@@ -393,10 +393,12 @@ class Analyzer {
       this.dirty[kind] = false;
       r = await groupPhotosAsync(feats, vecs, { mode: c.mode === 'custom' ? 'balanced' : c.mode, threshold: ai.thresholdFor(c.model, c.sensitivity), decisions });
     } else {
-      r = groupVideos(this.dx.featureRows('video'), { decisions });
+      const feats = this.dx.featureRows('video');
+      // Cleared before the work, as for photos: a change while it runs marks it dirty again.
+      this.dirty[kind] = false;
+      r = await groupVideosAsync(feats, { decisions });
     }
     this.dx.replaceGroups(kind, r.groups, this.now());
-    if (kind !== 'photo') this.dirty[kind] = false;
     this.lastGroupAt[kind] = this.now();
     // A capped candidate set means some similar pairs were not compared.
     if (r.capped) this.log(`${kind} grouping compared only the first ${r.candidates} candidate pairs (memory limit); some similar copies may be missing`);

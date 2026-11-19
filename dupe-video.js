@@ -18,6 +18,7 @@
 
 const { hashFrame, hamming, bandPairs, MAX_PAIRS } = require('./dupe-phash');
 const { cliques, pk } = require('./dupe-group');
+const { runSync, runAsync } = require('./dupe-ai');
 
 const FRAME_BYTES = 12; // float32 time + 8 bytes hash
 const MIN_CONTRAST = 6;
@@ -174,6 +175,17 @@ function explainVideo(a, b, r) {
 
 // features: dx.features rows of kind video. Returns { groups, partials }.
 function groupVideos(features, opts = {}) {
+  return runSync(groupVideosGen(features, opts));
+}
+
+// The same, handing the event loop back while it works (the analyzer's path).
+// A real library has tens of thousands of candidate pairs at ~20 ms each on a
+// Pi; run in one go, that froze every other request for minutes.
+function groupVideosAsync(features, opts = {}) {
+  return runAsync(groupVideosGen(features, opts));
+}
+
+function* groupVideosGen(features, opts = {}) {
   const decisions = opts.decisions || new Map();
   const items = features
     .map((f) => ({ ...f, framesList: unpackFrames(f.frames), probesList: unpackFrames(f.probes) }))
@@ -190,6 +202,7 @@ function groupVideos(features, opts = {}) {
     const b = items[j];
     const dk = a.sha256 < b.sha256 ? `${a.sha256}|${b.sha256}` : `${b.sha256}|${a.sha256}`;
     if (decisions.has(dk)) continue;
+    yield;
     const r = compareVideos(a, b);
     if (!r) continue;
     if (r.match === 'partial') {
@@ -239,4 +252,4 @@ function groupVideos(features, opts = {}) {
   return { groups: groups.concat(partials), compared: items.length, candidates: cand.size, capped: !!cand.capped };
 }
 
-module.exports = { packFrames, packProbes, unpackFrames, compareVideos, groupVideos, coverage, bestOffset, alignedEvidence, FRAME_MATCH, PROBE_AT };
+module.exports = { packFrames, packProbes, unpackFrames, compareVideos, groupVideos, groupVideosAsync, coverage, bestOffset, alignedEvidence, FRAME_MATCH, PROBE_AT };

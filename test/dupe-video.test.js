@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const media = require('../dupe-media');
 const { hashFrame } = require('../dupe-phash');
-const { packFrames, packProbes, unpackFrames, compareVideos, groupVideos, PROBE_AT } = require('../dupe-video');
+const { packFrames, packProbes, unpackFrames, compareVideos, groupVideos, groupVideosAsync, PROBE_AT } = require('../dupe-video');
 
 const has = (bin) => {
   try { return spawnSync(bin, ['-version'], { stdio: 'ignore', timeout: 5000 }).status === 0; } catch { return false; }
@@ -71,6 +71,26 @@ test('rows without enough frames or a duration are left out of grouping', () => 
   ]);
   assert.equal(r.compared, 0);
   assert.deepEqual(r.groups, []);
+});
+
+// Video grouping over many candidate pairs hands the event loop back while it
+// works, and gives the same groups as the one-go version. Run in one go on a
+// real library it once held every other request for over seven minutes.
+test('groupVideosAsync yields to the event loop and matches groupVideos', async () => {
+  const rows = [];
+  for (let g = 0; g < 12; g++) {
+    const buf = packFrames([0, 1, 2, 3, 4, 5].map((t) => ({ t, gray: pattern(100 + g * 10 + t) }))).buf;
+    for (let i = 0; i < 25; i++) rows.push({ sha256: `g${g}v${i}`, duration: 6, frames: buf, probes: null });
+  }
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 1);
+  const r = await groupVideosAsync(rows);
+  clearInterval(timer);
+  assert.ok(ticks > 0, 'timers ran while grouping');
+  const s = groupVideos(rows);
+  assert.equal(r.candidates, s.candidates);
+  assert.deepEqual(r.groups, s.groups);
+  assert.equal(r.groups.length, 12);
 });
 
 let fixtures = null;
