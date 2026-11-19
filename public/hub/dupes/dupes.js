@@ -853,7 +853,7 @@
         statTile('Possible space freed', bytes(c.duplicateBytes + c.apps.reduce((n, a) => n + (a.orphanBytes || 0), 0)), null, 'restore'));
       const groupsBox = h('div');
       fill(body, h('p', { class: 'muted dm-intro' }, 'Thumbnails, posters, previews and caches that apps generate. They are left out of the duplicate lists and cleaned through the app that owns them.'),
-        stats, h('div', { class: 'dm-grid2' }, appCards, kinds), h('h2', { class: 'dm-subhead' }, 'Identical generated files', c.duplicateGroups ? h('span', { class: 'muted small' }, ` - ${plural(c.duplicateGroups, 'group', 'groups')} of ${num(c.duplicateFiles)} files`) : null), groupsBox);
+        stats, h('div', { class: 'dm-grid2' }, appCards, kinds), h('h2', { class: 'dm-subhead' }, 'Identical generated files', c.duplicateGroups ? h('span', { class: 'muted small' }, ` - ${plural(c.duplicateGroups, 'group', 'groups')}, ${plural(c.duplicateFiles, 'extra copy', 'extra copies')}`) : null), groupsBox);
       await viewGroups(groupsBox, gen, 'cache', r);
     }
 

@@ -203,10 +203,15 @@ a.dm-stat:hover { border-color: var(--accent); }
 .dm-cmp-panes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; flex: 1 1 auto; min-height: 220px; }
 .dm-cmp-pane { margin: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; background: #07060e; border: 1px solid var(--line); border-radius: 12px; padding: 6px; min-height: 0; }
 .dm-cmp-pane.dm-rec { border-color: var(--ok); }
-.dm-cmp-pane img, .dm-cmp-pane video { width: 100%; height: 100%; max-height: 62dvh; object-fit: contain; background: #000; border-radius: 8px; min-height: 0; }
+/* The panes give up height on short screens so the facts table below them
+   fits without scrolling (about 440 px for the top bar, controls and table). */
+.dm-cmp-pane img, .dm-cmp-pane video { width: 100%; height: 100%; max-height: clamp(180px, calc(100dvh - 460px), 62dvh); object-fit: contain; background: #000; border-radius: 8px; min-height: 0; }
 .dm-cmp-pane figcaption { font-size: 13px; display: flex; gap: 6px; align-items: center; min-width: 0; }
 .dm-cmp-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .dm-scrub { flex: 1 1 200px; accent-color: var(--accent); }
+/* flex: none, or the column shrinks the table box and it scrolls on its
+   own, hiding the last rows under the screen edge. */
+.dm-cmp-top, .dm-cmp-controls, .dm-cmp-table { flex: none; }
 .dm-cmp-table { overflow-x: auto; }
 .dm-cmp:fullscreen { padding: 16px 16px 28px; }
 
@@ -232,7 +237,8 @@ a.dm-stat:hover { border-color: var(--accent); }
   .dm-member { grid-template-columns: auto minmax(0, 1fr); }
   .dm-member .dm-thumb { grid-column: 2; grid-row: 1; }
   .dm-member .dm-minfo { grid-column: 1 / -1; }
-  .dm-cmp-panes { grid-template-columns: minmax(0, 1fr); }
+  /* Stacked panes keep their height; the dialog scrolls instead. */
+  .dm-cmp-panes { grid-template-columns: minmax(0, 1fr); flex: none; }
   .dm-cmp-pane img, .dm-cmp-pane video { max-height: 34dvh; }
   .dm-facts { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
   .dm-facts dd { margin-bottom: 6px; }
