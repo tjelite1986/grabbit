@@ -298,13 +298,75 @@ function undoCopy(copy, made, orig, origStat, what) {
     return;
   }
   console.error(`dupes: ${what} changed meanwhile; its earlier copy stays at ${copy}`);
+  return copy;
+}
+
+// Linux has no unlink-if-inode and Node has no renameat2, so the last check
+// and the change after it are two system calls, and a writer can replace a
+// name in between. A name is therefore never removed or replaced blind: it
+// is first renamed aside, to a random name in the same folder (atomic, never
+// across disks, a name no one else knows), and only what was taken aside is
+// judged. If that is not the file the caller checked (`match(stat)`), it goes
+// back under its name; the writer's file is never lost. Returns the aside
+// path, or null when the name held another file (now back in place).
+function takeAside(p, match) {
+  const aside = path.join(path.dirname(p), `.${clampName(path.basename(p), 180)}.aside-${rand()}`);
+  fs.renameSync(p, aside);
+  let st = null;
+  try { st = fs.lstatSync(aside); } catch {}
+  if (st && st.isFile() && match(st)) return aside;
+  putBack(aside, p);
+  return null;
+}
+
+// Puts a file taken aside back under its name without clobbering: a name
+// made again meanwhile wins, and the aside file then stays where it is.
+function putBack(aside, p) {
+  try {
+    fs.linkSync(aside, p);
+  } catch (e) {
+    console.error(`dupes: ${path.basename(p)} changed again meanwhile; the file that held its name stays at ${aside} (${e.code || e.message})`);
+    return false;
+  }
+  try { fs.unlinkSync(aside); } catch {}
+  return true;
+}
+
+// Removes `p` only if it is the file `match` accepts. Returns false (and
+// changes nothing) when another file has the name.
+function removeIfSame(p, match) {
+  const aside = takeAside(p, match);
+  if (!aside) return false;
+  fs.unlinkSync(aside);
+  return true;
+}
+
+// Puts `stage` under the name `p`, but only while `p` is the file `match`
+// accepts. The new name is made with a link, which never clobbers, so a file
+// that appears at `p` in the moment between is never overwritten either;
+// the name is absent only for that moment. Returns false when `p` held
+// another file (put back; `stage` stays for the caller to undo).
+function replaceWith(p, match, stage) {
+  const aside = takeAside(p, match);
+  if (!aside) return false;
+  try {
+    fs.linkSync(stage, p);
+  } catch (e) {
+    putBack(aside, p);
+    throw e;
+  }
+  try { fs.unlinkSync(stage); } catch {}
+  try { fs.unlinkSync(aside); } catch {}
+  return true;
 }
 
 // Moves `from` to `to`: a hard link and an unlink where possible, else a
 // verified copy and an unlink. The source goes last, so a failure at any
 // step leaves it in place. `expect` is the source's stat from before it was
 // hashed: a file a writer put at that name since then is never removed.
-async function moveFile(from, to, sha256 = null, expect = null) {
+// `keep` ({ abs, stat }) is the copy that stays: it must still be that file
+// at the last look, so a move never takes what became the last copy.
+async function moveFile(from, to, sha256 = null, expect = null, keep = null) {
   if (taken(to)) throw new TrashError('Target already exists');
   const before = fs.lstatSync(from);
   const changed = () => new TrashError('The file changed while it was being moved; nothing changed, scan again');
@@ -333,16 +395,29 @@ async function moveFile(from, to, sha256 = null, expect = null) {
   try { now = fs.lstatSync(from); } catch {}
   try { dest = fs.lstatSync(to); } catch {}
   const destOk = !!dest && dest.isFile() && sameNode(dest, placed);
-  if (!now || !sameStat(now, before) || !destOk) {
+  let keepOk = true;
+  if (keep) {
+    let k = null;
+    try { k = fs.lstatSync(keep.abs); } catch {}
+    keepOk = !!k && k.isFile() && sameStat(k, keep.stat);
+  }
+  const refuse = (err) => {
     // Only the name this move made is ever removed again, and only while the
     // source still holds the same bytes. A hard link whose source name now
     // holds another file is the last name of the original, and a verified
     // copy of a source that changed or vanished may be the last copy of the
     // hashed bytes: either stays (an extra copy in the trash folder).
-    if (destOk) undoCopy(to, placed, from, before, path.basename(from));
-    throw changed();
+    const kept = destOk ? undoCopy(to, placed, from, before, path.basename(from)) : null;
+    if (kept) err.keptCopy = kept;
+    return err;
+  };
+  if (!keepOk) throw refuse(new TrashError('The copy that stays changed while this one was being moved; nothing changed, scan again'));
+  if (!now || !sameStat(now, before) || !destOk) {
+    throw refuse(changed());
   }
-  fs.unlinkSync(from);
+  // Taken aside first, so a file a writer put at the source name after the
+  // look above goes back instead of being unlinked.
+  if (!removeIfSame(from, (s) => sameStat(s, before))) throw refuse(changed());
   // The move is done: a failed sync of the old folder must not keep the
   // caller from recording it (the trash row, the restore).
   try { fsyncDir(path.dirname(from)); } catch (e) { console.error(`dupes: moved ${path.basename(from)}, but its old folder could not be synced (${e.code || e.message})`); }
@@ -364,7 +439,7 @@ class DupeTrash {
   // holdMs: a number, or a function returning one (the retention setting);
   // 0 means manual cleanup only, nothing is purged automatically.
   // onRemoved(trashId, row, info): lets the caller record 3.0.4 metadata.
-  constructor({ store, trashDir, rootOf, now = Date.now, holdMs = HOLD_MS, onRemoved = null, mergeOf = null }) {
+  constructor({ store, trashDir, rootOf, now = Date.now, holdMs = HOLD_MS, onRemoved = null, mergeOf = null, journal = null }) {
     this.store = store;
     this.dir = trashDir;
     this.rootOf = rootOf;
@@ -373,6 +448,9 @@ class DupeTrash {
     this.onRemoved = onRemoved;
     // mergeOf(trashId) -> { keep_root, keep_rel } for a merged copy, else null.
     this.mergeOf = mergeOf;
+    // journal: { begin(payload, by) -> id, end(id, ok, error), note(id, result), tx(fn) }
+    // for local moves (optional).
+    this.journal = journal;
     this.busy = false;
   }
 
@@ -404,7 +482,7 @@ class DupeTrash {
     const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
     if (a !== row.sha256 || b !== row.sha256) throw new TrashError('The bytes no longer match; scan again first');
 
-    return this.moveToTrash(row, doomed, { by, keepRow, reason });
+    return this.moveToTrash(row, doomed, { by, keepRow, reason, kept });
   }
 
   // Removes one copy of a picture or video whose bytes differ from the copy
@@ -430,7 +508,7 @@ class DupeTrash {
     if (doomed.stat.size !== row.bytes || kept.stat.size !== keepRow.bytes) throw new TrashError('A file changed since the scan; scan again first');
     const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
     if (a !== row.sha256 || b !== keepRow.sha256) throw new TrashError('The bytes no longer match; scan again first');
-    return this.moveToTrash(row, doomed, { by, keepRow, reason });
+    return this.moveToTrash(row, doomed, { by, keepRow, reason, kept });
   }
 
   // Records a name whose inode changed but whose bytes are known (the
@@ -478,10 +556,31 @@ class DupeTrash {
     return id;
   }
 
-  async moveToTrash(row, doomed, { by, keepRow, reason }) {
+  // The move is journaled before it starts and closed once the trash row is
+  // written: a crash in between, or a copy left behind by a refused move,
+  // stays listed as an unfinished operation that names both places, instead
+  // of a file in the trash folder that nothing lists.
+  async moveToTrash(row, doomed, { by, keepRow, reason, kept = null }) {
     const trashName = this.trashNameFor(row);
-    await moveFile(doomed.abs, path.join(this.dir, trashName), row.sha256, doomed.stat);
-    const id = this.record(row, trashName, { by, keepRow, reason });
+    const j = this.journal ? this.journal.begin({ from: row.rel, root: row.root, trashName }, by) : null;
+    try {
+      await moveFile(doomed.abs, path.join(this.dir, trashName), row.sha256, doomed.stat, kept);
+    } catch (e) {
+      if (j != null) {
+        try {
+          if (e.keptCopy) this.journal.note(j, { keptCopy: e.keptCopy });
+          else this.journal.end(j, false, e.message);
+        } catch {}
+      }
+      throw e;
+    }
+    // The trash row and the journal's close go in one transaction.
+    const write = () => {
+      const tid = this.record(row, trashName, { by, keepRow, reason });
+      if (j != null) this.journal.end(j, true);
+      return tid;
+    };
+    const id = j != null && this.journal.tx ? this.journal.tx(write) : write();
     this.store.fileGoneNow(row.id, this.now());
     return id;
   }
@@ -564,12 +663,20 @@ class DupeTrash {
       this.store.trashPurged(id, this.now());
       throw changed();
     }
+    // The swap takes the live name aside first: a file a writer put there
+    // after the look above goes back instead of being overwritten.
+    let swapped = false;
     try {
-      fs.renameSync(tmp, doomed.abs);
+      swapped = replaceWith(doomed.abs, (st) => sameStat(st, doomed.stat), tmp);
     } catch (e) {
       undo();
       this.store.trashPurged(id, this.now());
       throw new TrashError(`The files could not share one copy (${e.code || e.message}); nothing changed`);
+    }
+    if (!swapped) {
+      undo();
+      this.store.trashPurged(id, this.now());
+      throw changed();
     }
     try { fsyncDir(path.dirname(doomed.abs)); } catch (e) { console.error(`dupes: merged ${row.rel}, but its folder could not be synced (${e.code || e.message})`); }
     this.seenSame(row, row.rel, doomed.abs);
@@ -744,11 +851,18 @@ class DupeTrash {
         dropStage();
         throw new TrashError('The file in its place changed while restoring; the trash still holds the original, try again');
       }
+      // The link in its place is taken aside first, so a file written there
+      // after the look above goes back instead of being overwritten.
+      let swapped = false;
       try {
-        fs.renameSync(stage, abs);
+        swapped = replaceWith(abs, (s) => sameNode(s, live), stage);
       } catch (e) {
         dropStage();
         throw new TrashError(`The original could not be put back (${e.code || e.message}); the trash still holds it`);
+      }
+      if (!swapped) {
+        dropStage();
+        throw new TrashError('The file in its place changed while restoring; the trash still holds the original, try again');
       }
       // The name is durable before the held copy goes.
       fsyncDir(path.dirname(abs));
@@ -808,4 +922,4 @@ class DupeTrash {
   }
 }
 
-module.exports = { DupeTrash, TrashError, planGroup, checkRemoval, HOLD_MS, realFileOf, sha256Of, placeCopy, moveFile, fsyncDir };
+module.exports = { DupeTrash, TrashError, planGroup, checkRemoval, HOLD_MS, realFileOf, sha256Of, placeCopy, moveFile, fsyncDir, removeIfSame, replaceWith };

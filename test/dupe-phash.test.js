@@ -205,3 +205,13 @@ test('bandPairs honours a smaller band count', () => {
   assert.equal(bandPairs(items, { bands: 4 }).size, 1);
   assert.equal(bandPairs([{ id: 1, hashes: ['abc0000000000000'] }, { id: 2, hashes: ['abcfffffffffffff'] }], { bands: 4 }).size, 0);
 });
+
+test('bandPairs stops at maxPairs and says so', () => {
+  const items = Array.from({ length: 30 }, () => ({ hashes: ['0123456789abcdef'] }));
+  const all = bandPairs(items);
+  assert.equal(all.size, 435);
+  assert.equal(all.capped, false);
+  const cut = bandPairs(items, { maxPairs: 100 });
+  assert.equal(cut.size, 100);
+  assert.equal(cut.capped, true);
+});

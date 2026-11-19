@@ -261,7 +261,8 @@ function lshPairs(vecs, opts) {
   return runSync(lshPairsGen(vecs, opts));
 }
 
-function* lshPairsGen(vecs, { tables = 14, bits = 12, maxBucket = 300, seed = 1 } = {}) {
+// Capped at `maxPairs` like bandPairs (the set then carries `capped`).
+function* lshPairsGen(vecs, { tables = 14, bits = 12, maxBucket = 300, seed = 1, maxPairs = 1000000 } = {}) {
   if (!vecs.length) return new Set();
   const dim = vecs[0].length;
   let s = seed >>> 0;
@@ -273,6 +274,7 @@ function* lshPairsGen(vecs, { tables = 14, bits = 12, maxBucket = 300, seed = 1 
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296 - 0.5;
   };
   const pairs = new Set();
+  pairs.capped = false;
   for (let tb = 0; tb < tables; tb++) {
     const planes = Array.from({ length: bits }, () => Float32Array.from({ length: dim }, rnd));
     const buckets = new Map();
@@ -288,7 +290,10 @@ function* lshPairsGen(vecs, { tables = 14, bits = 12, maxBucket = 300, seed = 1 
     for (const arr of buckets.values()) {
       if (arr.length < 2 || arr.length > maxBucket) continue;
       for (let i = 0; i < arr.length; i++) {
-        for (let j = i + 1; j < arr.length; j++) pairs.add(`${arr[i]}|${arr[j]}`);
+        for (let j = i + 1; j < arr.length; j++) {
+          if (pairs.size >= maxPairs) { pairs.capped = true; return pairs; }
+          pairs.add(`${arr[i]}|${arr[j]}`);
+        }
         yield;
       }
     }

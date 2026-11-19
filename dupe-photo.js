@@ -16,7 +16,7 @@
 // A similarity score is evidence, not proof. Nothing here removes anything,
 // and AI matches are review-only.
 
-const { hamming, bandPairs } = require('./dupe-phash');
+const { hamming, bandPairs, MAX_PAIRS } = require('./dupe-phash');
 const { lshPairsGen, dot, runSync, runAsync } = require('./dupe-ai');
 const { cliques, pk } = require('./dupe-group');
 
@@ -76,10 +76,15 @@ function* groupPhotosGen(features, embeddings = new Map(), opts = {}) {
   const decisions = opts.decisions || new Map();
   const items = features.filter((f) => f.phash);
 
-  const cand = bandPairs(items.map((f) => ({ hashes: phashList(f) })), { bands: 8, maxBucket: 400 });
+  const cand = bandPairs(items.map((f) => ({ hashes: phashList(f) })), { bands: 8, maxBucket: 400, maxPairs: MAX_PAIRS });
+  let capped = cand.capped;
   const withVec = items.map((f, i) => [i, embeddings.get(f.sha256)]).filter(([, v]) => v);
-  if (withVec.length > 1) {
-    for (const p of yield* lshPairsGen(withVec.map(([, v]) => v))) {
+  if (withVec.length > 1 && !capped) {
+    const ai = yield* lshPairsGen(withVec.map(([, v]) => v), { maxPairs: MAX_PAIRS });
+    if (ai.capped) capped = true;
+    for (const p of ai) {
+      // One bound for both candidate sources together.
+      if (cand.size >= MAX_PAIRS) { capped = true; break; }
       const [x, y] = p.split('|').map(Number);
       cand.add(pk(withVec[x][0], withVec[y][0]));
     }
@@ -140,7 +145,7 @@ function* groupPhotosGen(features, embeddings = new Map(), opts = {}) {
       },
     });
   }
-  return { groups, candidates: cand.size, links: links.size, compared: items.length };
+  return { groups, candidates: cand.size, capped, links: links.size, compared: items.length };
 }
 
 module.exports = { groupPhotos, groupPhotosAsync, phashDistance, PHASH_NEAR, COS_NEAR, explainPair };

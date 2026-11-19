@@ -16,7 +16,7 @@
 // Flat frames (black, white, single-colour title cards) are dropped when the
 // fingerprint is made: they say nothing about which video it is.
 
-const { hashFrame, hamming, bandPairs } = require('./dupe-phash');
+const { hashFrame, hamming, bandPairs, MAX_PAIRS } = require('./dupe-phash');
 const { cliques, pk } = require('./dupe-group');
 
 const FRAME_BYTES = 12; // float32 time + 8 bytes hash
@@ -181,7 +181,7 @@ function groupVideos(features, opts = {}) {
   // Candidates: videos sharing frame-hash bands (keyframes and probes).
   // Common frames (logos, black with a watermark) overflow their bucket and
   // are ignored.
-  const cand = bandPairs(items.map((f) => ({ hashes: f.framesList.concat(f.probesList).map((x) => x.h).filter((h) => h !== FLAT) })), { bands: 8, maxBucket: 60 });
+  const cand = bandPairs(items.map((f) => ({ hashes: f.framesList.concat(f.probesList).map((x) => x.h).filter((h) => h !== FLAT) })), { bands: 8, maxBucket: 60, maxPairs: MAX_PAIRS });
   const links = new Map();
   const partials = [];
   for (const p of cand) {
@@ -236,7 +236,7 @@ function groupVideos(features, opts = {}) {
       },
     });
   }
-  return { groups: groups.concat(partials), compared: items.length, candidates: cand.size };
+  return { groups: groups.concat(partials), compared: items.length, candidates: cand.size, capped: !!cand.capped };
 }
 
 module.exports = { packFrames, packProbes, unpackFrames, compareVideos, groupVideos, coverage, bestOffset, alignedEvidence, FRAME_MATCH, PROBE_AT };

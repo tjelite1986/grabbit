@@ -1020,3 +1020,18 @@ test('only a cursor the app rejects as invalid is reported as bad_cursor; other 
     await assert.rejects(svc.cacheAction('egram', 'rebuild', false, 'owner', { cursor: 'm:12' }), (e) => e.code !== 'bad_cursor', err.message);
   }
 });
+
+test('a local move cut short is listed as an unfinished operation with both places', (t) => {
+  const { svc, dx, own } = setup(t);
+  let clock = 1_000_000;
+  svc.now = () => clock;
+  dx.opBegin('grabbit', 'trash', { from: 'clip.mp4', root: own, trashName: '5-1-ab-clip.mp4' }, 'owner', clock);
+  const kept = dx.opBegin('grabbit', 'trash', { from: 'b.mp4', root: own, trashName: '5-2-cd-b.mp4' }, 'owner', clock);
+  dx.opNote(kept, { keptCopy: '/trash/5-2-cd-b.mp4' });
+  clock += 3 * 60 * 1000;
+  const [a, b] = svc.trashList().unfinished;
+  assert.equal(a.app, 'Grabbit');
+  assert.equal(a.what, 'Move clip.mp4 to the trash');
+  assert.match(a.check, /in the trash folder as 5-1-ab-clip\.mp4/);
+  assert.match(b.check, /extra copy of the earlier file stays at \/trash\/5-2-cd-b\.mp4/);
+});

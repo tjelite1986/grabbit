@@ -153,9 +153,12 @@ function hamming(a, b) {
 // Candidate pairs among hashes by the pigeonhole rule: split each 64-bit hash
 // into `bands` parts; two hashes within distance < bands share at least one
 // part exactly. Buckets that grow past `maxBucket` (flat or blank frames) are
-// dropped instead of producing a quadratic pile of pairs.
+// dropped instead of producing a quadratic pile of pairs. The whole set is
+// capped at `maxPairs` as well (memory on a Pi): past it no pair is added and
+// the set carries `capped = true`, so the caller can say the scan was cut.
 // items: [{ id, hashes: [hex, ...] }] -> Set of "i|j" index pairs (i < j).
-function bandPairs(items, { bands = 8, maxBucket = 400 } = {}) {
+const MAX_PAIRS = 1000000;
+function bandPairs(items, { bands = 8, maxBucket = 400, maxPairs = MAX_PAIRS } = {}) {
   const width = 16 / bands;
   const buckets = new Map();
   items.forEach((it, idx) => {
@@ -172,17 +175,20 @@ function bandPairs(items, { bands = 8, maxBucket = 400 } = {}) {
     }
   });
   const pairs = new Set();
+  pairs.capped = false;
   for (const arr of buckets.values()) {
     if (arr.length < 2 || arr.length > maxBucket) continue;
     for (let i = 0; i < arr.length; i++) {
       for (let j = i + 1; j < arr.length; j++) {
         const a = arr[i] < arr[j] ? arr[i] : arr[j];
         const b = arr[i] < arr[j] ? arr[j] : arr[i];
-        if (a !== b) pairs.add(`${a}|${b}`);
+        if (a === b) continue;
+        if (pairs.size >= maxPairs) { pairs.capped = true; return pairs; }
+        pairs.add(`${a}|${b}`);
       }
     }
   }
   return pairs;
 }
 
-module.exports = { hashFrame, hamming, bandPairs, phash32, downsample, rotate };
+module.exports = { MAX_PAIRS, hashFrame, hamming, bandPairs, phash32, downsample, rotate };

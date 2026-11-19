@@ -3515,6 +3515,14 @@ const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({
       audience: require('./dupe-classify').audienceOf(r, null), keep_root: k.root || null, keep_rel: k.rel || null,
     });
   } : null,
+  // Local moves into the trash are journaled like app operations, so one
+  // cut short by a crash is listed under unfinished operations.
+  journal: DUPE_DX ? {
+    begin: (payload, by) => DUPE_DX.opBegin('grabbit', 'trash', payload, by, Date.now()),
+    end: (id, ok, error = null) => DUPE_DX.opEnd(id, ok, { error }, Date.now()),
+    note: (id, result) => DUPE_DX.opNote(id, result),
+    tx: (fn) => DUPE_DX.tx(fn),
+  } : null,
   mergeOf: DUPE_DX ? (id) => {
     const m = DUPE_DX.trashMeta(id);
     return m && m.reason === 'merged' ? m : null;

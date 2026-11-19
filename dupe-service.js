@@ -22,7 +22,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { classify, audienceOf, relatedRenditions } = require('./dupe-classify');
 const quality = require('./dupe-quality');
-const { TrashError } = require('./dupe-trash');
+const { TrashError, replaceWith } = require('./dupe-trash');
 const { AdapterError, noAdapterReason } = require('./dupe-adapters');
 const { signatureOf } = require('./dupe-store');
 const { hashFrame, hamming } = require('./dupe-phash');
@@ -146,6 +146,13 @@ class DupeService {
       try { p = JSON.parse(o.payload) || {}; } catch {}
       let res = {};
       try { res = JSON.parse(o.result) || {}; } catch {}
+      if (o.adapter === 'grabbit' && o.op === 'trash') {
+        const where = path.join(p.root || '', p.from || '');
+        const check = res.keptCopy
+          ? `The move was refused because a file changed meanwhile. ${where} was left alone, and an extra copy of the earlier file stays at ${res.keptCopy}; delete that copy by hand once you have compared them.`
+          : `Grabbit stopped while moving ${where} to the trash. If the file is gone from its folder, it is in the trash folder as ${p.trashName}; move it back by hand. If it is still in its folder, nothing happened.`;
+        return { id: o.id, app: 'Grabbit', op: o.op, what: `Move ${p.from} to the trash`, check, appRef: null, at: o.at };
+      }
       const app = apps.get(o.adapter) || o.adapter;
       const what = o.op === 'link' ? `Share ${p.drop} with ${p.keep}`
         : o.op === 'restore' ? `Restore held copy ${p.ref}`
@@ -1182,7 +1189,13 @@ class DupeService {
                 drop();
                 throw new Error('the new file changed while it was checked');
               }
-              fs.renameSync(tmp, abs);
+              // The download is taken aside first: a file a writer put at its
+              // name after the look above goes back instead of being replaced.
+              let swapped = false;
+              try {
+                swapped = replaceWith(abs, (n) => n.dev === st.dev && n.ino === st.ino && n.size === st.size && n.mtimeMs === st.mtimeMs, tmp);
+              } catch (e) { drop(); throw e; }
+              if (!swapped) { drop(); throw new Error('the new file changed while it was checked'); }
               detail = `Now stored once with ${oInfo.label}/${o.rel}`;
             } catch (e) {
               action = 'review';

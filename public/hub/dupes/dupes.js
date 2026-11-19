@@ -922,8 +922,8 @@
       // App calls that stopped half way: the app may have carried them out,
       // so they wait here until the owner has looked in the app.
       const unfinished = (d.unfinished || []).length ? h('section', { class: 'card dm-card' },
-        h('h2', null, ic('restore', 16), ' Unfinished app operations'),
-        h('p', { class: 'dm-warn' }, 'These apps stopped answering half way. The change may or may not have happened; Grabbit has not recorded it in the trash.'),
+        h('h2', null, ic('restore', 16), ' Unfinished operations'),
+        h('p', { class: 'dm-warn' }, 'These operations stopped half way (an app stopped answering, or Grabbit was interrupted). The change may or may not have happened; Grabbit has not recorded it in the trash.'),
         h('ul', { class: 'dm-trash' }, d.unfinished.map((o) => h('li', { class: 'dm-trow' },
           h('div', { class: 'dm-minfo' },
             h('b', { class: 'dm-break' }, `${o.app}: ${o.what}`),

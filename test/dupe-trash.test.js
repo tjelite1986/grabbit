@@ -132,21 +132,22 @@ function mergeFixture() {
   return { dir, g, trash, trashDir, t };
 }
 
-test('merge never leaves the live name missing, and a failed swap changes nothing', async () => {
+test('merge keeps the live name until the swap, and a failed swap puts the original back', async () => {
   const { g, trash, trashDir, t } = mergeFixture();
-  const rename = fs.renameSync;
+  const link = fs.linkSync;
   const seen = [];
-  fs.renameSync = (from, to) => {
-    seen.push(fs.existsSync(path.join(g, 'b.mp4')));
-    if (to === path.join(g, 'b.mp4')) { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }
-    return rename(from, to);
+  // The swap takes the live name aside, then links the stage in; that link fails.
+  fs.linkSync = (from, to) => {
+    if (to === path.join(g, 'b.mp4') && from.includes('.merge-')) { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }
+    if (!from.includes('.aside-')) seen.push(fs.existsSync(path.join(g, 'b.mp4')));
+    return link(from, to);
   };
   try {
     await assert.rejects(t.mergeLocal(2, 1), /nothing changed/);
   } finally {
-    fs.renameSync = rename;
+    fs.linkSync = link;
   }
-  assert.ok(seen.every(Boolean), 'b.mp4 was there at every rename');
+  assert.ok(seen.every(Boolean), 'b.mp4 was there at every step before the swap');
   const before = fs.statSync(path.join(g, 'b.mp4'));
   assert.notEqual(before.ino, fs.statSync(path.join(g, 'a.mp4')).ino, 'b.mp4 is still its own file');
   assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no merge temp left behind');
@@ -164,15 +165,15 @@ test('restoring a merged copy keeps the trash copy until the swap succeeded', as
   const { g, trash, trashDir, t } = mergeFixture();
   const id = await t.mergeLocal(2, 1);
   const held = path.join(trashDir, trash[id - 1].trash_name);
-  const rename = fs.renameSync;
-  fs.renameSync = (from, to) => {
-    if (to === path.join(g, 'b.mp4')) { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }
-    return rename(from, to);
+  const link = fs.linkSync;
+  fs.linkSync = (from, to) => {
+    if (to === path.join(g, 'b.mp4') && from.includes('.restore-')) { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }
+    return link(from, to);
   };
   try {
     await assert.rejects(t.restore(id), /trash still holds it/);
   } finally {
-    fs.renameSync = rename;
+    fs.linkSync = link;
   }
   assert.ok(fs.existsSync(held), 'the trash copy is still there');
   assert.deepEqual(fs.readdirSync(g).sort(), ['a.mp4', 'b.mp4'], 'no restore stage left behind');
@@ -513,7 +514,8 @@ test('a failed sync of the old folder after the unlink still records the trash e
   const unlink = fs.unlinkSync;
   const open = fs.openSync;
   let gone = false;
-  fs.unlinkSync = (p) => { const r = unlink(p); if (p === path.join(g, 'b.mp4')) gone = true; return r; };
+  // The source is taken aside and that name is unlinked.
+  fs.unlinkSync = (p) => { const r = unlink(p); if (path.dirname(p) === g && path.basename(p).startsWith('.b.mp4.aside-')) gone = true; return r; };
   fs.openSync = (p, ...rest) => {
     if (gone && p === g) { const e = new Error('i/o error'); e.code = 'EIO'; throw e; }
     return open(p, ...rest);
@@ -722,4 +724,129 @@ test('restoring a merge keeps the trash copy when the restored name is replaced 
   assert.equal(fs.readFileSync(b, 'utf8'), 'written meanwhile');
   assert.ok(fs.existsSync(held), 'the held original stays: it is its last name');
   assert.equal(fs.readFileSync(held, 'utf8'), 'same bytes');
+});
+
+// A writer that replaces `p` with new bytes (a new inode), the way a
+// downloader or an importer publishes a file: write beside it, rename over.
+function writerReplaces(p, bytes) {
+  fs.writeFileSync(`${p}.w`, bytes);
+  fs.renameSync(`${p}.w`, p);
+}
+
+// Runs `fn` while every lstat of `p` is counted; right after call number
+// `n` returns, `act()` runs (a writer acting between the last look and the
+// change that follows it).
+async function afterLstat(p, n, act, fn) {
+  const lstat = fs.lstatSync;
+  let calls = 0;
+  fs.lstatSync = (q, ...rest) => {
+    const r = lstat(q, ...rest);
+    if (q === p && ++calls === n) act();
+    return r;
+  };
+  try { return await fn(); } finally { fs.lstatSync = lstat; }
+}
+
+test('removeIfSame and replaceWith never lose a file a writer put at the name', () => {
+  const { removeIfSame, replaceWith } = require('../dupe-trash');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-aside-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const p = path.join(dir, 'clip.mp4');
+  fs.writeFileSync(p, 'old');
+  const old = fs.lstatSync(p);
+  const same = (s) => s.dev === old.dev && s.ino === old.ino;
+  writerReplaces(p, 'new');
+  const err = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(removeIfSame(p, same), false);
+    assert.equal(fs.readFileSync(p, 'utf8'), 'new', 'the writer\'s file is back under its name');
+    const stage = path.join(dir, 'stage');
+    fs.writeFileSync(stage, 'kept');
+    assert.equal(replaceWith(p, same, stage), false);
+    assert.equal(fs.readFileSync(p, 'utf8'), 'new');
+    assert.ok(fs.existsSync(stage), 'the stage stays for the caller to undo');
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['clip.mp4', 'stage'], 'nothing left aside');
+    // The file that was checked: replaced and removed as asked.
+    const cur = fs.lstatSync(p);
+    assert.equal(replaceWith(p, (s) => s.ino === cur.ino, stage), true);
+    assert.equal(fs.readFileSync(p, 'utf8'), 'kept');
+    assert.deepEqual(fs.readdirSync(dir), ['clip.mp4']);
+    const now = fs.lstatSync(p);
+    assert.equal(removeIfSame(p, (s) => s.ino === now.ino), true);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  } finally {
+    console.error = err;
+  }
+});
+
+test('a writer replacing the source after the last look keeps its file, and the trash keeps the original', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  t.store.dupeMembers = () => [1, 2].map((id) => t.store.dupeFile(id));
+  const notes = [];
+  t.journal = { begin: () => 7, end: (id, ok) => notes.push(['end', id, ok]), note: (id, r) => notes.push(['note', id, r]) };
+  const b = path.join(fs.realpathSync(g), 'b.mp4');
+  const err = console.error;
+  console.error = () => {};
+  try {
+    // lstat 1: realFileOf; 2: moveFile's first look; 3: the last look.
+    await assert.rejects(afterLstat(b, 3, () => writerReplaces(b, 'newer bytes'), () => t.remove(2)), /changed/);
+  } finally {
+    console.error = err;
+  }
+  assert.equal(fs.readFileSync(b, 'utf8'), 'newer bytes', 'the writer\'s file was not unlinked');
+  assert.equal(trash.length, 0, 'no trash row for a refused move');
+  const left = fs.readdirSync(trashDir);
+  assert.equal(left.length, 1, 'the only name of the original stays in the trash folder');
+  assert.equal(fs.readFileSync(path.join(trashDir, left[0]), 'utf8'), 'same bytes');
+  assert.deepEqual(notes, [['note', 7, { keptCopy: path.join(trashDir, left[0]) }]], 'the kept copy is listed as unfinished');
+  assert.ok(!fs.readdirSync(g).some((n) => n.includes('.aside-')));
+});
+
+test('a move is refused when the copy that stays changed after it was hashed', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  t.store.dupeMembers = () => [1, 2].map((id) => t.store.dupeFile(id));
+  const a = path.join(fs.realpathSync(g), 'a.mp4');
+  const b = path.join(fs.realpathSync(g), 'b.mp4');
+  const err = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(afterLstat(b, 2, () => writerReplaces(a, 'other bytes'), () => t.remove(2, { plannedKeep: 1 })), /copy that stays changed/);
+  } finally {
+    console.error = err;
+  }
+  assert.equal(fs.readFileSync(b, 'utf8'), 'same bytes', 'the copy is still in its place');
+  assert.equal(trash.length, 0);
+  assert.deepEqual(fs.readdirSync(trashDir), [], 'the trash link is undone (the source still holds it)');
+});
+
+test('a move into the trash is journaled and closed with its trash row', async () => {
+  const { trash, t } = mergeFixture();
+  t.store.dupeMembers = () => [1, 2].map((id) => t.store.dupeFile(id));
+  const calls = [];
+  t.journal = {
+    begin: (p) => (calls.push(['begin', p.from]), 3),
+    end: (id, ok) => calls.push(['end', id, ok, trash.length]),
+    note: () => calls.push(['note']),
+    tx: (fn) => { calls.push(['tx']); return fn(); },
+  };
+  await t.remove(2);
+  assert.deepEqual(calls, [['begin', 'b.mp4'], ['tx'], ['end', 3, true, 1]], 'the journal closes in the same transaction as the trash row');
+});
+
+test('merge puts back a file a writer put at the live name after the last look', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const b = path.join(fs.realpathSync(g), 'b.mp4');
+  const err = console.error;
+  console.error = () => {};
+  try {
+    // lstat 1: realFileOf; 2 and 3: the two intact() looks.
+    await assert.rejects(afterLstat(b, 3, () => writerReplaces(b, 'newer bytes'), () => t.mergeLocal(2, 1)), /changed/);
+  } finally {
+    console.error = err;
+  }
+  assert.equal(fs.readFileSync(b, 'utf8'), 'newer bytes', 'the writer\'s file was not overwritten');
+  assert.equal(trash[0].purged_at, 1, 'the trash row is closed');
+  assert.ok(!fs.readdirSync(g).some((n) => n.startsWith('.')), 'no stage or aside name left');
+  assert.equal(fs.readdirSync(trashDir).length, 1, 'the held original stays (its live name holds other bytes now)');
 });

@@ -220,3 +220,14 @@ test('lshPairs is deterministic and pairs identical vectors', () => {
   assert.deepEqual([...p1].sort(), [...ai.lshPairs(vecs)].sort());
   assert.equal(ai.lshPairs([]).size, 0);
 });
+
+test('lshPairs stops at maxPairs and says so', () => {
+  const { lshPairs } = require('../dupe-ai');
+  const vecs = Array.from({ length: 40 }, () => Float32Array.from([1, 0, 0, 0]));
+  const all = lshPairs(vecs, { tables: 1, bits: 4 });
+  assert.equal(all.size, 780);
+  assert.equal(all.capped, false);
+  const cut = lshPairs(vecs, { tables: 1, bits: 4, maxPairs: 50 });
+  assert.equal(cut.size, 50);
+  assert.equal(cut.capped, true);
+});

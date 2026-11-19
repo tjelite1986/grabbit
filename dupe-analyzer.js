@@ -398,7 +398,9 @@ class Analyzer {
     this.dx.replaceGroups(kind, r.groups, this.now());
     if (kind !== 'photo') this.dirty[kind] = false;
     this.lastGroupAt[kind] = this.now();
-    this.lastGroupStats[kind] = { groups: r.groups.length, compared: r.compared, candidates: r.candidates, ms: this.now() - t0, at: this.now() };
+    // A capped candidate set means some similar pairs were not compared.
+    if (r.capped) this.log(`${kind} grouping compared only the first ${r.candidates} candidate pairs (memory limit); some similar copies may be missing`);
+    this.lastGroupStats[kind] = { groups: r.groups.length, compared: r.compared, candidates: r.candidates, capped: !!r.capped, ms: this.now() - t0, at: this.now() };
     return this.lastGroupStats[kind];
   }
 
