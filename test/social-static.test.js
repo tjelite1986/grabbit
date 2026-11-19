@@ -55,8 +55,9 @@ test('the Review lane is labelled, opt-in per request, and the only unclassified
   assert.match(js, /lane === 'review' \? `\$\{sep\}lane=review`/);
   // Only the review pages and links they build ask for the review lane.
   const asks = [...js.matchAll(/lane: 'review'/g)].length;
-  // The post viewer's creator and post links keep the lane like the post card's (2 of them).
-  assert.ok(asks >= 3 && asks <= 14, `lane: 'review' appears ${asks} times`);
+  // The post viewer's creator and post links keep the lane like the post card's (2 of them),
+  // and so do caption @mention links (1).
+  assert.ok(asks >= 3 && asks <= 15, `lane: 'review' appears ${asks} times`);
   assert.doesNotMatch(js, /lane=adult|audience: 'unknown'/);
 });
 
@@ -285,17 +286,21 @@ test('3.0.3: the feed is as wide as the screen allows, like Elitogram', () => {
 
 test('3.0.3: @mentions link only to the creators the post names, and a creator has Published / Mentioned in', () => {
   // The caption links an @name only through the post's own `mentions`.
-  assert.match(js, /function captionNodes\(text, mentions\)/);
+  assert.match(js, /function captionNodes\(text, mentions, lane = null\)/);
   assert.match(js, /const handle = byName\.get\(name\.toLowerCase\(\)\);\s*if \(!handle\) continue;/);
-  assert.match(js, /h\('a', \{ class: 'sg-mention', href: link\(`creator\/\$\{enc\(handle\)\}`\) \}, `@\$\{name\}`\)/);
+  assert.match(js, /h\('a', \{ class: 'sg-mention', href: link\(`creator\/\$\{enc\(handle\)\}`, lane === 'review' \? \{ lane: 'review' \} : null\) \}, `@\$\{name\}`\)/);
   // Every post caption passes them: the card, a saved edit and the full-screen viewer.
-  assert.match(js, /captionNodes\(single \? p\.caption : String\(p\.caption \|\| ''\)\.slice\(0, 400\), p\.mentions\)/);
-  assert.match(js, /fill\(captionEl, captionNodes\(p\.caption, p\.mentions\)\)/);
-  assert.match(js, /captionNodes\(caption, p\.mentions\)/);
+  assert.match(js, /captionNodes\(single \? p\.caption : String\(p\.caption \|\| ''\)\.slice\(0, 400\), p\.mentions, lane\)\)/);
+  assert.match(js, /fill\(captionEl, captionNodes\(p\.caption, p\.mentions, lane\)\)/);
+  assert.match(js, /captionNodes\(caption, p\.mentions, lane\)/);
   // Comments carry no mentions and stay plain.
   assert.match(js, /captionNodes\(c\.body\)/);
-  // The creator page: two tabs, the list from posts or mentioned.
-  assert.match(js, /\['posts', `Published · \$\{num\(posts\)\}`\], \['mentioned', `Mentioned in · \$\{num\(mentioned\)\}`\]/);
+  // The creator page: two tabs, the list from posts or mentioned. The mention
+  // count is Elitogram's (it may include posts Grabbit hides), so it is no label.
+  assert.match(js, /\['posts', `Published · \$\{num\(posts\)\}`\], \['mentioned', 'Mentioned in'\]/);
+  assert.doesNotMatch(js, /plural\(mentioned,/);
+  // A saved edit without a mentions list links no @names.
+  assert.match(js, /p\.mentions = d && Array\.isArray\(d\.mentions\) \? d\.mentions : \[\];/);
   assert.match(js, /call\(`creators\/\$\{enc\(handle\)\}\/\$\{tab\}\$\{cur \?/);
   // A limited profile offers no Follow (Elitogram refuses it).
   assert.match(js, /const follow = c\.limited \? null :/);

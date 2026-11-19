@@ -227,8 +227,9 @@
     // Caption text with #tags and @mentions as links; everything else stays text.
     // An @name links only when the post's `mentions` (what the gateway let
     // through) name a creator for it; the name is read the way Elitogram reads
-    // it (ASCII, a trailing dot dropped, case folded).
-    function captionNodes(text, mentions) {
+    // it (ASCII, a trailing dot dropped, case folded). In the Review lane a
+    // mention link keeps the lane, so a creator still in review opens there.
+    function captionNodes(text, mentions, lane = null) {
       const byName = new Map();
       for (const m of Array.isArray(mentions) ? mentions : []) {
         if (m && m.type === 'creator' && typeof m.name === 'string' && typeof m.handle === 'string' && /^[a-z0-9._~-]{1,100}$/.test(m.handle)) byName.set(m.name.toLowerCase(), m.handle);
@@ -250,7 +251,7 @@
           end = at + 1 + name.length;
           const handle = byName.get(name.toLowerCase());
           if (!handle) continue;
-          node = h('a', { class: 'sg-mention', href: link(`creator/${enc(handle)}`) }, `@${name}`);
+          node = h('a', { class: 'sg-mention', href: link(`creator/${enc(handle)}`, lane === 'review' ? { lane: 'review' } : null) }, `@${name}`);
         }
         if (at > last) out.push(s.slice(last, at));
         out.push(node);
@@ -495,7 +496,7 @@
       const source = safeHttps(p.source_url);
       const meta = p.meta && typeof p.meta === 'object' ? p.meta : null;
       const tags = meta && Array.isArray(meta.tags) ? meta.tags.filter((t) => typeof t === 'string').slice(0, 12) : [];
-      const caption = h('p', { class: 'sg-caption', hidden: !p.caption }, captionNodes(single ? p.caption : String(p.caption || '').slice(0, 400), p.mentions));
+      const caption = h('p', { class: 'sg-caption', hidden: !p.caption }, captionNodes(single ? p.caption : String(p.caption || '').slice(0, 400), p.mentions, lane));
       // In the feed the caption shows three lines; a tap shows the rest (a tag link still opens the tag).
       if (!single) caption.addEventListener('click', (e) => { if (!e.target.closest('a')) caption.classList.toggle('sg-open'); });
 
@@ -530,9 +531,10 @@
           try {
             const d = await call(`posts/${id}`, { method: 'PATCH', body: { caption: text.value }, lane });
             p.caption = d && typeof d.caption === 'string' ? d.caption : text.value;
-            // An edit relinks the mentions upstream; keep the old ones only if none came back.
-            if (d && Array.isArray(d.mentions)) p.mentions = d.mentions;
-            fill(captionEl, captionNodes(p.caption, p.mentions));
+            // An edit relinks the mentions upstream. No list back means nothing
+            // was checked for the new caption, so no @name links (fail closed).
+            p.mentions = d && Array.isArray(d.mentions) ? d.mentions : [];
+            fill(captionEl, captionNodes(p.caption, p.mentions, lane));
             captionEl.hidden = !p.caption;
             closeSheet();
             say('Caption saved');
@@ -1086,7 +1088,7 @@
         r.like = like;
         setDl(0);
         const caption = String(p.caption || '');
-        const capEl = caption ? h('p', { class: 'sg-reel-cap' }, captionNodes(caption, p.mentions)) : null;
+        const capEl = caption ? h('p', { class: 'sg-reel-cap' }, captionNodes(caption, p.mentions, lane)) : null;
         const capMore = caption.length > 90 || caption.includes('\n')
           ? h('button', { type: 'button', class: 'sg-reel-more', 'aria-expanded': 'false', onclick: (e) => {
             const open = info.classList.toggle('sg-open');
@@ -1427,10 +1429,12 @@
         const posts = Number(c.post_count) || 0;
         const mentioned = Number(c.mentioned_count) || 0;
         // Published first, unless the creator has only been mentioned (a creator
-        // made for an @name usually has no posts of its own).
+        // made for an @name usually has no posts of its own). Elitogram's
+        // mention count may include posts Grabbit hides (authors it has as 18+),
+        // so it only decides whether the tab exists and is never shown as a number.
         const tab = asked === 'mentioned' || (asked !== 'posts' && !posts && mentioned) ? 'mentioned' : 'posts';
         const tabs = mentioned || tab === 'mentioned'
-          ? chips([['posts', `Published · ${num(posts)}`], ['mentioned', `Mentioned in · ${num(mentioned)}`]], tab, (v) => link(`creator/${enc(handle)}`, { tab: v, lane }))
+          ? chips([['posts', `Published · ${num(posts)}`], ['mentioned', 'Mentioned in']], tab, (v) => link(`creator/${enc(handle)}`, { tab: v, lane }))
           : null;
         fill(body, tabs, pager(tileGrid(), (cur) => call(`creators/${enc(handle)}/${tab}${cur ? `?cursor=${enc(cur)}` : ''}`, { lane }), (t, c) => tile(t, lane, null, c),
           { emptyText: tab === 'mentioned' ? 'No posts mention this creator.' : 'No posts here.' }));
@@ -1451,7 +1455,7 @@
           h('div', { class: 'sg-profile-text' },
             h('h1', null, c.display_name || c.handle),
             h('p', { class: 'muted' }, c.limited
-              ? `@${c.handle} · ${plural(mentioned, 'mention', 'mentions')}`
+              ? `@${c.handle}`
               : `@${c.handle} · ${plural(c.post_count, 'post', 'posts')} · ${plural(c.follower_count, 'follower', 'followers')}`),
             c.limited ? h('p', { class: 'muted small sg-limited' }, 'Known only from mentions in other posts. Not classified yet.') : null,
             c.bio ? h('p', { class: 'sg-bio' }, c.bio) : null,
