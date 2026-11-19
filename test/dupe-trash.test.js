@@ -79,17 +79,19 @@ test('a move across mounts (EXDEV) copies through a .part, then unlinks the sour
     trashAdd: (t) => (trash.push(t), trash.length),
     fileGoneNow: (id) => gone.add(id),
   };
-  const rename = fs.renameSync;
+  // A move is a hard link plus an unlink; across mounts the link fails with
+  // EXDEV (the .part publish inside the trash folder is on one mount).
+  const link = fs.linkSync;
   let exdev = 0;
-  fs.renameSync = (from, to) => {
+  fs.linkSync = (from, to) => {
     if (!path.basename(from).startsWith('.')) { exdev++; const e = new Error('cross-device'); e.code = 'EXDEV'; throw e; }
-    return rename(from, to);
+    return link(from, to);
   };
   try {
     const t = new DupeTrash({ store, trashDir: path.join(dir, 'trash'), rootOf: () => ({ owner: 'grabbit' }), now: () => 5 });
     await t.remove(2);
   } finally {
-    fs.renameSync = rename;
+    fs.linkSync = link;
   }
   assert.equal(exdev, 1);
   assert.ok(!fs.existsSync(path.join(g, 'b.mp4')));

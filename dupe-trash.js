@@ -20,13 +20,18 @@ const HOLD_MS = 30 * 24 * 60 * 60 * 1000;
 
 class TrashError extends Error {}
 
+// An import folder holds copies waiting for an app to take them in. It is
+// marked `import` (and names its library in `importFor` when that is
+// mounted); either marks it, so an unset destination still counts.
+const isImport = (r) => Boolean(r && (r.import || r.importFor));
+
 // rootOf(path) -> the scan root candidate ({ owner, importFor, ... }) or null.
 function canRemoveFrom(member, members, rootOf) {
   const r = rootOf(member.root);
   if (!r) return { ok: false, why: 'Unknown folder' };
   if (r.owner === 'grabbit') return { ok: true };
   if (r.importFor && members.some((m) => m.id !== member.id && m.root === r.importFor)) return { ok: true };
-  if (r.importFor) return { ok: false, why: `Kept: ${r.app || 'the app'} has not imported it yet` };
+  if (isImport(r)) return { ok: false, why: `Kept: ${r.app || 'the app'} has not imported it yet` };
   return { ok: false, why: `Kept: ${r.app || 'an app'} reads this folder` };
 }
 
@@ -51,7 +56,7 @@ function planGroup(members, rootOf) {
   const keep = new Set(fixed.map((m) => m.id));
   // A copy waiting in an import folder is not an anchor: the app may still
   // move, reject or delete it. One copy Grabbit controls stays as well.
-  const anchors = fixed.filter((m) => !(rootOf(m.root) || {}).importFor);
+  const anchors = fixed.filter((m) => !isImport(rootOf(m.root)));
   if (!anchors.length && removable.length) keep.add(removable[0].id);
   // An item keeps at least one linked copy.
   for (const m of removable) {
@@ -84,7 +89,7 @@ function checkRemoval(member, members, rootOf) {
   if (members.length < 2) throw new TrashError('This is the last copy');
   const c = canRemoveFrom(member, members, rootOf);
   if (!c.ok) throw new TrashError(c.why);
-  const lasting = members.filter((o) => o.id !== member.id && !(rootOf(o.root) || {}).importFor);
+  const lasting = members.filter((o) => o.id !== member.id && !isImport(rootOf(o.root)));
   if (!lasting.length) throw new TrashError('Kept: the other copies are only waiting in an import folder');
   if (member.link === 'filename' && member.item_id != null) {
     const other = members.some((o) => o.id !== member.id && o.link === 'filename' && o.item_id === member.item_id);
@@ -135,8 +140,17 @@ async function copyVerified(from, to, sha256 = null) {
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     const digest = h.digest('hex');
     if (sha256 && digest !== sha256) throw new TrashError('The copy does not match the original; nothing changed');
-    if (fs.existsSync(to)) throw new TrashError('Target already exists');
-    fs.renameSync(part, to);
+    // Publish without clobbering: a link fails on an existing name; rename
+    // is the fallback only where the filesystem refuses hard links.
+    try {
+      fs.linkSync(part, to);
+      fs.unlinkSync(part);
+    } catch (e) {
+      if (e.code === 'EEXIST') throw new TrashError('Target already exists');
+      if (e.code !== 'EPERM' && e.code !== 'ENOTSUP' && e.code !== 'EXDEV') throw e;
+      if (taken(to)) throw new TrashError('Target already exists');
+      fs.renameSync(part, to);
+    }
   } catch (e) {
     try { fs.unlinkSync(part); } catch {}
     throw e;
@@ -160,16 +174,34 @@ async function placeCopy(from, to, sha256 = null) {
 // Moves `from` to `to`: a rename where possible, else a verified copy and an
 // unlink. The source goes last, so a failure at any step leaves it in place.
 async function moveFile(from, to, sha256 = null) {
-  if (fs.existsSync(to)) throw new TrashError('Target already exists');
+  if (taken(to)) throw new TrashError('Target already exists');
+  // A hard link never replaces an existing name (EEXIST), unlike rename,
+  // so a file or symlink that appears at `to` meanwhile is never clobbered.
   try {
-    fs.renameSync(from, to);
+    fs.linkSync(from, to);
+    fs.unlinkSync(from);
     return;
   } catch (e) {
-    if (e.code !== 'EXDEV') throw e;
+    if (e.code === 'EEXIST') throw new TrashError('Target already exists');
+    if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
   }
   await copyVerified(from, to, sha256);
   fs.unlinkSync(from);
 }
+
+// True when the name exists in any form, a dangling symlink included
+// (existsSync follows links and reports those as free).
+function taken(p) {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch (e) {
+    if (e.code === 'ENOENT') return false;
+    throw e;
+  }
+}
+
+const sameNode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 
 class DupeTrash {
   // holdMs: a number, or a function returning one (the retention setting);
@@ -235,7 +267,7 @@ class DupeTrash {
     // deleted by its app, so it cannot be the copy that stays.
     const kr = this.rootOf(keepRow.root);
     if (!kr) throw new TrashError('The copy that stays is in an unknown folder');
-    if (kr.importFor) throw new TrashError(`The copy that stays is only waiting in ${kr.app || 'an app'}'s import folder; keep another copy`);
+    if (isImport(kr)) throw new TrashError(`The copy that stays is only waiting in ${kr.app || 'an app'}'s import folder; keep another copy`);
     const doomed = realFileOf(row);
     const kept = realFileOf(keepRow);
     if (doomed.stat.size !== row.bytes || kept.stat.size !== keepRow.bytes) throw new TrashError('A file changed since the scan; scan again first');
@@ -299,6 +331,15 @@ class DupeTrash {
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch {}
       throw e instanceof TrashError ? e : new TrashError(`The original could not be kept in the trash (${e.code || e.message}); nothing changed`);
+    }
+    // Copying to another disk can take a while: if a writer replaced the
+    // file meanwhile, the held copy is of the old bytes, so stop here.
+    let now = null;
+    try { now = fs.lstatSync(doomed.abs); } catch {}
+    if (!now || !now.isFile() || !sameNode(now, doomed.stat) || now.size !== doomed.stat.size || now.mtimeMs !== doomed.stat.mtimeMs) {
+      try { fs.unlinkSync(tmp); } catch {}
+      try { fs.unlinkSync(held); } catch {}
+      throw new TrashError('The file changed while it was being merged; nothing changed, scan again');
     }
     const id = this.record(row, trashName, { by, keepRow, reason: 'merged' });
     try {
@@ -442,11 +483,12 @@ class DupeTrash {
     // missing; it is staged beside it first (the trash may be on another disk).
     const meta = this.mergeOf ? this.mergeOf(t.id) : null;
     let replaceLink = false;
+    let live = null;
     if (meta && meta.keep_root && meta.keep_rel) {
       try {
-        const live = fs.lstatSync(abs);
+        live = fs.lstatSync(abs);
         const keep = fs.statSync(path.resolve(meta.keep_root, meta.keep_rel));
-        replaceLink = live.isFile() && live.ino === keep.ino && live.dev === keep.dev;
+        replaceLink = live.isFile() && sameNode(live, keep);
       } catch {}
     }
     let target = abs;
@@ -455,12 +497,23 @@ class DupeTrash {
       // a crash at any step leaves at worst one extra copy, never none.
       const stage = path.join(path.dirname(abs), `.${path.basename(abs).slice(0, 180)}.restore-${rand()}`);
       await placeCopy(from, stage, t.sha256);
+      // The staging may have taken a while: a file written to that name
+      // meanwhile is newer than the link we checked and must not be replaced.
+      let now = null;
+      try { now = fs.lstatSync(abs); } catch {}
+      if (!now || !sameNode(now, live)) {
+        try { fs.unlinkSync(stage); } catch {}
+        throw new TrashError('The file in its place changed while restoring; the trash still holds the original, try again');
+      }
       try {
         fs.renameSync(stage, abs);
       } catch (e) {
         try { fs.unlinkSync(stage); } catch {}
         throw new TrashError(`The original could not be put back (${e.code || e.message}); the trash still holds it`);
       }
+      // Recorded before the held copy goes, so a crash in between leaves an
+      // extra copy in the trash folder rather than an active row with none.
+      this.store.trashRestored(t.id, this.now());
       try {
         fs.unlinkSync(from);
       } catch (e) {
@@ -469,7 +522,7 @@ class DupeTrash {
     } else {
       // A newer file in its place is never overwritten: the copy comes back
       // beside it as "name (restored).ext", "name (restored 2).ext", ...
-      for (let n = 1; fs.existsSync(target); n++) {
+      for (let n = 1; taken(target); n++) {
         if (n > 50) throw new TrashError('Too many files with that name are back in its place');
         const ext = path.extname(abs);
         target = path.join(path.dirname(abs), `${path.basename(abs, ext)} (restored${n > 1 ? ` ${n}` : ''})${ext}`);
@@ -477,7 +530,7 @@ class DupeTrash {
       await moveFile(from, target, t.sha256);
     }
     const restoredRel = path.relative(root, target);
-    this.store.trashRestored(t.id, this.now());
+    if (!replaceLink) this.store.trashRestored(t.id, this.now());
     try { this.store.fileSeen(t.root, restoredRel, fs.statSync(target), this.now()); } catch {}
     return { ...t, restoredRel, renamed: target !== abs };
   }

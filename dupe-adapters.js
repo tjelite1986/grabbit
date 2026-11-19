@@ -26,6 +26,11 @@
 
 const fs = require('fs');
 
+function refBody(ref) {
+  const [id, uid] = String(ref).split(':');
+  return uid ? { id: Number(id), uid } : { id: Number(id) };
+}
+
 class AdapterError extends Error {
   constructor(message, { status = 409, fix = null, stalled = false } = {}) {
     super(message);
@@ -86,6 +91,13 @@ class AppAdapter {
       });
     } catch (e) {
       clearTimeout(timer);
+      // A timeout before the answer's headers is no proof that nothing
+      // happened: the app may have done the change and been slow to reply.
+      // Changes are then treated like an answer that stopped half way, so
+      // the operation stays pending for the owner to check.
+      if (ctrl.signal.aborted && method !== 'GET' && route !== 'lookup') {
+        throw new AdapterError(`${this.app} did not answer in time`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.`, stalled: true });
+      }
       throw new AdapterError(`${this.app} is not reachable right now`, { status: 424, fix: `Check that ${this.app} is running; nothing was changed.` });
     }
     // The timeout covers the body too: an app that sends headers and then
@@ -133,8 +145,11 @@ class AppAdapter {
     return this.call('POST', 'link', { keep: this.appPath(keepRel), drop: this.appPath(dropRel), sha256 });
   }
 
-  restore(id) { return this.call('POST', 'restore', { id: Number(id) }); }
-  purge(id) { return this.call('POST', 'purge', { id: Number(id) }); }
+  // A held entry is named by the app's id plus the random uid its link
+  // answer carried ("<id>:<uid>"), so an id the app reuses after a database
+  // restore never points at another merge. The app refuses a missing uid.
+  restore(ref) { return this.call('POST', 'restore', refBody(ref)); }
+  purge(ref) { return this.call('POST', 'purge', refBody(ref)); }
 
   async cache() {
     if (!this.caps.has('cache')) return null;

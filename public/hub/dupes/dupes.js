@@ -802,7 +802,7 @@
         ], [{ label: `Delete ${num(s.files)} files`, value: true, danger: true }]);
         if (!ok) return;
         try {
-          const out = await post('trash/empty', { expect: { files: s.files, bytes: s.bytes } });
+          const out = await post('trash/empty', { expect: { files: s.files, bytes: s.bytes, fingerprint: s.fingerprint } });
           toast(`Trash emptied: ${num(out.done)} files, ${bytes(out.bytes)} freed${out.refused.length ? `; ${num(out.refused.length)} refused` : ''}.`);
           viewTrash(body, generation, r);
         } catch (e) { toast(e.message); }

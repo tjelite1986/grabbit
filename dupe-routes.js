@@ -90,7 +90,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
   r.post('/trash/empty', wrap(async (req) => {
     const e = (req.body || {}).expect;
     if (!e || typeof e !== 'object') throw new DupeError('Confirm how many files and bytes you are deleting');
-    return service.trashEmpty({ files: Number(e.files), bytes: Number(e.bytes) }, who(req));
+    return service.trashEmpty({ files: Number(e.files), bytes: Number(e.bytes), fingerprint: typeof e.fingerprint === 'string' ? e.fingerprint : null }, who(req));
   }));
   // A held copy in Grabbit's own trash, for the preview. The file is found
   // from the trash row (never from the request), inside the trash folder.

@@ -700,7 +700,7 @@ class DupeService {
       try {
         const r = await ad.link(target.rel, m.rel, m.sha256);
         const tid = this.dx.appTrashAdd({
-          adapter: ad.id, ref: r.id, root: m.root, rel: m.rel, sha256: m.sha256, bytes: m.bytes,
+          adapter: ad.id, ref: r.uid ? `${r.id}:${r.uid}` : String(r.id), root: m.root, rel: m.rel, sha256: m.sha256, bytes: m.bytes,
           keep_root: target.root, keep_rel: target.rel, reason: 'Merged in the app (both posts kept)', kind: m.kind, audience: m.audience, app: ad.app, by,
         }, this.now());
         this.dx.opEnd(opId, true, { result: r }, this.now());
@@ -800,7 +800,10 @@ class DupeService {
 
   trashSummary() {
     const all = this.trashEntries();
-    return { files: all.length, bytes: all.reduce((n, t) => n + t.bytes, 0), retentionDays: this.cfg().trashRetentionDays };
+    // The exact set of entries, so "empty" deletes only what the owner saw:
+    // another set with the same count and size gives another fingerprint.
+    const fingerprint = crypto.createHash('sha256').update(all.map((t) => t.id).sort().join(',')).digest('hex').slice(0, 32);
+    return { files: all.length, bytes: all.reduce((n, t) => n + t.bytes, 0), fingerprint, retentionDays: this.cfg().trashRetentionDays };
   }
 
   trashList(q = {}) {
@@ -909,7 +912,7 @@ class DupeService {
   // Empties the whole trash, if it still holds what the owner confirmed.
   async trashEmpty(expect, by) {
     const s = this.trashSummary();
-    if (!expect || Number(expect.files) !== s.files || Number(expect.bytes) !== s.bytes) {
+    if (!expect || Number(expect.files) !== s.files || Number(expect.bytes) !== s.bytes || expect.fingerprint !== s.fingerprint) {
       throw new DupeError('The trash changed since you opened it; check it again', 409);
     }
     const ids = this.trashEntries().map((t) => t.id);
@@ -928,7 +931,11 @@ class DupeService {
     return this.whenFree('retention purge', async () => {
       let n = 0;
       for (const e of this.dx.appTrashHeld()) {
-        if (e.at + days * 86400000 > this.now()) continue;
+        // Re-read each time: switching to manual cleanup during a slow purge
+        // stops the remaining requests.
+        const d = this.cfg().trashRetentionDays;
+        if (!d) break;
+        if (e.at + d * 86400000 > this.now()) continue;
         try {
           await this.deleteOne(`a${e.id}`, 'retention');
           n++;
@@ -1081,7 +1088,12 @@ class DupeService {
           if (action === 'link' && where) {
             try {
               const keepAbs = path.join(o.root, o.rel);
-              const ks = fs.statSync(keepAbs);
+              // The copy linked in must be a plain file inside its own folder:
+              // never a symlink, and never reached through one.
+              const ks = fs.lstatSync(keepAbs);
+              if (!ks.isFile()) throw new Error('the existing copy is not a plain file');
+              const realRoot = fs.realpathSync(o.root);
+              if (fs.realpathSync(keepAbs) !== path.join(realRoot, path.relative(o.root, keepAbs))) throw new Error('the existing copy is reached through a symlink');
               if (ks.dev !== st.dev) throw new Error('different disks');
               const tmp = `${abs}.dedupe-${process.pid}`;
               fs.linkSync(keepAbs, tmp);

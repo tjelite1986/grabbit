@@ -144,8 +144,8 @@ test('trash routes take only trash ids and need an explicit expectation to empty
   assert.equal(s.service.calls.filter((c) => ['trashRestore', 'trashDelete', 'trashEmpty'].includes(c.name)).length, 0);
   await s.post('/trash/restore', { all: true });
   assert.deepEqual(s.service.calls.find((c) => c.name === 'trashRestore').args, [['g1', 'a2'], 'tester']);
-  await s.post('/trash/empty', { expect: { files: '3', bytes: 10 } });
-  assert.deepEqual(s.service.calls.find((c) => c.name === 'trashEmpty').args[0], { files: 3, bytes: 10 });
+  await s.post('/trash/empty', { expect: { files: '3', bytes: 10, fingerprint: 'abc' } });
+  assert.deepEqual(s.service.calls.find((c) => c.name === 'trashEmpty').args[0], { files: 3, bytes: 10, fingerprint: 'abc' });
 });
 
 test('errors map to 4xx with a message, never 5xx', async (t) => {

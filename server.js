@@ -3475,10 +3475,10 @@ const DUPE_ROOT_CANDIDATES = [
   { path: NAVIDROME_KIDS_DIR, label: 'Kids music library', owner: 'grabbit', app: 'Navidrome' },
   { path: AUDIOBOOKS_DIR, label: 'Audiobooks', owner: 'grabbit' },
   { path: TIKSHORTIS_ROOT, label: 'TikShortis', owner: 'app', app: 'TikShortis' },
-  { path: ELITE_ROOT, label: '18+ app import', owner: 'app', app: 'Adshortis', adult: true, importFor: ADSHORTIS_LIBRARY_DIR },
-  { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform', importFor: PLATFORM_LIBRARY_DIR },
-  { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts' },
-  { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram', importFor: EGRAM_LIBRARY_DIR },
+  { path: ELITE_ROOT, label: '18+ app import', owner: 'app', app: 'Adshortis', adult: true, import: true, importFor: ADSHORTIS_LIBRARY_DIR },
+  { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform', import: true, importFor: PLATFORM_LIBRARY_DIR },
+  { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts', import: true },
+  { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram', import: true, importFor: EGRAM_LIBRARY_DIR },
   { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
   { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram' },
   { path: PLATFORM_LIBRARY_DIR, label: 'Platform library', owner: 'app', app: 'Platform' },
@@ -4634,6 +4634,7 @@ const trashOff = (res) => {
 };
 const trashError = (res, e, what) => {
   if (e instanceof TrashError) return res.status(409).json({ ok: false, error: e.message });
+  if (e && e.name !== 'TypeError' && e.status === 409) return res.status(409).json({ ok: false, error: e.message });
   console.error(`dupes: ${what} failed (${e.message})`);
   res.status(500).json({ ok: false, error: `${what} failed` });
 };
@@ -4691,7 +4692,10 @@ app.get('/api/hub/dupes/trash', (req, res) => {
 app.post('/api/hub/dupes/trash/:id/restore', async (req, res) => {
   if (!metaStore(res) || trashOff(res)) return;
   try {
-    const t = await DUPE_TRASH.restore(req.params.id);
+    // Same lock as the v2 trash actions, so a delete or a retention purge
+    // never runs while this restore is still staging the copy.
+    const run = () => DUPE_TRASH.restore(req.params.id);
+    const t = DUPE_SERVICE ? await DUPE_SERVICE.exclusive('restore', run) : await run();
     console.log(`dupes: trash entry ${t.id} restored to ${t.rel} by ${actorOf(req) || 'owner'}`);
     res.json({ ok: true });
   } catch (e) {
