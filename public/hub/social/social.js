@@ -434,7 +434,9 @@
       if (car) {
         const m = media[0];
         const ratio = m.width && m.height ? m.width / m.height : 1;
-        stage.style.aspectRatio = String(Math.max(0.8, Math.min(1.91, ratio)));
+        // Tall images keep more of their height (down to 9:16); the feed's
+        // max-height still stops a post at one screen.
+        stage.style.aspectRatio = String(Math.max(0.5625, Math.min(1.91, ratio)));
         setDl(0);
       }
 

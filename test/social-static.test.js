@@ -271,3 +271,14 @@ test('Review: "Choose all shown" and "Choose whole lane", and big choices go out
   assert.match(js, /aud === 'general' && handles\.length > 1 && !confirm\(/);
   assert.match(css, /\.sg-review-all \{/);
 });
+
+test('3.0.3: the feed is as wide as the screen allows, like Elitogram', () => {
+  // No fixed 560px column, and the 1100px page cap is lifted on the feed.
+  assert.doesNotMatch(css, /\.sg-feed \{[^}]*max-width: 560px;/);
+  assert.match(css, /\.sg-root:has\(\.sg-feed\) \{ max-width: none; \}/);
+  // The only cap is a 1.91:1 image at the tallest media height.
+  assert.match(css, /max-width: max\(560px, calc\(\(100dvh - var\(--sg-snap-top, 0px\) - 210px\) \* 1\.91\)\);/);
+  // Media are never cropped: contain, and tall images keep down to 9:16.
+  assert.match(css, /\.sg-slide img, \.sg-slide video \{[^}]*object-fit: contain;/);
+  assert.match(js, /Math\.max\(0\.5625, Math\.min\(1\.91, ratio\)\)/);
+});
