@@ -108,6 +108,9 @@ class ModelManager {
     const spec = MODELS[id];
     if (!spec) throw new Error('Unknown model');
     if (this.installed(id)) return { already: true };
+    // Only a model whose exact bytes are pinned here may be fetched: ONNX
+    // Runtime parses the file natively, so an unverified file is not loaded.
+    if (!spec.sha256) throw new Error(`The ${spec.id} model has no pinned checksum in this build yet`);
     if (this.downloading) throw new Error('A model download is already running');
     this.downloading = id;
     this.progress = { bytes: 0, total: spec.bytes };
