@@ -176,3 +176,15 @@ test('the pager says "Loading ..." only while a page is on its way', () => {
   assert.match(body, /fill\(more, done && !count \? h\('p', \{ class: 'muted' \}, emptyText\) : null\);/);
   assert.match(body, /finally \{\s*busy = false;\s*more\.removeAttribute\('aria-busy'\);/);
 });
+
+test('Review: "Choose all shown" picks every loaded creator, and big choices go out in parts of 200', () => {
+  assert.match(js, /'aria-label': 'Choose all creators shown'/);
+  assert.match(js, /h\('label', \{ class: 'sg-review-all small' \}, all, 'Choose all shown'\)/);
+  assert.match(js, /all\.indeterminate = selected\.size > 0 && selected\.size < shown;/);
+  // The server takes at most 200 handles per request.
+  assert.match(js, /for \(let i = 0; i < handles\.length; i \+= 200\)/);
+  assert.match(js, /handles: handles\.slice\(i, i \+ 200\)/);
+  // More than one creator marked general asks first, like 18+ always does.
+  assert.match(js, /aud === 'general' && handles\.length > 1 && !confirm\(/);
+  assert.match(css, /\.sg-review-all \{/);
+});

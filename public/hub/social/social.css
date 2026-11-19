@@ -116,6 +116,7 @@
   padding: 10px 0; margin: 0 0 8px; background: var(--bg);
 }
 .sg-review-bar .muted { margin-right: auto; }
+.sg-review-all { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .sg-review-list { display: grid; gap: 10px; }
 .sg-review-item {
   display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr) auto; align-items: center; gap: 12px;

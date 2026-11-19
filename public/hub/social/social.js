@@ -1070,21 +1070,32 @@
         const handles = typeof handlesOf === 'function' ? handlesOf() : handlesOf;
         if (!handles.length) return say('Choose at least one creator');
         if (aud === 'adult' && !confirm(`Mark ${handles.length} creator(s) 18+? They leave Social & Photos.`)) return;
+        if (aud === 'general' && handles.length > 1 && !confirm(`Mark ${handles.length} creators general? Their posts show up in every Social & Photos page.`)) return;
         btn.disabled = true;
+        // Grabbit takes at most 200 handles per request, so a large choice is sent in parts.
+        const d = { updated: [], skipped: [], mirror_failed: [] };
         try {
-          const r = await fetch('/api/egram/creators-classify', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'content-type': 'application/json', accept: 'application/json' },
-            body: JSON.stringify({ handles, audience: aud, lane: 'review' }),
-          });
-          const d = await r.json().catch(() => null);
-          if (!r.ok || !d || d.ok === false) throw new Error((d && d.error) || `HTTP ${r.status}`);
-          const skipped = (d.skipped || []).length;
-          const unsaved = (d.mirror_failed || []).length;
+          for (let i = 0; i < handles.length; i += 200) {
+            const r = await fetch('/api/egram/creators-classify', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'content-type': 'application/json', accept: 'application/json' },
+              body: JSON.stringify({ handles: handles.slice(i, i + 200), audience: aud, lane: 'review' }),
+            });
+            const part = await r.json().catch(() => null);
+            if (!r.ok || !part || part.ok === false) throw new Error((part && part.error) || `HTTP ${r.status}`);
+            for (const k of Object.keys(d)) d[k].push(...(part[k] || []));
+          }
+          const skipped = d.skipped.length;
+          const unsaved = d.mirror_failed.length;
           say(`${d.updated.length} classified ${aud === 'adult' ? '18+' : 'general'}${skipped ? `, ${skipped} skipped` : ''}${unsaved ? `, ${unsaved} not saved in Grabbit (try again)` : ''}`);
-          if (after) after(d);
-        } catch (err) { fail(err); } finally { btn.disabled = false; }
+        } catch (err) {
+          fail(d.updated.length ? new Error(`${err.message} (${d.updated.length} were classified before this)`) : err);
+        } finally {
+          btn.disabled = false;
+          // Parts that went through are shown as done even when a later part failed.
+          if (after && d.updated.length) after(d);
+        }
       };
       return [
         h('button', { type: 'button', class: 'btn small', onclick: go('general') }, 'Mark general'),
@@ -1101,14 +1112,31 @@
       const selected = new Set();
       const count = h('span', { class: 'muted small' }, '0 chosen');
       const box = h('div', { class: 'sg-review-list' });
+      // "Choose all shown" covers the creators loaded so far, not the whole lane.
+      const all = h('input', { type: 'checkbox', 'aria-label': 'Choose all creators shown' });
+      const picks = () => [...box.querySelectorAll('.sg-review-who input[type="checkbox"]')];
+      const sync = () => {
+        const shown = picks().length;
+        count.textContent = `${selected.size} chosen`;
+        all.checked = shown > 0 && selected.size === shown;
+        all.indeterminate = selected.size > 0 && selected.size < shown;
+      };
+      all.addEventListener('change', () => {
+        for (const p of picks()) {
+          p.checked = all.checked;
+          const hnd = p.closest('[data-handle]').dataset.handle;
+          if (all.checked) selected.add(hnd); else selected.delete(hnd);
+        }
+        sync();
+      });
       const bar = canClassify()
-        ? h('div', { class: 'sg-review-bar' }, count, classifyCreatorButtons(() => [...selected], (d) => {
+        ? h('div', { class: 'sg-review-bar' }, h('label', { class: 'sg-review-all small' }, all, 'Choose all shown'), count, classifyCreatorButtons(() => [...selected], (d) => {
           for (const hnd of d.updated || []) {
             const row = box.querySelector(`[data-handle="${CSS.escape(hnd)}"]`);
             if (row) row.remove();
             selected.delete(hnd);
           }
-          count.textContent = `${selected.size} chosen`;
+          sync();
         }))
         : h('p', { class: 'muted small' }, 'Your Elitogram account cannot classify creators (it needs the profiles permission).');
       return [
@@ -1124,8 +1152,10 @@
           const pick = h('input', { type: 'checkbox', 'aria-label': `Choose ${c.handle}`, disabled: !canClassify() });
           pick.addEventListener('change', () => {
             if (pick.checked) selected.add(c.handle); else selected.delete(c.handle);
-            count.textContent = `${selected.size} chosen`;
+            sync();
           });
+          // A new page of rows arrives unchosen: "all" turns partial once it is in the list.
+          queueMicrotask(sync);
           return h('div', { class: 'sg-review-item', 'data-handle': c.handle },
             h('label', { class: 'sg-review-who' }, pick, avatar(c.avatar, c.display_name || c.handle, 'review', 40),
               h('span', { class: 'sg-review-name' }, h('b', null, c.handle), h('span', { class: 'muted small' }, plural(c.post_count, 'post', 'posts')))),
