@@ -81,6 +81,16 @@ test('a pass finds exact duplicates across roots and links only unique file name
   assert.equal(st.totals.hashed, 3);
 });
 
+test('a held original in another app\'s .grabbit-dedupe-trash is never scanned', async (t) => {
+  const { s, app } = setup(t);
+  write(path.join(app, 'main', 'creator', 'kept.mp4'), 'merged bytes');
+  write(path.join(app, 'main', '.grabbit-dedupe-trash', '7-dropped.mp4'), 'merged bytes');
+  const sc = scanner(s, planRoots([{ path: app, label: 'App', owner: 'app' }]));
+  assert.equal(await sc.pass(), true);
+  assert.equal(s.dupeGroups().total, 0);
+  assert.equal(sc.status().totals.files, 1);
+});
+
 test('the scan never writes, renames or removes anything in a scanned folder', async (t) => {
   const { s, own, app } = setup(t);
   write(path.join(app, 'creator', 'a.mp4'), 'x'.repeat(3 * 1024 * 1024));

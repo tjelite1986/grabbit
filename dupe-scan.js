@@ -54,6 +54,11 @@ function mediaNames(names) {
   });
 }
 
+// Folders whose files are held by another app, not live copies: TikShortis
+// keeps the original of a merged clip in .grabbit-dedupe-trash until it is
+// purged. Scanning it would show every merge as a new duplicate.
+const SKIP_DIRS = new Set(['.grabbit-dedupe-trash']);
+
 const realOrNull = (p) => {
   try {
     return fs.realpathSync(p);
@@ -262,6 +267,7 @@ class DupeScanner {
       for await (const d of dir) {
         if (++n % 200 === 0) await new Promise((res) => setImmediate(res));
         if (d.isDirectory()) {
+          if (SKIP_DIRS.has(d.name)) continue;
           const child = path.join(abs, d.name);
           if (r.excluded && r.excluded.some((e) => inside(child, e) || inside(realOrNull(child) || child, e))) continue;
           stack.push(path.join(relDir, d.name));
@@ -402,4 +408,4 @@ async function openReadOnly(file) {
   return fs.promises.open(file, flags);
 }
 
-module.exports = { DupeScanner, planRoots, mediaNames, STATE_KEY, LAST_PASS_KEY };
+module.exports = { DupeScanner, planRoots, mediaNames, STATE_KEY, LAST_PASS_KEY, SKIP_DIRS };

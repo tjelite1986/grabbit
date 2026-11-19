@@ -93,10 +93,10 @@ test('hub.js passes the menu hooks to the module and tik.js calls them', () => {
   }
 });
 
-test('version labels and the service worker cache name moved to 3.0.3', () => {
-  assert.match(read('hub/index.html'), /<span id="version">v3\.0\.3<\/span>/);
-  // 3.0.3 changed the Social & Photos files in the shell, so the cache moved on.
-  assert.match(read('sw.js'), /const CACHE = 'grabbit-v15';/);
+test('version labels and the service worker cache name moved to 3.0.4', () => {
+  assert.match(read('hub/index.html'), /<span id="version">v3\.0\.4<\/span>/);
+  // 3.0.4 added the duplicate manager's files to the shell, so the cache moved on.
+  assert.match(read('sw.js'), /const CACHE = 'grabbit-v16';/);
 });
 
 test('3.0.2: sheets ride on top of the on-screen keyboard (visualViewport)', () => {
