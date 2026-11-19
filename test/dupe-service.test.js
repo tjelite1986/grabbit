@@ -1283,3 +1283,25 @@ test('a list counts only the answers of the fresh run it waited for, never a lat
   assert.equal(list.items.length, 0, 'an answer of run A does not count for request B');
   assert.equal(svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audRun: 0 }).items.length, 0, 'a failed refresh counts no answer');
 });
+
+test('two list requests in the same clock tick never share a run: the later one asks again', async (t) => {
+  const { svc, state, shown } = await mixedFixture(t);
+  let release;
+  state.hold = new Promise((r) => { release = r; });
+  // Request A sends its lookup while the post is general (the clock does not move).
+  const a = svc.refreshAppAudience({ fresh: true });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(state.asked, 1);
+  // The post turns 18+, then request B arrives in the same tick.
+  state.aud = 'adult';
+  const b = svc.refreshAppAudience({ fresh: true });
+  release();
+  const runA = await a;
+  state.hold = null;
+  const runB = await b;
+  assert.notEqual(runB, runA, 'B runs its own refresh');
+  assert.equal(state.asked, 2, 'B asks egram itself');
+  const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audRun: runB });
+  assert.equal(list.items.length, 0, 'B never lists on the answer to A\'s question');
+  assert.equal(shown(), 0);
+});

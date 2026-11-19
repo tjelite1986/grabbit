@@ -284,13 +284,12 @@ class DupeService {
   // counts as 18+. An earlier answer still serves a preview for up to
   // AUD_TTL_MS; the list itself never rests on one.
   async refreshAppAudience({ fresh = false } = {}) {
-    const t0 = this.now();
-    // One run at a time. A fresh call joins only a fresh run that began
-    // after it did; otherwise it waits for the run in progress and starts
-    // its own.
+    // One run at a time. A fresh call never joins a run: a run may have sent
+    // its lookups before this call began (clock ticks are too coarse to
+    // tell), so it waits for the run in progress and starts its own.
     while (this.audBusy) {
       const cur = this.audBusy;
-      if (!fresh || (cur.fresh && cur.startedAt >= t0)) return cur.p;
+      if (!fresh) return cur.p;
       try { await cur.p; } catch {}
     }
     this.audSeq = (this.audSeq || 0) + 1;
