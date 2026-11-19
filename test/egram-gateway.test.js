@@ -360,6 +360,7 @@ test('a post keeps only the mentions that are not 18+ in Grabbit', async () => {
     handlers[`/api/creators/${h}/mentioned`] = json(200, { items: [post(1)], next: null });
     const before = seen.length;
     assert.equal((await call('GET', `/api/egram/api/creators/${h}/mentioned`)).status, 404, h);
+    assert.ok(seen.length > before, `${h}: the creator was asked for`);
     assert.ok(seen.slice(before).every((q) => !q.url.includes('/mentioned')), `${h}: the list was asked for`);
   }
   // Follow and the published list are judged on the creator the same way.
@@ -423,6 +424,68 @@ test('a HEAD on a JSON route answers what the filtered GET would', async () => {
   } finally {
     adultSet = new Set();
     for (const k of ['/api/posts/31', '/api/posts/32', '/api/posts/33', '/m/44']) delete handlers[k];
+  }
+});
+
+test('contract: a limited profile and mention links to it pass only when the identity lookup answers for it', async () => {
+  const lim = 'u-lim';
+  const mention = { type: 'creator', handle: lim, name: '_lim' };
+  const post = (id, author, audience) => ({ id, caption: '@_lim', author: { handle: author, type: 'creator' }, media: [], audience, mentions: [mention] });
+  const profile = (audience) => ({ id: 70, handle: lim, name: '_lim', limited: true, post_count: 0, mentioned_count: 1, follower_count: 0, audience });
+  const keys = [`/api/creators/${lim}`, `/api/creators/${lim}/mentioned`, '/api/feed'];
+  try {
+    for (const [lane, audience] of [['', 'general'], ['?lane=review', 'unknown']]) {
+      handlers[`/api/creators/${lim}`] = json(200, profile(audience));
+      handlers[`/api/creators/${lim}/mentioned`] = json(200, { items: [post(71, 'bob', audience)], next: null });
+      handlers['/api/feed'] = json(200, { items: [post(71, 'bob', audience)], next: null });
+      // The identity lookup answers for the creator: profile, list and link survive.
+      const p = await call('GET', `/api/egram/api/creators/${lim}${lane}`);
+      assert.equal(p.status, 200, `${audience} profile`);
+      assert.equal((await p.json()).handle, lim);
+      const m = await call('GET', `/api/egram/api/creators/${lim}/mentioned${lane}`);
+      assert.equal(m.status, 200, `${audience} mentioned`);
+      assert.deepEqual((await m.json()).items.map((x) => x.id), [71]);
+      const f = await (await call('GET', `/api/egram/api/feed${lane}`)).json();
+      assert.deepEqual(f.items[0].mentions.map((x) => x.handle), [lim], `${audience} mention link`);
+      // The lookup leaves the creator out: everything about it is refused, the post stays.
+      hidden.add(lim);
+      assert.equal((await call('GET', `/api/egram/api/creators/${lim}${lane}`)).status, 404, `${audience} hidden profile`);
+      assert.equal((await call('GET', `/api/egram/api/creators/${lim}/mentioned${lane}`)).status, 404, `${audience} hidden mentioned`);
+      const fh = await (await call('GET', `/api/egram/api/feed${lane}`)).json();
+      assert.deepEqual(fh.items.map((x) => x.id), [71]);
+      assert.deepEqual(fh.items[0].mentions, [], `${audience} hidden mention link`);
+      hidden.delete(lim);
+      // The display name it is known by is 18+ in Grabbit.
+      identities[lim] = ['_lim'];
+      adultSet = new Set(['_lim']);
+      assert.equal((await call('GET', `/api/egram/api/creators/${lim}${lane}`)).status, 404, `${audience} 18+ name`);
+      adultSet = new Set();
+      delete identities[lim];
+      // The creator is clean, but the only post that mentions it is by an
+      // author that is 18+ in Grabbit: nothing makes it reachable.
+      identities.bob = ['bob.alias18'];
+      adultSet = new Set(['bob.alias18']);
+      const before = seen.length;
+      assert.equal((await call('GET', `/api/egram/api/creators/${lim}${lane}`)).status, 404, `${audience} unreachable profile`);
+      assert.equal((await call('GET', `/api/egram/api/creators/${lim}/mentioned${lane}`)).status, 404, `${audience} unreachable mentioned`);
+      assert.equal((await call('POST', `/api/egram/api/creators/${lim}/follow${lane}`)).status, 404, `${audience} unreachable follow`);
+      assert.ok(seen.length > before, 'the checks reached Elitogram');
+      assert.ok(seen.slice(before).every((q) => q.method === 'GET'), 'no follow reached Elitogram');
+      adultSet = new Set();
+      delete identities.bob;
+    }
+    // A full (not limited) profile is not checked against its mentions.
+    handlers['/api/creators/ann'] = json(200, { id: 9, handle: 'ann', post_count: 1, mentioned_count: 0, follower_count: 0, audience: 'general' });
+    const before = seen.length;
+    assert.equal((await call('GET', '/api/egram/api/creators/ann')).status, 200);
+    assert.ok(seen.length > before, 'the profile was asked for');
+    assert.ok(seen.slice(before).every((q) => !q.url.includes('/mentioned')));
+  } finally {
+    adultSet = new Set();
+    hidden.delete(lim);
+    delete identities[lim];
+    delete identities.bob;
+    for (const k of keys) delete handlers[k];
   }
 });
 

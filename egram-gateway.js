@@ -107,7 +107,10 @@ function laneOf(req) {
 //           creator in the lane and passes the request on only if the creator
 //           itself would be passed back. Needed where the answer lists posts the
 //           creator did not write ("Mentioned in"), so filtering the answer by
-//           author would let a Grabbit 18+ creator's page through.
+//           author would let a Grabbit 18+ creator's page through. A limited
+//           creator also needs a mentioning post that passes (mentionReachable).
+//   profile a creator's profile. Filtered like any answer; a limited profile
+//           also needs a mentioning post that passes (mentionReachable).
 const ID = '(\\d{1,12})';
 // What a post's audience may be set to through the gateway (PATCH api/posts/:id).
 const AUDIENCE_WRITES = ['general', 'unknown', 'adult'];
@@ -136,7 +139,7 @@ const ROUTES = [
   r('DELETE', `api/posts/${ID}/comments/${ID}`, { parent: 'path' }),
   // Creators
   r('GET', 'api/creators'),
-  r('GET', `api/creators/${HANDLE}`),
+  r('GET', `api/creators/${HANDLE}`, { profile: true }),
   r('GET', `api/creators/${HANDLE}/posts`, { subject: true }),
   r('GET', `api/creators/${HANDLE}/mentioned`, { subject: true }),
   r('POST', `api/creators/${HANDLE}/follow`, { subject: true }),
@@ -655,7 +658,24 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     if (!d || typeof d !== 'object' || norm(d.handle) !== handle) return false;
     const ids = await identitiesFor(req, cur, lane, [...new Set([...handlesIn(d), `c:${handle}`])], downstream);
     const { value, dropped } = filterAnswer(d, LANES[lane], adultTest(ids));
-    return value !== null && dropped === 0 && value.audience === LANES[lane] && !adultTest(ids)?.(handle, 'c');
+    if (!(value !== null && dropped === 0 && value.audience === LANES[lane] && !adultTest(ids)?.(handle, 'c'))) return false;
+    if (value.limited) return mentionReachable(req, cur, lane, handle, downstream);
+    return true;
+  }
+
+  // A limited creator (known only from mentions) is reachable in this lane
+  // only through a post that mentions it, so it opens only when at least one
+  // post on the first page of its "Mentioned in" list survives Grabbit's own
+  // filter. Elitogram's mention count may include posts by authors Grabbit
+  // has as 18+. -> true | false | 401
+  async function mentionReachable(req, cur, lane, handle, downstream = null) {
+    const r = await upstream(req, { method: 'GET', path: `/api/creators/${encodeURIComponent(handle)}/mentioned`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
+    if (r.statusCode === 401) { r.resume(); return 401; }
+    if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
+    const d = await readJson(r);
+    const ids = await identitiesFor(req, cur, lane, handlesIn(d), downstream);
+    const { value } = filterAnswer(d, LANES[lane], adultTest(ids));
+    return !!value && Array.isArray(value.items) && value.items.some((p) => p && typeof p === 'object' && looksLikePost(p) && p.audience === LANES[lane]);
   }
 
   // The notification ids this lane lists after Grabbit's filter. -> Set | 401
@@ -857,6 +877,15 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     const { value, dropped } = filtered;
     if (dropped) log.warn(`[egram] dropped ${dropped} item(s) outside the ${lane} lane from ${rest}`);
     if (value === null) return fail(res, 404, 'Not found');
+    if (route.profile && value && typeof value === 'object' && value.limited) {
+      let reachable;
+      try { reachable = await mentionReachable(req, cur, lane, route.p.exec(rest)[1], res); } catch (e) {
+        log.warn(`[egram] mention check ${rest}: ${e.message}`);
+        return fail(res, 424, 'Grabbit could not check this answer right now');
+      }
+      if (reachable === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
+      if (reachable !== true) return fail(res, 404, 'Not found');
+    }
     res.status(status).set('Cache-Control', 'private, no-store');
     return res.json(value);
   }
