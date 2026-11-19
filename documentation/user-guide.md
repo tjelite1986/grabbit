@@ -7,10 +7,11 @@ applies to 3.0.4, where these features live in the classic view (`/classic/`)
 and in the hub's Download, Queue and Media pages.
 
 For installation see [installation.md](installation.md). For every setting see
-[configuration.md](configuration.md). For an overview of the 3.0 hub, see the
-[README](../README.md).
+[configuration.md](configuration.md). For an overview of the 3.0 hub and current
+screenshots from a demo instance, see the [README](../README.md). This guide
+was carried over from the 2.x README and covers the classic view in depth.
 
-## Grabbit 2.0 hub
+## The hub (Grabbit 3.0.4)
 
 The hub is the start page (`/`): a front end over the same API with a dashboard
 of counts from the downloaded registry, a paste-a-link box, the live job queue,
@@ -107,9 +108,13 @@ daily state snapshot includes a consistent copy of `items.db`. If `items.db`
 cannot be opened, general apps receive nothing until it can; `/api/health`
 shows the reason under `items`.
 
-Content hashes (SHA-256) are recorded for each delivered file. A file with the
-same bytes as an earlier item is logged as a duplicate; nothing is refused on
-that yet.
+Content hashes (SHA-256) are recorded for each delivered file. The Smart
+Duplicate Manager finds duplicates when it scans your folders, and its
+**duplicate prevention** also checks the files a download job saves to the
+server (up to 20 per job) as soon as the job finishes. By default a match is
+only flagged for review. Prevention can
+instead skip an exact copy to the trash or replace it with a hard link; see
+the README.
 
 ### Creator profiles
 
@@ -170,7 +175,6 @@ https://www.example.com/share/r/19EBzS35RK/https://www.example.com/share/r/19EBz
 The second form takes no spacing to get right, which makes it much easier to
 build up a list on a phone or tablet.
 
-![Several links pasted at once, laid out as a batch with download-all buttons](../assets/screenshots/multi-paste.jpg)
 
 **Download straight into a music server.** If you run your own music server such
 as [Navidrome](https://www.navidrome.org/), point the music destination at its
@@ -195,8 +199,9 @@ A story that arrives as a single file keeps the plain book name; a book that
 comes as one long recording can be split on its chapters (**Split by chapters**
 in the download sheet), and each chapter lands as a numbered, individually
 tagged part of the same book. Adding a part later continues the numbering
-instead of overwriting part one, and the source thumbnail is saved as
-`cover.jpg` next to the book, which is what audiobook players look for.
+instead of overwriting part one, and Grabbit tries to save the source
+thumbnail as `cover.jpg` next to the book, which is what audiobook players
+look for (best effort: the save goes ahead without a cover if that fails).
 
 **Auto or hand-picked metadata.** Leave tagging on **auto** and Grabbit names
 and tags the track for you. Prefer to curate it? Do it manually and pick the
@@ -215,7 +220,6 @@ Paste a **playlist** or a **creator/profile** link and Grabbit doesn't resolve a
 single file — it lists *every* item in it as a card, with batch actions on top.
 This is how you grab a whole channel, playlist or profile at once.
 
-![A playlist view with item cards and batch actions](../assets/screenshots/playlist.jpg)
 
 **The item list.** The header shows the playlist/profile name, the handle and how
 many items it holds. Each card has:
@@ -415,7 +419,6 @@ pre-filled from your [default download options](#default-download-options--every
 anything you change here applies to **this download only**. The button at the
 bottom starts it.
 
-![The download sheet for a server-library video, showing cutting, SponsorBlock and extra-args fields](../assets/screenshots/download-dialog-video.jpg)
 
 The sheet is context-aware: it only shows the fields that make sense for what
 you're downloading and where it's going, so you'll never see all of these at
@@ -447,7 +450,6 @@ once. Each entry below says when it appears.
 **Music tagging** *(the whole block shows only for a single Navidrome save — not
 batches, which tag each track automatically from its own metadata)*
 
-![The download sheet in Navidrome mode with the iTunes/Deezer metadata lookup and tag fields](../assets/screenshots/download-dialog.jpg)
 
 - **Source description** — a collapsible panel showing the original post's
   description, where the real song title often hides when the video title is
@@ -501,8 +503,9 @@ where each item names its own book from its own metadata)*
 - **Part title** — names the file and its title tag. A story that arrives as one
   file can keep the book title. *Hidden when Split by chapters is on*, since
   each chapter then titles itself.
-- **Year** and **Genres** — as for music; an empty genre defaults to
-  `Audiobook` rather than being looked up in a music database.
+- **Year** and **Genres** — taken from the source or from what you type,
+  never from the iTunes/Deezer music lookup. When neither gives a genre, it
+  defaults to `Audiobook`.
 
 **Quality and format**
 
@@ -559,15 +562,14 @@ Under **More → Rules** you can teach Grabbit to fill in the download options f
 you whenever a link matches. Each rule is a simple *when this → then that*: a set
 of match conditions and the settings to apply when they're met.
 
-![The rule editor with when/then conditions and the automatic toggle](../assets/screenshots/rules.jpg)
 
 **How matching works:**
 
 - A rule has a **When** block (the conditions) and a **Then** block (the settings
   to apply). Leave every When field empty and the rule matches *everything*.
 - All the conditions you do fill in must match (they're AND-ed together).
-- Matching is **case-insensitive substring** by default — `youtube` matches
-  `www.youtube.com`. Wrap a pattern in `/slashes/` to use a **regex** instead,
+- Matching is **case-insensitive substring** by default — `example` matches
+  `www.example.com`. Wrap a pattern in `/slashes/` to use a **regex** instead,
   e.g. `/(mp3|flac)$/` on the title.
 - Rules are checked **top to bottom, and the first enabled match wins**, so put
   your most specific rules above the broad catch-all ones. Drag to reorder.
@@ -577,7 +579,7 @@ of match conditions and the settings to apply when they're met.
 applies to links whose length is known).
 
 **What you can set (Then):** destination (shorts / server library /
-Navidrome music), channel (main / 18+), music library (mine / kids), a library
+Navidrome music / audiobooks), channel (main / 18+), music library (mine / kids), a library
 subfolder, quality, audio format + bitrate, video container, SponsorBlock
 (remove or mark), save-to-this-device, a profile name to file it under, and an
 *extract audio only* toggle. Anything left on **Don't change** keeps the normal
@@ -607,7 +609,6 @@ login by using an exported `cookies.txt` file. Every yt-dlp call — resolve,
 download and playlist polling — then reuses it automatically, so login-gated
 content just works.
 
-![The cookies panel for private and login-only content](../assets/screenshots/cookies.jpg)
 
 **Getting a `cookies.txt` file.** It has to be in the classic *Netscape* format,
 which a small browser extension produces in one click:
@@ -663,7 +664,6 @@ blunt about anything permanent** so you're not left staring at a stalled job.
 A resolve problem shows up right on the card; a download problem shows in the
 **Queue** with the job's message.
 
-![The download queue showing progress and an automatic retry](../assets/screenshots/queue.jpg)
 
 ### Common messages
 
@@ -675,8 +675,8 @@ A resolve problem shows up right on the card; a download problem shows in the
 | `only available to Music Premium members` (YouTube Music) | An auto-generated track ID is premium- or region-locked, even though the same recording usually exists under a free ID. | Grabbit **automatically** looks up a free counterpart (via music.youtube's redirect, then a track search), checks it actually plays, and copies the original's clean artist/title onto it for tagging. Only if no free copy exists does the error stand. |
 | `Video unavailable` (YouTube) | Often just an intermittent YouTube flake; sometimes a genuine removal. | Grabbit **re-probes once** after a short pause before giving up. A real removal still fails after the retry. |
 | `not available in your country` / `blocked in your country` | Geo-restriction. | Can't be bypassed from here — it needs cookies or a network from an allowed region. |
-| `HTTP Error 403` / `429 Too Many Requests` / `timed out` / `Connection reset` / `ETIMEDOUT` … | A temporary network or rate-limit failure — common when a big batch hammers one site at once. | Grabbit **retries automatically**, up to 3 attempts, waiting longer each time (the queue shows `Retrying (1/2)…`). The queue also caps how many downloads run at once to ease the pressure. |
-| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the *shorts* destination. | Grabbit routes it to the **server library** instead (a notice tells you). In a batch, clips already known to be too long are skipped. |
+| `HTTP Error 403` / `429 Too Many Requests` / `timed out` / `Connection reset` / `ETIMEDOUT` … | A temporary network or rate-limit failure — common when a big batch hammers one site at once. | Grabbit **retries automatically**: three attempts in total, with two waits that grow (the queue shows `Retrying (1/2)…`). A video save to the server library or a shorts channel that still fails this way can then be parked in the persistent retry queue (see below). The queue also caps how many downloads run at once to ease the pressure. |
+| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the *shorts* destination. | In the download sheet, Grabbit switches the destination to the **server library** (a notice tells you). A direct API save to a shorts destination is refused with this message, and a batch skips clips already known to be too long. |
 | `Cutting needs a yt-dlp-handled site (this one uses a direct downloader)` | You asked to cut or split a site that Grabbit downloads directly, not through yt-dlp. | Cutting/splitting only works on yt-dlp sites — download the file whole instead. |
 | `yt-dlp produced no output (no matching sections/chapters?)` | Your cut ranges matched nothing, or the video has no chapters to split. | Double-check the timestamps, or that the video actually has chapters. |
 | `Bad cut section "…" — use start-end like 1:30-2:45` / `Too many cut sections (max 20)` | The **Cut sections** field is malformed. | Give `start-end` ranges, comma-separated, up to 20. |
@@ -690,12 +690,21 @@ A resolve problem shows up right on the card; a download problem shows in the
 Three of the rows above are worth calling out, because Grabbit handles them with
 no action from you:
 
-- **Automatic retries with back-off.** Transient download failures (403, 429,
-  timeouts, dropped connections, 5xx) are retried up to three times, each after a
-  longer pause — so a rate limiter that's momentarily busy with the rest of your
-  batch usually clears by the next attempt. Only a non-transient error, or the
-  third strike, marks the job failed. Failed and cancelled jobs also keep a manual
-  **retry** button in the queue.
+- **Automatic retries, in two stages.** First, a job that hits a transient
+  failure (403, 429, timeouts, dropped connections, 5xx) gets three attempts in
+  total, with two growing pauses — so a rate limiter that's momentarily busy
+  with the rest of your batch usually clears by the next attempt. Second, if a
+  **video save to the server library or a shorts channel** fails with a
+  temporary upstream error (including a 404 while a new upload is still being
+  encoded), it is parked in a persistent retry queue and tried again later
+  with backoff. The queue uses its own, slightly different test for
+  "temporary", so a save can land there before all three first-stage attempts
+  are used. An entry is dropped after 12 attempts, after a permanent error, or
+  when an attempt fails after it has waited more than 72 hours. Images, device
+  downloads, audio, cuts, chapter splits and other destinations are not
+  parked; they fail after the first stage. A non-transient error fails at
+  once. Failed and cancelled jobs also keep a manual **retry** button in the
+  queue.
 - **YouTube re-probe.** Because YouTube intermittently reports playable videos as
   "unavailable", Grabbit quietly probes a second time before trusting the error.
 - **Free-counterpart swap for premium locks.** Premium/region-locked YouTube
@@ -734,9 +743,13 @@ A few design choices worth knowing about:
 - **Plugins over a monolith.** Each supported site is one file in
   `extractors/` exporting `match()` + `resolve()`; the registry auto-loads
   them. The generic yt-dlp extractor is just the plugin that matches last.
-- **Jobs, not requests.** Downloads never run inside the HTTP request that
-  started them. A job survives the browser tab closing, reports progress over
-  SSE, persists scheduled runs to disk, and can be retried from the queue.
+- **Jobs, not requests.** Downloads started from the hub run as background
+  jobs, outside the HTTP request that started them. A job survives the browser
+  tab closing, reports progress over SSE, persists scheduled runs to disk, and
+  can be retried from the queue. (Two paths still download inside the
+  request: the classic view's playlist and profile batch, which streams
+  `/api/download-all`, and the synchronous `/api/download` and
+  `/api/download-all` calls from co-hosted apps.)
 - **Shell-injection paranoia.** User-supplied yt-dlp flags pass through an
   allowlist of known-safe long options; everything else — short flags, unknown
   options, stray positional arguments — is rejected before a process is
@@ -749,10 +762,10 @@ A few design choices worth knowing about:
 ### Long videos
 
 Shorts are short clips, so a video longer than `SHORTS_MAX_DURATION` seconds
-(default 600 = 10 min, `0` disables) is refused for the elite-v2 shorts
-destination and routed to the plain server library instead. The web UI forces
-the server library and shows a notice; the elite path and the batch downloader
-skip known-long clips.
+(default 600 = 10 min, `0` disables) does not go to a shorts destination. The
+download sheet switches such a clip to the server library and shows a notice;
+a direct API save to a shorts destination is refused, and the batch
+downloader skips known-long clips.
 
 ## Adding a new site
 
@@ -785,7 +798,10 @@ Drop a file in `extractors/` that exports:
 ```js
 module.exports = {
   name: 'example',
-  match(url) { return new URL(url).hostname.endsWith('example.com'); },
+  match(url) {
+    const host = new URL(url).hostname;   // compare the parsed host, never a substring
+    return host === 'example.com' || host.endsWith('.example.com');
+  },
   async resolve(url) {
     return {
       kind: 'direct',                 // or 'ytdlp'
@@ -805,44 +821,54 @@ module.exports = {
 };
 ```
 
-Everything but `kind` and `filename` is optional, but leaving `duration` out
-means the shorts length cap never fires for that site — an unknown duration is
-treated as "no opinion", not as "too long". An extractor that also exports
-`resolveProfile(url)` returns `{ creator, items: [...] }` with the same shape
-per item, and the batch path only sees the fields the listing carries.
+`kind` and `filename` are always required. A `direct` result also needs
+`downloadUrl` (or a fallback that can produce one). The rest is optional, but
+leaving `duration` out means the shorts length cap never fires for that site — an unknown duration is
+treated as "no opinion", not as "too long". For profile and playlist links an extractor exports two more functions:
+`isProfile(url)`, which tells Grabbit that a link is a listing, and
+`resolveProfile(url)`, which returns `{ creator, items: [...] }` with the same
+shape per item. The batch path only sees the fields the listing carries.
 
 See `extractors/nuditok.js` for a real example (SPA whose real URL only comes
 from a private API). The registry in `extractors/index.js` auto-loads every file
-except `index.js` and `generic.js`.
+except `index.js`, `generic.js` and `util.js`.
 
 ## Auth
 
 Set `GRABBIT_PASSWORD` to gate the web UI behind a single shared password
-(HMAC-signed cookie; `GRABBIT_SECRET` optionally signs it separately). Only
-external traffic is gated, so a co-hosted app can call the API directly over
-the docker network. A caller counts as internal only when it sends
+(HMAC-signed cookie; `GRABBIT_SECRET` optionally signs it separately). The
+cookie is `Secure`, so sign in over HTTPS or on `http://localhost`. Every
+request is gated except the login page, the icons, manifest and service
+worker it needs, `GET`/`HEAD /api/health/release` and `POST /logout`. Being on the Docker network grants nothing by itself:
+a co-hosted app skips the gate only as an internal caller, and a caller counts
+as internal only when it sends
 `GRABBIT_INTERNAL_TOKEN` in an `X-Grabbit-Token` header *and* carries no
 `X-Forwarded-Host` — leave the token unset and there is no bypass at all.
+A request through a reverse proxy counts as external only because the proxy
+sets `X-Forwarded-Host`; Traefik, nginx and Caddy as configured in the
+installation guide do.
 
 That is deliberate. A missing `X-Forwarded-Host` proves nothing: the header is
 absent only because the reverse proxy is what adds it, so anything reaching a
 published container port directly arrives without it too. A compose file that
-publishes port 3000 — including the one below, before you add the token — would
+publishes port 3000 on a reachable interface would
 otherwise let every request in off the internet with `GRABBIT_PASSWORD` set and
 nothing in the log to say so. The boot line names the mode the gate ended up in.
 
-API requests the browser labels as cross-site are refused with `403` regardless
+API requests the browser labels `Sec-Fetch-Site: cross-site`, and requests
+whose `Origin` header names another host, are refused with `403` regardless
 of the session, because `/api/download`, `/api/download-all` and
 `/api/jobs/start` are GETs with side effects and the login cookie is
 `SameSite=Lax`. Requests from another origin's page cannot queue a job as you.
-Server-to-server callers send no `Origin` or `Sec-Fetch-Site`, so they are
-unaffected.
+Requests without an `Origin` (or with `Origin: null`) pass this check, so
+server-to-server callers are unaffected; they still face the password gate.
 
 Running without a login has to be asked for: an empty `GRABBIT_PASSWORD` makes
 grabbit exit at boot with a message naming the variable, because a missing
 password and a password that failed to reach the process look the same to the
 gate and the second one used to come up wide open. Set `GRABBIT_AUTH_DISABLED=1`
-alongside it to run ungated on purpose. Either way the boot log states which
+with an empty password to run ungated on purpose; with a password set, the
+gate stays on. Either way the boot log states which
 mode the gate is in.
 
 ### Per-app access (GDA v1)

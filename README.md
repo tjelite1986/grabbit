@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/self--hosted-Docker-2496ed?style=flat-square&logo=docker&logoColor=white" alt="Self-hosted with Docker">
   <img src="https://img.shields.io/badge/linux-arm64%20%7C%20amd64-5a4fcf?style=flat-square&logo=linux&logoColor=white" alt="linux/arm64 and linux/amd64">
   <br>
-  <img src="https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 20+">
+  <img src="https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 22+">
   <img src="https://img.shields.io/badge/Express-4-404040?style=flat-square&logo=express&logoColor=white" alt="Express 4">
   <img src="https://img.shields.io/badge/SQLite-better--sqlite3-003b57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite">
   <img src="https://img.shields.io/badge/yt--dlp-+%20ffmpeg-c4302b?style=flat-square" alt="yt-dlp and ffmpeg">
@@ -51,7 +51,8 @@ enough.
 - **Discover** your media in native feeds: short videos through TikShortis and
   photo posts through Social & Photos.
 - **Keep it clean** with the Smart Duplicate Manager. It finds exact copies,
-  similar photos and re-encoded videos, and nothing is removed until you say so.
+  similar photos and re-encoded videos. By default nothing is removed until you
+  say so.
 
 Grabbit runs on its own. TikShortis and Elitogram are optional separate
 applications, and this README marks clearly which features need them.
@@ -98,8 +99,8 @@ applications, and this README marks clearly which features need them.
 | ▦ | **Social & Photos**: photo feed, explore grid, collections, post editing | Needs the separate [Elitogram](https://github.com/tjelite1986/elitogram) backend |
 | ☺ | **Creator profiles**: one profile, many accounts, merge and split | Built in |
 | # | **Metadata & tags**: source captions, hashtags, edits with a change log | Built in |
-| ♫ | **Music and audiobook libraries**: tagging through iTunes and Deezer lookups | Built in |
-| ⚿ | **Per-app access (GDA)**: tokens for co-hosted apps, scoped by audience | Built in |
+| ♫ | **Music and audiobook libraries**: music tagging through iTunes and Deezer lookups | Built in |
+| ◈ | **Per-app access (GDA)**: tokens for co-hosted apps, scoped by audience | Built in |
 | ◇ | Native Videos, Movies & music, Home | [Planned](#roadmap) |
 
 ## Screenshot showcase
@@ -144,9 +145,12 @@ media and sandbox backends. No real libraries or accounts were used.
 - **Background jobs.** A download starts at once and reports progress over
   Server-Sent Events. Up to two run at a time (`MAX_ACTIVE_JOBS`) and the rest
   wait in the queue. Jobs survive a page reload.
-- **Retries that make sense.** Temporary upstream errors (404 while a CDN is
-  still encoding, 403, 429, 5xx) go to a retry queue with backoff. Permanent
-  errors fail fast and are kept in the history.
+- **Retries that make sense.** A job gets three attempts, with a short wait
+  between them. If a video save to the server library or a shorts channel
+  hits a temporary upstream error (404 while a CDN is still encoding, 403,
+  429, 5xx), it is parked in a persistent retry queue with backoff. An entry
+  is dropped after 12 attempts, or when an attempt fails after it has waited
+  more than 72 hours. Permanent errors fail fast and are kept in the history.
 - **Destinations.** Stream to your device, save to the server library, file
   into a music or audiobook library with tags, or hand the file to a co-hosted
   app. App destinations are opt-in: an unset folder means the destination does
@@ -168,8 +172,11 @@ explains every field.
 </p>
 
 The Duplicate Manager scans your libraries in the background, groups copies
-and shows them side by side. **It never removes anything on its own.** Every
-action is yours, and every removal goes to a trash you can restore from.
+and shows them side by side. **With the default settings it never removes
+anything on its own**: every action is yours, and every removal goes to a
+trash you can restore from. Two things act automatically only when you switch
+them on: duplicate prevention for exact copies (skip to trash, or link) and a
+trash retention period.
 
 | Engine | How it matches | Result |
 |---|---|---|
@@ -194,8 +201,9 @@ action is yours, and every removal goes to a trash you can restore from.
 - **Scanning.** A read-only background scanner hashes every media file once.
   It never follows symlinks, reads at a limit you set (20 MB/s by default) and
   can be paused, resumed or stopped. Unchanged files are not read again.
-- **Analysis.** Photo and video analysis run one file at a time at low CPU and
-  I/O priority. Everything happens on your server.
+- **Analysis.** Photo and video analysis run one file at a time. The ffmpeg
+  and image tools it starts run at low CPU and I/O priority (`nice`/`ionice`)
+  where available. Everything happens on your server.
 - **Cross-app duplicates.** The scanner also reads the app folders you
   configure (for example TikShortis and Elitogram). Each app keeps its own copy
   and its own records. Where the app offers a dedupe operation, Grabbit asks
@@ -205,8 +213,9 @@ action is yours, and every removal goes to a trash you can restore from.
   *already stored once* and counted once. Identical copies inside Grabbit's
   own folders on the same disk can be merged into hard links, so every name
   keeps working.
-- **Duplicate prevention.** After a download finishes, the new file is checked
-  against the library. By default a match is flagged for review. You can
+- **Duplicate prevention.** When a download job saves files to the server,
+  each saved file (up to 20 per job) is checked against the library. By
+  default a match is flagged for review. You can
   instead choose to keep it, skip it (to the trash) or link it, and those
   choices apply only when both copies are in Grabbit's folders.
 - **Cache & Thumbnails.** Generated files such as thumbnails are listed per
@@ -223,8 +232,9 @@ action is yours, and every removal goes to a trash you can restore from.
 ### AI Photo Engine and DINOv2
 
 The AI engine compares photos by content: the same scene with a different
-crop, edit or export. It is **off by default** and stays off until you fetch
-a model in **Duplicates → Settings**.
+crop, edit or export. It is **off by default**. In **Duplicates → Settings**,
+press **Get model** to download a model, then switch on **AI comparison
+(DINOv2)**. Downloading alone does not turn it on.
 
 - **Model:** DINOv2 small (*Light*, 44 MB), exported to ONNX by
   [photo-duplicate-finder-ai](https://github.com/nikweel/photo-duplicate-finder-ai).
@@ -254,10 +264,15 @@ a model in **Duplicates → Settings**.
 
 ### Smart Trash and safe duplicate management
 
-- Removed copies move to `DATA_DIR/dupe-trash`, outside every scanned folder.
-- **Retention is manual by default** (0 days: never purged automatically). You
-  can choose 7 to 90 days, and shortening the retention asks for its own
-  confirmation.
+- Copies removed from Grabbit's own folders move to `DATA_DIR/dupe-trash`,
+  outside every scanned folder. A copy inside TikShortis or Elitogram is
+  removed by that app through its adapter, so restoring or purging it depends
+  on that app.
+- **Retention is manual by default** (never purged automatically). You can
+  choose 7, 14, 30, 60 or 90 days, and shortening the retention asks for its
+  own confirmation.
+The guarantees below apply to entries held in Grabbit's own trash.
+
 - **Restore** puts a file back at its original path, or next to it as
   `name (restored).ext` when that name is taken. A merged copy gets its
   original file back in place of the hard link.
@@ -288,7 +303,7 @@ liked videos, history, upload and settings.
 - **What needs the backend:** everything else. Clips, accounts, likes,
   comments and playlists live in the separate
   [TikShortis](https://github.com/tjelite1986/tikshortis) application. Grabbit
-  stores none of that data.
+  keeps only your sealed TikShortis session.
 - **Linking:** you sign in once with your TikShortis account. The TikShortis
   session is sealed (AES-256-GCM) in an HttpOnly cookie.
 - **Not configured?** The menu entry is hidden and `/api/tik` is not mounted.
@@ -313,9 +328,10 @@ and tags.
 - **Backend:** the separate [Elitogram](https://github.com/tjelite1986/elitogram)
   application keeps the database, accounts and media. You link your Elitogram
   account once.
-- **General audience only.** Every request is scoped to general content, and
-  answers are checked again against Grabbit's own 18+ profiles. 18+ content
-  cannot be reached through Social & Photos.
+- **No 18+ content.** Browsing uses the general lane, and a Review lane shows
+  unclassified content so you can classify it. Answers in both lanes are
+  checked again against Grabbit's own 18+ profiles, and adult records are
+  dropped. 18+ content cannot be reached through Social & Photos.
 - **Publishing:** with `POSTS_TO_EGRAM=1` and `EGRAM_IMPORT_DIR`, downloaded
   images are dropped into Elitogram's import folder.
 
@@ -356,7 +372,7 @@ Set `EGRAM_MODE=native` and `EGRAM_API_URL`. See
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TD
   UI["Hub web app"] --> G["Grabbit server<br/>Node.js + Express"]
   G --> DL["Download engine<br/>yt-dlp · gallery-dl · ffmpeg"]
   G --> SDM["Smart Duplicate Manager<br/>pHash · DINOv2 · video fingerprints"]
@@ -367,8 +383,9 @@ flowchart LR
   G -- "/api/egram" --> EG["Elitogram<br/>(separate app, optional)"]
 ```
 
-Grabbit is a single Node.js process with a vanilla-JavaScript interface. Heavy
-work runs in child processes, state lives in `DATA_DIR`, and TikShortis and
+Grabbit is a single Node.js process with a vanilla-JavaScript interface.
+Downloads and media tools run in child processes, AI inference runs inside
+the server process, state lives in `DATA_DIR`, and TikShortis and
 Elitogram stay separate applications with their own data. The
 [architecture guide](documentation/architecture.md) has the full component
 diagram, the outbound network traffic and the planned modules.
@@ -377,8 +394,8 @@ diagram, the outbound network traffic and the planned modules.
 
 | | Docker (recommended) | Without Docker |
 |---|---|---|
-| Runtime | Docker Engine with the Compose plugin | Node.js 20 or newer (the image uses 22, which yt-dlp also uses as its JavaScript runtime for YouTube) |
-| Tools | Included in the image | yt-dlp and ffmpeg. Optional: Python 3 with mutagen (music and audiobook tags), gallery-dl and curl_cffi |
+| Runtime | Docker Engine with the Compose plugin | Node.js 22 or newer (the image's version; yt-dlp's YouTube solver needs it as its JavaScript runtime) |
+| Tools | Included in the image | Python 3 with a virtual environment holding `yt-dlp[default]` (set to use Node as its JS runtime), and ffmpeg. Optional in the same environment: mutagen (music and audiobook tags), gallery-dl and curl_cffi |
 | Platform | linux/arm64 (Raspberry Pi 4/5) or linux/amd64 | The same, or macOS for development |
 | Memory | About 350 MB extra while the Light AI model runs | Same |
 
@@ -404,7 +421,7 @@ services:
     container_name: grabbit
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GRABBIT_PASSWORD=${GRABBIT_PASSWORD}
       - TZ=Etc/UTC
@@ -417,7 +434,13 @@ services:
 docker compose up -d --build
 ```
 
-Open `http://<your-host>:3000` and sign in with the password from `.env`.
+Open `http://localhost:3000` on the same machine and sign in with the password
+from `.env`. The login cookie is marked `Secure`, so browsers accept it only
+over HTTPS or on `localhost`: signing in over plain HTTP to a LAN address does
+not work. From another computer, forward the port with
+`ssh -L 3000:localhost:3000 you@your-server`, and for daily use put Grabbit
+behind an HTTPS reverse proxy. `.env` is listed in `.gitignore` and
+`.dockerignore`, so it stays out of Git and out of the image.
 
 The [installation guide](documentation/installation.md) covers music and
 audiobook libraries, running behind a reverse proxy, running as a normal
@@ -426,7 +449,9 @@ without Docker.
 
 ## Configuration reference
 
-Everything is set through environment variables. The most common ones:
+Deployment settings are environment variables. Preferences such as classic
+view defaults and Duplicate Manager settings are made in the app. The most
+common variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -435,12 +460,12 @@ Everything is set through environment variables. The most common ones:
 | `DATA_DIR` | `/data` in Docker | State: history, registry, databases, trash, snapshots. |
 | `DOWNLOAD_DIR` | `/downloads` in Docker | The server library, split into `videos/`, `mp3/`, `photos/` and more. |
 | `MAX_ACTIVE_JOBS` | `2` | Downloads that run at the same time. |
-| `TIKSHORTIS_MODE` | `off` | `native` or `embed` to switch on TikShortis. |
+| `TIKSHORTIS_MODE` | unset | `native` or `embed` to switch on TikShortis. Unset means `embed` when an embed URL is set, otherwise off. |
 | `EGRAM_MODE` | `off` | `native` to switch on Social & Photos. |
 | `DUPES_SCAN_MBPS` | `20` | Read limit for the duplicate scanner, in MB/s. |
-| `STATE_BACKUP_DAYS` | `7` | Daily state snapshots to keep (0 turns them off). |
+| `STATE_BACKUP_DAYS` | `7` | Daily snapshot folders to keep (0 turns them off). |
 
-Every variable, with its default, is listed in the
+Every deployment variable, with its default, is listed in the
 [configuration reference](documentation/configuration.md).
 
 ## Storage and volumes
@@ -458,14 +483,21 @@ same file system. See [storage in the installation guide](documentation/installa
 
 ## Security and privacy
 
-- **Password gate** on every page and API call. Internal calls from co-hosted
-  apps need a shared secret (`X-Grabbit-Token`). The mere absence of a proxy
-  header never counts as internal.
-- **Cross-site protection.** `/api/*` refuses cross-site requests and
-  mismatched origins.
-- **Safe URL handling.** Every submitted URL must resolve to a public address,
-  and redirects are checked hop by hop. Extractors match exact host names, and
-  extra yt-dlp arguments pass an allowlist.
+- **Password gate** on every page and API call, except the login page, the
+  icons, manifest and service worker the login page and PWA need,
+  `GET`/`HEAD /api/health/release` and `POST /logout`. A co-hosted app skips
+  it only by sending `GRABBIT_INTERNAL_TOKEN` in `X-Grabbit-Token` on a
+  request without `X-Forwarded-Host`. A reverse proxy that sets that header
+  therefore never passes the bypass on; being on the same network grants
+  nothing.
+- **Cross-site protection.** `/api/*` refuses requests the browser marks
+  `Sec-Fetch-Site: cross-site`, and requests that carry an `Origin` whose host
+  does not match. Requests without an `Origin` (server-to-server callers) pass
+  this check and still face the password gate.
+- **Safe URL handling.** Submitted URLs must resolve to a public address unless
+  you set `ALLOW_PRIVATE_ADDRESSES=1`. Grabbit's guarded fetches re-check every
+  redirect hop. Extractors match the parsed host name (the domain or its
+  subdomains), and extra yt-dlp arguments pass an allowlist.
 - **Audience isolation.** General and 18+ content are kept apart in profiles,
   libraries, the hub and both gateways.
 - **Local analysis.** Photo and video analysis runs on your server, and no
@@ -473,7 +505,9 @@ same file system. See [storage in the installation guide](documentation/installa
   [architecture guide](documentation/architecture.md#outbound-network-traffic).
 
 **Known limits.** yt-dlp and ffmpeg resolve host names themselves, outside the
-URL guard. The duplicate manager does not detect a program that rewrites a
+URL guard. Some extractors use a plain fetch without the per-hop redirect
+check, in some cases on the matched URL you submitted (erome albums, for
+example). The duplicate manager does not detect a program that rewrites a
 file in place while a cleanup runs. The fsync durability of trash operations
 has not been tested against a power cut. Run Grabbit behind HTTPS when you
 expose it to the internet.
@@ -484,13 +518,17 @@ expose it to the internet.
   renamed into place.
 - **Daily snapshots** go to `DATA_DIR/backups/YYYY-MM-DD/`. They hold the JSON
   state, plus `items.db` and `dupes.db` copied with `VACUUM INTO`. The last
-  `STATE_BACKUP_DAYS` days are kept.
-- **Automatic repair.** If a state file exists but no longer parses, Grabbit
-  moves it aside as `.corrupt-<stamp>` and restores it from the newest
-  snapshot. It never rebuilds a file from partial data.
-- **Manual restore.** There is no restore button. Stop the container, copy
-  the files you need from a snapshot folder back into `DATA_DIR`, and start it
-  again.
+  `STATE_BACKUP_DAYS` snapshot folders are kept.
+- **Automatic repair of JSON state.** If a state file exists but no longer
+  parses, Grabbit tries to move it aside as `.corrupt-<stamp>` and then tries
+  the newest non-empty snapshot once. If that copy is damaged too, it starts
+  that file empty and logs it; older snapshot folders remain for a manual
+  restore. It never rebuilds a file from partial data.
+- **Manual restore.** There is no restore button. Stop the container first.
+  For a JSON file, copy it from a snapshot folder into `DATA_DIR`. The
+  databases run in WAL mode, so for `items.db` or `dupes.db` move the current
+  file **together with its `-wal` and `-shm` files** aside, then copy the
+  snapshot in. Start the container again.
 - **Back up `DATA_DIR` and your media** with your normal backup tool. The
   snapshots live on the same disk, so they do not replace a real backup.
 
@@ -498,10 +536,13 @@ expose it to the internet.
 
 ```bash
 npm install
-GRABBIT_AUTH_DISABLED=1 npm start   # http://localhost:3000, local testing only
+GRABBIT_AUTH_DISABLED=1 npm start   # no login; listens on 0.0.0.0:3000
 npm test                            # node --test test/
 ```
 
+- `GRABBIT_AUTH_DISABLED=1` with no password opens the server to everyone who
+  can reach port 3000. Use it only on a machine that is not on a shared
+  network, or behind a firewall.
 - The test suite uses Node's built-in test runner. It has 49 test files that
   cover the download contract, the gateways, audience separation and every
   Duplicate Manager module.
@@ -512,12 +553,15 @@ npm test                            # node --test test/
 ## Roadmap
 
 From the module registry (`modules.js`). None of these is available in 3.0.4.
+(Separately, the hub already lists Adshortis and Adflix library viewers when
+`ADSHORTIS_LIBRARY` or `ADFLIX_LIBRARY` is mounted; they are not part of this
+roadmap.)
 
 - [ ] **Videos**: a native long-form video module
 - [ ] **Movies & music**: library browsing for films and music
 - [ ] **Home**: a personal start page across modules
 - [ ] **Conversion queue**: the Conversion page shows tool status today
-- [ ] **Isolated 18+ modules**: kept apart from every general module by design
+- [ ] **Isolated 18+ modules**: full 18+ modules kept apart from every general module by design
 
 ## Contributing
 

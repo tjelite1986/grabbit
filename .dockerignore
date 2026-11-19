@@ -4,3 +4,10 @@ data
 .git
 *.log
 test
+# Never bake local secrets or media folders from the install guide into the image
+.env
+.env.*
+music
+audiobooks
+docs
+.venv

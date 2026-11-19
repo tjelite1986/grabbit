@@ -56,24 +56,38 @@ Duplicates → Settings, and its size and SHA-256 are checked before use.
 | [html-to-image](https://github.com/bubkoo/html-to-image) | MIT |
 | [onnxruntime-node](https://github.com/microsoft/onnxruntime) (optional) | MIT |
 
-## Programs installed in the Docker image
+## Selected runtime components in the Docker image
 
-These run as separate programs (child processes). They are installed by the
-`Dockerfile` from Debian and PyPI and keep their own licences.
+The base image provides Node.js, which runs the server. The `Dockerfile`
+installs the rest from Debian and PyPI. yt-dlp, gallery-dl, FFmpeg and the
+Python tagging script run as child processes; yt-dlp-ejs supplies solver
+scripts to yt-dlp, and mutagen is a library the tagging script imports. Each
+keeps its own licence. The table lists selected components, not every
+package of the base image or every transitive dependency.
 
 | Program | Licence |
 |---|---|
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Unlicense |
+| [yt-dlp-ejs](https://github.com/yt-dlp/ejs) (installed by `yt-dlp[default]`; YouTube challenge solver scripts) | Unlicense, with bundled MIT and ISC components |
 | [FFmpeg](https://ffmpeg.org/) (Debian build) | LGPL-2.1+ / GPL-2.0+ depending on build options |
 | [gallery-dl](https://github.com/mikf/gallery-dl) | GPL-2.0 |
 | [mutagen](https://github.com/quodlibet/mutagen) | GPL-2.0+ |
 | [curl_cffi](https://github.com/lexiforest/curl_cffi) | MIT |
 | [Node.js](https://nodejs.org/) | MIT |
-| [Python](https://www.python.org/) | PSF License |
+| [Python](https://www.python.org/) and pip (Debian `python3`, `python3-pip`) | PSF License / MIT |
+| CA certificates (Debian `ca-certificates`) | MPL-2.0 (certificate data) / GPL-2.0+ (scripts) |
 
 ## Documentation assets
 
-The README banner (`assets/brand/`) embeds small subsets of
-[Plus Jakarta Sans](https://github.com/tokotype/PlusJakartaSans) and
-[Inter](https://github.com/rsms/inter), both under the SIL Open Font
-License 1.1. The mascot is Grabbit's own (`public/logo.svg`).
+The README banner and social preview (`assets/brand/*.svg`) embed small
+subsets of two fonts as WOFF2 data, both under the SIL Open Font License 1.1
+with no Reserved Font Name:
+
+- [Plus Jakarta Sans](https://github.com/tokotype/PlusJakartaSans),
+  Copyright 2020 The Plus Jakarta Sans Project Authors. Full licence:
+  [`assets/brand/licenses/PlusJakartaSans-OFL.txt`](assets/brand/licenses/PlusJakartaSans-OFL.txt).
+- [Inter](https://github.com/rsms/inter), Copyright (c) 2016 The Inter
+  Project Authors. Full licence:
+  [`assets/brand/licenses/Inter-OFL.txt`](assets/brand/licenses/Inter-OFL.txt).
+
+The mascot is Grabbit's own (`public/logo.svg`).

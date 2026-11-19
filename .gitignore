@@ -3,3 +3,7 @@ downloads/
 data/
 *.log
 docs/
+.venv/
+# Local secrets (the install guide creates .env in the checkout)
+.env
+.env.*

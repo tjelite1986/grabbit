@@ -1,87 +1,104 @@
 # Architecture
 
 Grabbit is one Node.js (Express) process with a vanilla-JavaScript web app.
-Heavy work runs in child processes (yt-dlp, gallery-dl, ffmpeg, Python for
-tags), state lives in `DATA_DIR`, and media lives in folders you mount.
-TikShortis and Elitogram are **separate applications** with their own
-databases; Grabbit talks to them through narrow gateways and stores none of
-their data.
+Downloads and media tools run in child processes (yt-dlp, gallery-dl, ffmpeg,
+Python for tags); AI inference runs inside the server process. State lives in
+`DATA_DIR`, and media lives in folders you mount. TikShortis and Elitogram are
+**separate applications** with their own databases and media; Grabbit talks to
+them through narrow gateways. On its side Grabbit keeps only the sealed
+TikShortis and Elitogram sessions (HttpOnly cookies in your browser) and a
+mirror of the creator classifications it uses to filter Social & Photos.
 
 ## Overview (implemented in 3.0.4)
 
+The first diagram shows how a request travels; the second shows where the
+work runs and where data is stored.
+
+**Requests**
+
 ```mermaid
-flowchart LR
+flowchart TD
   subgraph Browser
     HUB["Hub web app<br/>public/hub/"]
     CLASSIC["Classic view<br/>/classic/"]
   end
 
+  AUTH["Password gate · cross-site checks<br/>GDA per-app access (/api/v1)"]
+
   subgraph Grabbit["Grabbit server (Node.js + Express)"]
-    AUTH["Password gate · same-origin checks<br/>GDA per-app access (/api/v1)"]
-    DL["Download engine<br/>extractors/ · jobs + SSE · retry queue<br/>playlist watcher · scheduler"]
-    GUARD["url-guard<br/>public-address check"]
-    META["Item store + metadata<br/>creators · captions · tags"]
-    SDM["Smart Duplicate Manager<br/>scanner · analyzer · Smart Trash"]
-    TIKGW["TikShortis gateway<br/>/api/tik (allowlist)"]
-    EGGW["Social & Photos gateway<br/>/api/egram (general scope only)"]
+    DL["Download engine<br/>jobs · retry queue · watcher"]
+    META["Item store<br/>creators · tags"]
+    SDM["Duplicate Manager"]
+    TIKGW["TikShortis gateway<br/>/api/tik"]
+    EGGW["Social & Photos gateway<br/>/api/egram"]
   end
 
-  subgraph Tools["Child processes"]
-    YTDLP["yt-dlp / gallery-dl"]
-    FF["ffmpeg / ffprobe"]
-    PY["python3 + mutagen"]
-    ONNX["ONNX Runtime<br/>DINOv2 (optional)"]
-  end
-
-  subgraph Data["DATA_DIR"]
-    JSON["State JSON<br/>atomic writes + daily snapshots"]
-    ITEMS[("items.db")]
-    DUPES[("dupes.db")]
-    TRASH["dupe-trash/"]
-  end
-
-  subgraph Storage["Media storage (your volumes)"]
-    LIB["Grabbit library<br/>videos · photos · audio"]
-    MUSIC["Music / audiobook libraries"]
-    APPROOT["App folders (opt-in)<br/>TIKSHORTIS_ROOT · EGRAM_IMPORT_DIR"]
-  end
+  GUARD["url-guard<br/>public-address check"]
 
   subgraph Apps["Separate applications (optional)"]
-    TIK["TikShortis backend"]
-    EG["Elitogram backend"]
+    TIK["TikShortis"]
+    EG["Elitogram"]
   end
 
   HUB --> AUTH
   CLASSIC --> AUTH
   AUTH --> DL & META & SDM & TIKGW & EGGW
   DL --> GUARD
-  DL --> YTDLP & FF & PY
-  DL --> LIB & MUSIC & APPROOT
-  DL --> META
-  META --> ITEMS
-  DL --> JSON
-  SDM --> FF & ONNX
-  SDM --> DUPES & TRASH
-  SDM -. "read-only scan" .-> LIB & MUSIC & APPROOT
-  SDM -. "dedupe adapters" .-> TIK & EG
   TIKGW --> TIK
   EGGW --> EG
-  APPROOT -. "imported by" .-> TIK & EG
+  SDM -. "dedupe adapters" .-> Apps
+```
+
+**Processes and storage**
+
+```mermaid
+flowchart LR
+  DL["Download engine"]
+  SDM["Duplicate Manager"]
+
+  subgraph Tools["Child processes"]
+    YTDLP["yt-dlp / gallery-dl"]
+    FF["ffmpeg / ffprobe"]
+    PY["python3 + mutagen"]
+  end
+
+  ONNX["ONNX Runtime · DINOv2<br/>(optional, in-process)"]
+
+  subgraph Data["DATA_DIR"]
+    JSON["State JSON<br/>+ daily snapshots"]
+    ITEMS[("items.db")]
+    DUPES[("dupes.db")]
+    TRASH["dupe-trash/"]
+  end
+
+  subgraph Storage["Your media volumes"]
+    LIB["Grabbit library"]
+    MUSIC["Music / audiobooks"]
+    APPROOT["App import folders<br/>(opt-in)"]
+  end
+
+  DL --> Tools
+  DL --> Storage
+  DL --> JSON & ITEMS
+  SDM --> FF & ONNX
+  SDM --> DUPES & TRASH
+  SDM -. "read-only scan" .-> Storage
+  APPROOT -. "imported by" .-> APPS["TikShortis / Elitogram"]
 ```
 
 ## Components
 
 | Component | Where | What it does |
 |---|---|---|
-| Hub web app | `public/hub/` | The 3.0 interface: Dashboard, Download, Queue & jobs, Media, Library, Profiles, Review, Inbox, Duplicates, Conversion, Metadata & tags, Distribution, Settings, plus TikShortis and Social & Photos when they are switched on. |
+| Hub web app | `public/hub/` | The 3.0 interface: Dashboard, Download, Queue & jobs, Media, Library, Profiles, Review, Inbox, Duplicates, Conversion, Metadata & tags, Distribution, Settings, plus TikShortis and Social & Photos when they are switched on, and the Adshortis 18+ and Adflix 18+ library viewers when their libraries are mounted. |
 | Classic view | `public/index.html`, served at `/classic/` | The 2.x single-page app. Some download features (playlists, formats, scheduling, cookies, rules, notifications) are still configured here. |
-| Download engine | `server.js`, `extractors/`, `premium-fallback.js`, `retry-queue.js` | Resolves links with site extractors and falls back to yt-dlp. Runs long downloads as background jobs with progress over Server-Sent Events, at most `MAX_ACTIVE_JOBS` at a time. |
-| URL guard | `url-guard.js` | Every submitted URL must resolve to a public address. Direct fetches follow redirects by hand and re-check each hop. |
+| Download engine | `server.js`, `extractors/`, `premium-fallback.js`, `retry-queue.js` | Resolves links with site extractors and falls back to yt-dlp. The web UI runs downloads as background jobs with progress over Server-Sent Events, at most `MAX_ACTIVE_JOBS` at a time. The exception is the classic view's playlist and profile batch, which streams `/api/download-all` and downloads inside that request. The synchronous `/api/download` and `/api/download-all` endpoints for co-hosted apps also run in the request. |
+| URL guard | `url-guard.js` | Submitted URLs must resolve to a public address unless `ALLOW_PRIVATE_ADDRESSES=1`. Guarded fetches (`safeFetch`) follow redirects by hand and re-check each hop. Some extractors use a plain fetch, in some cases on the matched URL you submitted (erome albums, for example). |
 | Item store | `item-store.js`, `item-meta.js`, `source-meta.js` | SQLite (`items.db`, WAL) with one row per downloaded item: audience, creator, source record, tags and an edit log. |
 | Profiles and audience | `profiles.js`, `audience.js` | Creator profiles with several platform accounts and aliases. Audience (general or 18+) is set by hand and only ever tightens. |
 | Smart Duplicate Manager | `dupe-*.js`, `public/hub/dupes/` | Read-only scanner, photo/AI/video analysis, review UI, Smart Trash and restore. See the README section. |
 | TikShortis gateway | `tikshortis-gateway.js`, `public/hub/tik/` | Native TikShortis pages. Requests pass a method and path allowlist to the TikShortis API; the TikShortis session is sealed in an HttpOnly cookie. |
-| Social & Photos gateway | `egram-gateway.js`, `public/hub/social/` | Native pages over the Elitogram API. Every request carries a general-audience scope and answers are checked again against Grabbit's own 18+ profiles. |
+| Social & Photos gateway | `egram-gateway.js`, `public/hub/social/` | Native pages over the Elitogram API. A request uses the general lane, or the review lane for unclassified content (`X-Egram-Audience`). Answers in both lanes are checked again against Grabbit's own 18+ profiles, and adult records are dropped. |
 | GDA (per-app access) | `gda.js`, `gda-admin.js` | Passwords or bearer tokens per co-hosted app, each tied to an audience, targets and operations (`/api/v1/*`). |
 | Module registry | `modules.js` | One list of hub modules, their audience and their switch. Planned modules are listed but never served. |
 
@@ -94,8 +111,10 @@ flowchart LR
 
 Both are installed and run on their own. Grabbit can also drop finished files
 into their import folders (`TIKSHORTIS_ROOT`, `EGRAM_IMPORT_DIR` with
-`POSTS_TO_EGRAM=1`), and the duplicate manager can ask them about shared
-copies when both sides mount the same `GRABBIT_DEDUPE_TOKEN_FILE`.
+`POSTS_TO_EGRAM=1`). The duplicate manager can ask them about shared copies
+once each adapter has its three prerequisites: the shared token file
+(`GRABBIT_DEDUPE_TOKEN_FILE`), the app's API URL and its library root. See
+[the adapter settings](configuration.md#smart-duplicate-manager) in the configuration guide.
 
 ## Outbound network traffic
 
@@ -103,7 +122,8 @@ Grabbit contacts:
 
 - the sites you download from (through yt-dlp, gallery-dl and the extractors);
 - iTunes Search and Deezer, for music metadata lookups;
-- GitHub, once, when you press **Get model** for the AI Photo Engine;
+- GitHub, when you press **Get model** for the AI Photo Engine (if the
+  model file goes missing or fails its check, press **Get model** again);
 - your browser's push service, if you enable web-push notifications;
 - TikShortis and Elitogram, if you configure them.
 
@@ -113,7 +133,8 @@ analysis.
 ## Planned, not built
 
 These are listed in `modules.js` with `planned: true`. They have no menu
-entry and no routes in 3.0.4.
+entry and no routes in 3.0.4. The Adshortis 18+ and Adflix 18+ library
+viewers that exist today are separate from the planned 18+ modules below.
 
 | Module | Audience |
 |---|---|
