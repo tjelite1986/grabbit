@@ -637,8 +637,13 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     if (r.statusCode !== 200) { r.resume(); if (r.statusCode >= 500) throw new Error(`Elitogram answered ${r.statusCode}`); return false; }
     const d = await readJson(r);
     const ids = await identitiesFor(req, cur, lane, handlesIn(d), downstream);
-    const { value, dropped } = filterAnswer(d, LANES[lane], adultTest(ids));
-    return value !== null && dropped === 0 && value.audience === LANES[lane];
+    // The post itself is judged, not what the filter removes inside it: a
+    // mention entry naming an 18+ creator is dropped from the post's answer,
+    // while the post stays visible and so stays open to comments, likes and
+    // caption edits. The post object fails closed as before (value null when
+    // its audience, author or the author's identities do not pass).
+    const { value } = filterAnswer(d, LANES[lane], adultTest(ids));
+    return value !== null && typeof value === 'object' && !Array.isArray(value) && value.audience === LANES[lane];
   }
 
   // Would the creator `handle` be passed back in this lane? -> true | false | 401

@@ -370,6 +370,28 @@ test('a post keeps only the mentions that are not 18+ in Grabbit', async () => {
   adultSet = new Set();
 });
 
+test('a post stays actionable after the filter drops an 18+ mention from it', async () => {
+  adultSet = new Set(['secretly18']);
+  const post = { id: 8, caption: '@ann @Secretly18', author: { handle: 'bob', type: 'creator' }, media: [], audience: 'general',
+    mentions: [{ type: 'creator', handle: 'ann', name: 'ann' }, { type: 'creator', handle: 'secretly18', name: 'Secretly18' }] };
+  handlers['GET /api/posts/8'] = json(200, post);
+  handlers['/api/posts/8/comments'] = json(200, { items: [{ id: 1, body: 'hi', user: { username: 'u' } }] });
+  handlers['POST /api/posts/8/like'] = json(200, { liked: true });
+  handlers['PATCH /api/posts/8'] = json(200, { id: 8, caption: '@ann', can_edit: true });
+  try {
+    assert.deepEqual((await (await call('GET', '/api/egram/api/posts/8')).json()).mentions.map((m) => m.handle), ['ann']);
+    assert.equal((await call('GET', '/api/egram/api/posts/8/comments')).status, 200);
+    assert.equal((await call('POST', '/api/egram/api/posts/8/like')).status, 200);
+    assert.equal((await call('PATCH', '/api/egram/api/posts/8', { body: { caption: '@ann' } })).status, 200);
+    // The post itself still fails closed: an 18+ author denies it.
+    adultSet = new Set(['bob']);
+    assert.equal((await call('POST', '/api/egram/api/posts/8/like')).status, 404);
+  } finally {
+    adultSet = new Set();
+    for (const k of ['GET /api/posts/8', '/api/posts/8/comments', 'POST /api/posts/8/like', 'PATCH /api/posts/8']) delete handlers[k];
+  }
+});
+
 test('media: refused without the right audience header, passed with it', async () => {
   handlers['/m/10'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'ann', 'content-disposition': 'attachment; filename="a.jpg"' });
   handlers['/m/11'] = file({ 'x-egram-audience': 'unknown', 'x-egram-creator': 'bob' });
