@@ -322,7 +322,7 @@ test('Back to a list redraws it where it was; a new visit or a redraw in place l
   // Snapshots are keyed by the history entry the page was drawn on.
   assert.match(js, /history\.replaceState\(\{ \.\.\.\(st \|\| \{\}\), sgEntry: id \}, ''\);/);
   assert.match(body, /const key = `\$\{historyEntry\(\)\}#\$\{pagerSeq\+\+\}`;/);
-  assert.match(body, /pagerSnaps\.set\(key, \{ items: src\.items\.slice\(\), cursor, done: src\.done, anchor \}\);/);
+  assert.match(body, /pagerSnaps\.set\(key, \{ items: src\.items\.slice\(\), cursor, done: src\.done, anchor, /);
   // A restored list draws the saved items instead of loading the first page.
   assert.match(body, /if \(saved\) \{\s*add\(saved\.items\);/);
   assert.match(body, /\} else next\(\);/);
@@ -330,10 +330,14 @@ test('Back to a list redraws it where it was; a new visit or a redraw in place l
   assert.match(body, /root\.style\.scrollSnapType = 'none';/);
   // A redraw on the entry already on show drops its snapshots.
   assert.match(js, /if \(entry === shownEntry\) for \(const k of \[\.\.\.pagerSnaps\.keys\(\)\]\) if \(k\.startsWith\(`\$\{entry\}#`\)\) pagerSnaps\.delete\(k\);/);
-  // A link out of the post viewer leaves the page under it at that post.
-  assert.match(js, /else if \(how === 'link'\) reveal\(\);/);
 });
 
 test('opening a post or a photo never asks for browser fullscreen by itself', () => {
   assert.doesNotMatch(js, /\.matches[^;\n]*\) toggleFs\(\);/);
+});
+
+test('Back from a page reached through the post viewer opens the viewer again on that post', () => {
+  assert.match(js, /else if \(how === 'link'\) \{ src\.reopen = \{ at, lane \}; reveal\(\); \}/);
+  assert.match(js, /anchor, reopen: src\.reopen \|\| null \}\);/);
+  assert.match(js, /if \(saved\.reopen && saved\.reopen\.at < src\.items\.length\) openPosts\(src, saved\.reopen\.at, saved\.reopen\.lane\);/);
 });

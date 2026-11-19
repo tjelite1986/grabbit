@@ -370,7 +370,7 @@
         // browser may already have moved the window for the entry it returns to.
         if (src.items.length && !src.failed) {
           pagerSnaps.delete(key);
-          pagerSnaps.set(key, { items: src.items.slice(), cursor, done: src.done, anchor });
+          pagerSnaps.set(key, { items: src.items.slice(), cursor, done: src.done, anchor, reopen: src.reopen || null });
           while (pagerSnaps.size > PAGER_SNAPS_MAX) pagerSnaps.delete(pagerSnaps.keys().next().value);
         }
       });
@@ -394,6 +394,9 @@
           if (el) window.scrollTo(0, window.scrollY + el.getBoundingClientRect().top - anchor.off);
           else window.scrollTo(0, 0);
           requestAnimationFrame(() => root.style.removeProperty('scroll-snap-type'));
+          // The page was left through a link in the post viewer: Back opens
+          // the viewer again on the post that was on show.
+          if (saved.reopen && saved.reopen.at < src.items.length) openPosts(src, saved.reopen.at, saved.reopen.lane);
         };
         requestAnimationFrame(restore);
       } else next();
@@ -1347,8 +1350,9 @@
           history.back();
         } else if (how === 'popped') requestAnimationFrame(reveal);
         // A link out of the viewer: the page under it is left at that post,
-        // so Back from the link's page returns to it (the pager's snapshot).
-        else if (how === 'link') reveal();
+        // and the pager's snapshot notes it, so Back from the link's page
+        // opens the viewer on it again.
+        else if (how === 'link') { src.reopen = { at, lane }; reveal(); }
       }
       postsClose = close;
 
