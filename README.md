@@ -1,1390 +1,570 @@
-# Grabbit
-
-![Node.js](https://img.shields.io/badge/Node.js-20-339933?logo=nodedotjs&logoColor=white)
-![Express](https://img.shields.io/badge/Express-4-000000?logo=express)
-![yt-dlp](https://img.shields.io/badge/powered%20by-yt--dlp-red)
-![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-green)
-
-Plugin-based media grabber. Paste a link in the web UI; the file streams to your
-device while a copy is saved on the server.
-
-Think of it as a self-hosted download manager with a phone-friendly UI: search
-or paste links, pick a destination (your device, the server library, a music
-library, another app), and let the server do the heavy lifting — even for
-hour-long files.
-
-- URL: whatever host you route it to (e.g. `https://grabbit.example.com`)
-- Saved copies: a host folder you bind-mount to `/data` in the container
-- Stack: Node + Express, yt-dlp + ffmpeg for the generic fallback
-- Supported sites: everything yt-dlp handles (~1750 sites), plus a handful of
-  dedicated extractors for sites yt-dlp doesn't cover well — so the reach is the
-  same as metube/yt-dlp and then some
-
-## Screenshots
-
-| Home | Download sheet | Settings |
-|------|----------------|----------|
-| ![Home screen with resolved link and saved playlists](assets/screenshots/home.jpg) | ![Audio download sheet with metadata lookup and destination picker](assets/screenshots/download-dialog.jpg) | ![Default download options and cookie storage](assets/screenshots/settings.jpg) |
-| Multi-link paste | Playlist & batch | Rules |
-| ![Several links pasted at once, laid out as a batch with download-all buttons](assets/screenshots/multi-paste.jpg) | ![A playlist view with item cards and batch actions](assets/screenshots/playlist.jpg) | ![The rule editor with when/then conditions and the automatic toggle](assets/screenshots/rules.jpg) |
-| Cookies | Queue & retries | |
-| ![The cookies panel for private and login-only content](assets/screenshots/cookies.jpg) | ![The download queue showing progress and an automatic retry](assets/screenshots/queue.jpg) | |
-
-> **The easiest way to install it:** copy this repo's link and ask an AI coding
-> agent like [Claude Code](https://claude.com/claude-code) to set it up for you —
-> "Install and run Grabbit from `https://github.com/tjelite1986/grabbit` on this
-> machine." It can clone the repo, create the folders, write your compose/`.env`
-> and start the container, following the [deploy guide](#deploy-with-docker)
-> below. Prefer to do it by hand? Everything is spelled out step by step.
-
-> **A tool, not an invitation.** Grabbit is a general-purpose downloader I built
-> as a personal project. It hosts no content and points to nothing, and I do not
-> encourage downloading copyrighted or pirated material. What you download — and
-> whether you have the right to — is entirely up to you. See the
-> [Disclaimer](#disclaimer).
-
-**Just want to run it?** Jump to [Getting started](#getting-started).
-**Curious how it's built?** See [How it works](#how-it-works--under-the-hood).
-
-- [Features](#features)
-- [Getting started](#getting-started)
-- [Everyday use](#everyday-use)
-- [Errors and how Grabbit handles them](#errors-and-how-grabbit-handles-them)
-- [How it works](#how-it-works--under-the-hood)
-- [Adding a new site](#adding-a-new-site)
-- [Configuration](#configuration) · [Auth](#auth)
-- [Deploy with Docker](#deploy-with-docker)
-- [Disclaimer](#disclaimer) · [License](#license)
-
-## Features
-
-- **Search**: type plain words instead of a URL and the box becomes a video
-  search (`yt-dlp ytsearch`); click a result to fetch it.
-- **Multi-link paste**: paste several URLs at once — one card queues them all
-  as separate jobs sharing the same settings. Links may be separated by spaces
-  or newlines, or run straight together with no separator at all
-  (`https://a/x/https://b/y`), which is far easier to assemble on a phone or
-  tablet.
-- **Destinations**: download to your device, the server library, a music
-  library (with metadata tagging via iTunes/Deezer lookup), or hand the file to
-  a co-hosted app such as [elite-v2](https://github.com/tjelite1986/elite-v2).
-- **Playlist watching**: save a playlist and Grabbit polls it on an interval,
-  fetching new entries automatically.
-- **Music log & duplicate detection**: every track saved into a music library
-  is logged permanently (Downloads → Music), and Grabbit matches new downloads
-  against that library by artist + title — so the same song from a *different*
-  upload is recognised before it lands in the library twice.
-- **Cookies for private content**: store Netscape `cookies.txt` files under
-  More → Cookies (one default file plus optional per-domain files). Every
-  yt-dlp call — resolve, download, playlists — automatically uses the matching
-  file, unlocking member/private/premium content. Each invocation gets its own
-  throwaway temp copy so concurrent jobs can't corrupt the stored file.
-- **Cutting**: give timestamp sections (`0:30-1:45, 3:10-4:00`) to download
-  only those parts (`--download-sections` + `--force-keyframes-at-cuts`), or
-  toggle *Split by chapters* for one file per chapter (`--split-chapters`).
-  Since a cut can produce several files, this is limited to the two
-  destinations that can hold them: the server library, and the audiobook
-  library (where the chapters become numbered parts of one book).
-- **SponsorBlock**: per download, either remove the sponsored segments or keep
-  them but embed them as chapters.
-- **Scheduling**: pick a start time in the sheet; the job waits as `scheduled`,
-  survives restarts (persisted in `DATA_DIR/scheduled.json`) and can be
-  cancelled from the queue.
-- **Extra yt-dlp arguments**: a flags field in the sheet, with named templates
-  you can save/re-use. Only an allowlisted safe subset of long yt-dlp options
-  passes through (subtitles, format selection, network pacing, site auth,
-  SponsorBlock categories, …) — short flags, unknown flags and stray
-  positional tokens are refused, so nothing can execute programs, touch
-  arbitrary paths or smuggle extra URLs.
-- **Retry & re-download**: failed/cancelled jobs get a retry button in the
-  queue; history rows get a re-download button.
-
-## Getting started
-
-Run it on your own machine, step by step. No prior experience needed.
-
-**Before you start**, install these free tools (skip any you already have):
-
-- **Node.js 20 (LTS)** — from [nodejs.org](https://nodejs.org). Check with
-  `node --version`.
-- **yt-dlp** — the downloader that handles ~1750 sites. Install per the
-  [official instructions](https://github.com/yt-dlp/yt-dlp/wiki/Installation)
-  (e.g. `pipx install yt-dlp` or a release binary on your `PATH`). Check with
-  `yt-dlp --version`.
-- **ffmpeg** — merges/cuts media. `sudo apt install ffmpeg` on Debian/Ubuntu,
-  `brew install ffmpeg` on macOS. Check with `ffmpeg -version`.
-- **Python 3 and mutagen** — every audio tag Grabbit reads or writes goes
-  through them, so the music and audiobook libraries do not work without them:
-  `sudo apt install python3 python3-pip` then `pip install mutagen`. Check with
-  `python3 -c "import mutagen; print(mutagen.version_string)"`. If `python3` is
-  not on your `PATH`, point `PYTHON_BIN` at it.
-- **gallery-dl and curl_cffi** (optional) — `pip install gallery-dl curl_cffi`.
-  gallery-dl enumerates image galleries (imagefap); curl_cffi lets yt-dlp
-  impersonate a browser on sites that check the TLS fingerprint. Without them
-  those sites fall back to plain yt-dlp, which works for most video links and
-  for none of the galleries.
-
-Only Node.js, yt-dlp and ffmpeg are needed to download a video. The rest add
-the music, audiobook and gallery destinations. The Docker image installs all of
-them, so this list is for running it outside Docker.
-
-Then, in a terminal:
-
-**Step 1 — Download the code:**
-
-```bash
-git clone https://github.com/tjelite1986/grabbit.git
-cd grabbit
-```
-
-**Step 2 — Install dependencies:**
-
-```bash
-npm install
-```
-
-(It's quick — the server itself only depends on Express; everything heavy is
-done by yt-dlp/ffmpeg.)
-
-**Step 3 — Start it:**
-
-```bash
-npm start
-```
-
-Open **http://localhost:3000**, paste a video link, press the arrow. That's it —
-no config file is required for a local try-out. Files land in `./downloads` and
-the state (job history, cookies, playlists) in `./data`, both next to
-`server.js`; see [Configuration](#configuration) to point `DOWNLOAD_DIR` and
-`DATA_DIR` somewhere else.
-
-To stop the server, press `Ctrl + C`. For running it permanently on a server,
-see [Deploy with Docker](#deploy-with-docker).
-
-## Grabbit 2.0 hub
-
-The hub is the start page (`/`): a front end over the same API with a dashboard
-of counts from the downloaded registry, a paste-a-link box, the live job queue,
-the latest downloads, creators found in file names, app destinations, system
-status, and the Media, Review, Profiles, Inbox, Duplicates and Metadata & tags
-pages. Every number comes from the server.
-
-The classic interface lives at `/classic/`, keeps every feature and is linked
-from the hub's sidebar. It still owns the share target (`/share`) and the app
-shortcuts; the old deep links `/?tab=…` and `/?action=…` (installed apps, push
-notifications) are redirected to `/classic/` with their query. `/hub/`, the
-hub's address before it became the start page, redirects to `/`.
-
-### Media viewer
-
-A click on a tile in the hub's *Media* page plays the video or shows the picture
-in place: native video controls (play, seek, volume, full screen, inline on
-phones), zoom and pan for pictures (wheel, double click or double tap, pinch,
-drag), next and previous by button, arrow key or swipe, and a details panel with
-creator, platform, original URL, format, size, resolution and the item's
-classification. Next and previous stay inside the page's filter, so with the
-audience filter set to *General* no 18+ item comes up.
-
-Files are served as they are; nothing is converted. Where an app keeps a
-browser copy beside the original (`<name>.web.mp4`), the viewer offers both and
-starts with the web copy. The browser asks for a history entry id and a variant
-(`original`, `web`, `poster`), never a path: the server looks in the folders the
-entry's save channel writes to and serves a file only when its real path lies
-inside a configured root (a symlink out of a library is refused). The routes
-are for the main session only; app passwords get 403. A file an importer has
-already taken out of its drop folder (Adshortis, Platform) shows as no longer
-on the server.
-
-### The 18+ destination (Adshortis)
-
-Adshortis is a destination of its own, never mixed with the general apps:
-
-- The hub lists it in a separate *18+ only* group, only when `ELITE_ROOT` is
-  set and passed the boot check, and never restores it as the default choice.
-  Saving to it needs a confirmation tick, every time.
-- Its folder may not share a tree with a general destination; if it does, the
-  channel is disabled at boot (see `ELITE_ROOT` below).
-- Only the owner session and app clients with the `adult` audience can save to
-  it (GDA target `adshortis.inbox`); a general client is refused.
-- A save to it is refused up front when it is not available, and an 18+ image
-  is refused instead of going to the general posts import.
-
-### The audience gate
-
-Every item has an audience: `general`, `adult` or `unknown`. Before anything is
-written into an app's folder, Grabbit works out the item's audience and checks
-it against the app (`audience.js`). The check runs when the save starts and
-again right before the file lands.
-
-- **Adult wins.** An item is adult when the save goes to Adshortis, when it was
-  recorded as adult before, when it comes from an 18+ site, when the site
-  itself flags it 18+ (yt-dlp's `age_limit`), or when its creator matches a
-  profile that is 18+ or was classified 18+. Once adult, an item stays adult.
-- **General is a decision by hand.** An item is general only when its creator
-  matches a general profile that was created by hand or classified general on
-  the hub's *Review* page, or when the item itself was classified general
-  there. Having been delivered to a general app before is not a
-  classification, and neither is a save to the plain server library.
-- **Unknown is not general.** A creator no one has classified, or an item with
-  no creator, is refused by every general app (Tikshortis, Platform, the posts
-  import). Classify it on the *Review* page, or save to Adshortis or the
-  server library.
-- **18+ is final.** An 18+ creator or item is never classified general again,
-  and 18+ and other profiles are never merged.
-- **A job can tighten, never loosen.** Saving to Adshortis makes the item
-  adult. Renaming the creator (`creator=`) cannot borrow another creator's
-  general profile: both the site's name and the new name are checked, and the
-  stricter answer wins.
-- Adshortis takes videos only.
-
-**Review page.** The hub's *Review* page lists unclassified creators (most
-files first) and the items a general app refused (latest refusal first). Tick
-creators or items and classify them general or 18+, or classify every
-unclassified creator that matches a filter at once; that bulk action states
-the count you saw, and is refused if the list changed meanwhile.
-
-**Kids library.** A child-safety rule for the Navidrome kids library
-(`kidsRefusal()` in `audience.js`: only items classified general, never
-unknown or 18+) is written and tested but not switched on; the kids library
-works as before.
-
-Items and deliveries are recorded in `items.db` (SQLite, WAL) in the data
-directory. The database refuses on its own any general delivery of an item that
-is not general, and any lowering of an adult item. On boot, items are imported
-from `downloaded.json` (read only; nothing is added to or changed in the JSON
-files). Before a schema migration the existing database is copied to
-`items.db.pre-v<N>-<time>`, and a database newer than the code is refused. The
-daily state snapshot includes a consistent copy of `items.db`. If `items.db`
-cannot be opened, general apps receive nothing until it can; `/api/health`
-shows the reason under `items`.
-
-Content hashes (SHA-256) are recorded for each delivered file. A file with the
-same bytes as an earlier item is logged as a duplicate; nothing is refused on
-that yet.
-
-### Creator profiles
-
-The hub's Profiles page manages one profile per creator, stored in
-`profiles.json` in the data directory (snapshotted daily with the other state
-files). A profile holds:
-
-- **Linked accounts**: any number of platform accounts (`tiktok`, `instagram`,
-  `facebook`, ...), each with a handle, an optional profile link and where it
-  came from (`manual`, or the importer that added it).
-- **Aliases**: the creator names found in downloaded file names
-  (`<creator>_-_<title>`). Every creator in the downloaded registry gets a
-  profile of its own the first time the page is opened, and new creators are
-  added as they appear.
-
-Edit renames a profile and changes its accounts. Merge moves the aliases and
-accounts of other profiles into one and remembers the merged ids. Split moves
-chosen aliases or accounts out into a new profile. The rules:
-
-- Nothing on disk changes. Files are never renamed or moved, and the registry is
-  only read.
-- An alias is only ever moved, never deleted, so every file name's creator
-  always resolves to exactly one profile.
-- One platform account belongs to one profile. Adding it to a second profile is
-  refused with a hint to merge instead.
-- General and 18+ are kept apart. A file saved to the `18plus` channel makes its
-  creator an 18+ alias, so the same name in both channels becomes two profiles,
-  and merging across audiences is refused. A profile created by hand must be
-  given its audience explicitly.
-
-API (web session only; app passwords are refused):
-`GET /api/hub/profiles?q=&audience=general|adult`, `GET /api/hub/profiles/:id`,
-`POST /api/hub/profiles` (`{ name, audience, note?, accounts? }`),
-`POST /api/hub/profiles/:id` (`{ name?, note?, accounts? }`),
-`POST /api/hub/profiles/merge` (`{ target, sources: [id] }`),
-`POST /api/hub/profiles/:id/split` (`{ name, aliases: [name], accounts: ['platform:handle'] }`).
-
-
-## Everyday use
-
-A few things the web UI does that aren't obvious at first glance.
-
-**Paste one link — or many.** One link resolves to a single card. Paste several
-and Grabbit lays them out as a batch, queuing every one with the same settings.
-The links can be on separate lines, spaced out, or run straight together with no
-separator:
-
-```
-https://www.example.com/share/r/19EBzS35RK/
-https://www.example.com/share/r/19EBzS35RK/
-https://www.example.com/share/r/19EBzS35RK/
-```
-
-```
-https://www.example.com/share/r/19EBzS35RK/https://www.example.com/share/r/19EBzS35RK/https://www.example.com/share/r/19EBzS35RK/
-```
-
-The second form takes no spacing to get right, which makes it much easier to
-build up a list on a phone or tablet.
-
-![Several links pasted at once, laid out as a batch with download-all buttons](assets/screenshots/multi-paste.jpg)
-
-**Download straight into a music server.** If you run your own music server such
-as [Navidrome](https://www.navidrome.org/), point the music destination at its
-library folder and Grabbit files each track into a clean, scannable tree:
-
-```
-[Artist]/[Album (Year)]/[Artist] - [Album (Year)] - [Title].ext
-```
-
-(Artist and album repeat in the file name on purpose, so a track stays
-identifiable even if it ends up outside its folder.)
-
-**Audiobooks and audio stories get their own shelf.** The *Audiobooks /
-stories* destination is a separate library where every book or story lives in
-its own folder:
-
-```
-[Author]/[Book]/[NN - ][Part].ext
-```
-
-A story that arrives as a single file keeps the plain book name; a book that
-comes as one long recording can be split on its chapters (**Split by chapters**
-in the download sheet), and each chapter lands as a numbered, individually
-tagged part of the same book. Adding a part later continues the numbering
-instead of overwriting part one, and the source thumbnail is saved as
-`cover.jpg` next to the book, which is what audiobook players look for.
-
-**Auto or hand-picked metadata.** Leave tagging on **auto** and Grabbit names
-and tags the track for you. Prefer to curate it? Do it manually and pick the
-right match from a metadata lookup list — set the genre, mark it as part of an
-Album, Single or EP, and check the source description, where the real title is
-often hiding.
-
-**A site that won't download?** Most links already work through the built-in
-yt-dlp fallback, but a stubborn site can be taught with a small custom extractor
-— see [Adding a new site](#adding-a-new-site), which also covers the easiest
-route: letting an AI agent write it for you.
-
-### Playlists, subscriptions and bulk downloads
-
-Paste a **playlist** or a **creator/profile** link and Grabbit doesn't resolve a
-single file — it lists *every* item in it as a card, with batch actions on top.
-This is how you grab a whole channel, playlist or profile at once.
-
-![A playlist view with item cards and batch actions](assets/screenshots/playlist.jpg)
-
-**The item list.** The header shows the playlist/profile name, the handle and how
-many items it holds. Each card has:
-
-- an **audio** button and a **video** button (image items get an **image**
-  button instead) — tap either to open the download sheet for just that one item;
-- a **✓ mark-as-downloaded** toggle. Grabbit remembers what you've already
-  grabbed so you can tell new from old at a glance; tap again to clear the mark.
-
-**Batch actions across the whole list:**
-
-- **Download all** (the floating button, bottom-right) — opens the download sheet
-  once for *every* item in the list. Whatever you set there is shared by all of
-  them, and each file still names and tags itself from its own metadata (so the
-  per-item title/tag fields are hidden in a batch).
-- **Download new to Navidrome (N)** — queues every item you *haven't* downloaded
-  yet as tagged audio into your music library, skipping the ones already done
-  *and* the ones whose song is already in the library under another upload.
-  Disabled when there's nothing new. `(N)` is how many are fresh.
-- **Hide downloaded (N) / Show all** — collapse the items you've already grabbed
-  so only new ones show. The choice is remembered between visits.
-
-**"Download all as audio" vs "Download all as video".** When you paste several
-links at once you get both buttons, and the difference is exactly what it says:
-
-- **Download all as audio** — extracts *only the sound track* of each link. Use
-  this for music, podcasts or anything you only want to listen to: the files are
-  much smaller, and the sheet gives you the audio-specific options (audio format
-  + bitrate). Each track is named and tagged from its own metadata.
-- **Download all as video** — downloads the *full video* (picture + sound) of
-  each link, at the quality and container you choose in the sheet.
-
-Both open the same shared-settings sheet; the only difference is whether you end
-up with audio files or video files. (Sending a batch to the **Navidrome** music
-destination always extracts audio, whichever button you started from — a music
-library holds songs, not video.)
-
-**Subscribing to a playlist.** In a playlist view, tap **Save playlist** (it
-becomes **Remove saved playlist** once saved). Saved playlists live under
-**More → Saved playlists**, where each row gives you:
-
-- **Tap the row** — re-open the playlist to look through it and check for new
-  items by hand.
-- **The library pill (`Mine` / `Kids`)** — tap to switch which Navidrome library
-  this playlist's new tracks go into (your own or the separate kids library).
-- **The bell (watch) toggle** — turn on **auto-download**: Grabbit then polls the
-  playlist on an interval (`WATCH_INTERVAL_MINUTES`) and downloads any newly
-  added track to Navidrome on its own, as tagged audio — no need to come back.
-  Off means the playlist is just saved for easy re-opening, nothing downloads by
-  itself.
-- **The trash icon** — remove the saved playlist (this only unsubscribes; it
-  never touches files you've already downloaded).
-
-### The music log and "do I already have this song?"
-
-Two different questions, answered by two different files in `DATA_DIR`:
-
-- `downloaded.json` — **have I fetched this source before?** Keyed by the clip's
-  URL and its site-native id. It is what marks playlist items as *downloaded*
-  and what the watcher skips.
-- `music.json` — **which songs are in my music libraries?** One row per track:
-  library, path, artist(s), title, album, year, genres, and the source URL it
-  came from. Unlike the download history (capped at the last 200 downloads of
-  any kind) this log is never trimmed, so it stays a complete record.
-
-**Downloads → Music** lists that log — each row under the track's own cover
-art, extracted from the file once and cached as a small JPEG in
-`DATA_DIR/covers` (a scan pre-extracts what is missing, a few at a time, and
-drops covers no track claims any more). Search across artist/title/album, filter
-by library, and **Rescan** to reconcile it with what is actually on disk.
-
-**Working through the library.** Each row carries two review markers, for
-cleaning up a library a bit at a time:
-
-- an **edited** badge with the time, on every track whose tags were changed here
-  — so a pass over a badly tagged import shows what has already been fixed;
-- a **tick** button that marks a track as dealt with (dimmed and struck through).
-  Saving an edit ticks the track off on its own; tracks that were fine as they
-  were can be ticked off without touching them, and a tick can be undone.
-
-The chip next to the library filter cycles **All tracks → Needs a look → Ticked
-off → Edited here**, and the line above the list counts how many are ticked off
-and how many were edited. Both markers live in the music log only — nothing on
-disk changes. A scan
-walks both music roots, reads the tags of anything the log has not seen (so
-files copied in by hand, or downloaded before the log existed, still show up)
-and flags rows whose file has since disappeared. One scan also runs shortly
-after every start, and **More → Music library** has the same scan next to the
-current track count and the time of the last one.
-
-**Editing a track you already have.** Every row in the music list has a pencil
-button: it opens the same tag fields the download sheet uses — song title,
-artists, release type, album, date, genres (with the picker) and which library
-the track belongs to — but applies them to the file that is already on disk. No
-download happens: the tags are rewritten in place (cover art survives), the file
-is re-filed under the layout the new tags imply, the folders it left behind are
-removed if empty, and the music log follows along. The iTunes/Deezer lookup is
-available there too, so a badly tagged rip can be fixed from a database match,
-and the track's **description** is shown above the fields — the text embedded in
-the file, or failing that the source page's own description, which is where the
-real artist and title usually hide when the video title is clickbait. Grabbit
-refuses the save if another track already sits under the new name.
-
-**Duplicate detection.** The same song is uploaded many times — a topic channel,
-an official video, a lyric video — and each of those is a *different source*, so
-the downloaded registry cannot recognise it. Grabbit therefore also matches
-against the music log by **artist + title**, ignoring the noise video titles
-carry (`(Official Music Video)`, `[Lyrics] HD`, an `Artist - ` prefix, the
-`- Topic` channel suffix). What happens with a match:
-
-- a **full match** (artist *and* title) shows *in library* on the item card, is
-  excluded from *Download new to Navidrome* and is skipped by the watcher;
-- a **title-only match** (the artist reads differently on the two sides) is only
-  a warning in the download sheet — never a reason to skip a track by itself.
-
-Both sides are read generously, because a rip is filed under whatever the site
-gave it: a credit line is compared per artist as well as whole (`Rocco,
-Pulsedriver & Ninkid` also matches plain `Rocco`), a library track is indexed
-under every reading of its title (so `STARSET - Brave New World (Official Music
-Video)`, saved under the channel `starsetonline`, is also found as `Brave New
-World`), and a title-only hit counts as a full match when one side names the
-other's artist inside its title — which is exactly what a channel-tagged rip
-looks like.
-
-A suffix that means a *different recording* — `(Live …)`, a remix name — is
-deliberately kept, so those are not treated as duplicates of the studio version.
-
-### Default download options — every setting explained
-
-These live under **More → Default download options**. They set the *starting
-point* for every new download: the options sheet opens pre-filled with them, you
-can still change anything per download, and a matching [rule](#rules--automate-the-settings-youd-otherwise-pick-every-time)
-can override them. Each change saves the instant you make it — there's no separate
-save button.
-
-Some rows only appear when they're relevant (e.g. the music-library picker shows
-up only once the destination is Navidrome); that's noted per setting.
-
-- **Save to** — the destination new downloads go to. This choice also decides
-  which of the rows below are shown.
-  - *Shorts* — the short-clip library of a co-hosted app. Each channel has its
-    own root, so *main* and *18+* can be served by different apps.
-  - *Server library* — a plain folder library on the server.
-  - *Navidrome (music)* — a tagged music library: audio only, filed by
-    artist/album (see the naming scheme above).
-  - *Audiobooks / stories* — a tagged audiobook library: audio only, one folder
-    per book, filed by author/book (see the naming scheme above).
-
-- **Music library** — *shown only when Save to = Navidrome.* Which music library
-  the audio lands in: *My music* or *Kids* (a separate library/instance).
-
-- **Channel** — *shown only when Save to = Shorts.* Which shorts channel new
-  clips post to: *main* or *18+*. Each is its own app with its own root — see
-  `TIKSHORTIS_ROOT` / `ELITE_ROOT`. Only the channels whose root is configured
-  are shown, and with neither set the *Shorts* destination is hidden entirely.
-  The 18+ channel takes videos only: an 18+ image is refused rather than filed
-  into the general posts import.
-
-- **Library folder** — *shown only when Save to = Server library.* The subfolder
-  inside the server library that video downloads are filed under.
-
-- **Quality** — the resolution **cap** for downloads from yt-dlp sites. *Best*
-  takes the highest available; pick a number (2160p/4K down to 360p) to cap it
-  there — handy to save space or bandwidth. Sites with a dedicated extractor
-  hand over their own single quality, so this only affects yt-dlp links.
-
-- **Video container** — *shown only when Save to = Server library.* The file
-  format video is saved as: *mp4* (most compatible), *mkv* or *webm*. mkv and
-  webm need a yt-dlp remux, so they apply to yt-dlp downloads.
-
-- **Audio format** — the format for audio-only downloads. *Best (source)* keeps
-  the original track without re-encoding (fastest, no quality loss); the others
-  force a format — lossy (*mp3*, *opus*, *aac*, *vorbis*, *m4a*) or lossless
-  (*flac*, *wav*, *alac*).
-
-- **Audio bitrate** — the target bitrate for **lossy** audio only; it has no
-  effect on lossless formats or on *Best (source)*. *Best* lets yt-dlp decide;
-  otherwise pick from 320k (highest quality, biggest file) down to 96k
-  (smallest).
-
-- **Download to this device** — *on by default.* When on, the finished file is
-  also streamed to the device you're using, on top of the server copy. Turn it
-  off to keep the file only on the server and skip pulling it to your phone/PC.
-
-- **Convert to web format** — save the download already as a web-optimized
-  `.web.mp4`, ready to play in a browser without a later transcode pass (it skips
-  the separate transcoder step).
-
-- **Notify when done** — *shown only after you've enabled push notifications.*
-  Sends a push notification when a download finishes.
-
-### The download sheet — every field explained
-
-When you tap a download action on a resolved link (audio / video / image), or a
-batch button on a playlist/multi-paste, the **options sheet** slides up. It's
-pre-filled from your [default download options](#default-download-options--every-setting-explained);
-anything you change here applies to **this download only**. The button at the
-bottom starts it.
-
-![The download sheet for a server-library video, showing cutting, SponsorBlock and extra-args fields](assets/screenshots/download-dialog-video.jpg)
-
-The sheet is context-aware: it only shows the fields that make sense for what
-you're downloading and where it's going, so you'll never see all of these at
-once. Each entry below says when it appears.
-
-**Naming and tagging**
-
-- **Title** — the file/clip title. *Shown for a single link or one item picked
-  from a profile; hidden for Navidrome and for batch/multi runs* (there each item
-  keeps its own title).
-- **Save under profile name** — files the download under a creator/profile name.
-  *Hidden for Navidrome and multi-link runs.*
-- **Hashtags (space or comma separated)** — tags that feed the clip's
-  caption/keywords. *Hidden for Navidrome (which uses genres instead) and for
-  batch runs.*
-
-**Where it goes**
-
-- **Save to** — the destination for this download: *Shorts*, *Server
-  library*, *Navidrome* or *Audiobooks*. This choice drives which fields below
-  appear.
-- **Music library** — *Navidrome only.* *My music* or *Kids*.
-- **Channel** — *Shorts only.* *main* or *18+*.
-- **Library folder** — *server-library video only.* Pick an existing subfolder,
-  or choose *New folder* to reveal…
-- **New folder name** — *shown when Library folder = New folder.* Names the
-  subfolder to create.
-
-**Music tagging** *(the whole block shows only for a single Navidrome save — not
-batches, which tag each track automatically from its own metadata)*
-
-![The download sheet in Navidrome mode with the iTunes/Deezer metadata lookup and tag fields](assets/screenshots/download-dialog.jpg)
-
-- **Source description** — a collapsible panel showing the original post's
-  description, where the real song title often hides when the video title is
-  clickbait.
-- **Metadata lookup (iTunes + Deezer)** — a dropdown of matches from a music
-  database; picking one fills every tag field below at once. The button beside it
-  re-runs the search. Each row is marked by how well it answers: `✓` matched both
-  the artist and the title, `≈` matched the artist and a title one typo away
-  (found in that artist's own catalogue, so `Eyes Dem Open` still finds
-  `EYES THEM OPEN`), `~` matched the title alone, `?` neither. Only `✓` and `≈`
-  fill the fields on their own — a near miss stays pickable but is never written
-  for you, because searching a common word answers with somebody else's song. The search is built from the artist and title fields (plus the
-  channel name), not from the raw video title, whose brackets and genre words no
-  catalogue indexes.
-  When the fields are still empty, Grabbit reads the credit line out of the video
-  title itself (`Artist – Track (Official 2026)`), so a track that only ever
-  existed on its artist's channel still arrives tagged. If no database knows it
-  either, the genre field falls back to the genres named in the video's own tags.
-- **Song title** — the track title tag.
-- **Artists / group (comma-separated)** — one or more artists.
-- **Release type** — *Album*, *Single* or *EP*. A *Single* has no album and is
-  filed under its own name (the album field disappears); *EP* relabels the field
-  to *EP name*.
-- **Album / EP name** — *hidden for Single.* The album/EP the track belongs to.
-- **Release date** — `YYYY` or `YYYY-MM-DD`; the year becomes the `(Year)` in the
-  folder path.
-- **Genres (commas, spaces or #hashtags)** — one or more genre tags, written
-  with whichever separator you have at hand: `#neurofunk #darkdnb #dnb`,
-  `neurofunk darkdnb dnb` or `Pop, Rock`. The separator is taken from the text
-  itself — hashtags win, then commas/semicolons, and only a line with neither
-  is split on spaces. Multi-word genres therefore need a comma or a hashtag
-  (`#hard rock #dnb`), except when a connector makes the name obvious
-  (`Drum & Bass`, `Rhythm and Blues`), which is kept whole. Duplicates are
-  dropped.
-- **Pick genres from list** — opens every genre Grabbit knows, most-used first
-  with a track count: the genres already in your music libraries plus the ones
-  you have typed here before (kept in `DATA_DIR/genres.json`). Tap to add or
-  remove; the field is rewritten in whichever style it already uses (hashtags
-  or commas), so typing and tapping mix freely.
-
-**Audiobook tagging** *(shows only for a single Audiobooks save — not batches,
-where each item names its own book from its own metadata)*
-
-- **Source description** — the same collapsible panel as above. Worth opening
-  for a book: audiobook uploads usually spell out the author, the narrator and
-  the chapter timestamps there, and those timestamps go straight into *Cut
-  sections* further down.
-- **Author / narrator** — becomes the artist tag and the top folder level.
-- **Book / story title** — becomes the album tag and the book's own folder.
-  Editing it also retitles the part, until you edit the part by hand.
-- **Part title** — names the file and its title tag. A story that arrives as one
-  file can keep the book title. *Hidden when Split by chapters is on*, since
-  each chapter then titles itself.
-- **Year** and **Genres** — as for music; an empty genre defaults to
-  `Audiobook` rather than being looked up in a music database.
-
-**Quality and format**
-
-- **Quality** — resolution cap for yt-dlp sites (*Best* or 2160p…360p). *Shown
-  for video, non-Navidrome.*
-- **Container** — output format *mp4 / mkv / webm*. *Server-library video only*
-  (Elite shorts stay plain mp4; mkv/webm need yt-dlp).
-- **Audio format** + **Bitrate** — same choices as the defaults; bitrate applies
-  to lossy formats only. *Shown for audio downloads* (including a Navidrome or
-  Audiobooks save, which always extract audio; audiobooks default to `m4a`).
-
-**Video extras** *(server-library video only)*
-
-- **Embed thumbnail** — write the cover art inside the file.
-- **Embed subtitles** — include subtitles when the source has them.
-
-**SponsorBlock** — *shown for server-library video or any audio extraction.*
-*Off*, *Remove segments* (cut sponsor/intro/etc. out) or *Keep, mark as chapters*
-(leave them in but add chapter markers).
-
-**Cutting** *(server or audiobook library, not images, not batches)*
-
-- **Cut sections (start-end, comma-separated)** — download only the given
-  timestamp ranges, e.g. `0:30-1:45, 3:10-4:00`. Because a cut can produce
-  several files, only the server and audiobook libraries take it.
-- **Split by chapters** — *video, or any audiobook save.* Save one file per
-  chapter instead. For an audiobook each chapter becomes a numbered part inside
-  the book's folder, tagged individually.
-
-**Advanced and delivery**
-
-- **Extra yt-dlp arguments** — pass extra flags straight to yt-dlp, e.g.
-  `--write-subs --sub-langs en`. Only an allowlisted safe subset of long options
-  is accepted; you can save named **Templates** (Save/Delete) to reuse a flag set.
-  *Shown for anything except images; ignored by sites with a direct extractor.*
-- **Schedule start (optional)** — a date/time to hold the job until; it waits as
-  *scheduled*, survives restarts, and can be cancelled from the queue. *Hidden for
-  the download-all batch.*
-- **Convert to web format** — save a web-ready `.web.mp4` immediately, skipping
-  the later transcoder pass. *Elite-v2 video saves only.*
-- **Download to this device** — *on by default.* Also stream the finished file to
-  your device, not just the server. *Hidden for the download-all batch.*
-
-**The confirm button** relabels itself for the context — *Download & import*,
-*Save to library*, *Save to Navidrome*, *Download all (N)*, and so on — so it
-always says exactly what pressing it will do. A **warning banner** may appear
-above the fields when something's worth knowing before you commit: the clip is
-too long for shorts (so it's routed to the server library instead), or it's
-already been downloaded/imported.
-
-### Rules — automate the settings you'd otherwise pick every time
-
-Under **More → Rules** you can teach Grabbit to fill in the download options for
-you whenever a link matches. Each rule is a simple *when this → then that*: a set
-of match conditions and the settings to apply when they're met.
-
-![The rule editor with when/then conditions and the automatic toggle](assets/screenshots/rules.jpg)
-
-**How matching works:**
-
-- A rule has a **When** block (the conditions) and a **Then** block (the settings
-  to apply). Leave every When field empty and the rule matches *everything*.
-- All the conditions you do fill in must match (they're AND-ed together).
-- Matching is **case-insensitive substring** by default — `youtube` matches
-  `www.youtube.com`. Wrap a pattern in `/slashes/` to use a **regex** instead,
-  e.g. `/(mp3|flac)$/` on the title.
-- Rules are checked **top to bottom, and the first enabled match wins**, so put
-  your most specific rules above the broad catch-all ones. Drag to reorder.
-
-**What you can match on (When):** site, creator, title contains (text or
-`/regex/`), media type (video/image), and a duration range in seconds (only
-applies to links whose length is known).
-
-**What you can set (Then):** destination (shorts / server library /
-Navidrome music), channel (main / 18+), music library (mine / kids), a library
-subfolder, quality, audio format + bitrate, video container, SponsorBlock
-(remove or mark), save-to-this-device, a profile name to file it under, and an
-*extract audio only* toggle. Anything left on **Don't change** keeps the normal
-default. A rule only touches the fields you actually set.
-
-**Automatic rules.** Flip **Fully automatic** on and a matching *shared* link
-starts downloading immediately with the rule's settings — the options sheet
-never opens. Leave it off and the rule just pre-fills the sheet, so you still get
-a chance to review before hitting download.
-
-**Examples:**
-
-- *Send music straight to Navidrome.* When **Site** = `youtube` → Then
-  **Extract audio only** on, **Audio format** = `opus`, **Save to** =
-  `Navidrome (music)`, and **Fully automatic** on. Now sharing a YouTube link
-  files a tagged track into your music library with zero taps.
-- *Keep long videos out of shorts.* When **Type** = `Video`, **Duration min** =
-  `1200` → Then **Save to** = `Server library`, **Quality** = `1080p`.
-- *Route one creator to the 18+ channel.* When **Creator** = `somename` → Then
-  **Channel** = `18+`. Put this above any broader site rule so it wins.
-
-### Unlocking private or login-only content with cookies
-
-Some links only resolve when you're signed in — members-only videos, private
-playlists, age-gated pages, premium audio. Grabbit can borrow your browser's
-login by using an exported `cookies.txt` file. Every yt-dlp call — resolve,
-download and playlist polling — then reuses it automatically, so login-gated
-content just works.
-
-![The cookies panel for private and login-only content](assets/screenshots/cookies.jpg)
-
-**Getting a `cookies.txt` file.** It has to be in the classic *Netscape* format,
-which a small browser extension produces in one click:
-
-1. Sign in to the site in your browser as usual.
-2. Install a "cookies.txt" exporter extension — for example *Get cookies.txt
-   LOCALLY* (Chrome/Edge) or *cookies.txt* (Firefox). Pick one that exports the
-   **Netscape** format and keeps the data on your machine.
-3. Open the site and click the extension. You don't have to download a file —
-   *Get cookies.txt LOCALLY* has a **Copy** button that puts the cookies on your
-   clipboard, ready to paste straight into Grabbit.
-
-**On a phone or tablet.** Most mobile browsers can't run extensions, but
-[Ultimatum](https://github.com/gonzazoid/Ultimatum) (Android) can. Download the
-*Get cookies.txt LOCALLY* plugin and load it into Ultimatum, then sign in to the
-site, tap the extension's **Copy** button, and paste — no cookies file to save,
-no desktop needed.
-
-**Adding them to Grabbit.** Go to **More → Cookies** (the *Cookies for private
-content* panel) and fill in the two fields:
-
-1. **Site domain** — type the site the cookies are for, e.g. `example.com`.
-   Leave it empty instead to save a *default* file that's used on every site.
-2. **cookies.txt content (Netscape format, from a browser export)** — paste the
-   text you copied with the extension's **Copy** button.
-3. Click **Save cookies**.
-
-That's it — the file appears in the list above the form, and matching downloads
-start using it right away. You can keep one default plus any number of per-domain
-files side by side; Grabbit picks the matching one for each download on its own,
-and each saved file has a delete button when you want to remove it.
-
-A couple of things worth knowing:
-
-- **Use a throwaway account** where you can. Cookies are live login sessions —
-  treat the file like a password, and don't hand a site your main account if a
-  spare will do.
-- Cookies expire. If a previously working link starts failing on login again,
-  re-export and paste a fresh file.
-- Stored files are never touched in place — each download gets its own temp
-  copy, so running several jobs at once can't corrupt the saved cookies.
-
-## Errors and how Grabbit handles them
-
-A download happens in two stages, and it helps to know which one failed:
-
-1. **Resolve** — Grabbit reads the link's metadata (title, creator, duration).
-   This is also where it learns whether the content is even reachable.
-2. **Download** — the file is actually fetched and saved.
-
-Grabbit's guiding rule: **recover from anything temporary on its own, and be
-blunt about anything permanent** so you're not left staring at a stalled job.
-A resolve problem shows up right on the card; a download problem shows in the
-**Queue** with the job's message.
-
-![The download queue showing progress and an automatic retry](assets/screenshots/queue.jpg)
-
-### Common messages
-
-| What you see | What it means | What Grabbit does — and what you can do |
-| ------------ | ------------- | --------------------------------------- |
-| `Invalid URL` | The box didn't contain a usable link. | Nothing runs. (Plain words instead of a link trigger a video *search*, not this error.) |
-| **"The site refused this video: … — downloading will fail too"** (red card notice) | The site won't hand the video over at all — it's deleted, private, members-only, behind a login, or geo-blocked. The download uses the same extraction, so it can't succeed either. | Grabbit warns you **before** you start, instead of failing halfway. If it's login-only, add cookies (**More → Cookies**); otherwise try again later or find another upload. |
-| **"No metadata: … — the download may still work"** (amber card notice) | Only the metadata probe hiccupped (a timeout, an unreadable field). This says nothing about the download itself. | Grabbit still lets you download; just the title and creator show as unknown until it finishes. |
-| `only available to Music Premium members` (YouTube Music) | An auto-generated track ID is premium- or region-locked, even though the same recording usually exists under a free ID. | Grabbit **automatically** looks up a free counterpart (via music.youtube's redirect, then a track search), checks it actually plays, and copies the original's clean artist/title onto it for tagging. Only if no free copy exists does the error stand. |
-| `Video unavailable` (YouTube) | Often just an intermittent YouTube flake; sometimes a genuine removal. | Grabbit **re-probes once** after a short pause before giving up. A real removal still fails after the retry. |
-| `not available in your country` / `blocked in your country` | Geo-restriction. | Can't be bypassed from here — it needs cookies or a network from an allowed region. |
-| `HTTP Error 403` / `429 Too Many Requests` / `timed out` / `Connection reset` / `ETIMEDOUT` … | A temporary network or rate-limit failure — common when a big batch hammers one site at once. | Grabbit **retries automatically**, up to 3 attempts, waiting longer each time (the queue shows `Retrying (1/2)…`). The queue also caps how many downloads run at once to ease the pressure. |
-| `This video is … long — too long for shorts` | The clip is longer than `SHORTS_MAX_DURATION`, the cap for the *shorts* destination. | Grabbit routes it to the **server library** instead (a notice tells you). In a batch, clips already known to be too long are skipped. |
-| `Cutting needs a yt-dlp-handled site (this one uses a direct downloader)` | You asked to cut or split a site that Grabbit downloads directly, not through yt-dlp. | Cutting/splitting only works on yt-dlp sites — download the file whole instead. |
-| `yt-dlp produced no output (no matching sections/chapters?)` | Your cut ranges matched nothing, or the video has no chapters to split. | Double-check the timestamps, or that the video actually has chapters. |
-| `Bad cut section "…" — use start-end like 1:30-2:45` / `Too many cut sections (max 20)` | The **Cut sections** field is malformed. | Give `start-end` ranges, comma-separated, up to 20. |
-| `Extra argument "…" is not allowed` / `… needs a value` / `… does not take a value` / `Too many extra arguments` | An **Extra yt-dlp arguments** entry was rejected by the safety allowlist. | Only a safe subset of long flags is accepted (no short flags, unknown options or stray URLs). Remove the flagged one. |
-| `Empty cookie file` | You pressed **Save cookies** with nothing pasted. | Paste the `cookies.txt` content first. |
-| `No results for "…"` | A plain-words search came back empty. | Refine the search terms, or paste a direct link. |
-| `Unauthorized` | Wrong or expired web-UI password. | Re-enter the Grabbit password. |
-
-### What runs on its own
-
-Three of the rows above are worth calling out, because Grabbit handles them with
-no action from you:
-
-- **Automatic retries with back-off.** Transient download failures (403, 429,
-  timeouts, dropped connections, 5xx) are retried up to three times, each after a
-  longer pause — so a rate limiter that's momentarily busy with the rest of your
-  batch usually clears by the next attempt. Only a non-transient error, or the
-  third strike, marks the job failed. Failed and cancelled jobs also keep a manual
-  **retry** button in the queue.
-- **YouTube re-probe.** Because YouTube intermittently reports playable videos as
-  "unavailable", Grabbit quietly probes a second time before trusting the error.
-- **Free-counterpart swap for premium locks.** Premium/region-locked YouTube
-  Music IDs are transparently replaced with a verified free upload of the same
-  track, tagged from the original — you just get the song.
-
-## How it works — under the hood
+<p align="center">
+  <picture>
+    <source srcset="assets/brand/banner.svg" type="image/svg+xml">
+    <img src="assets/brand/banner.png" alt="Grabbit. Your Media. Your Rules. Download. Organize. Discover. Enjoy." width="100%">
+  </picture>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/version-3.0.4-7c4dff?style=flat-square" alt="Version 3.0.4">
+  <img src="https://img.shields.io/badge/license-MIT-4f8bff?style=flat-square" alt="MIT License">
+  <img src="https://img.shields.io/badge/self--hosted-Docker-2496ed?style=flat-square&logo=docker&logoColor=white" alt="Self-hosted with Docker">
+  <img src="https://img.shields.io/badge/linux-arm64%20%7C%20amd64-5a4fcf?style=flat-square&logo=linux&logoColor=white" alt="linux/arm64 and linux/amd64">
+  <br>
+  <img src="https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 20+">
+  <img src="https://img.shields.io/badge/Express-4-404040?style=flat-square&logo=express&logoColor=white" alt="Express 4">
+  <img src="https://img.shields.io/badge/SQLite-better--sqlite3-003b57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite">
+  <img src="https://img.shields.io/badge/yt--dlp-+%20ffmpeg-c4302b?style=flat-square" alt="yt-dlp and ffmpeg">
+  <img src="https://img.shields.io/badge/ONNX%20Runtime-DINOv2%20(optional)-8a5cff?style=flat-square" alt="ONNX Runtime with DINOv2, optional">
+</p>
+
+<p align="center">
+  <b>Grabbit is a self-hosted media hub.</b> It downloads from the sites you use,
+  files everything into your own libraries, finds the duplicates and lets you
+  browse it all from one fast, phone-friendly interface.
+</p>
+
+<p align="center">
+  <a href="#docker-quick-start">Quick start</a> ·
+  <a href="#feature-overview">Features</a> ·
+  <a href="#smart-duplicate-manager-20">Duplicate Manager</a> ·
+  <a href="documentation/architecture.md">Architecture</a> ·
+  <a href="documentation/configuration.md">Configuration</a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/showcase/dashboard.webp" alt="The Grabbit hub dashboard: library statistics, active queue, recent downloads and system status" width="100%">
+</p>
+
+---
+
+## Introduction
+
+Grabbit started as a downloader: paste a link, get the file. Version 3 turns it
+into a **media hub that you run on your own hardware**. A Raspberry Pi is
+enough.
+
+- **Download** from everything yt-dlp supports, plus dedicated extractors for
+  sites it handles poorly. Long downloads run as background jobs.
+- **Organize** files into libraries for video, photos, music and audiobooks,
+  with creator profiles, tags and a manual audience classification.
+- **Discover** your media in native feeds: short videos through TikShortis and
+  photo posts through Social & Photos.
+- **Keep it clean** with the Smart Duplicate Manager. It finds exact copies,
+  similar photos and re-encoded videos, and nothing is removed until you say so.
+
+Grabbit runs on its own. TikShortis and Elitogram are optional separate
+applications, and this README marks clearly which features need them.
+
+> [!NOTE]
+> Grabbit is a general-purpose tool. It hosts no content and points to
+> nothing. You are responsible for what you download and for whether you have
+> the right to keep it. See the [Disclaimer](#disclaimer).
+
+## Table of contents
+
+- [Feature overview](#feature-overview)
+- [Screenshot showcase](#screenshot-showcase)
+- [Smart Download Engine](#smart-download-engine)
+- [Smart Duplicate Manager 2.0](#smart-duplicate-manager-20)
+  - [AI Photo Engine and DINOv2](#ai-photo-engine-and-dinov2)
+  - [Video Fingerprint Engine](#video-fingerprint-engine)
+  - [Smart Trash and safe duplicate management](#smart-trash-and-safe-duplicate-management)
+- [Native TikShortis](#native-tikshortis)
+- [Social & Photos](#social--photos)
+- [Creator management](#creator-management)
+- [Metadata and hashtags](#metadata-and-hashtags)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Docker Quick Start](#docker-quick-start)
+- [Configuration reference](#configuration-reference)
+- [Storage and volumes](#storage-and-volumes)
+- [Security and privacy](#security-and-privacy)
+- [Backup and recovery](#backup-and-recovery)
+- [Development and testing](#development-and-testing)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License and acknowledgements](#license-and-acknowledgements)
+- [Credits](#credits)
+
+## Feature overview
+
+| | Feature | Status in 3.0.4 |
+|:-:|---|---|
+| ⬇ | **Smart Download Engine**: site extractors with a yt-dlp fallback, background jobs, retries, playlist watching | Built in |
+| ◫ | **Smart Duplicate Manager 2.0**: exact, perceptual, AI and video matching with Smart Trash | Built in |
+| ◉ | **AI Photo Engine**: DINOv2 image embeddings, run locally | Built in, optional (model download on request) |
+| ▶ | **Native TikShortis**: vertical video feed, explore, playlists, profiles | Needs the separate [TikShortis](https://github.com/tjelite1986/tikshortis) backend |
+| ▦ | **Social & Photos**: photo feed, explore grid, collections, post editing | Needs the separate [Elitogram](https://github.com/tjelite1986/elitogram) backend |
+| ☺ | **Creator profiles**: one profile, many accounts, merge and split | Built in |
+| # | **Metadata & tags**: source captions, hashtags, edits with a change log | Built in |
+| ♫ | **Music and audiobook libraries**: tagging through iTunes and Deezer lookups | Built in |
+| ⚿ | **Per-app access (GDA)**: tokens for co-hosted apps, scoped by audience | Built in |
+| ◇ | Native Videos, Movies & music, Home | [Planned](#roadmap) |
+
+## Screenshot showcase
+
+All screenshots come from a demo instance of 3.0.4 with generated sample
+media and sandbox backends. No real libraries or accounts were used.
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/showcase/download.webp" alt="The Download page with a link field and destination picker"><br><sub><b>Download</b>: paste a link and choose where it goes.</sub></td>
+    <td width="50%"><img src="assets/screenshots/showcase/media.webp" alt="The Media grid with videos and photos"><br><sub><b>Media</b>: everything you downloaded, by kind and audience.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/showcase/tikshortis.webp" alt="The native TikShortis player in the hub"><br><sub><b>TikShortis</b>: the short-video feed, native in the hub.</sub></td>
+    <td><img src="assets/screenshots/showcase/social-explore.webp" alt="The Social and Photos explore grid"><br><sub><b>Social & Photos</b>: the explore grid.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/showcase/sdm-overview.webp" alt="Smart Duplicate Manager overview with scan status and reclaimable space"><br><sub><b>Duplicate Manager</b>: what was found and what can be freed.</sub></td>
+    <td><img src="assets/screenshots/showcase/settings.webp" alt="The Settings page with save locations and system status"><br><sub><b>Settings</b>: save locations and system status.</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="assets/screenshots/showcase/mobile-dashboard.webp" alt="Dashboard on a phone" width="24%">
+  <img src="assets/screenshots/showcase/mobile-tikshortis.webp" alt="TikShortis on a phone" width="24%">
+  <img src="assets/screenshots/showcase/mobile-social.webp" alt="Social and Photos feed on a phone" width="24%">
+  <img src="assets/screenshots/showcase/mobile-sdm.webp" alt="Duplicate Manager on a phone" width="24%">
+  <br><sub>The same hub on a phone: dashboard, TikShortis, Social & Photos and the Duplicate Manager.</sub>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/showcase/tablet-social-explore.webp" alt="Social and Photos explore grid on a tablet" width="40%">
+  <img src="assets/screenshots/showcase/tablet-sdm-photos.webp" alt="Similar photos on a tablet" width="40%">
+  <br><sub>On a tablet: the explore grid and similar photos.</sub>
+</p>
+
+## Smart Download Engine
+
+- **Any link yt-dlp supports**, plus dedicated extractors in
+  [`extractors/`](extractors) for sites that yt-dlp covers poorly. Image
+  galleries go through gallery-dl.
+- **Background jobs.** A download starts at once and reports progress over
+  Server-Sent Events. Up to two run at a time (`MAX_ACTIVE_JOBS`) and the rest
+  wait in the queue. Jobs survive a page reload.
+- **Retries that make sense.** Temporary upstream errors (404 while a CDN is
+  still encoding, 403, 429, 5xx) go to a retry queue with backoff. Permanent
+  errors fail fast and are kept in the history.
+- **Destinations.** Stream to your device, save to the server library, file
+  into a music or audiobook library with tags, or hand the file to a co-hosted
+  app. App destinations are opt-in: an unset folder means the destination does
+  not exist.
+- **Playlists and schedules.** Watch a playlist and new entries are fetched
+  automatically. Schedule a start time, cut sections, split by chapters, or
+  handle sponsor segments with SponsorBlock.
+- **Already downloaded?** A registry keyed on the site's own media id marks
+  what you already have, so playlists only offer what is new.
+
+Playlists, formats, scheduling, cookies, rules and notifications are still set
+up in the classic view (`/classic/`). The [user guide](documentation/user-guide.md)
+explains every field.
+
+## Smart Duplicate Manager 2.0
+
+<p align="center">
+  <img src="assets/screenshots/showcase/sdm-photos-compare.webp" alt="Side-by-side comparison of two similar photos with resolution, size and match details" width="100%">
+</p>
+
+The Duplicate Manager scans your libraries in the background, groups copies
+and shows them side by side. **It never removes anything on its own.** Every
+action is yours, and every removal goes to a trash you can restore from.
+
+| Engine | How it matches | Result |
+|---|---|---|
+| **Exact** | SHA-256 of the full file | *Identical*: same bytes |
+| **Perceptual photo** | 64-bit pHash, also of the 90°, 180° and 270° rotations | *Near*: resized, recompressed or rotated |
+| **AI photo** (optional) | DINOv2 embeddings, cosine similarity | *Similar*: same scene, other crop or edit |
+| **Video fingerprint** | pHash of keyframes and fixed probe frames | *Re-encoded*, *similar* or *partial* (one clip inside another) |
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/showcase/sdm-identical.webp" alt="Identical copies tab with a group expanded"><br><sub><b>Identical</b>: exact copies, with the space each group frees.</sub></td>
+    <td width="50%"><img src="assets/screenshots/showcase/sdm-videos.webp" alt="Similar videos tab"><br><sub><b>Similar videos</b>: re-encodes and clips cut from a longer video.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/showcase/sdm-settings.webp" alt="Duplicate Manager settings with the AI Photo Engine models"><br><sub><b>Settings</b>: engines, AI model, keep rule and trash retention.</sub></td>
+    <td><img src="assets/screenshots/showcase/sdm-trash.webp" alt="Smart Trash with a restorable entry"><br><sub><b>Smart Trash</b>: restore, or delete for good when you choose.</sub></td>
+  </tr>
+</table>
+
+**What it covers**
+
+- **Scanning.** A read-only background scanner hashes every media file once.
+  It never follows symlinks, reads at a limit you set (20 MB/s by default) and
+  can be paused, resumed or stopped. Unchanged files are not read again.
+- **Analysis.** Photo and video analysis run one file at a time at low CPU and
+  I/O priority. Everything happens on your server.
+- **Cross-app duplicates.** The scanner also reads the app folders you
+  configure (for example TikShortis and Elitogram). Each app keeps its own copy
+  and its own records. Where the app offers a dedupe operation, Grabbit asks
+  the app to perform it rather than touching the app's files. A library that
+  has no adapter is shown for information only.
+- **Hard links.** Names that already share one file on disk are shown as
+  *already stored once* and counted once. Identical copies inside Grabbit's
+  own folders on the same disk can be merged into hard links, so every name
+  keeps working.
+- **Duplicate prevention.** After a download finishes, the new file is checked
+  against the library. By default a match is flagged for review. You can
+  instead choose to keep it, skip it (to the trash) or link it, and those
+  choices apply only when both copies are in Grabbit's folders.
+- **Cache & Thumbnails.** Generated files such as thumbnails are listed per
+  app, with a dry run before any cleanup or rebuild.
+- **18+ separation.** 18+ groups are hidden by default, and an 18+ copy is
+  never merged into a general app.
+
+> [!IMPORTANT]
+> Similar photos and videos are **suggestions for manual review**. Nothing in
+> a similar group is pre-selected, bulk actions skip them, and only exact
+> groups can be merged. Check every AI or video match yourself before you act
+> on it.
+
+### AI Photo Engine and DINOv2
+
+The AI engine compares photos by content: the same scene with a different
+crop, edit or export. It is **off by default** and stays off until you fetch
+a model in **Duplicates → Settings**.
+
+- **Model:** DINOv2 small (*Light*, 44 MB), exported to ONNX by
+  [photo-duplicate-finder-ai](https://github.com/nikweel/photo-duplicate-finder-ai).
+  The download is checked against a pinned size and SHA-256. Medium and Heavy
+  variants are listed in the settings, but they have no pinned checksum yet,
+  so Grabbit refuses to download them.
+- **Runtime:** `onnxruntime-node` is an optional dependency, and inference
+  runs locally on the CPU. If the runtime is missing, the AI switch is greyed
+  out and the other engines keep working.
+- **Tuning:** strict, balanced or relaxed modes, or a custom sensitivity, and
+  1 to 4 threads.
+- **Safety net:** a low AI similarity vetoes a perceptual match unless the
+  match came from a rotation, which keeps look-alike compositions apart.
+
+### Video Fingerprint Engine
+
+- ffmpeg decodes keyframes (up to 240) and eight probe frames at fixed points
+  of the video, and each becomes a small perceptual hash. Flat frames, such as
+  black fades, are ignored.
+- **Same length:** a *re-encoded* match needs at least 80% matching frames,
+  and a *similar* match at least 55%. Either way the matches must cover three
+  of the four quarters of the video, so a shared intro alone never makes two
+  videos match.
+- **Different length:** a shorter clip is aligned against the longer video by
+  voting on the time offset. It is labelled *partial* and is never offered for
+  removal.
+
+### Smart Trash and safe duplicate management
+
+- Removed copies move to `DATA_DIR/dupe-trash`, outside every scanned folder.
+- **Retention is manual by default** (0 days: never purged automatically). You
+  can choose 7 to 90 days, and shortening the retention asks for its own
+  confirmation.
+- **Restore** puts a file back at its original path, or next to it as
+  `name (restored).ext` when that name is taken. A merged copy gets its
+  original file back in place of the hard link.
+- **Deleting permanently** is refused unless another copy with the same bytes
+  is verified to remain. *Empty trash* only goes ahead when the count, size and
+  fingerprint you confirmed still match.
+- **Media references are preserved.** A file that is the only copy behind a
+  library item is never removed. Merges keep every name working, and every
+  operation is journaled.
+
+> [!CAUTION]
+> These safeguards reduce risk. They do not guarantee against data loss.
+> Keep backups of your media, and review before you empty the trash. Known
+> limits are listed in [Security and privacy](#security-and-privacy).
+
+## Native TikShortis
+
+<p align="center">
+  <img src="assets/screenshots/showcase/tikshortis-explore.webp" alt="TikShortis explore page in the Grabbit hub" width="100%">
+</p>
+
+The hub has its own TikShortis pages: a vertical video feed with an immersive
+player and keyboard navigation, Explore, categories, profiles, playlists,
+liked videos, history, upload and settings.
+
+- **What is native:** the interface (`public/hub/tik/`) and a gateway at
+  `/api/tik` that forwards only an allowlist of methods and paths.
+- **What needs the backend:** everything else. Clips, accounts, likes,
+  comments and playlists live in the separate
+  [TikShortis](https://github.com/tjelite1986/tikshortis) application. Grabbit
+  stores none of that data.
+- **Linking:** you sign in once with your TikShortis account. The TikShortis
+  session is sealed (AES-256-GCM) in an HttpOnly cookie.
+- **Not configured?** The menu entry is hidden and `/api/tik` is not mounted.
+  If the backend is down, the page says so and offers *Try again*.
+
+Set `TIKSHORTIS_MODE=native` and `TIKSHORTIS_API_URL`. An `embed` mode that
+frames an existing TikShortis site is also available. See
+[configuration](documentation/configuration.md#tikshortis).
+
+## Social & Photos
+
+<p align="center">
+  <img src="assets/screenshots/showcase/social-feed.webp" alt="Social and Photos feed with photo posts" width="100%">
+</p>
+
+Social & Photos puts an Instagram-style photo experience into the hub: a feed,
+Photos and Explore grids (Auto, Feed, or 2 to 4 columns), creators you follow,
+collections and favorites, history, upload, notifications and a post viewer
+with swipeable carousels. **Edit post** changes a post's creator, description
+and tags.
+
+- **Backend:** the separate [Elitogram](https://github.com/tjelite1986/elitogram)
+  application keeps the database, accounts and media. You link your Elitogram
+  account once.
+- **General audience only.** Every request is scoped to general content, and
+  answers are checked again against Grabbit's own 18+ profiles. 18+ content
+  cannot be reached through Social & Photos.
+- **Publishing:** with `POSTS_TO_EGRAM=1` and `EGRAM_IMPORT_DIR`, downloaded
+  images are dropped into Elitogram's import folder.
+
+Set `EGRAM_MODE=native` and `EGRAM_API_URL`. See
+[configuration](documentation/configuration.md#social--photos-elitogram).
+
+## Creator management
+
+<p align="center">
+  <img src="assets/screenshots/showcase/profiles.webp" alt="Creator profiles list" width="100%">
+</p>
+
+- **One profile, many accounts.** A creator profile holds several platform
+  accounts and filename aliases. Merge and split profiles without losing an
+  alias.
+- **Manual classification.** The Review page classifies creators, groups and
+  items as general or 18+, by hand only. Profiles created automatically stay
+  unclassified until you decide.
+- **Audience only tightens.** An 18+ profile or item never becomes general
+  again, and general apps only receive items that were classified general.
+
+## Metadata and hashtags
+
+<p align="center">
+  <img src="assets/screenshots/showcase/metadata.webp" alt="Metadata and tags page with a tag cloud and filters" width="100%">
+</p>
+
+- **The source record is kept.** Each item keeps the title, creator, caption
+  and raw record from the source, and they are never overwritten.
+- **Your edits are separate.** Edited titles and creators are stored next to
+  the source values. Clear an edit and the source value shows again. Every
+  change is logged.
+- **Tags with an origin.** Tags come from the site, from `#hashtags` in the
+  caption, or from you, and the origin is kept. Nothing is guessed.
+- **Bulk tools.** Search, filter, use the tag cloud, add or remove tags in
+  bulk, and rename a creator everywhere.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  B[Browser] -->|"resolve / start job"| S[Express server]
-  S --> R{extractor registry}
-  R -->|match| E["site extractor (plugin)"]
-  R -->|no match| Y[yt-dlp fallback]
-  S -->|SSE progress| B
-  S --> L[/server library/]
-  S -.->|"device=1: file pull"| B
-  S -.->|optional| EV2[shorts library]
+  UI["Hub web app"] --> G["Grabbit server<br/>Node.js + Express"]
+  G --> DL["Download engine<br/>yt-dlp · gallery-dl · ffmpeg"]
+  G --> SDM["Smart Duplicate Manager<br/>pHash · DINOv2 · video fingerprints"]
+  G --> DB[("DATA_DIR<br/>items.db · dupes.db · state")]
+  DL --> M["Your media libraries"]
+  SDM -. "read-only scan" .-> M
+  G -- "/api/tik" --> TIK["TikShortis<br/>(separate app, optional)"]
+  G -- "/api/egram" --> EG["Elitogram<br/>(separate app, optional)"]
 ```
 
-1. `GET /api/resolve?url=...` picks the matching extractor and returns metadata
-   (incl. `duration` and `tooLongForShorts`).
-2. The web UI starts a **background job** (`GET /api/jobs/start?...`) and watches
-   progress over SSE (`GET /api/jobs/stream`). The download runs server-side, so a
-   long file no longer has to finish within the gateway timeout. When a job is
-   done and `device=1`, the browser pulls the finished file from
-   `GET /api/jobs/:id/file` (the file is already on disk, so bytes flow at once).
-3. `GET /api/download?url=...` (synchronous, returns JSON or streams the file) and
-   `GET /api/download-all` (SSE batch) are kept for elite-v2's internal grab
-   integration, which calls Grabbit over the docker network (no gateway timeout).
+Grabbit is a single Node.js process with a vanilla-JavaScript interface. Heavy
+work runs in child processes, state lives in `DATA_DIR`, and TikShortis and
+Elitogram stay separate applications with their own data. The
+[architecture guide](documentation/architecture.md) has the full component
+diagram, the outbound network traffic and the planned modules.
 
-Any URL no dedicated extractor claims falls back to yt-dlp automatically.
+## Requirements
 
-A few design choices worth knowing about:
-
-- **Plugins over a monolith.** Each supported site is one file in
-  `extractors/` exporting `match()` + `resolve()`; the registry auto-loads
-  them. The generic yt-dlp extractor is just the plugin that matches last.
-- **Jobs, not requests.** Downloads never run inside the HTTP request that
-  started them. A job survives the browser tab closing, reports progress over
-  SSE, persists scheduled runs to disk, and can be retried from the queue.
-- **Shell-injection paranoia.** User-supplied yt-dlp flags pass through an
-  allowlist of known-safe long options; everything else — short flags, unknown
-  options, stray positional arguments — is rejected before a process is
-  spawned. External binaries are invoked with argument arrays, never via a
-  shell string.
-- **Cookies without corruption.** Stored `cookies.txt` files are never handed
-  to yt-dlp directly; each invocation gets its own temp copy, so concurrent
-  jobs can't clobber the jar (yt-dlp rewrites the file it's given).
-
-### Long videos
-
-Shorts are short clips, so a video longer than `SHORTS_MAX_DURATION` seconds
-(default 600 = 10 min, `0` disables) is refused for the elite-v2 shorts
-destination and routed to the plain server library instead. The web UI forces
-the server library and shows a notice; the elite path and the batch downloader
-skip known-long clips.
-
-## Adding a new site
-
-Most links already work through the built-in yt-dlp fallback, so you only need a
-custom extractor when a site yt-dlp *can't* handle — usually a single-page app
-that hides the real media URL behind its own API. This is an advanced,
-code-level task; if you're just here to download things, you can skip this
-section entirely.
-
-### The easy way: let an AI agent write it
-
-Realistically the fastest way to add a site is to hand the job to an AI coding
-agent such as [Claude Code](https://claude.com/claude-code). The extractor
-contract is small and the folder already has working examples to copy, which is
-exactly the kind of self-contained task these agents do well. A prompt like this
-is usually enough:
-
-> Add a Grabbit extractor for `example.com`. Look at the existing files in
-> `extractors/` (e.g. `nuditok.js`) and `extractors/index.js` for the contract,
-> figure out how `example.com` serves its media, and write a new
-> `extractors/example.js` that follows the same pattern.
-
-Point it at the repo, let it inspect a real page, and review the file it
-produces. The manual contract below is what it (or you) needs to follow.
-
-### The extractor contract
-
-Drop a file in `extractors/` that exports:
-
-```js
-module.exports = {
-  name: 'example',
-  match(url) { return new URL(url).hostname.endsWith('example.com'); },
-  async resolve(url) {
-    return {
-      kind: 'direct',                 // or 'ytdlp'
-      filename: 'creator-id.mp4',
-      title: '...',
-      creator: '...',
-      thumbnail: '...',
-      sourceUrl: 'https://example.com/v/123', // canonical page URL (dedupe key)
-      id: '123',                      // site-native id
-      mediaType: 'video',             // or 'image' (then also set `ext`)
-      duration: 42,                   // SECONDS, or null when unknown
-      tags: ['#tag'],                 // '#lowercase' strings
-      downloadUrl: 'https://cdn.example.com/real.mp4',
-      headers: { Referer: 'https://example.com/' }, // headers the CDN requires
-    };
-  },
-};
-```
-
-Everything but `kind` and `filename` is optional, but leaving `duration` out
-means the shorts length cap never fires for that site — an unknown duration is
-treated as "no opinion", not as "too long". An extractor that also exports
-`resolveProfile(url)` returns `{ creator, items: [...] }` with the same shape
-per item, and the batch path only sees the fields the listing carries.
-
-See `extractors/nuditok.js` for a real example (SPA whose real URL only comes
-from a private API). The registry in `extractors/index.js` auto-loads every file
-except `index.js` and `generic.js`.
-
-## Configuration
-
-Everything is optional — Grabbit starts with sensible defaults. Set via
-environment variables:
-
-### Server
-
-| Variable | Description |
-| -------- | ----------- |
-| `PORT` | Listen port (default `3000`). |
-| `DATA_DIR` | State directory: job history, `scheduled.json`, cookie files. Defaults to `./data` next to `server.js`; the Docker image sets it to `/data`. The server exits at boot if it cannot create it. |
-| `MAX_ACTIVE_JOBS` | Max downloads running concurrently (default `2`). |
-| `WATCH_INTERVAL_MINUTES` | How often watched playlists are polled. |
-| `MAX_WATCH_FAILURES` | How many times a watched track may fail before the watcher stops re-queuing it (default `3`). A track only counts as downloaded once it saves, so without a limit a deleted or geo-blocked video comes back every cycle forever. The count resets if it later succeeds. |
-
-### Destinations
-
-| Variable | Description |
-| -------- | ----------- |
-| `DOWNLOAD_DIR` | Server-library root for saved copies. Defaults to `./downloads` next to `server.js`; the Docker image sets it to `/downloads`. |
-| `VIDEOS_DOWNLOAD_DIR` / `AUDIO_DOWNLOAD_DIR` / `PHOTOS_DOWNLOAD_DIR` / `ADULTS_DOWNLOAD_DIR` | Per-type overrides inside the library. |
-| `ADULTS_BY_UPLOADER` | `1` files saves to the adults folder in a subfolder per uploader (`adults/<uploader>/`); an existing folder that differs only in case is reused. Off by default. |
-| `NAVIDROME_MUSIC_DIR` | Music-library destination (tagged audio, e.g. for Navidrome). |
-| `NAVIDROME_KIDS_DIR` | Second music library for the *Kids* option (a separate music-server instance). |
-| `AUDIOBOOKS_DIR` | Audiobook/audio-story library — one folder per book, filed by author. |
-| `ELITE_ROOT` | Storage root of the **18+** shorts app (Adshortis, channel `18plus`). Clips are dropped in `<root>/18plus/_import/`. Unset (the default), there is no 18+ channel. If `<root>/18plus` shares a folder tree with any general destination (the main channel folder, `PLATFORM_IMPORT_ROOT` or the posts import folder, compared after resolving symlinks), the 18+ channel is disabled at boot and the reason is logged, shown in `/api/config` (`adultBlocked`) and in the health check. |
-| `TIKSHORTIS_ROOT` | Storage root of the **main** (general) shorts app. Same `<root>/main/_import/` layout. Unset (the default), there is no main channel. It no longer falls back to `ELITE_ROOT`: that root is the 18+ library, and a general channel is never filed inside it. With neither root set, the *Shorts* option and mode disappear and new downloads default to the server library. |
-| `DROP_FORMAT_MAIN` / `DROP_FORMAT_18PLUS` | How a clip dropped into that channel's `_import/` is named. `legacy` (default): `<creator>_-_<title>.mp4` plus a `.md` caption. `brackets`: `<title> [@<creator>] [id=<media id>].mp4` plus a yt-dlp style `.json` sidecar (title, description, tags, uploader, webpage_url). |
-| `PLATFORM_IMPORT_ROOT` | Drop folder of a social app that imports clips as posts by per-creator profiles (channel `platform`, GDA target `platform.inbox`). Unlike the other shorts roots this IS the drop folder (no `<channel>/_import/`). Each save writes `<creator>_-_<title>.mp4` first, then `<creator>_-_<title>.json` (drop-zone contract v1: `version`, `file`, `source`, `sourceId`, `sourceUrl`, `creator{handle,name,profileUrl}`, `caption`, `tags`), both by an atomic rename from a dot-name. Videos only; a clip whose creator is unknown is refused. Unset (the default), the channel does not exist. |
-| `INBOX_DROP_DIR` | Drop folder of a patched Instagram app (one folder per username, each media file with a schema-2 JSON sidecar, plus `<username>.json` profile sidecars). Read by the Instagram inbox; see `INBOX_MODE`. Unset (the default), there is no inbox. |
-| `INBOX_MODE` | `off` (default), `shadow` or `on`. `shadow` only reads `INBOX_DROP_DIR` and logs what it would do to `DATA_DIR/inbox/shadow.jsonl` (summed up at `GET /api/hub/inbox/shadow`); nothing is moved. `on` moves every drop older than two minutes into `DATA_DIR/inbox/staged`, records it in `items.db`, runs the audience gate and delivers a general creator's items to the apps switched on in the hub's Inbox page (`inbox-settings.json`). An unclassified creator's items wait until the owner classifies the creator; nothing is general by default. A carousel is delivered as one post. Staged copies are removed a set number of days (default 7) after delivery. |
-| `INBOX_SINCE` | ISO time. Drops older than this are not inbox material and stay where they are (an earlier app's leftovers). |
-| `EGRAM_IMPORT_DIR` | Import folder of a general Instagram-style app (destination `egram`). The inbox copies the sidecar first, then the media file, into `<dir>/<username>/` under their original names, both by an atomic rename from a dot-name and with one shared mtime per post. Images and videos. Unset (the default), there is no `egram` destination. Counted as a general destination by the 18+ overlap check. |
-| `ADSHORTIS_LIBRARY_DIR` / `EGRAM_LIBRARY_DIR` / `PLATFORM_LIBRARY_DIR` | The 18+ shorts app's, the Instagram-style app's and the social app's own media libraries (where their importers file what they took). Used only by the duplicate scan, which reads and never writes; mount them read-only. The Adshortis library counts as an 18+ folder. Unset (the default), they are not scanned. |
-| `HUB_BRAND` | The line under the logo in the Grabbit 2.0 hub (`/`). Default `Media hub`. |
-| `HUB_APP_LINKS` | The hub sidebar's list of connected apps: `Name\|https://app.example.com,Other\|https://other.example.com`. Only https links are shown. Unset, the list is hidden. |
-| `ADSHORTIS_LIBRARY` | Optional. The 18+ shorts app's media folder (`<creator>/<clip>.web.mp4` with a `.jpg` poster), mounted read-only. Set, the hub gets an "Adshortis 18+" page that plays the library in the vertical feed. Folders starting with `_` or `.` are skipped, except `_unsorted`. Unset, the page and its routes do not exist. |
-| `ADFLIX_LIBRARY` | Optional. An 18+ film library (`<section>/<studio>/...`, a film either loose in the studio folder or in a folder of its own with a Kodi/Jellyfin `<stem>.nfo` and `<stem>-poster.png`), mounted read-only. Set, the hub gets an "Adflix 18+" page: a grid with studio filter and search over title, cast and genres, and a player with seeking. `.posters/<sha1 of the film's path>.jpg`, if present, is used as the grid frame. Only browser-playable files (mp4, m4v, webm, mov) are listed; folders starting with `_` or `.` and DVD `VIDEO_TS` folders are skipped. Unset, the page and its routes do not exist. |
-| `TIKSHORTIS_EMBED_URL` | Optional. The TikShortis app's own address (a plain `https://` origin, e.g. `https://tikshortis.example.com`). Set, the hub gets a TikShortis page that shows that app in a frame with its own sign-in, data and media; Grabbit stores and proxies nothing of it. TikShortis must name this hub in its `EMBED_FRAME_ANCESTORS`, or the frame stays empty. Unset or malformed, the page does not exist: removing it and restarting is the off switch. |
-| `TIKSHORTIS_MODE` | Optional, Grabbit 3.0. `native` draws TikShortis inside the hub and talks to its API through Grabbit (`/api/tik/*`); `embed` is the 2.2 frame page; `off` removes the page. Unset keeps 2.2's behaviour (embed when `TIKSHORTIS_EMBED_URL` is set, else off). A mode whose setting is missing falls back (native → embed → off) and logs why. Rolling back from native to the frame is `TIKSHORTIS_MODE=embed` and a restart. |
-| `TIKSHORTIS_API_URL` | Needed for `TIKSHORTIS_MODE=native`. Where Grabbit reaches TikShortis, as a plain origin on the local network (e.g. `http://192.0.2.10:3001`), not through the public proxy. The browser never talks to it: Grabbit forwards an allowlist of routes, keeps the linked TikShortis session in a sealed cookie, drops clips outside TikShortis' general channel and any clip Grabbit knows as 18+. The TikShortis account is linked once on the TikShortis page with its own email and password. Needs a TikShortis build with `GET /api/me`. |
-| `EGRAM_MODE` | Optional, Grabbit 3.0 phase 2. `native` adds the Social & Photos module: Elitogram's posts, photos, creators, collections and favorites inside the hub, through Grabbit (`/api/egram/*`). Unset or `off` means no module and no routes. |
-| `EGRAM_API_URL` | Needed for `EGRAM_MODE=native`. Where Grabbit reaches Elitogram on the internal network, as a plain origin (e.g. `http://egram:3000`). Every request carries an audience scope: general, or unclassified in the labelled Review lane; 18+ is never reachable from the module. Answers are checked again in Grabbit and anything by a creator Grabbit classifies 18+ is dropped. The Elitogram account is linked once on the module's page with its own user name and password. Needs an Elitogram build with audience scopes (`X-Egram-Audience`) whose identity lookup lists accounts (`accounts`); against an older build, posts written by an account are refused. |
-| `EGRAM_UPLOAD_MAX_MB` | Optional, with `EGRAM_MODE=native`. The most one upload from the module may carry in all, files and fields together (default `4096`). A larger upload gets 413 and Elitogram removes what it had staged. |
-| `POSTS_TO_EGRAM` | Optional, Grabbit 3.0 phase 2. `1` sends images saved to the posts destination into `EGRAM_IMPORT_DIR/<creator>/` with the sidecar Elitogram's importer reads (caption, post key, audience, metadata) instead of `ELITE_POSTS_ROOT`. Needs `EGRAM_IMPORT_DIR`. |
-| `ELITE_POSTS_ROOT` | Photo-posts storage root — enables images saved to the elite destination, dropped in `<root>/_import/<creator>/` (with a JSON caption sidecar) and imported as that creator's posts. Unset (the default) images go to the server photos library instead; to point at a drop folder directly, set `ELITE_POSTS_IMPORT_DIR` instead. |
-| `SHORTS_MAX_DURATION` | Max clip length (seconds) for the shorts destination; `0` disables the check. |
-
-### Notifications (optional)
-
-| Variable | Description |
-| -------- | ----------- |
-| `GRABBIT_VAPID_PUBLIC` / `GRABBIT_VAPID_PRIVATE` | Web-push key pair — enables "notify when a download finishes". Generate with `npx web-push generate-vapid-keys`. |
-| `GRABBIT_VAPID_SUBJECT` | Contact URI for the push keys, e.g. `mailto:you@example.com`. |
-
-### External tools
-
-| Variable | Description |
-| -------- | ----------- |
-| `YTDLP_BIN` / `FFMPEG_BIN` / `FFPROBE_BIN` / `GALLERY_DL_BIN` | Paths to the external binaries, when they're not on `PATH`. |
-| `PYTHON_BIN` | Python 3 interpreter used for the mutagen tag reads/writes (default `python3`). It has to be the one mutagen is installed for — the music and audiobook destinations fail with a message naming it otherwise. |
-
-### Auth
-
-| Variable | Description |
-| -------- | ----------- |
-| `GRABBIT_PASSWORD` | Shared password gating the web UI. Required: grabbit refuses to start without it unless `GRABBIT_AUTH_DISABLED=1` is also set. |
-| `GRABBIT_AUTH_DISABLED` | Set to `1` to run with no login at all. Only then is an empty `GRABBIT_PASSWORD` accepted. |
-| `GRABBIT_SECRET` | Optional separate secret for signing the auth cookie. |
-| `ALLOW_PRIVATE_ADDRESSES` | Set to `true` to allow downloads from hosts that resolve to private, loopback, link-local or otherwise non-public addresses. Defaults to `false`, which is what stops a submitted URL — or a redirect from a public one — being used to reach services on your own network. Only enable it if grabbing from an internal host is deliberate. |
-| `GRABBIT_INTERNAL_TOKEN` | Token internal (co-hosted) callers must send in `X-Grabbit-Token`. Without it there is no internal bypass at all: every request is gated. |
-
-## Auth
-
-Set `GRABBIT_PASSWORD` to gate the web UI behind a single shared password
-(HMAC-signed cookie; `GRABBIT_SECRET` optionally signs it separately). Only
-external traffic is gated, so a co-hosted app can call the API directly over
-the docker network. A caller counts as internal only when it sends
-`GRABBIT_INTERNAL_TOKEN` in an `X-Grabbit-Token` header *and* carries no
-`X-Forwarded-Host` — leave the token unset and there is no bypass at all.
-
-That is deliberate. A missing `X-Forwarded-Host` proves nothing: the header is
-absent only because the reverse proxy is what adds it, so anything reaching a
-published container port directly arrives without it too. A compose file that
-publishes port 3000 — including the one below, before you add the token — would
-otherwise let every request in off the internet with `GRABBIT_PASSWORD` set and
-nothing in the log to say so. The boot line names the mode the gate ended up in.
-
-API requests the browser labels as cross-site are refused with `403` regardless
-of the session, because `/api/download`, `/api/download-all` and
-`/api/jobs/start` are GETs with side effects and the login cookie is
-`SameSite=Lax`. Requests from another origin's page cannot queue a job as you.
-Server-to-server callers send no `Origin` or `Sec-Fetch-Site`, so they are
-unaffected.
-
-Running without a login has to be asked for: an empty `GRABBIT_PASSWORD` makes
-grabbit exit at boot with a message naming the variable, because a missing
-password and a password that failed to reach the process look the same to the
-gate and the second one used to come up wide open. Set `GRABBIT_AUTH_DISABLED=1`
-alongside it to run ungated on purpose. Either way the boot log states which
-mode the gate is in.
-
-### Per-app access (GDA v1)
-
-The shared password gives full access. Apps can instead get a password or a
-bearer token of their own, scoped to an audience (`general` or `adult`) and a
-list of **targets**: named destinations that the server maps to its own
-folders. A client never sends a path.
-
-| Target | Audience | Same as the legacy parameters |
+| | Docker (recommended) | Without Docker |
 |---|---|---|
-| `legacy.tikshortis` | general | `dest=elite&channel=main` |
-| `adshortis.inbox` | adult | `dest=elite&channel=18plus` |
-| `platform.inbox` | general | `dest=elite&channel=platform` |
-| `server.downloads` | general | `dest=server` |
-| `library.adults` | adult | `dest=server&folder=adults` |
-| `library.music` | general | `dest=navidrome` |
-| `library.audiobooks` | general | `dest=audiobooks` |
+| Runtime | Docker Engine with the Compose plugin | Node.js 20 or newer (the image uses 22, which yt-dlp also uses as its JavaScript runtime for YouTube) |
+| Tools | Included in the image | yt-dlp and ffmpeg. Optional: Python 3 with mutagen (music and audiobook tags), gallery-dl and curl_cffi |
+| Platform | linux/arm64 (Raspberry Pi 4/5) or linux/amd64 | The same, or macOS for development |
+| Memory | About 350 MB extra while the Light AI model runs | Same |
 
-A `general` client can never be given an `adult` target, or the other way
-round. That rule is checked in code on every request, and a registry entry
-that breaks it is not loaded. Every job logs `gda: client=<id> target=<t>
-result=allow|deny`.
+There is **no published container image**. You build the image from this
+repository, which takes a few minutes the first time.
 
-Clients live in `DATA_DIR/gda-clients.json` and are managed with the CLI, run
-inside the container. Passwords and tokens are printed once and stored only as
-scrypt and SHA-256 hashes:
-
-```sh
-docker exec -it grabbit node gda-admin.js add my-app --audience general \
-    --targets legacy.tikshortis --main legacy.tikshortis --name "My app"
-docker exec -it grabbit node gda-admin.js password my-app   # for an installed app's settings
-docker exec -it grabbit node gda-admin.js token my-app      # for the v1 API
-docker exec -it grabbit node gda-admin.js list
-```
-
-An app password works with the existing `POST /login` + `GET /api/jobs/start`
-flow and the same `grabbit_auth` cookie, so an installed app only needs the new
-password in its settings. It reaches nothing else: no web UI and no other API
-(`403`). A request outside the app's scope gets `403 {"ok":false,"error":...}`.
-`--main` names where that app's `dest=elite&channel=main` requests go, so you
-can move an app to another library by editing one field, without rebuilding it.
-
-v1 endpoints take `Authorization: Bearer gda_<client>_<random>` and answer
-`{ "ok": true, "data": ... }` or
-`{ "ok": false, "error": { "code", "message", "retryable" } }`:
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/v1/whoami` | client id, audience, allowed targets |
-| `GET /api/v1/targets` | targets this client may use |
-| `POST /api/v1/jobs` | `{ "url", "target" }`, optional `Idempotency-Key` header, returns `202` and `job_id` |
-| `GET /api/v1/jobs/:id` | `queued`, `fetching`, `stored`, `delivered`, `failed` or `cancelled` (only the client's own jobs) |
-
-## Deploy with Docker
-
-The container is self-contained: the image bundles Node, yt-dlp, ffmpeg,
-gallery-dl and mutagen, so you don't install any of those on the host. This is a
-step-by-step, copy-paste-safe walkthrough. Follow it top to bottom.
-
-### 1. Prerequisites
-
-- **Docker Engine** with the **Compose plugin**. Check both:
-  ```bash
-  docker --version
-  docker compose version
-  ```
-  If `docker compose version` errors, install the plugin (Docker's
-  [official docs](https://docs.docker.com/compose/install/)).
-
-### 2. Get the code
+## Docker Quick Start
 
 ```bash
 git clone https://github.com/tjelite1986/grabbit.git
 cd grabbit
+mkdir -p data downloads/{videos,mp3,photos}
+printf 'GRABBIT_PASSWORD=%s\n' "$(openssl rand -hex 16)" > .env
+cat .env   # this is your login password
 ```
 
-The compose file below is built from this checked-out source, so the folder you
-clone into is also where you run `docker compose`.
-
-### 3. Create the host folders (do this **before** the first start)
-
-Grabbit stores three separate kinds of data on the host. Create the folders up
-front — if you let Docker auto-create bind-mount targets they're made as `root`
-with restrictive permissions, which causes confusing write errors later.
-
-```bash
-# state (must persist) + the plain server library, split by type
-mkdir -p data downloads/{videos,mp3,adults,photos}
-# only if you'll use the music-server destination — point this at the same
-# folder your music server scans (create it wherever that library lives)
-mkdir -p music
-# only if you'll use the audiobook destination
-mkdir -p audiobooks
-```
-
-- **`data/`** — Grabbit's own state: download history, scheduled jobs, saved
-  playlists, saved cookies, rules and flag templates, push subscriptions. **Back
-  this up.** Deleting it loses all of that (but not your downloaded files).
-- **`downloads/`** — the plain server library. New files are auto-sorted into
-  `videos/`, `mp3/`, `adults/` (18+) and `photos/`.
-- **`music/`** — only for the *Navidrome (music)* destination; make it the exact
-  directory your music server already scans, so tracks appear there.
-- **`audiobooks/`** — only for the *Audiobooks / stories* destination; one
-  folder per book, so an audiobook player can pick each one up as a single
-  title.
-
-**Permissions.** By default the container runs as **root**, so it can always
-write these folders, and the files it creates are owned by `root`. That's fine
-when another app only needs to **read** them (a music server scanning `music/`).
-If you instead want the files owned by a normal user — e.g. so your music server
-can also move or delete them — pin the container to that user and pre-own the
-folders (use your own values from `id -u` and `id -g`):
-
-```bash
-sudo chown -R 1000:1000 data downloads music audiobooks
-```
-
-…and add `user: "1000:1000"` to the service in the next step.
-
-### 4. Create the secrets file (`.env`)
-
-In the same folder, create a file named `.env`. Every value is optional — set
-only what you use. Leave it out entirely to run with **no password and no
-notifications**.
-
-```dotenv
-# Password gate for the web UI. Required: grabbit refuses to start with this
-# empty unless GRABBIT_AUTH_DISABLED=1 is set alongside it.
-GRABBIT_PASSWORD=change-me-to-something-strong
-# Optional extra secret that signs the login cookie (any random string).
-GRABBIT_SECRET=another-random-string
-# Only needed if another app on the same docker network calls grabbit's API.
-# Leave it empty and there is no internal bypass: everything goes through the
-# password gate, which is what you want for a published port.
-GRABBIT_INTERNAL_TOKEN=
-
-# Web-push, for "notify when a download finishes". Generate a key pair with:
-#   npx web-push generate-vapid-keys
-GRABBIT_VAPID_PUBLIC=
-GRABBIT_VAPID_PRIVATE=
-GRABBIT_VAPID_SUBJECT=mailto:you@example.com
-```
-
-Generate strong random values with `openssl rand -hex 32`.
-
-### 5. The compose file — every line explained
-
-Save this as `docker-compose.yml` in the same folder. Each line is annotated
-inline; a fuller explanation follows below.
+Save this as `docker-compose.yml`:
 
 ```yaml
 services:
-  grabbit:                       # the service name (also the DNS name on the network)
-    build:
-      context: .                 # build the image from the cloned source in this folder
-    container_name: grabbit      # fixed container name, so `docker logs grabbit` works
-    restart: unless-stopped      # auto-start on boot / after a crash; stays down if you stop it
+  grabbit:
+    build: .
+    container_name: grabbit
+    restart: unless-stopped
     ports:
-      - "3000:3000"              # HOST:CONTAINER — reach the UI at http://<host>:3000.
-                                 # Remove this if you put grabbit behind a reverse proxy.
-    # user: "1000:1000"          # uncomment to run as a normal user (see step 3 permissions)
+      - "3000:3000"
     environment:
-      # --- auth (see .env) ---
       - GRABBIT_PASSWORD=${GRABBIT_PASSWORD}
-      - GRABBIT_SECRET=${GRABBIT_SECRET}
-      - GRABBIT_INTERNAL_TOKEN=${GRABBIT_INTERNAL_TOKEN}
-      # --- notifications (see .env) ---
-      - GRABBIT_VAPID_PUBLIC=${GRABBIT_VAPID_PUBLIC}
-      - GRABBIT_VAPID_PRIVATE=${GRABBIT_VAPID_PRIVATE}
-      - GRABBIT_VAPID_SUBJECT=${GRABBIT_VAPID_SUBJECT}
-      # --- plain server library, auto-split by type (paths are INSIDE the container) ---
-      - DOWNLOAD_DIR=/downloads
-      - VIDEOS_DOWNLOAD_DIR=/downloads/videos
-      - AUDIO_DOWNLOAD_DIR=/downloads/mp3
-      - ADULTS_DOWNLOAD_DIR=/downloads/adults
-      - PHOTOS_DOWNLOAD_DIR=/downloads/photos
-      # --- music-server destination (point the volume below at your library) ---
-      - NAVIDROME_MUSIC_DIR=/music
-      # --- audiobook destination (one folder per book, filed by author) ---
-      - AUDIOBOOKS_DIR=/audiobooks
-      # --- behaviour ---
-      - MAX_ACTIVE_JOBS=2        # how many downloads run at once (rest queue)
-      - WATCH_INTERVAL_MINUTES=60 # how often watched playlists are polled
-      - TZ=Europe/Stockholm      # your timezone, so scheduled-start times are local
+      - TZ=Etc/UTC
     volumes:
-      - ./data:/data            # grabbit state — the container writes to /data (DATA_DIR)
-      - ./downloads:/downloads  # the plain server library (matches DOWNLOAD_DIR above)
-      - ./music:/music          # your music library (matches NAVIDROME_MUSIC_DIR above)
-      - ./audiobooks:/audiobooks # your audiobook library (matches AUDIOBOOKS_DIR above)
+      - ./data:/data
+      - ./downloads:/downloads
 ```
-
-Then start it:
 
 ```bash
 docker compose up -d --build
 ```
 
-Open **http://your-host:3000**. To watch logs: `docker logs -f grabbit`.
+Open `http://<your-host>:3000` and sign in with the password from `.env`.
 
-**What each block does**
+The [installation guide](documentation/installation.md) covers music and
+audiobook libraries, running behind a reverse proxy, running as a normal
+user, and connecting TikShortis and Elitogram. It also covers running Grabbit
+without Docker.
 
-- **`services:` / `grabbit:`** — defines one service. The name doubles as its
-  hostname on the docker network, which is how a co-hosted app would reach it at
-  `http://grabbit:3000`.
-- **`build: context: .`** — builds the image from the cloned repo (the
-  `Dockerfile` bundles every runtime dependency). Rebuild with `--build` after
-  you pull new code or edit an extractor.
-- **`restart: unless-stopped`** — brings Grabbit back after a reboot or crash,
-  but respects a manual `docker compose stop`.
-- **`ports: "3000:3000"`** — publishes the UI on host port 3000. Left of the
-  colon is the host port (change it to e.g. `"8080:3000"` if 3000 is taken);
-  right of the colon is the container port and must stay `3000`. **Delete this
-  line** if a reverse proxy fronts Grabbit (below).
-- **`environment:`** — the settings from the [Configuration](#configuration)
-  tables. The `${...}` values are filled from `.env`; the plain ones are literal.
-  Container-internal paths (`/downloads`, `/music`, `/audiobooks`) must match
-  the right side of the volume mounts.
-- **`volumes:`** — `HOST:CONTAINER` bind mounts. The **`./data`** mount is the
-  one you must never lose. `./downloads`, `./music` and `./audiobooks` only
-  matter for those destinations — drop a mount and its env vars if you don't use
-  that destination.
+## Configuration reference
 
-Rebuilds are needed after **any** code change, because the source is copied into
-the image (there's no live bind mount of the app), so make a habit of
-`docker compose up -d --build` after `git pull`.
+Everything is set through environment variables. The most common ones:
 
-### More you can add
+| Variable | Default | Purpose |
+|---|---|---|
+| `GRABBIT_PASSWORD` | *(required)* | Password for the web interface. The server refuses to start without it unless `GRABBIT_AUTH_DISABLED=1`. |
+| `GRABBIT_SECRET` | the password | Extra secret that signs the login cookie. |
+| `DATA_DIR` | `/data` in Docker | State: history, registry, databases, trash, snapshots. |
+| `DOWNLOAD_DIR` | `/downloads` in Docker | The server library, split into `videos/`, `mp3/`, `photos/` and more. |
+| `MAX_ACTIVE_JOBS` | `2` | Downloads that run at the same time. |
+| `TIKSHORTIS_MODE` | `off` | `native` or `embed` to switch on TikShortis. |
+| `EGRAM_MODE` | `off` | `native` to switch on Social & Photos. |
+| `DUPES_SCAN_MBPS` | `20` | Read limit for the duplicate scanner, in MB/s. |
+| `STATE_BACKUP_DAYS` | `7` | Daily state snapshots to keep (0 turns them off). |
 
-**Put it behind a reverse proxy (HTTPS + a clean hostname).** Instead of
-publishing a port, join Grabbit to your proxy's network and let the proxy
-terminate TLS. Only *external* traffic is password-gated, so this is the
-recommended way to expose it. A [Traefik](https://traefik.io/) example:
+Every variable, with its default, is listed in the
+[configuration reference](documentation/configuration.md).
 
-```yaml
-    # (remove the top-level `ports:` block when using a proxy)
-    networks:
-      - proxy
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.grabbit.rule=Host(`grabbit.example.com`)"
-      - "traefik.http.routers.grabbit.entrypoints=https"
-      - "traefik.http.routers.grabbit.tls=true"
-      - "traefik.http.services.grabbit.loadbalancer.server.port=3000"
+## Storage and volumes
 
-networks:
-  proxy:
-    external: true               # the network your proxy already runs on
+| Container path | What it holds | Back it up? |
+|---|---|---|
+| `/data` | History, registry, `items.db`, `dupes.db`, cookies, models, Smart Trash, daily snapshots | **Yes, always.** |
+| `/downloads` | The server library (`videos/`, `mp3/`, `photos/`, ...) | Your media |
+| `/music`, `/audiobooks` | Optional music and audiobook libraries | Your media |
+| App folders | Optional TikShortis or Elitogram import and library folders | Owned by those apps |
+
+Create the host folders before the first start. Docker creates missing
+bind-mount folders as `root`. Merges into hard links need both copies on the
+same file system. See [storage in the installation guide](documentation/installation.md#3-storage-and-volumes).
+
+## Security and privacy
+
+- **Password gate** on every page and API call. Internal calls from co-hosted
+  apps need a shared secret (`X-Grabbit-Token`). The mere absence of a proxy
+  header never counts as internal.
+- **Cross-site protection.** `/api/*` refuses cross-site requests and
+  mismatched origins.
+- **Safe URL handling.** Every submitted URL must resolve to a public address,
+  and redirects are checked hop by hop. Extractors match exact host names, and
+  extra yt-dlp arguments pass an allowlist.
+- **Audience isolation.** General and 18+ content are kept apart in profiles,
+  libraries, the hub and both gateways.
+- **Local analysis.** Photo and video analysis runs on your server, and no
+  media is uploaded. Outbound traffic is listed in the
+  [architecture guide](documentation/architecture.md#outbound-network-traffic).
+
+**Known limits.** yt-dlp and ffmpeg resolve host names themselves, outside the
+URL guard. The duplicate manager does not detect a program that rewrites a
+file in place while a cleanup runs. The fsync durability of trash operations
+has not been tested against a power cut. Run Grabbit behind HTTPS when you
+expose it to the internet.
+
+## Backup and recovery
+
+- **Atomic state.** State files are written to a temporary file, fsynced and
+  renamed into place.
+- **Daily snapshots** go to `DATA_DIR/backups/YYYY-MM-DD/`. They hold the JSON
+  state, plus `items.db` and `dupes.db` copied with `VACUUM INTO`. The last
+  `STATE_BACKUP_DAYS` days are kept.
+- **Automatic repair.** If a state file exists but no longer parses, Grabbit
+  moves it aside as `.corrupt-<stamp>` and restores it from the newest
+  snapshot. It never rebuilds a file from partial data.
+- **Manual restore.** There is no restore button. Stop the container, copy
+  the files you need from a snapshot folder back into `DATA_DIR`, and start it
+  again.
+- **Back up `DATA_DIR` and your media** with your normal backup tool. The
+  snapshots live on the same disk, so they do not replace a real backup.
+
+## Development and testing
+
+```bash
+npm install
+GRABBIT_AUTH_DISABLED=1 npm start   # http://localhost:3000, local testing only
+npm test                            # node --test test/
 ```
 
-The same idea works with Caddy, nginx-proxy-manager or any other proxy — point
-it at the container's port 3000.
+- The test suite uses Node's built-in test runner. It has 49 test files that
+  cover the download contract, the gateways, audience separation and every
+  Duplicate Manager module.
+- There is no build step. The hub is plain JavaScript served from `public/`.
+- New site support is a file in `extractors/`. See
+  [adding a new site](documentation/user-guide.md#adding-a-new-site).
 
-**Let another app drive Grabbit.** If you run a co-hosted app that should call
-Grabbit's API directly over the docker network (not through the proxy), set
-`GRABBIT_INTERNAL_TOKEN` here and have that app send the same value in an
-`X-Grabbit-Token` header. Internal calls then skip the password gate while
-external ones stay protected. Until you set it, nothing skips the gate. See
-[Auth](#auth) for the full logic.
+## Roadmap
 
-**A second (e.g. kids) music library.** Add a `NAVIDROME_KIDS_DIR=/music-kids`
-env var and a `./music-kids:/music-kids` volume, pointed at a second music
-library. It becomes the *Kids* option in the destination picker and on saved
-playlists.
+From the module registry (`modules.js`). None of these is available in 3.0.4.
 
-**Auto-update.** Add [Watchtower](https://containrrr.dev/watchtower/) to the
-stack to pull and restart updated images automatically — though since Grabbit
-builds from source, `git pull && docker compose up -d --build` on a schedule is
-the more direct route.
+- [ ] **Videos**: a native long-form video module
+- [ ] **Movies & music**: library browsing for films and music
+- [ ] **Home**: a personal start page across modules
+- [ ] **Conversion queue**: the Conversion page shows tool status today
+- [ ] **Isolated 18+ modules**: kept apart from every general module by design
 
-### Companion: AudioMuse-AI (smart playlists from what you grab)
+## Contributing
 
-If you use the **Navidrome (music)** destination, everything Grabbit downloads
-lands in a real music library — which means you can point
-[AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) at that same library.
-AudioMuse-AI runs a local **sonic analysis** of your tracks (via Librosa/ONNX,
-no external APIs required) and generates mood/"instant" playlists for Navidrome,
-Jellyfin, Plex, Emby, LMS and Lyrion. There's also a
-[Navidrome plugin](https://github.com/NeptuneHub/AudioMuse-AI-NV-plugin) that
-queues sonically similar songs in real time.
+Issues and pull requests are welcome.
 
-It connects to your **music server**, not to Grabbit directly, so the pipeline is
-simply: *Grabbit downloads & tags → your music server scans them → AudioMuse-AI
-analyses and builds playlists*. Follow AudioMuse-AI's own
-[compose guide](https://github.com/NeptuneHub/AudioMuse-AI/blob/main/deployment/docker-compose-navidrome.yaml)
-to add it alongside this stack. One caveat if you automate around it: leave its
-auto-generated playlists alone (renaming them can break its own housekeeping).
+1. Open an issue first for larger changes.
+2. Keep a pull request about one change, and match the surrounding code style.
+   The project has no formatter configuration.
+3. Add or update tests in `test/` and run `npm test`.
+4. Code, comments, interface strings and commit messages are in English.
+5. Never commit secrets or `.env` files. The repository is public.
 
-Sources: [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) ·
-[AudioMuse-AI Navidrome plugin](https://github.com/NeptuneHub/AudioMuse-AI-NV-plugin)
+## License and acknowledgements
 
-## Disclaimer
+Grabbit is released under the [MIT License](LICENSE).
 
-Grabbit is a free, open-source, general-purpose download tool, built and shared
-as a personal project. It ships no content, hosts nothing, and contains no links
-to any specific material — it simply automates yt-dlp and similar tools against
-URLs that **you** provide.
+It stands on the shoulders of [yt-dlp](https://github.com/yt-dlp/yt-dlp),
+[FFmpeg](https://ffmpeg.org/), [gallery-dl](https://github.com/mikf/gallery-dl),
+[mutagen](https://github.com/quodlibet/mutagen),
+[Express](https://expressjs.com/),
+[better-sqlite3](https://github.com/WiseLibs/better-sqlite3),
+[ONNX Runtime](https://onnxruntime.ai/),
+[DINOv2](https://github.com/facebookresearch/dinov2) (Meta, Apache-2.0) and
+[photo-duplicate-finder-ai](https://github.com/nikweel/photo-duplicate-finder-ai)
+(MIT), whose work the AI Photo Engine adapts. Licences and attributions are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-- **No encouragement of infringement.** I do not endorse, encourage or condone
-  using Grabbit to download, copy or distribute copyrighted, pirated or otherwise
-  unlawful material. Only download content you own, have created yourself, or
-  otherwise have the explicit right to save.
-- **You are responsible for how you use it.** Complying with copyright law, with
-  each site's Terms of Service, and with any laws and regulations that apply where
-  you live is entirely your responsibility as the user.
-- **No warranty, no liability.** The software is provided "as is", without
-  warranty of any kind. To the maximum extent permitted by law, the author accepts
-  no responsibility or liability for how the app is used, for what is downloaded
-  with it, or for any damages, data loss or legal consequences arising from its
-  use.
-- **Not legal advice.** If you're unsure whether a particular download is
-  permitted, get qualified advice before proceeding.
+### Disclaimer
 
-By downloading, installing or running Grabbit you acknowledge that you do so at
-your own risk and take full responsibility for your own actions.
+Grabbit ships no content and links to none. It automates yt-dlp and similar
+tools against URLs that **you** provide. Download only what you own, created
+yourself, or have the right to save. You are responsible for following
+copyright law and each site's terms of service. The software comes "as is",
+without warranty of any kind. See the full
+[disclaimer](documentation/user-guide.md#disclaimer).
 
-## License
+## Credits
 
-Released under the [MIT License](LICENSE) — free to use, modify and redistribute,
-with attribution and no warranty. The [Disclaimer](#disclaimer) above still
-applies to how you use it.
+Built by [@tjelite1986](https://github.com/tjelite1986) with the Mecloud AI team:
+
+| | Role |
+|---|---|
+| **Claude** (Anthropic) | Implementation and documentation |
+| **Codex** (OpenAI) | Technical accuracy and review |
+| **Hermes** | Visual presentation and user experience review |
+
+<p align="center">
+  <img src="public/logo.svg" alt="The Grabbit frog mascot" width="72"><br>
+  <sub>Your Media. Your Rules.</sub>
+</p>
