@@ -643,8 +643,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     const d = await readJson(r);
     const ids = await identitiesFor(req, cur, lane, handlesIn(d), downstream);
     const { value } = filterAnswer(d, LANES[lane], adultTest(ids));
-    const items = value && Array.isArray(value.items) ? value.items : [];
-    return new Set(items.filter((n) => n && Number.isInteger(n.id)).map((n) => n.id));
+    // No list means nothing was verified: the write does not go ahead.
+    if (!value || !Array.isArray(value.items)) throw new Error('Elitogram sent no notification list');
+    return new Set(value.items.filter((n) => n && Number.isInteger(n.id)).map((n) => n.id));
   }
 
   // A new post. The multipart body goes upstream as it arrives (Elitogram

@@ -820,6 +820,14 @@ test('notifications/read forwards only the ids the module showed', async () => {
     const before = seen.length;
     assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: { ids: [5] } })).status, 200);
     assert.ok(!seen.slice(before).some((q) => q.method === 'POST'), 'nothing to mark: no write upstream');
+    // A list that cannot be verified stops the write (fail closed, never 5xx).
+    for (const bad of [json(200, { nope: true }), json(503, { error: 'down' })]) {
+      handlers['/api/notifications'] = bad;
+      const n = seen.length;
+      const r2 = await call('POST', '/api/egram/api/notifications/read', { body: { ids: [3] } });
+      assert.equal(r2.status, 424);
+      assert.ok(!seen.slice(n).some((q) => q.method === 'POST'), 'unverified: no write upstream');
+    }
   } finally {
     adultSet = new Set();
     delete handlers['/api/notifications'];
