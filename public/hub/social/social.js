@@ -109,6 +109,7 @@
     const live = (gen) => gen === generation;
     function leave() {
       generation++;
+      pagerSeq = 0;
       const list = cleanups;
       cleanups = [];
       for (const fn of list.reverse()) {
@@ -262,6 +263,21 @@
       return out;
     }
 
+    // Each history entry a social page is drawn on gets an id in
+    // history.state, so a list can be put back as it was when Back returns to
+    // that entry. A new navigation makes a new entry without an id: it loads fresh.
+    const pagerSnaps = new Map();
+    const PAGER_SNAPS_MAX = 8;
+    let pagerSeq = 0;
+    let shownEntry = null;
+    function historyEntry() {
+      const st = history.state;
+      if (st && typeof st.sgEntry === 'string') return st.sgEntry;
+      const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      history.replaceState({ ...(st || {}), sgEntry: id }, '');
+      return id;
+    }
+
     // Infinite list: calls load(cursor) until it returns next = null. Items are
     // appended to `box` by draw(item, { src, index }). Stops when the page is left.
     // `src` is the list as loaded so far, for the full-screen post viewer: it
@@ -269,6 +285,8 @@
     // items through src.listeners. src.els[i] is the element drawn for item i.
     function pager(box, load, draw, { emptyText = 'Nothing here yet.' } = {}) {
       const gen = generation;
+      const key = `${historyEntry()}#${pagerSeq++}`;
+      const saved = pagerSnaps.get(key);
       // The sentinel says "Loading ..." only while a page is on its way. Between
       // pages it is empty: a long list (the Review lane has dozens of pages)
       // otherwise reads as never finishing.
@@ -285,23 +303,33 @@
         running = page().finally(() => { running = null; });
         return running;
       }
+      function add(items) {
+        for (const it of items) {
+          const index = src.items.length;
+          const el = draw(it, { src, index });
+          if (!el) continue;
+          src.items.push(it);
+          src.els.push(el);
+          box.append(el);
+          count++;
+        }
+      }
+      // Where the list stands: the first item still in view and how far its
+      // top sits from the top of the window.
+      let anchor = null;
+      const capture = () => {
+        if (!wrap.isConnected) return;
+        const i = src.els.findIndex((el) => el.getBoundingClientRect().bottom > 1);
+        anchor = i < 0 ? null : { i, off: src.els[i].getBoundingClientRect().top };
+      };
       async function page() {
         more.setAttribute('aria-busy', 'true');
         fill(more, h('span', { class: 'muted' }, 'Loading ...'));
         try {
           const d = await load(cursor);
           if (!live(gen)) return;
-          const items = d.items || [];
           const from = src.items.length;
-          for (const it of items) {
-            const index = src.items.length;
-            const el = draw(it, { src, index });
-            if (!el) continue;
-            src.items.push(it);
-            src.els.push(el);
-            box.append(el);
-            count++;
-          }
+          add(d.items || []);
           cursor = d.next == null ? null : d.next;
           src.done = d.next == null;
           fill(more, src.done && !count ? h('p', { class: 'muted' }, emptyText) : null);
@@ -324,11 +352,51 @@
       let scrollTimer = 0;
       const onScroll = () => {
         if (scrollTimer) return;
-        scrollTimer = setTimeout(() => { scrollTimer = 0; if (nearEnd()) next(); }, 150);
+        scrollTimer = setTimeout(() => { scrollTimer = 0; capture(); if (nearEnd()) next(); }, 150);
       };
       window.addEventListener('scroll', onScroll, { passive: true });
-      onLeave(() => { io.disconnect(); window.removeEventListener('scroll', onScroll); clearTimeout(scrollTimer); src.listeners.clear(); });
-      next();
+      // A click may be a link out of the page: note where the list stands
+      // now (after the target's own handler), not only after the last scroll.
+      window.addEventListener('click', capture);
+      onLeave(() => {
+        io.disconnect();
+        window.removeEventListener('scroll', onScroll);
+        window.removeEventListener('click', capture);
+        clearTimeout(scrollTimer);
+        src.listeners.clear();
+        // The list as it stood, so Back to this history entry redraws it
+        // where it was instead of starting over from the first page.
+        // The anchor comes from the last scroll, not from now: on Back the
+        // browser may already have moved the window for the entry it returns to.
+        if (src.items.length && !src.failed) {
+          pagerSnaps.delete(key);
+          pagerSnaps.set(key, { items: src.items.slice(), cursor, done: src.done, anchor });
+          while (pagerSnaps.size > PAGER_SNAPS_MAX) pagerSnaps.delete(pagerSnaps.keys().next().value);
+        }
+      });
+      if (saved) {
+        add(saved.items);
+        cursor = saved.cursor;
+        src.done = saved.done;
+        anchor = saved.anchor;
+        if (src.done && !count) fill(more, h('p', { class: 'muted' }, emptyText));
+        // Scroll back once the page is in the document; a few frames are
+        // allowed for the view to be attached.
+        let tries = 0;
+        const restore = () => {
+          if (!live(gen)) return;
+          if (!wrap.isConnected) { if (++tries < 10) requestAnimationFrame(restore); return; }
+          const el = anchor && src.els[anchor.i];
+          // The feed's scroll-snap-stop: always would halt the jump at the
+          // first post, so snapping is off for the jump itself.
+          const root = document.documentElement;
+          root.style.scrollSnapType = 'none';
+          if (el) window.scrollTo(0, window.scrollY + el.getBoundingClientRect().top - anchor.off);
+          else window.scrollTo(0, 0);
+          requestAnimationFrame(() => root.style.removeProperty('scroll-snap-type'));
+        };
+        requestAnimationFrame(restore);
+      } else next();
       return wrap;
     }
 
@@ -985,8 +1053,6 @@
       // Over the post viewer it is drawn inside it, which may be the fullscreen element.
       (postsEl || document.body).append(viewerEl);
       paint();
-      // Browser fullscreen needs the click that opened the viewer, so it is asked for now.
-      if (matchMedia('(pointer: coarse)').matches && !fsEl()) toggleFs();
       viewerEl.querySelector('.sg-viewer-btn.close').focus({ preventScroll: true });
     }
 
@@ -1101,7 +1167,7 @@
           if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
           e.preventDefault();
           const to = e.currentTarget.getAttribute('href');
-          close('replace');
+          close('link');
           location.replace(to);
         };
         const info = h('div', { class: 'sg-reel-info' },
@@ -1250,8 +1316,8 @@
       window.addEventListener('popstate', onPop);
 
       // how: undefined = Close/Escape (step back past the viewer's entry),
-      // 'popped' = Back was pressed, 'replace' = a link replaces the entry or
-      // the page is left.
+      // 'popped' = Back was pressed, 'replace' = the page is left, 'link' = a
+      // link replaces the entry.
       function close(how) {
         if (!postsEl) return;
         const el = postsEl;
@@ -1280,6 +1346,9 @@
           window.addEventListener('popstate', () => requestAnimationFrame(reveal), { once: true });
           history.back();
         } else if (how === 'popped') requestAnimationFrame(reveal);
+        // A link out of the viewer: the page under it is left at that post,
+        // so Back from the link's page returns to it (the pager's snapshot).
+        else if (how === 'link') reveal();
       }
       postsClose = close;
 
@@ -1287,8 +1356,6 @@
       document.body.append(postsEl);
       scroller.scrollTop = active * scroller.clientHeight;
       setActive(active);
-      // Browser fullscreen needs the tap that opened the viewer, so it is asked for now.
-      if (matchMedia('(pointer: coarse)').matches) toggleFs();
       closeBtn.focus({ preventScroll: true });
     }
 
@@ -1994,6 +2061,11 @@
 
     function view(r) {
       const first = r.sub[0] || '';
+      // Drawn again on the entry already on show (a redraw in place, not
+      // Back): its lists load fresh instead of coming back from a snapshot.
+      const entry = historyEntry();
+      if (entry === shownEntry) for (const k of [...pagerSnaps.keys()]) if (k.startsWith(`${entry}#`)) pagerSnaps.delete(k);
+      shownEntry = entry;
       let body;
       if (S.session === undefined) {
         if (S.sessionError) {

@@ -315,3 +315,25 @@ test('3.0.3: every row of the Creators list has a copy-username button beside it
   assert.match(js, /await navigator\.clipboard\.writeText\(handle\);/);
   assert.match(css, /\.sg-creator-copy \{/);
 });
+
+test('Back to a list redraws it where it was; a new visit or a redraw in place loads fresh', () => {
+  const start = js.indexOf('function pager(');
+  const body = js.slice(start, js.indexOf('// --- Tiles', start));
+  // Snapshots are keyed by the history entry the page was drawn on.
+  assert.match(js, /history\.replaceState\(\{ \.\.\.\(st \|\| \{\}\), sgEntry: id \}, ''\);/);
+  assert.match(body, /const key = `\$\{historyEntry\(\)\}#\$\{pagerSeq\+\+\}`;/);
+  assert.match(body, /pagerSnaps\.set\(key, \{ items: src\.items\.slice\(\), cursor, done: src\.done, anchor \}\);/);
+  // A restored list draws the saved items instead of loading the first page.
+  assert.match(body, /if \(saved\) \{\s*add\(saved\.items\);/);
+  assert.match(body, /\} else next\(\);/);
+  // The jump back turns scroll snapping off, or scroll-snap-stop halts it at the first post.
+  assert.match(body, /root\.style\.scrollSnapType = 'none';/);
+  // A redraw on the entry already on show drops its snapshots.
+  assert.match(js, /if \(entry === shownEntry\) for \(const k of \[\.\.\.pagerSnaps\.keys\(\)\]\) if \(k\.startsWith\(`\$\{entry\}#`\)\) pagerSnaps\.delete\(k\);/);
+  // A link out of the post viewer leaves the page under it at that post.
+  assert.match(js, /else if \(how === 'link'\) reveal\(\);/);
+});
+
+test('opening a post or a photo never asks for browser fullscreen by itself', () => {
+  assert.doesNotMatch(js, /\.matches[^;\n]*\) toggleFs\(\);/);
+});
