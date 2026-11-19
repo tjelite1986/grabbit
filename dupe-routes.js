@@ -58,7 +58,8 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
   r.get('/library', wrap(() => ({ roots: service.libraryStatus() })));
   r.get('/groups', wrap(async (req) => {
     // egram's own audience decides whether its copies are 18+ (best effort).
-    try { await service.refreshAppAudience(); } catch {}
+    // Asked again for every list: the list never rests on an earlier answer.
+    try { await service.refreshAppAudience({ fresh: true }); } catch {}
     return service.list(listQuery(req.query));
   }));
   r.get('/groups/:key/references', wrap(async (req) => {

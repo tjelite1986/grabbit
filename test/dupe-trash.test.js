@@ -1047,3 +1047,95 @@ test('remove all moves nothing when the plan changed, even with the same counts'
   const ok = await t.removeAll({ fingerprint: again.fingerprint });
   assert.deepEqual([ok.files, removed], [1, [1]]);
 });
+
+test('undoing a refused move never unlinks a file a writer put at the target meanwhile', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-undo-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const from = path.join(dir, 'src.mp4');
+  const to = path.join(dir, 'dst.mp4');
+  const keep = path.join(dir, 'keep.mp4');
+  fs.writeFileSync(from, 'hashed');
+  fs.writeFileSync(keep, 'hashed');
+  const expect = fs.lstatSync(from);
+  const keepStat = fs.lstatSync(keep);
+  // The copy that stays changes, so the move is refused and its link undone.
+  fs.renameSync(keep, path.join(dir, 'keep-old.mp4'));
+  fs.writeFileSync(keep, 'other bytes');
+  // lstat of the source: 1 the first look, 2 the last look, 3 the undo's
+  // redundancy check. Right after that check a writer puts its file at the
+  // target name.
+  await quiet(() => afterLstat(from, 3, () => writerReplaces(to, 'writer'), () => assert.rejects(
+    moveFile(from, to, null, expect, { abs: keep, stat: keepStat }), /copy that stays changed/)));
+  assert.equal(fs.readFileSync(to, 'utf8'), 'writer', 'the writer\'s file at the target survives the undo');
+  assert.equal(fs.readFileSync(from, 'utf8'), 'hashed', 'the source is untouched');
+  assert.ok(!fs.readdirSync(dir).some((n) => n.includes('.aside-')), 'nothing is left aside');
+});
+
+// A group of three identical copies (a kept, b and c to go) plus d, which
+// has other bytes. dupeMembers reads the rows as they are now.
+function threeFixture() {
+  const fx = mergeFixture();
+  const crypto = require('crypto');
+  const rows = [1, 2].map((id) => fx.t.store.dupeFile(id));
+  fs.writeFileSync(path.join(fx.g, 'c.mp4'), 'same bytes');
+  fs.writeFileSync(path.join(fx.g, 'd.mp4'), 'other bytes');
+  const sha2 = crypto.createHash('sha256').update('other bytes').digest('hex');
+  rows.push({ ...rows[1], id: 3, rel: 'c.mp4', mtime_ms: 3 });
+  rows.push({ ...rows[1], id: 4, rel: 'd.mp4', mtime_ms: 4, bytes: 11, sha256: sha2 });
+  fx.t.store.dupeFile = (id) => rows.find((r) => r.id === Number(id));
+  fx.t.store.dupeMembers = (s) => rows.filter((r) => r.sha256 === s);
+  fx.t.store.openDupeGroups = () => [{ sha256: rows[0].sha256, members: rows.filter((r) => r.sha256 === rows[0].sha256) }];
+  // c is rehashed to d's bytes (a writer rewrote it): a new row object, as
+  // the store returns after a rescan.
+  const rehashC = () => {
+    fs.writeFileSync(path.join(fx.g, 'c.mp4'), 'other bytes');
+    rows[2] = { ...rows[2], bytes: 11, sha256: sha2 };
+  };
+  return { ...fx, rows, rehashC };
+}
+
+test('remove all refuses a planned copy that moved to another group meanwhile; nothing else moves', async () => {
+  const { g, trash, t, rehashC } = threeFixture();
+  const move = t.moveToTrash.bind(t);
+  let first = true;
+  t.moveToTrash = async (...a) => {
+    const r = await move(...a);
+    if (first) { first = false; rehashC(); }
+    return r;
+  };
+  const out = await quiet(() => t.removeAll({ by: 'test' }));
+  assert.equal(out.files, 1);
+  assert.deepEqual(out.failed.map((f) => f.id), [3], 'the rehashed copy is refused');
+  assert.equal(trash.length, 1);
+  assert.equal(fs.readFileSync(path.join(g, 'c.mp4'), 'utf8'), 'other bytes', 'c stays');
+  assert.equal(fs.readFileSync(path.join(g, 'd.mp4'), 'utf8'), 'other bytes', 'd stays');
+  assert.ok(fs.existsSync(path.join(g, 'a.mp4')), 'the kept copy stays');
+});
+
+test('a planned keeper that left the group is never replaced by another copy', async () => {
+  const { g, trash, t, rows } = threeFixture();
+  // Plan: keep a, remove c. a is gone from the group by the time c moves.
+  rows[0] = { ...rows[0], sha256: 'f'.repeat(64) };
+  await assert.rejects(t.remove(3, { plannedKeep: 1 }), /changed since the plan/);
+  assert.equal(trash.length, 0);
+  assert.ok(fs.existsSync(path.join(g, 'c.mp4')));
+});
+
+test('a removal rechecks its rows after hashing: a row rehashed meanwhile is refused', async () => {
+  const { g, trash, t, rehashC } = threeFixture();
+  const read = fs.createReadStream;
+  let fired = false;
+  fs.createReadStream = (p, ...rest) => {
+    const s = read(p, ...rest);
+    if (!fired && String(p).endsWith('c.mp4')) { fired = true; s.on('end', rehashC); }
+    return s;
+  };
+  try {
+    await assert.rejects(t.remove(3, { plannedKeep: 1 }), /changed since the plan/);
+  } finally {
+    fs.createReadStream = read;
+  }
+  assert.equal(trash.length, 0);
+  assert.equal(fs.readFileSync(path.join(g, 'c.mp4'), 'utf8'), 'other bytes');
+});

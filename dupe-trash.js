@@ -288,20 +288,29 @@ async function placeCopy(from, to, sha256 = null) {
 // or still holds the file as it was hashed (`origStat`). Otherwise the copy
 // may be the last one of those bytes, so it stays and its place is logged:
 // an extra file, never a lost one.
+//
+// The copy is never unlinked by name: it is taken aside first (only while
+// the name still holds `made`), and `orig` is judged after that, so a file a
+// writer puts at `copy` between the look and the unlink goes back, and the
+// original is checked as late as it can be. A copy that is not redundant is
+// put back under its name.
 function undoCopy(copy, made, orig, origStat, what) {
-  let cur = null;
+  if (!made) return;
+  let aside = null;
+  try { aside = takeAside(copy, (st) => sameNode(st, made)); } catch {}
+  if (!aside) return; // not ours (any more), or already gone
   let now = null;
-  try { cur = fs.lstatSync(copy); } catch {}
-  if (!cur || !made || !sameNode(cur, made)) return; // not ours (any more)
   try { now = fs.lstatSync(orig); } catch {}
-  const redundant = !!now && now.isFile() && (sameNode(now, cur) || (origStat && sameStat(now, origStat)));
+  const redundant = !!now && now.isFile() && (sameNode(now, made) || (!!origStat && sameStat(now, origStat)));
   if (redundant) {
-    try { fs.unlinkSync(copy); } catch {}
+    try { fs.unlinkSync(aside); } catch {}
     try { fsyncDir(path.dirname(copy)); } catch {}
     return;
   }
-  console.error(`dupes: ${what} changed meanwhile; its earlier copy stays at ${copy}`);
-  return copy;
+  const back = putBack(aside, copy);
+  const at = back ? copy : aside;
+  console.error(`dupes: ${what} changed meanwhile; its earlier copy stays at ${at}`);
+  return at;
 }
 
 // Linux has no unlink-if-inode and Node has no renameat2, so the last check
@@ -485,25 +494,43 @@ class DupeTrash {
   }
 
   // Removes one copy. Returns the trash entry id.
-  async remove(fileId, { by = null, plannedKeep = null, reason = null } = {}) {
+  // plannedKeep: the copy the caller's plan keeps. When given it must still
+  // be in the group; there is no stand-in, so a plan made for other copies
+  // never moves this one. expectSha: the group the caller planned for; a row
+  // that was rehashed to other bytes since is refused.
+  async remove(fileId, { by = null, plannedKeep = null, reason = null, expectSha = null } = {}) {
     const row = this.store.dupeFile(fileId);
     if (!row || !row.sha256) throw new TrashError('No such file in a duplicate group');
+    const stale = () => new TrashError('The duplicates changed since the plan was made; check them again');
+    if (expectSha != null && row.sha256 !== expectSha) throw stale();
     const members = this.store.dupeMembers(row.sha256);
     const member = members.find((m) => m.id === row.id);
     if (!member) throw new TrashError('No such file in a duplicate group');
     checkRemoval(member, members, this.rootOf);
     // A copy that stays must still be there with the same bytes.
     const others = members.filter((m) => m.id !== row.id);
-    const keeper = others.find((m) => m.id === plannedKeep) || others[0];
+    const keeper = plannedKeep != null ? others.find((m) => m.id === plannedKeep) : others[0];
+    if (!keeper) throw stale();
     const keepRow = this.store.dupeFile(keeper.id);
-    if (!keepRow) throw new TrashError('The copy that stays is gone');
+    if (!keepRow || keepRow.sha256 !== row.sha256) throw new TrashError('The copy that stays is gone');
     const kept = realFileOf(keepRow);
     const doomed = realFileOf(row);
     if (doomed.stat.size !== row.bytes || kept.stat.size !== keepRow.bytes) throw new TrashError('A file changed since the scan; scan again first');
     const [a, b] = await Promise.all([sha256Of(doomed.abs), sha256Of(kept.abs)]);
     if (a !== row.sha256 || b !== row.sha256) throw new TrashError('The bytes no longer match; scan again first');
+    // Hashing awaited: the rows may have changed meanwhile (a rescan, another
+    // removal). Both rows must still be the ones checked, in the same group,
+    // and the removal must still be allowed in the group as it is now.
+    const row2 = this.store.dupeFile(row.id);
+    const keep2 = this.store.dupeFile(keepRow.id);
+    const same = (x, y) => !!x && x.sha256 === y.sha256 && x.root === y.root && x.rel === y.rel && x.bytes === y.bytes;
+    if (!same(row2, row) || !same(keep2, keepRow)) throw stale();
+    const members2 = this.store.dupeMembers(row.sha256);
+    const member2 = members2.find((m) => m.id === row.id);
+    if (!member2 || !members2.some((m) => m.id === keepRow.id)) throw stale();
+    checkRemoval(member2, members2, this.rootOf);
 
-    return this.moveToTrash(row, doomed, { by, keepRow, reason, kept });
+    return this.moveToTrash(row2, doomed, { by, keepRow: keep2, reason, kept });
   }
 
   // Removes one copy of a picture or video whose bytes differ from the copy
@@ -734,7 +761,7 @@ class DupeTrash {
           continue;
         }
         try {
-          await this.remove(row.id, { by, plannedKeep: g.keepId, reason });
+          await this.remove(row.id, { by, plannedKeep: g.keepId, reason, expectSha: g.sha256 });
           out.files++;
           out.bytes += row.bytes;
         } catch (e) {

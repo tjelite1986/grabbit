@@ -260,7 +260,10 @@ class DupeService {
     const base = audienceOf(r, row.item_audience);
     if (base === 'adult' || !r.mixedAudience) return base;
     const c = this.appAnswer(row);
-    return c && c.aud === 'general' ? 'general' : 'adult';
+    if (!c || c.aud !== 'general') return 'adult';
+    // A list built on this answer holds only while the answer does.
+    if (this.audTrack) this.audTrack.exp = Math.min(this.audTrack.exp, c.at + AUD_TTL_MS);
+    return 'general';
   }
 
   audienceUnverified(r, row) {
@@ -271,9 +274,26 @@ class DupeService {
   // Asks the mixed-audience apps about every copy of theirs in a group that
   // they have not reported on yet. Best effort: an app that does not answer
   // leaves its copies counted as 18+.
-  async refreshAppAudience() {
-    if (this.audBusy) return this.audBusy;
-    this.audBusy = (async () => {
+  //
+  // fresh: the list a person is about to see. Every copy of theirs is asked
+  // again, not only the unverified ones, and only answers given after this
+  // call began count: a copy the app does not answer for now (the app is
+  // down, in its retry pause, or leaves it out) loses its earlier answer and
+  // counts as 18+. An earlier answer still serves a preview for up to
+  // AUD_TTL_MS; the list itself never rests on one.
+  async refreshAppAudience({ fresh = false } = {}) {
+    const t0 = this.now();
+    // One run at a time. A fresh call joins only a fresh run that began
+    // after it did; otherwise it waits for the run in progress and starts
+    // its own.
+    while (this.audBusy) {
+      const cur = this.audBusy;
+      if (!fresh || (cur.fresh && cur.startedAt >= t0)) return cur.p;
+      try { await cur.p; } catch {}
+    }
+    const run = { fresh, startedAt: this.now(), p: null };
+    this.audBusy = run;
+    run.p = (async () => {
       // Expired answers go first; a cached list built on a 'general' one is
       // rebuilt, so the copy counts as 18+ until the app confirms it again.
       let expired = false;
@@ -284,17 +304,25 @@ class DupeService {
       }
       if (expired) this.invalidate();
       const byRoot = new Map();
+      let changed = false;
+      // Drops an earlier answer: the copy counts as 18+ until asked again.
+      const forget = (m) => {
+        const k = `${m.root}\0${m.rel}`;
+        const c = this.appAud.get(k);
+        if (!c) return;
+        this.appAud.delete(k);
+        if (c.aud === 'general') changed = true;
+      };
       for (const g of this.build().groups) {
         for (const m of g.members) {
-          if (!m.audienceUnverified) continue;
+          if (fresh ? !this.rootInfo(m.root).mixedAudience : !m.audienceUnverified) continue;
           const ad = this.adapters.get(m.root);
-          if (!ad || !ad.caps.has('lookup')) continue;
-          if ((this.audRetryAt.get(m.root) || 0) > this.now()) continue;
+          if (!ad || !ad.caps.has('lookup')) { if (fresh) forget(m); continue; }
+          if ((this.audRetryAt.get(m.root) || 0) > this.now()) { if (fresh) forget(m); continue; }
           if (!byRoot.has(m.root)) byRoot.set(m.root, { ad, members: new Map() });
           byRoot.get(m.root).members.set(m.rel, m);
         }
       }
-      let changed = false;
       for (const [root, { ad, members }] of byRoot) {
         const list = [...members.values()];
         for (let i = 0; i < list.length; i += 200) {
@@ -305,21 +333,24 @@ class DupeService {
           } catch {
             // Not asked again for a minute, so a down app does not slow every list.
             this.audRetryAt.set(root, this.now() + 60000);
+            if (fresh) list.slice(i).forEach(forget);
             break;
           }
           for (const m of part) {
             const it = r.get(m.rel);
-            if (!it) continue;
+            if (!it) { if (fresh) forget(m); continue; }
             const refs = Array.isArray(it.refs) ? it.refs : [];
             const aud = refs.length && refs.every((x) => x && x.audience === 'general') ? 'general' : 'adult';
-            this.appAud.set(`${m.root}\0${m.rel}`, { aud, ino: String(m.ino), mtime: m.mtime_ms, at: this.now() });
-            changed = true;
+            const k = `${m.root}\0${m.rel}`;
+            const was = this.appAud.get(k);
+            this.appAud.set(k, { aud, ino: String(m.ino), mtime: m.mtime_ms, at: this.now() });
+            if (!was || was.aud !== aud || was.ino !== String(m.ino) || was.mtime !== m.mtime_ms) changed = true;
           }
         }
       }
       if (changed) this.invalidate();
-    })().finally(() => { this.audBusy = null; });
-    return this.audBusy;
+    })().finally(() => { if (this.audBusy === run) this.audBusy = null; });
+    return run.p;
   }
 
   // Every present file that has a twin with the same bytes, plus Grabbit's
@@ -516,8 +547,19 @@ class DupeService {
 
   // All groups, built once and cached for a short while.
   build() {
-    if (this.cache && this.now() - this.cache.at < 15000) return this.cache;
+    // A cached list holds for 15 s, and never past the first 'general' app
+    // answer it rests on: after that the copy counts as 18+ again.
+    if (this.cache && this.now() - this.cache.at < 15000 && this.now() < this.cache.audExp) return this.cache;
     const t0 = this.now();
+    this.audTrack = { exp: Infinity };
+    try {
+      return this.buildFresh(t0);
+    } finally {
+      this.audTrack = null;
+    }
+  }
+
+  buildFresh(t0) {
     const groups = [];
     // Exact.
     const rows = this.exactRows();
@@ -580,7 +622,7 @@ class DupeService {
         }));
       }
     }
-    this.cache = { at: this.now(), groups, ms: this.now() - t0 };
+    this.cache = { at: this.now(), groups, ms: this.now() - t0, audExp: this.audTrack.exp };
     return this.cache;
   }
 
@@ -843,7 +885,7 @@ class DupeService {
     const reason = g.match === 'exact' ? 'Identical copy' : g.tab === 'photos' ? `Similar photo (${g.match})` : `Similar video (${g.match})`;
     if (m.action === 'trash') {
       if (g.match === 'exact') {
-        const id = await this.trash.remove(m.id, { by, plannedKeep: keepId, reason });
+        const id = await this.trash.remove(m.id, { by, plannedKeep: keepId, reason, expectSha: m.sha256 || null });
         return { trash: `g${id}` };
       }
       const id = await this.trash.removeSimilar(m.id, keepId, { by, reason });

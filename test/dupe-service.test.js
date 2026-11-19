@@ -1162,3 +1162,71 @@ test('copies in a mixed-audience app library stay hidden as 18+ until the app re
   assert.equal(hidden().items.length, 0);
   assert.ok(svc.audRetryAt.size === 1, 'a failed app is paused for a minute');
 });
+
+// A mixed-audience fixture: one group whose egram copy egram calls general.
+async function mixedFixture(t) {
+  const adapters = new Map();
+  const mixedDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-dupesvc-mixed-')));
+  t.after(() => fs.rmSync(mixedDir, { recursive: true, force: true }));
+  const ctx = setup(t, { adapters, extra: [{ path: mixedDir, label: 'egram library', owner: 'app', app: 'egram', mixedAudience: true }] });
+  write(path.join(ctx.own, 'b.jpg'), 'general post bytes', 1000);
+  write(path.join(mixedDir, 'general.jpg'), 'general post bytes', 2000);
+  const state = { reachable: true, aud: 'general', asked: 0 };
+  adapters.set(mixedDir, stubAdapter({
+    id: 'egram', app: 'egram', caps: ['lookup', 'cache'],
+    lookup: (rels) => {
+      state.asked++;
+      if (!state.reachable) throw new AdapterError('egram is not reachable right now');
+      return new Map(rels.map((r) => [r, { path: r, role: 'media', refs: [{ type: 'post', id: 1, audience: state.aud }] }]));
+    },
+  }));
+  await ctx.scan();
+  let clock = Date.now();
+  ctx.svc.now = () => clock;
+  const shown = () => ctx.svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }).items.length;
+  return { ...ctx, state, shown, tick: (ms) => { clock += ms; } };
+}
+
+test('a cached list never outlives the general app answer it was built on', async (t) => {
+  const { svc, shown, tick } = await mixedFixture(t);
+  await svc.refreshAppAudience();
+  assert.equal(shown(), 1);
+  // The list is built again just before the answer expires...
+  tick(59 * 1000);
+  svc.invalidate();
+  assert.equal(shown(), 1);
+  // ...and is still inside its 15 s cache when the answer expires: the copy
+  // counts as 18+ again, without waiting for the cache.
+  tick(2 * 1000);
+  assert.equal(shown(), 0, 'the cached list is not served past the answer it rests on');
+});
+
+test('every list asks the app again, and a copy it does not confirm now is 18+', async (t) => {
+  const { svc, state, shown, tick } = await mixedFixture(t);
+  await svc.refreshAppAudience({ fresh: true });
+  assert.equal(shown(), 1);
+  // The post turns 18+ in egram ten seconds later; the earlier answer is
+  // still young, but the next list asks again.
+  state.aud = 'adult';
+  tick(10 * 1000);
+  const before = state.asked;
+  await svc.refreshAppAudience({ fresh: true });
+  assert.equal(state.asked, before + 1, 'a verified copy is asked again for a list');
+  assert.equal(shown(), 0, 'the reclassified copy is hidden at once');
+  // General again, then egram goes down: the list fails closed although the
+  // earlier answer is a second old.
+  state.aud = 'general';
+  tick(1000);
+  await svc.refreshAppAudience({ fresh: true });
+  assert.equal(shown(), 1);
+  state.reachable = false;
+  tick(1000);
+  await svc.refreshAppAudience({ fresh: true });
+  assert.equal(shown(), 0, 'an app that cannot answer now leaves its copies 18+');
+  // In its retry pause the app is not asked, and its copies stay 18+.
+  state.reachable = true;
+  const asked = state.asked;
+  await svc.refreshAppAudience({ fresh: true });
+  assert.equal(state.asked, asked);
+  assert.equal(shown(), 0);
+});
