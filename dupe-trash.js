@@ -137,14 +137,16 @@ function clampName(name, max) {
 }
 
 // Makes a directory's entries durable (a new, renamed or removed name).
-// Filesystems that cannot fsync a directory are left as they are.
+// Only a filesystem that cannot fsync a directory at all is let through
+// (EINVAL, EISDIR, ENOTSUP); an open error (EACCES, ...) or EIO throws, so a
+// caller never goes on as if the name were durable.
 function fsyncDir(dir) {
   let fd = null;
   try {
     fd = fs.openSync(dir, 'r');
     fs.fsyncSync(fd);
   } catch (e) {
-    if (!['EINVAL', 'EISDIR', 'EPERM', 'EBADF', 'ENOTSUP', 'EACCES'].includes(e.code)) throw e;
+    if (!['EINVAL', 'EISDIR', 'ENOTSUP'].includes(e.code)) throw e;
   } finally {
     if (fd != null) fs.closeSync(fd);
   }
@@ -152,10 +154,13 @@ function fsyncDir(dir) {
 
 // Same file and, as far as stat can tell, same contents as when it was looked at.
 const sameStat = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+const sameNode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 
 // Copies `from` to a new file `to` without blocking the event loop: streamed
 // to a .part beside the target, flushed, hashed on the way and compared with
-// `sha256` (when given), then renamed into place. The source is not touched.
+// `sha256` (when given), then published without clobbering. The source is
+// not touched. Returns the published file's identity ({ dev, ino }), so a
+// caller can tell it from a file a writer put at that name later.
 async function copyVerified(from, to, sha256 = null) {
   const part = path.join(path.dirname(to), `.${clampName(path.basename(to), 180)}.${rand()}.part`);
   try {
@@ -169,8 +174,13 @@ async function copyVerified(from, to, sha256 = null) {
       out.on('finish', resolve);
       src.pipe(out);
     });
+    let published = null;
     const fd = fs.openSync(part, 'r');
-    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    try {
+      fs.fsyncSync(fd);
+      const st = fs.fstatSync(fd);
+      published = { dev: st.dev, ino: st.ino };
+    } finally { fs.closeSync(fd); }
     const digest = h.digest('hex');
     if (sha256 && digest !== sha256) throw new TrashError('The copy does not match the original; nothing changed');
     // Publish without clobbering: a link fails on an existing name. Where
@@ -188,11 +198,17 @@ async function copyVerified(from, to, sha256 = null) {
         if (e2.code === 'EEXIST') throw new TrashError('Target already exists');
         throw e2;
       }
+      // The exclusive create made this name; its fd is that very file.
       const fd2 = fs.openSync(to, 'r');
-      try { fs.fsyncSync(fd2); } finally { fs.closeSync(fd2); }
+      try {
+        fs.fsyncSync(fd2);
+        const st = fs.fstatSync(fd2);
+        published = { dev: st.dev, ino: st.ino };
+      } finally { fs.closeSync(fd2); }
       fs.unlinkSync(part);
     }
     fsyncDir(path.dirname(to));
+    return published;
   } catch (e) {
     try { fs.unlinkSync(part); } catch {}
     throw e;
@@ -203,13 +219,17 @@ async function copyVerified(from, to, sha256 = null) {
 // it is: a hard link on the same disk, else a verified copy. Bind mounts make
 // a link across folders fail with EXDEV even on one disk.
 async function placeCopy(from, to, sha256 = null) {
+  let linked = false;
   try {
     fs.linkSync(from, to);
-    fsyncDir(path.dirname(to));
-    return;
+    linked = true;
   } catch (e) {
     if (e.code === 'EEXIST') throw new TrashError('Target already exists');
     if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
+  }
+  if (linked) {
+    fsyncDir(path.dirname(to));
+    return;
   }
   await copyVerified(from, to, sha256);
 }
@@ -233,7 +253,9 @@ async function moveFile(from, to, sha256 = null, expect = null) {
     if (e.code === 'EEXIST') throw new TrashError('Target already exists');
     if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
   }
-  if (!linked) await copyVerified(from, to, sha256);
+  // The file now at `to` must be the one this move put there: the source's
+  // inode for a link, the published copy's inode for a copy.
+  const placed = linked ? { dev: before.dev, ino: before.ino } : await copyVerified(from, to, sha256);
   // Its new name is durable before the old one goes. The sync is slow disk
   // I/O, so it comes before the last look, never between it and the unlink.
   fsyncDir(path.dirname(to));
@@ -244,11 +266,12 @@ async function moveFile(from, to, sha256 = null, expect = null) {
   let dest = null;
   try { now = fs.lstatSync(from); } catch {}
   try { dest = fs.lstatSync(to); } catch {}
-  const destOk = dest && dest.isFile() && (!linked || (dest.dev === before.dev && dest.ino === before.ino));
+  const destOk = !!dest && dest.isFile() && sameNode(dest, placed);
   if (!now || !sameStat(now, before) || !destOk) {
-    // A hard link whose source name now holds another file is the last name
-    // of the original: it stays (an extra copy in the trash folder, never none).
-    const lastName = linked && !(now && now.dev === dest.dev && now.ino === dest.ino);
+    // Only the name this move made is ever removed again. A hard link whose
+    // source name now holds another file is the last name of the original:
+    // it stays (an extra copy in the trash folder, never none).
+    const lastName = destOk && linked && !(now && sameNode(now, dest));
     if (destOk && !lastName) {
       try { fs.unlinkSync(to); } catch {}
       try { fsyncDir(path.dirname(to)); } catch {}
@@ -274,8 +297,6 @@ function taken(p) {
     throw e;
   }
 }
-
-const sameNode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 
 class DupeTrash {
   // holdMs: a number, or a function returning one (the retention setting);
@@ -364,13 +385,25 @@ class DupeTrash {
 
   trashNameFor(row) {
     // A trash folder made here is a new entry in its parent: that entry is
-    // durable before any move can unlink a source into it.
-    const made = fs.mkdirSync(this.dir, { recursive: true });
+    // durable before any move can unlink a source into it. Until that sync
+    // has succeeded once, every removal retries it (a first attempt that
+    // failed left the folder in place, unsynced), up to the highest folder
+    // that was made.
+    const dir = path.resolve(this.dir);
+    const made = fs.mkdirSync(dir, { recursive: true });
     if (made) {
-      for (let d = path.resolve(this.dir); ; d = path.dirname(d)) {
+      const top = path.resolve(made);
+      if (!this.syncTop || top.length < this.syncTop.length) this.syncTop = top;
+      this.dirDurable = false;
+    }
+    if (!this.dirDurable) {
+      const top = this.syncTop || dir;
+      for (let d = dir; ; d = path.dirname(d)) {
         fsyncDir(path.dirname(d));
-        if (d === path.resolve(made) || d === path.dirname(d)) break;
+        if (d === top || d === path.dirname(d)) break;
       }
+      this.dirDurable = true;
+      this.syncTop = null;
     }
     return `${this.now()}-${row.id}-${rand()}-${clampName(path.basename(row.rel), 150)}`;
   }
@@ -584,15 +617,12 @@ class DupeTrash {
     let probe = path.dirname(abs);
     while (probe !== root && !taken(probe)) probe = path.dirname(probe);
     if (!inside(probe)) throw new TrashError('Path runs through a symlink');
-    const made = fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
     if (!inside(path.dirname(abs))) throw new TrashError('Path runs through a symlink');
     // Each folder made here is a new entry in its parent: sync those too.
-    if (made) {
-      for (let d = path.dirname(abs); d.length >= made.length && d !== root; d = path.dirname(d)) {
-        fsyncDir(path.dirname(d));
-        if (d === made) break;
-      }
-    }
+    // Every restore syncs the whole chain below the root, not only what this
+    // call made, so a retry after a failed sync still makes it durable.
+    for (let d = path.dirname(abs); d !== root && d.startsWith(root + path.sep); d = path.dirname(d)) fsyncDir(path.dirname(d));
     // A merged copy: its name now points at the kept file (a hard link). The
     // original replaces that link in one rename, so the name never goes
     // missing; it is staged beside it first (the trash may be on another disk).

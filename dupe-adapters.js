@@ -134,20 +134,25 @@ class AppAdapter {
     if (stalled) {
       throw new AdapterError(`${this.app} stopped answering half way`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.`, stalled: true });
     }
+    // A change closes as "nothing happened" only on a 4xx whose body is a
+    // fully read JSON error from the app without `mayHaveChanged`. A 5xx
+    // (a proxy's 502/504 included), a body that could not be read (a cut
+    // 422 may have lost its `mayHaveChanged`), a success status that says
+    // ok: false, and a marked answer all leave the operation pending.
+    const isObj = j && typeof j === 'object' && !Array.isArray(j);
+    const definiteRefusal = res.status >= 400 && res.status < 500 && isObj && typeof j.error === 'string' && j.mayHaveChanged !== true;
+    if (mutation && (!res.ok || j.ok === false) && !definiteRefusal) {
+      const ref = isObj && Number.isSafeInteger(j.id) && j.id > 0 ? (j.uid != null && /^[A-Za-z0-9_-]{1,64}$/.test(String(j.uid)) ? `${j.id}:${j.uid}` : String(j.id)) : null;
+      throw new AdapterError((isObj && typeof j.error === 'string' && j.error) || `${this.app} failed while carrying out the request (HTTP ${res.status})`, {
+        status: 424, stalled: true, appRef: ref,
+        fix: `The request may have been carried out${ref ? ` (${this.app} held entry ${ref})` : ''}; check the item in ${this.app} before trying again.`,
+      });
+    }
     if (res.status === 404 && (!j || !j.error)) {
       throw new AdapterError(`${this.app} does not have the dedupe operations yet`, { status: 424, fix: `Install the ${this.app} version that ships the Grabbit dedupe v1 routes.` });
     }
     if (!res.ok || !j || j.ok === false) {
-      // A 4xx refusal (from the app, or a proxy that never passed the
-      // request on) means nothing changed. A 5xx, a proxy's 502/504, or an
-      // app that says it may have acted leaves the operation pending.
-      if (mutation && (res.status >= 500 || (j && typeof j === 'object' && j.mayHaveChanged === true))) {
-        const ref = j && Number.isSafeInteger(j.id) && j.id > 0 ? (j.uid != null && /^[A-Za-z0-9_-]{1,64}$/.test(String(j.uid)) ? `${j.id}:${j.uid}` : String(j.id)) : null;
-        throw new AdapterError((j && j.error) || `${this.app} failed while carrying out the request (HTTP ${res.status})`, {
-          status: 424, stalled: true, appRef: ref,
-          fix: `The request may have been carried out${ref ? ` (${this.app} held entry ${ref})` : ''}; check the item in ${this.app} before trying again.`,
-        });
-      }
+      // Here a mutation's answer is a definite refusal (see above): nothing changed.
       throw new AdapterError((j && j.error) || `${this.app} refused (HTTP ${res.status})`, { status: res.status >= 500 ? 424 : 409, fix: j && j.fix ? j.fix : null });
     }
     return j;

@@ -102,6 +102,21 @@
       return `#/duplicates/${tab}${q ? `?${q}` : ''}`;
     }
     const scrollKey = () => `grabbit.dupes.scroll:${location.hash}`;
+    // Where an app's last thumbnail rebuild stopped looking (its opaque
+    // cursor), so the next run goes on from there instead of the newest media.
+    const cursorKey = (id) => `grabbit.dupes.rebuildCursor:${id}`;
+    function savedCursor(id) {
+      try {
+        const c = localStorage.getItem(cursorKey(id));
+        return c && c.length <= 64 ? c : null;
+      } catch { return null; }
+    }
+    function saveCursor(id, c) {
+      try {
+        if (c == null) localStorage.removeItem(cursorKey(id));
+        else localStorage.setItem(cursorKey(id), String(c));
+      } catch {}
+    }
     function saveScroll() {
       try { sessionStorage.setItem(scrollKey(), String(window.scrollY || document.documentElement.scrollTop || 0)); } catch {}
     }
@@ -711,15 +726,26 @@
                 let failed = 0;
                 let x = {};
                 // egram looks for missing thumbnails a page at a time and hands
-                // back where it got to; that cursor goes back verbatim.
-                let cursor = null;
+                // back where it got to; that cursor goes back verbatim. A run
+                // starts where the last one stopped, so repeated runs reach the
+                // older media even when each run uses up its requests early.
+                const resumed = savedCursor(a.id);
+                let cursor = resumed;
                 for (let round = 0; round < 50; round++) {
                   btn.textContent = made ? `Rebuilding ... ${num(made)} made` : 'Rebuilding ...';
-                  x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0, ...(cursor != null ? { cursor } : {}) })).result || {};
+                  try {
+                    x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0, ...(cursor != null ? { cursor } : {}) })).result || {};
+                  } catch (err) {
+                    // A saved place the app no longer accepts is dropped, so the
+                    // next run starts over instead of failing the same way.
+                    if (round === 0 && resumed != null) saveCursor(a.id, null);
+                    throw err;
+                  }
                   made += x.made || 0;
                   failed += x.failed || 0;
                   const moved = x.cursor != null && x.cursor !== cursor;
                   cursor = x.cursor ?? null;
+                  saveCursor(a.id, cursor);
                   if (x.stopReason === 'disconnected') break;
                   const more = (x.stoppedEarly && x.stopReason === 'time') || (x.remaining || 0) > 0 || cursor != null;
                   if (!more || (!x.made && !x.inProgress && !moved)) break;
@@ -735,7 +761,7 @@
                 // egram sets aside, for 30 minutes, the files that failed or are
                 // still being made, so one bad video cannot stall the batches.
                 const skipped = x.skipped || 0;
-                toast(`${num(made)} thumbnails made${failed ? `, ${num(failed)} failed` : ''}${left ? `; ${num(left)} still missing` : ''}${skipped ? `; ${num(skipped)} set aside (failed recently or still being made)` : ''}${cursor != null ? '; more left to check, run it again' : ''}.`);
+                toast(`${num(made)} thumbnails made${failed ? `, ${num(failed)} failed` : ''}${left ? `; ${num(left)} still missing` : ''}${skipped ? `; ${num(skipped)} set aside (failed recently or still being made)` : ''}${cursor != null ? '; more left to check, run it again to go on from where it stopped' : ''}.`);
                 if (skipped && !left && !retryFailed) {
                   const again = await dialog('Retry the files set aside?', [
                     h('p', null, `${num(skipped)} files in ${a.app} failed in the last 30 minutes or are still being made, so the rebuild skipped them.`),
@@ -778,7 +804,10 @@
           a.ok ? h('div', { class: 'dm-btns' },
             h('button', { class: 'btn small ghost danger', type: 'button', onclick: run('clean', true) }, 'Clean unused cache'),
             h('button', { class: 'btn small ghost', type: 'button', onclick: run('clean', true) }, 'Remove duplicate thumbnails'),
-            h('button', { class: 'btn small ghost', type: 'button', onclick: run('rebuild', true) }, 'Rebuild thumbnails')) : null);
+            h('button', { class: 'btn small ghost', type: 'button', onclick: run('rebuild', true) }, savedCursor(a.id) != null ? 'Continue rebuilding thumbnails' : 'Rebuild thumbnails'),
+            savedCursor(a.id) != null
+              ? h('button', { class: 'btn small ghost', type: 'button', title: 'Forget where the last rebuild stopped and start again from the newest media', onclick: (e) => { saveCursor(a.id, null); return run('rebuild', true)(e); } }, 'Rebuild from the start')
+              : null) : null);
       });
       const kinds = h('section', { class: 'card dm-card' }, h('h2', null, ic('cache'), 'Generated files in the scanned folders'),
         c.kinds.length ? h('div', { class: 'dm-scroll' }, h('table', { class: 'dm-table' },

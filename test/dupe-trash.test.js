@@ -502,3 +502,97 @@ test('a trash folder made by the first removal is synced into its parent', async
   assert.ok(parent >= 0, 'the parent of the new trash folder is synced');
   assert.ok(parent < opened.indexOf(trashDir), 'before the move syncs the trash folder itself');
 });
+
+// Round 6: a directory sync that fails is never taken as durable, and a
+// retry syncs again; the final check knows which file the move published.
+test('fsyncDir passes only a filesystem that cannot sync a directory', () => {
+  const { fsyncDir } = require('../dupe-trash');
+  const open = fs.openSync;
+  const sync = fs.fsyncSync;
+  try {
+    fs.openSync = () => { const e = new Error('denied'); e.code = 'EACCES'; throw e; };
+    assert.throws(() => fsyncDir(os.tmpdir()), /denied/);
+    fs.openSync = open;
+    fs.fsyncSync = () => { const e = new Error('not here'); e.code = 'EINVAL'; throw e; };
+    assert.doesNotThrow(() => fsyncDir(os.tmpdir()));
+    fs.fsyncSync = () => { const e = new Error('i/o error'); e.code = 'EIO'; throw e; };
+    assert.throws(() => fsyncDir(os.tmpdir()), /i\/o error/);
+  } finally {
+    fs.openSync = open;
+    fs.fsyncSync = sync;
+  }
+});
+
+test('a removal after a failed sync of the new trash folder syncs its parent again', async () => {
+  const { g, dir, trash, t } = mergeFixture();
+  t.store.dupeMembers = () => [1, 2].map((id) => t.store.dupeFile(id));
+  const open = fs.openSync;
+  let fail = true;
+  const opened = [];
+  fs.openSync = (p, ...rest) => {
+    opened.push(p);
+    if (fail && p === dir) { const e = new Error('i/o error'); e.code = 'EIO'; throw e; }
+    return open(p, ...rest);
+  };
+  try {
+    await assert.rejects(t.remove(2), /i\/o error/);
+    assert.ok(fs.existsSync(path.join(g, 'b.mp4')), 'nothing was moved');
+    assert.equal(trash.length, 0);
+    fail = false;
+    opened.length = 0;
+    await t.remove(2);
+  } finally {
+    fs.openSync = open;
+  }
+  assert.ok(opened.includes(dir), 'the retry syncs the parent of the trash folder');
+  assert.equal(trash.length, 1);
+  assert.ok(!fs.existsSync(path.join(g, 'b.mp4')));
+});
+
+test('a cross-mount move refuses when a writer replaces the published copy during the folder sync', async () => {
+  const { moveFile } = require('../dupe-trash');
+  const { g, dir } = mergeFixture();
+  const src = path.join(g, 'b.mp4');
+  const destDir = path.join(dir, 'other-mount');
+  fs.mkdirSync(destDir);
+  const dest = path.join(destDir, 'held.mp4');
+  const expect = fs.lstatSync(src);
+  const link = fs.linkSync;
+  const open = fs.openSync;
+  fs.linkSync = (from, to) => {
+    if (from === src) { const e = new Error('cross-device'); e.code = 'EXDEV'; throw e; }
+    return link(from, to);
+  };
+  fs.openSync = (p, ...rest) => {
+    if (p === destDir && fs.existsSync(dest) && fs.readFileSync(dest, 'utf8') === 'same bytes') replaceFile(dest, 'a writer was here');
+    return open(p, ...rest);
+  };
+  try {
+    await assert.rejects(moveFile(src, dest, null, expect), /changed while it was being moved/);
+  } finally {
+    fs.linkSync = link;
+    fs.openSync = open;
+  }
+  assert.equal(fs.readFileSync(src, 'utf8'), 'same bytes', 'the original is never unlinked');
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'a writer was here', "the writer's file is never removed");
+});
+
+test('a hard-link move whose new name vanishes during the sync refuses cleanly', async () => {
+  const { moveFile, TrashError } = require('../dupe-trash');
+  const { g, trashDir } = mergeFixture();
+  fs.mkdirSync(trashDir, { recursive: true });
+  const src = path.join(g, 'b.mp4');
+  const dest = path.join(trashDir, 'held.mp4');
+  const expect = fs.lstatSync(src);
+  const open = fs.openSync;
+  fs.openSync = (p, ...rest) => {
+    if (p === trashDir) { try { fs.unlinkSync(dest); } catch {} }
+    return open(p, ...rest);
+  };
+  try {
+    await assert.rejects(moveFile(src, dest, null, expect), (e) => e instanceof TrashError && /changed while it was being moved/.test(e.message));
+  } finally {
+    fs.openSync = open;
+  }
+  assert.equal(fs.readFileSync(src, 'utf8'), 'same bytes');
+});

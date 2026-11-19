@@ -244,11 +244,24 @@ test('5xx from the app is a 424, never passed through as 5xx', async () => {
   await rejectsAdapter(adapter({ fetchImpl: stubFetch(() => jsonRes(502, undefined)), caps: ['lookup', 'cache'] }).cache(), { status: 424, message: /refused \(HTTP 502\)/ });
 });
 
-test('other refusals are 409: 4xx and ok:false on a 200', async () => {
-  for (const [status, body] of [[403, { error: 'Bad token' }], [200, { ok: false, error: 'Bytes differ' }], [400, undefined]]) {
+test('other refusals are 409: a 4xx with a JSON error and no mayHaveChanged', async () => {
+  for (const [status, body] of [[403, { error: 'Bad token' }], [409, { error: 'Bytes differ' }]]) {
     const fetchImpl = stubFetch(() => jsonRes(status, body));
     await rejectsAdapter(adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), { status: 409 });
   }
+});
+
+// Round 6: a 4xx body that could not be read may be a cut 422 that carried
+// mayHaveChanged, so a change stays pending; so does a 2xx that says ok: false.
+test('a change with an unreadable 4xx body, a bare 404 or ok:false on a 200 stays pending', async () => {
+  for (const [status, body] of [[400, undefined], [422, undefined], [404, undefined], [422, ['x']], [422, { message: 'no error field' }], [200, { ok: false, error: 'Bytes differ' }]]) {
+    const fetchImpl = stubFetch(() => jsonRes(status, body));
+    await assert.rejects(adapter({ fetchImpl }).link('a.mp4', 'b.mp4', 'f'.repeat(64)), (e) => e.stalled === true && e.status === 424, `${status} ${JSON.stringify(body)}`);
+    await assert.rejects(adapter({ fetchImpl }).purge('1:' + 'a'.repeat(32)), (e) => e.stalled === true, `purge ${status}`);
+  }
+  // A lookup changes nothing: a bare 404 there still means "not installed".
+  const bare = stubFetch(() => jsonRes(404, undefined));
+  await assert.rejects(adapter({ fetchImpl: bare, caps: ['lookup'] }).lookup(['a.mp4']), (e) => !e.stalled && /does not have the dedupe operations/.test(e.message));
 });
 
 test('a change whose outcome is unknown stays open (stalled): a reset after sending, or a 2xx with no JSON', async () => {
