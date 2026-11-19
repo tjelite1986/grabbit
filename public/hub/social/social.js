@@ -748,6 +748,12 @@
         // creator-only edit must not rewrite it.
         const captionEdited = descEdited || tagsEdited;
         if (!moving && !captionEdited) { closeSheet(); return; }
+        // Elitogram refuses a caption over 5000 characters; say so before anything moves.
+        if (captionEdited && caption.length > 5000) {
+          err.textContent = `Description and tags together are ${caption.length} characters; the limit is 5000.`;
+          err.hidden = false;
+          return;
+        }
         const body = {};
         if (captionEdited) body.caption = caption;
         if (moving) body.author = { creator: handle };

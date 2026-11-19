@@ -420,6 +420,8 @@ test('Edit post sends the caption only when description or tags changed', () => 
   assert.match(body, /const body = \{\};\n\s+if \(captionEdited\) body\.caption = caption;\n\s+if \(moving\) body\.author = \{ creator: handle \};/);
   assert.match(body, /if \(!moving && !captionEdited\) \{ closeSheet\(\); return; \}/);
   assert.doesNotMatch(body, /const body = \{ caption \};/);
+  // Codex r11 (R11-02): an over-long caption is stopped in the editor.
+  assert.match(body, /if \(captionEdited && caption\.length > 5000\) \{/);
 });
 
 // Hermes final review (A1, A2): Duplicate Manager dialogs.
