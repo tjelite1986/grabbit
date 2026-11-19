@@ -165,3 +165,14 @@ test('viewer: fullscreen, pinch/wheel/double-tap zoom, pan, swipe, original file
   // Leaving the page ends fullscreen and closes the viewer.
   assert.match(js, /if \(fsEl\(\) === viewerEl\) exitFs\(\);/);
 });
+
+test('the pager says "Loading ..." only while a page is on its way', () => {
+  const start = js.indexOf('function pager(');
+  const body = js.slice(start, js.indexOf('// --- Tiles', start));
+  // The sentinel starts empty; next() puts the text in and marks it busy.
+  assert.match(body, /const more = h\('div', \{ class: 'sg-more' \}\);/);
+  assert.match(body, /busy = true;\s*more\.setAttribute\('aria-busy', 'true'\);\s*fill\(more, h\('span', \{ class: 'muted' \}, 'Loading \.\.\.'\)\);/);
+  // After a page the sentinel is emptied again (or shows the empty text), and the busy mark goes.
+  assert.match(body, /fill\(more, done && !count \? h\('p', \{ class: 'muted' \}, emptyText\) : null\);/);
+  assert.match(body, /finally \{\s*busy = false;\s*more\.removeAttribute\('aria-busy'\);/);
+});

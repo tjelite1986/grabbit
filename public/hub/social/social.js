@@ -242,7 +242,10 @@
     // appended to `box` by draw(). Stops when the page is left.
     function pager(box, load, draw, { emptyText = 'Nothing here yet.' } = {}) {
       const gen = generation;
-      const more = h('div', { class: 'sg-more' }, h('span', { class: 'muted' }, 'Loading ...'));
+      // The sentinel says "Loading ..." only while a page is on its way. Between
+      // pages it is empty: a long list (the Review lane has dozens of pages)
+      // otherwise reads as never finishing.
+      const more = h('div', { class: 'sg-more' });
       const wrap = h('div', null, box, more);
       let cursor = null;
       let busy = false;
@@ -251,6 +254,8 @@
       async function next() {
         if (busy || done || !live(gen)) return;
         busy = true;
+        more.setAttribute('aria-busy', 'true');
+        fill(more, h('span', { class: 'muted' }, 'Loading ...'));
         try {
           const d = await load(cursor);
           if (!live(gen)) return;
@@ -261,13 +266,14 @@
           }
           cursor = d.next == null ? null : d.next;
           done = d.next == null;
-          if (done) fill(more, count ? null : h('p', { class: 'muted' }, emptyText));
+          fill(more, done && !count ? h('p', { class: 'muted' }, emptyText) : null);
         } catch (e) {
           if (!live(gen)) return;
           done = true;
-          fill(more, h('p', { class: 'muted' }, e.message), h('button', { type: 'button', class: 'btn small ghost', onclick: () => { done = false; fill(more, h('span', { class: 'muted' }, 'Loading ...')); next(); } }, 'Try again'));
+          fill(more, h('p', { class: 'muted' }, e.message), h('button', { type: 'button', class: 'btn small ghost', onclick: () => { done = false; next(); } }, 'Try again'));
         } finally {
           busy = false;
+          more.removeAttribute('aria-busy');
         }
         // Short pages: keep going while the sentinel is still in view.
         if (!done && live(gen) && more.getBoundingClientRect().top < window.innerHeight + 400) next();
