@@ -826,6 +826,17 @@ test('the trash defaults to manual cleanup, and a time limit needs its own confi
   assert.equal(svc.setCfg({ trashRetentionDays: 0 }).trashRetentionDays, 0, 'back to manual needs none');
 });
 
+test('clearing the read speed limit goes back to the server limit without a restart', async (t) => {
+  const { svc, s, candidates } = setup(t);
+  svc.scanner = new DupeScanner({ store: s, roots: planRoots(candidates), mbPerSec: 20, defaultMbPerSec: 20, pauseMs: 0, log: () => {} });
+  svc.setCfg({ scanMbps: 5 });
+  assert.equal(svc.scanner.mbPerSec, 5);
+  svc.setCfg({ scanMbps: null });
+  assert.equal(svc.cfg().scanMbps, null);
+  assert.equal(svc.scanner.mbPerSec, 20, 'the old 5 MB/s cap is gone');
+  delete svc.scanner;
+});
+
 test('settings are sanitised and stored in items.db settings, not as a schema change', async (t) => {
   const { svc, s } = setup(t);
   const next = svc.setCfg({ trashRetentionDays: 3, defaultRule: 'bogus', prevention: { exact: 'explode', perceptual: 'delete' } });

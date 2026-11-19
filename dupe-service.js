@@ -102,7 +102,7 @@ class DupeService {
       if (['mode', 'sensitivity', 'model', 'ai', 'photo'].some((k) => before[k] !== next[k])) this.analyzer.markDirty('photo');
       if (before.video !== next.video) this.analyzer.markDirty('video');
     }
-    if (this.scanner && next.scanMbps && next.scanMbps !== before.scanMbps) this.scanner.setRate(next.scanMbps);
+    if (this.scanner && next.scanMbps !== before.scanMbps) this.scanner.setRate(next.scanMbps);
     this.invalidate();
     this.log(`settings changed by ${by || 'owner'}`);
     return next;

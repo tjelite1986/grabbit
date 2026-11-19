@@ -3561,6 +3561,7 @@ if (ITEM_STORE && ITEM_STORE.fileSeen && String(process.env.DUPES_SCAN || '').to
     store: ITEM_STORE,
     roots: dupeRoots,
     mbPerSec: (DUPE_DX && readDupeCfg(ITEM_STORE).scanMbps) || Number(process.env.DUPES_SCAN_MBPS) || 20,
+    defaultMbPerSec: Number(process.env.DUPES_SCAN_MBPS) || 20,
     onPass: DUPE_DX ? (phase, info) => {
       if (phase === 'start') passHistory = DUPE_DX.historyStart('exact');
       else if (passHistory) {

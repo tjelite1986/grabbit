@@ -97,7 +97,9 @@ class DupeScanner {
     this.store = opts.store;
     this.rootsFn = typeof opts.roots === 'function' ? opts.roots : () => opts.roots || [];
     this.roots = this.rootsFn();
-    this.mbPerSec = Math.max(1, Number(opts.mbPerSec) || 20);
+    // The server's own limit (env), used again when the owner clears the setting.
+    this.defaultMbPerSec = Math.max(1, Math.min(500, Number(opts.defaultMbPerSec) || 20));
+    this.mbPerSec = Math.max(1, Number(opts.mbPerSec) || this.defaultMbPerSec);
     this.pauseMs = Math.max(0, Number(opts.pauseMs != null ? opts.pauseMs : 25));
     this.rescanMs = Math.max(60_000, Number(opts.rescanMs) || 6 * 3600_000);
     this.log = opts.log || ((m) => console.log(`dupes: ${m}`));
@@ -116,9 +118,10 @@ class DupeScanner {
     this.passBytes = 0;
   }
 
-  // The read cap can change while the scan runs (Settings).
+  // The read cap can change while the scan runs (Settings). An empty value
+  // goes back to the server's own limit.
   setRate(mbPerSec) {
-    this.mbPerSec = Math.max(1, Math.min(500, Number(mbPerSec) || 20));
+    this.mbPerSec = Math.max(1, Math.min(500, Number(mbPerSec) || this.defaultMbPerSec));
     return this.mbPerSec;
   }
 
