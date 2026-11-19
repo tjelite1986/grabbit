@@ -300,9 +300,15 @@ class Analyzer {
         }, this.now());
         if (emb && img.rgb) {
           const c = this.cfg();
-          const [v] = await emb.embed(img.rgb);
-          this.dx.putEmbedding(t.sha256, c.model, ai.versionOf(c.model), v, null, this.now());
-          this.done.embed++;
+          // An embedding failure is the AI engine's own: the pHash row above
+          // stays, so the picture keeps its perceptual matching.
+          try {
+            const [v] = await emb.embed(img.rgb);
+            this.dx.putEmbedding(t.sha256, c.model, ai.versionOf(c.model), v, null, this.now());
+            this.done.embed++;
+          } catch (e) {
+            this.dx.putEmbedding(t.sha256, c.model, ai.versionOf(c.model), null, String(e.message || e).slice(0, 200), this.now());
+          }
         }
         this.done.image++;
         this.dirty.photo = true;

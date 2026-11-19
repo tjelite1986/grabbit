@@ -80,12 +80,28 @@ class AppAdapter {
         redirect: 'error',
       });
     } catch (e) {
+      clearTimeout(timer);
       throw new AdapterError(`${this.app} is not reachable right now`, { status: 424, fix: `Check that ${this.app} is running; nothing was changed.` });
+    }
+    // The timeout covers the body too: an app that sends headers and then
+    // stalls must not hang the request.
+    let j = null;
+    let stalled = false;
+    try {
+      j = await new Promise((resolve, reject) => {
+        if (ctrl.signal.aborted) return reject(Object.assign(new Error('timeout'), { stalled: true }));
+        ctrl.signal.addEventListener('abort', () => reject(Object.assign(new Error('timeout'), { stalled: true })), { once: true });
+        Promise.resolve().then(() => res.json()).then(resolve, reject);
+      });
+    } catch (e) {
+      stalled = Boolean(e && e.stalled);
+      j = null;
     } finally {
       clearTimeout(timer);
     }
-    let j = null;
-    try { j = await res.json(); } catch { j = null; }
+    if (stalled) {
+      throw new AdapterError(`${this.app} stopped answering half way`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.` });
+    }
     if (res.status === 404 && (!j || !j.error)) {
       throw new AdapterError(`${this.app} does not have the dedupe operations yet`, { status: 424, fix: `Install the ${this.app} version that ships the Grabbit dedupe v1 routes.` });
     }

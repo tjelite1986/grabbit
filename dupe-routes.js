@@ -14,6 +14,7 @@ const fs = require('fs');
 const { DupeError } = require('./dupe-service');
 const { TrashError } = require('./dupe-trash');
 const { AdapterError } = require('./dupe-adapters');
+const { MODELS } = require('./dupe-ai');
 
 const KEY_RE = /^(exact:[0-9a-f]{64}|photo:[1-9][0-9]{0,12}|video:[1-9][0-9]{0,12})$/;
 const TRASH_ID_RE = /^[ga][1-9][0-9]{0,15}$/;
@@ -166,7 +167,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     if (!scanner) throw new DupeError('The duplicate scan is switched off on this server (DUPES_SCAN=off).', 409);
     const a = (req.body || {}).action;
     const map = { start: 'start', resume: 'start', pause: 'pause', stop: 'stop', rescan: 'rescan' };
-    if (!map[a]) throw new DupeError('action must be start, pause, resume, stop or rescan');
+    if (typeof a !== 'string' || !Object.hasOwn(map, a)) throw new DupeError('action must be start, pause, resume, stop or rescan');
     console.log(`dupes: scan ${a} by ${who(req)}`);
     return { scan: scanner[map[a]]() };
   }));
@@ -177,7 +178,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
       return { photo: analyzer.regroup('photo'), video: analyzer.regroup('video') };
     }
     const map = { start: 'start', resume: 'start', pause: 'pause', stop: 'stop' };
-    if (!map[a]) throw new DupeError('action must be start, pause, resume, stop or regroup');
+    if (typeof a !== 'string' || !Object.hasOwn(map, a)) throw new DupeError('action must be start, pause, resume, stop or regroup');
     console.log(`dupes: analysis ${a} by ${who(req)}`);
     service.invalidate();
     return { analysis: analyzer[map[a]]() };
@@ -191,6 +192,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
   r.post('/models/:id/download', wrap(async (req) => {
     if (!models) throw new DupeError('Models are not available', 409);
     if (!/^(light|medium|heavy)$/.test(req.params.id)) throw new DupeError('Unknown model');
+    if (!MODELS[req.params.id].sha256) throw new DupeError(`The ${req.params.id} model has no pinned checksum in this build yet, so it cannot be downloaded`, 409);
     // Runs in the background; progress shows in /settings.
     models.download(req.params.id).catch((e) => console.warn(`dupes: model download failed (${e.message})`));
     return { started: true };

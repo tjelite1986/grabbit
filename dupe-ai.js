@@ -74,6 +74,19 @@ function runtime() {
   }
 }
 
+function hashFileSync(file) {
+  const h = crypto.createHash('sha256');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    let n;
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) h.update(buf.subarray(0, n));
+  } finally {
+    fs.closeSync(fd);
+  }
+  return h.digest('hex');
+}
+
 class ModelManager {
   constructor({ dir, fetchImpl = globalThis.fetch, log = console.log } = {}) {
     this.dir = dir;
@@ -87,12 +100,27 @@ class ModelManager {
     return path.join(this.dir, MODELS[id].file);
   }
 
+  // Installed means the exact pinned bytes: ONNX Runtime parses the file
+  // natively, so a file of the right size but other content is never loaded.
+  // The hash is computed once per (inode, size, mtime) and remembered.
   installed(id) {
+    const spec = MODELS[id];
+    if (!spec || !spec.sha256) return false;
+    let st;
     try {
-      return fs.statSync(this.fileOf(id)).size === MODELS[id].bytes;
+      st = fs.statSync(this.fileOf(id));
     } catch {
       return false;
     }
+    if (!st.isFile() || st.size !== spec.bytes) return false;
+    const sig = `${st.ino}:${st.size}:${st.mtimeMs}`;
+    if (!this.verified) this.verified = new Map();
+    const known = this.verified.get(id);
+    if (known && known.sig === sig) return known.ok;
+    const ok = hashFileSync(this.fileOf(id)) === spec.sha256;
+    if (!ok) this.log(`dupes: model ${id} on disk does not match its checksum; it is not loaded`);
+    this.verified.set(id, { sig, ok });
+    return ok;
   }
 
   status() {

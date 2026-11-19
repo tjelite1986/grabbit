@@ -36,11 +36,17 @@ function cliques(n, links) {
     comps.get(r).push(i);
   }
   const out = [];
-  for (let comp of comps.values()) {
+  const work = [...comps.values()];
+  while (work.length) {
+    let comp = work.pop();
     if (comp.length < 2) continue;
     // A huge component is almost always a chain of loosely similar pictures;
     // keep the best-connected part and let the rest form their own groups.
-    if (comp.length > MAX_COMPONENT) comp = comp.sort((a, b) => adj.get(b).size - adj.get(a).size).slice(0, MAX_COMPONENT);
+    if (comp.length > MAX_COMPONENT) {
+      comp.sort((a, b) => adj.get(b).size - adj.get(a).size);
+      work.push(comp.slice(MAX_COMPONENT));
+      comp = comp.slice(0, MAX_COMPONENT);
+    }
     const left = new Set(comp);
     while (left.size > 1) {
       let seed = null;

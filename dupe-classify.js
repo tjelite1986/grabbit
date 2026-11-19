@@ -40,13 +40,16 @@ const CACHE_DIRS = new Set([
 //   regenerable cache. Avatars and banners are owner-chosen pictures.
 // - TikShortis is a video app: an image beside the clips is the poster frame
 //   it generated.
+const EGRAM_LABELS = { _avatars: 'avatar', _banners: 'banner', _stories: 'story', _users: 'user' };
+
 function appRule(root, rel) {
   const segs = rel.split(/[\\/]/);
   const top = segs[0];
   if (root.app === 'egram') {
     if (top === '_thumbs') return { cls: 'derivative', what: 'thumbnail', regenerable: true };
     if (top === '_tmp') return { cls: 'derivative', what: 'temporary file', regenerable: true };
-    if (top && top.startsWith('_')) return { cls: 'app', what: top.slice(1).replace(/s$/, '') };
+    // Only a folder counts: a file named "_x.jpg" at the root is media.
+    if (segs.length > 1 && top.startsWith('_')) return { cls: 'app', what: EGRAM_LABELS[top] || top.slice(1) };
   }
   if (root.app === 'TikShortis' && kindOf(rel) === 'image') return { cls: 'derivative', what: 'poster', regenerable: true };
   return null;

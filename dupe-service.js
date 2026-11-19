@@ -244,9 +244,13 @@ class DupeService {
       m.fix = na.fix;
     }
     const actionable = members.filter((m) => m.action);
-    const reclaim = actionable
-      .filter((m) => !(m.dev === keep.dev && m.ino === keep.ino))
-      .reduce((n, m) => n + m.bytes, 0);
+    // Bytes come back once per inode: two hard-linked names free one copy.
+    const freed = new Map();
+    for (const m of actionable) {
+      if (m.dev === keep.dev && m.ino === keep.ino) continue;
+      freed.set(`${m.dev}:${m.ino}`, m.bytes);
+    }
+    const reclaim = [...freed.values()].reduce((n, b) => n + b, 0);
     return { keepId: keep.id, reclaim, units: units.size, recommendation: { rule: rec.rule, reasons: keep.reasons || [] } };
   }
 
@@ -657,11 +661,17 @@ class DupeService {
     for (const g of groups) {
       if (action !== 'trash_extras') { summary.files += g.files; continue; }
       if (g.match !== 'exact') { summary.similarSkipped++; continue; }
+      const kept = g.members.find((x) => x.id === g.keepId);
+      const counted = new Set(kept ? [`${kept.dev}:${kept.ino}`] : []);
       for (const m of g.members) {
         if (m.recommended) continue;
         if (m.suggested && m.action) {
           summary.files++;
-          summary.bytes += m.dev === g.members.find((x) => x.id === g.keepId).dev && m.ino === g.members.find((x) => x.id === g.keepId).ino ? 0 : m.bytes;
+          const unit = `${m.dev}:${m.ino}`;
+          if (!counted.has(unit)) {
+            counted.add(unit);
+            summary.bytes += m.bytes;
+          }
           summary.apps.add(m.app || m.rootLabel);
         } else if (!m.action && !(m.why || '').startsWith('Already stored once')) {
           summary.blocked.push({ group: g.key, name: m.name, why: m.why, fix: m.fix || null });
