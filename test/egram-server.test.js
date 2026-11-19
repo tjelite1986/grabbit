@@ -58,6 +58,14 @@ const upstream = http.createServer((req, res) => {
         items: [
           { id: 1, caption: 'a', author: { handle: 'sunny' }, media: [], audience: 'general' },
           { id: 2, caption: 'b', author: { handle: 'naughty' }, media: [], audience: 'general' },
+          // 18+ in Grabbit under another spelling: "Katerina-23", "Lillie Lucas", "Zoë Ray".
+          { id: 11, caption: 'k', author: { handle: 'katerina23' }, media: [], audience: 'general' },
+          { id: 12, caption: 'l', author: { handle: 'lillie_lucas' }, media: [], audience: 'general' },
+          { id: 13, caption: 'z', author: { handle: 'zoe.ray' }, media: [], audience: 'general' },
+          // Look-alikes that are not the same name stay: a longer handle, and a
+          // fold too short to trust ("J.J" vs "jj").
+          { id: 14, caption: 'f', author: { handle: 'lillielucasfan' }, media: [], audience: 'general' },
+          { id: 15, caption: 'j', author: { handle: 'jj' }, media: [], audience: 'general' },
         ],
         next: null,
       });
@@ -147,6 +155,17 @@ const PROFILES = {
   ],
   log: [],
 };
+const respell = (id, name, extra) => ({
+  id, name, audience: 'adult', note: '', accounts: [], aliases: [], mergedFrom: [], origin: 'manual',
+  classifiedAs: null, classifiedAt: null, createdAt: 1, updatedAt: 1, ...extra,
+});
+PROFILES.profiles.push(
+  respell(4, 'Katerina-23'),
+  respell(5, 'Lillie Lucas', { origin: 'registry', aliases: [{ name: 'Lillie Lucas', addedAt: 1 }] }),
+  respell(6, 'Zoë Ray'),
+  respell(7, 'J.J'),
+);
+PROFILES.nextId = 8;
 
 let native;
 let auth;
@@ -204,7 +223,7 @@ test('link, then the feed comes back without the Grabbit-18+ author', async () =
   egramCookie = (r.headers.getSetCookie() || []).map((v) => v.split(';')[0]).find((v) => v.startsWith('grabbit_egram='));
   assert.ok(egramCookie);
   const feed = await (await fetch(`${native.base}/api/egram/api/feed`, { headers: hub() })).json();
-  assert.deepEqual(feed.items.map((p) => p.author.handle), ['sunny']);
+  assert.deepEqual(feed.items.map((p) => p.author.handle), ['sunny', 'lillielucasfan', 'jj']);
   const up = upSeen[upSeen.length - 1];
   assert.equal(up.headers['x-egram-audience'], 'general');
   assert.equal(up.headers.cookie, 'eg_session=up-token');
@@ -250,6 +269,20 @@ test('classify: general is refused before the write for a creator 18+ in Grabbit
     { handle: 'ghost', reason: 'not found in Elitogram' },
     { handle: 'shady', reason: 'matches an 18+ profile in Grabbit' },
   ]);
+  assert.equal(upSeen.filter((x) => x.url === '/api/creators-classify').length, before, 'nothing written upstream');
+});
+
+test('classify: general is refused for a creator 18+ in Grabbit under another spelling', async () => {
+  const before = upSeen.filter((x) => x.url === '/api/creators-classify').length;
+  const r = await fetch(`${native.base}/api/egram/creators-classify`, {
+    method: 'POST',
+    headers: hub({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ handles: ['katerina23'], audience: 'general' }),
+  });
+  const d = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(d));
+  assert.deepEqual(d.updated, []);
+  assert.deepEqual(d.skipped, [{ handle: 'katerina23', reason: 'matches an 18+ profile in Grabbit' }]);
   assert.equal(upSeen.filter((x) => x.url === '/api/creators-classify').length, before, 'nothing written upstream');
 });
 

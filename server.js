@@ -2989,29 +2989,48 @@ for (const w of EGRAM_MODE_WARNINGS) console.warn(`[grabbit] ${w}`);
 // as 18+ and the module shows nothing (fail closed).
 // The read-only store is the server's cached copy once anything has loaded it;
 // before that it is read from disk, at most once a minute.
-let egramAdultNames = { store: null, set: null, at: 0 };
-function egramAdultSet() {
+let egramAdultNames = { store: null, set: null, folded: null, at: 0 };
+// The same person is often spelled differently in the two apps ("katerina-23"
+// in Grabbit, "katerina23" in Elitogram; "Lillie Lucas" and "lillielucas"), so
+// every 18+ name is also kept folded: compatibility forms and accents folded,
+// lower case, letters and digits only. A folded match only ever hides an author
+// (18+), never shows one, so a looser match fails closed. Too short a fold is
+// not used: it would hide unrelated short handles.
+const EGRAM_FOLD_MIN = 4;
+function egramFold(name) {
+  const f = String(name == null ? '' : name).normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  return f.length >= EGRAM_FOLD_MIN ? f : '';
+}
+function egramAdultLookup() {
   if (egramAdultNames.set && (profilesCache ? egramAdultNames.store === profilesCache : Date.now() - egramAdultNames.at < 60000)) {
-    return egramAdultNames.set;
+    return egramAdultNames;
   }
   const { store } = readProfilesReadOnly();
   {
     const set = new Set();
+    const folded = new Set();
+    const add = (name, key) => {
+      set.add(key);
+      const f = egramFold(name);
+      if (f) folded.add(f);
+    };
     for (const p of store.profiles) {
       if (profiles.effectiveAudience(p) !== 'adult') continue;
-      for (const a of p.aliases || []) set.add(creatorKey(a.name).toLowerCase());
-      for (const a of p.accounts || []) set.add(String(a.handle).toLowerCase());
-      if (p.origin === 'manual') set.add(creatorKey(p.name).toLowerCase());
+      for (const a of p.aliases || []) add(a.name, creatorKey(a.name).toLowerCase());
+      for (const a of p.accounts || []) add(a.handle, String(a.handle).toLowerCase());
+      if (p.origin === 'manual') add(p.name, creatorKey(p.name).toLowerCase());
     }
-    egramAdultNames = { store, set, at: Date.now() };
+    egramAdultNames = { store, set, folded, at: Date.now() };
   }
-  return egramAdultNames.set;
+  return egramAdultNames;
 }
 function egramIsAdultHandle(handle) {
   try {
-    const set = egramAdultSet();
+    const { set, folded } = egramAdultLookup();
     const h = String(handle || '').toLowerCase();
-    return set.has(h) || set.has(creatorKey(h).toLowerCase());
+    if (set.has(h) || set.has(creatorKey(h).toLowerCase())) return true;
+    const f = egramFold(handle);
+    return !!f && folded.has(f);
   } catch (e) {
     console.warn('[egram] adult profile lookup failed:', e.message);
     return true;
