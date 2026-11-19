@@ -115,6 +115,7 @@
       }
       closeSheet();
       closeViewer();
+      closePosts('replace');
     }
 
     // --- The on-screen keyboard ---------------------------------------------------
@@ -139,7 +140,7 @@
 
     // Sheets and toasts go into the viewer while it is open: in browser
     // fullscreen only the fullscreen element's subtree is drawn.
-    const layer = () => viewerEl || document.body;
+    const layer = () => viewerEl || postsEl || document.body;
 
     // --- API -------------------------------------------------------------------
     class SocialError extends Error {
@@ -239,7 +240,10 @@
     }
 
     // Infinite list: calls load(cursor) until it returns next = null. Items are
-    // appended to `box` by draw(). Stops when the page is left.
+    // appended to `box` by draw(item, { src, index }). Stops when the page is left.
+    // `src` is the list as loaded so far, for the full-screen post viewer: it
+    // reads src.items, asks src.more() for the next page and hears about new
+    // items through src.listeners. src.els[i] is the element drawn for item i.
     function pager(box, load, draw, { emptyText = 'Nothing here yet.' } = {}) {
       const gen = generation;
       // The sentinel says "Loading ..." only while a page is on its way. Between
@@ -247,50 +251,78 @@
       // otherwise reads as never finishing.
       const more = h('div', { class: 'sg-more' });
       const wrap = h('div', null, box, more);
+      const src = { items: [], els: [], done: false, failed: false, more: () => next(), listeners: new Set() };
       let cursor = null;
-      let busy = false;
-      let done = false;
+      let running = null;
       let count = 0;
-      async function next() {
-        if (busy || done || !live(gen)) return;
-        busy = true;
+      const nearEnd = () => more.isConnected && more.getBoundingClientRect().top < window.innerHeight + 600;
+      function next() {
+        if (running) return running;
+        if (src.done || !live(gen)) return Promise.resolve();
+        running = page().finally(() => { running = null; });
+        return running;
+      }
+      async function page() {
         more.setAttribute('aria-busy', 'true');
         fill(more, h('span', { class: 'muted' }, 'Loading ...'));
         try {
           const d = await load(cursor);
           if (!live(gen)) return;
           const items = d.items || [];
+          const from = src.items.length;
           for (const it of items) {
-            const el = draw(it);
-            if (el) { box.append(el); count++; }
+            const index = src.items.length;
+            const el = draw(it, { src, index });
+            if (!el) continue;
+            src.items.push(it);
+            src.els.push(el);
+            box.append(el);
+            count++;
           }
           cursor = d.next == null ? null : d.next;
-          done = d.next == null;
-          fill(more, done && !count ? h('p', { class: 'muted' }, emptyText) : null);
+          src.done = d.next == null;
+          fill(more, src.done && !count ? h('p', { class: 'muted' }, emptyText) : null);
+          if (src.items.length > from) for (const fn of src.listeners) fn();
         } catch (e) {
           if (!live(gen)) return;
-          done = true;
-          fill(more, h('p', { class: 'muted' }, e.message), h('button', { type: 'button', class: 'btn small ghost', onclick: () => { done = false; next(); } }, 'Try again'));
+          src.done = true;
+          src.failed = true;
+          fill(more, h('p', { class: 'muted' }, e.message), h('button', { type: 'button', class: 'btn small ghost', onclick: () => { src.done = false; src.failed = false; next(); } }, 'Try again'));
         } finally {
-          busy = false;
           more.removeAttribute('aria-busy');
         }
         // Short pages: keep going while the sentinel is still in view.
-        if (!done && live(gen) && more.getBoundingClientRect().top < window.innerHeight + 400) next();
+        if (!src.done && live(gen) && nearEnd()) setTimeout(next, 0);
       }
       const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) next(); }, { rootMargin: '600px' });
       io.observe(more);
-      onLeave(() => io.disconnect());
+      // A scroll check as well as the observer: an observer reports only
+      // changes, so a sentinel that never leaves its margin would stop the list.
+      let scrollTimer = 0;
+      const onScroll = () => {
+        if (scrollTimer) return;
+        scrollTimer = setTimeout(() => { scrollTimer = 0; if (nearEnd()) next(); }, 150);
+      };
+      window.addEventListener('scroll', onScroll, { passive: true });
+      onLeave(() => { io.disconnect(); window.removeEventListener('scroll', onScroll); clearTimeout(scrollTimer); src.listeners.clear(); });
       next();
       return wrap;
     }
 
     // --- Tiles -------------------------------------------------------------------
-    function tile(t, lane, query) {
+    // A tile in a pager's grid (ctx from the pager) opens the full-screen post
+    // viewer on a plain click; the address still opens the post page in a new
+    // tab or with a modifier key.
+    function tile(t, lane, query, ctx) {
       const id = intOf(t.id);
       const mid = intOf(t.media_id);
       if (!id || !mid) return null;
-      return h('a', { class: 'sg-tile', href: link(`post/${id}`, { ...(query || {}), lane: lane === 'review' ? 'review' : null }), 'aria-label': `Post by ${t.author_handle || 'unknown'}` },
+      const open = ctx && ctx.src ? (e) => {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        openPosts(ctx.src, ctx.src.els.indexOf(e.currentTarget), lane);
+      } : null;
+      return h('a', { class: 'sg-tile', href: link(`post/${id}`, { ...(query || {}), lane: lane === 'review' ? 'review' : null }), 'aria-label': `Post by ${t.author_handle || 'unknown'}`, onclick: open },
         h('img', { alt: '', src: thumbUrl(mid, lane), loading: 'lazy', decoding: 'async', 'data-media-bg': '1', onerror: (e) => e.currentTarget.classList.add('sg-broken') }),
         t.has_video ? h('span', { class: 'sg-badge' }, ic('play', 16)) : t.count > 1 ? h('span', { class: 'sg-badge' }, ic('stack', 16)) : null);
     }
@@ -304,42 +336,107 @@
         options.map(([value, label]) => h('a', { class: `sg-chip${current === value ? ' on' : ''}`, href: href(value), 'aria-current': current === value ? 'true' : null }, label)));
     }
 
+    // --- Media carousel --------------------------------------------------------------
+    // A post's items side by side in a horizontal scroll-snap track, like
+    // Elitogram's Carousel: a swipe, a trackpad or the buttons move it and it
+    // settles on one item at a time. Only the item on show plays.
+    //   full        the full-screen viewer (fills its frame, videos loop)
+    //   onIndex(i)  the item on show changed
+    //   onOpen(i)   a tap on an image (after the double-tap window when onDoubleTap is set)
+    //   onDoubleTap a double tap or double click on an image
+    function carousel(media, lane, { full = false, eager = false, alt = '', onIndex, onOpen, onDoubleTap } = {}) {
+      let at = 0;
+      const track = h('div', { class: 'sg-track' });
+      const dots = h('div', { class: 'sg-cdots', 'aria-hidden': 'true' });
+      const heart = h('div', { class: 'sg-heart-pop', 'aria-hidden': 'true' }, ic('heart', 96));
+      const prev = h('button', { type: 'button', class: 'sg-nav prev', 'aria-label': 'Previous', onclick: () => go(at - 1) }, ic('prev'));
+      const next = h('button', { type: 'button', class: 'sg-nav next', 'aria-label': 'Next', onclick: () => go(at + 1) }, ic('next'));
+      const root = h('div', { class: `sg-carousel${full ? ' sg-full' : ''}` }, track, media.length > 1 ? [prev, next, dots] : null, heart);
+      let lastTap = 0;
+      let tapTimer = 0;
+      const tap = (i, e) => {
+        const now = Date.now();
+        if (onDoubleTap && now - lastTap < 300) {
+          lastTap = 0;
+          clearTimeout(tapTimer);
+          heart.classList.remove('on');
+          void heart.offsetWidth;
+          heart.classList.add('on');
+          onDoubleTap();
+          return;
+        }
+        lastTap = now;
+        if (!onOpen) return;
+        if (!onDoubleTap) { onOpen(i, e); return; }
+        clearTimeout(tapTimer);
+        tapTimer = setTimeout(() => onOpen(i, e), 300);
+      };
+      media.forEach((m, i) => {
+        const el = m.kind === 'video'
+          ? h('video', { src: mediaUrl(m.id, lane), poster: thumbUrl(m.id, lane, 1080), controls: true, playsinline: true, loop: full, preload: i === 0 ? 'metadata' : 'none', 'data-media-bg': '1' })
+          : h('img', { src: mediaUrl(m.id, lane), alt, loading: i === 0 && eager ? 'eager' : 'lazy', decoding: 'async', draggable: 'false', 'data-media-bg': '1', class: onOpen ? 'sg-zoomable' : null, onclick: (e) => tap(i, e) });
+        track.append(h('div', { class: 'sg-slide' }, el));
+      });
+      const videos = () => track.querySelectorAll('video');
+      function paint() {
+        prev.hidden = at === 0;
+        next.hidden = at >= media.length - 1;
+        fill(dots, media.length > 1 ? media.map((_, i) => h('span', { class: i === at ? 'on' : null })) : null);
+      }
+      track.addEventListener('scroll', () => {
+        const w = track.clientWidth;
+        if (!w) return;
+        const i = Math.max(0, Math.min(media.length - 1, Math.round(track.scrollLeft / w)));
+        if (i === at) return;
+        at = i;
+        videos().forEach((v) => { if (v.closest('.sg-slide') !== track.children[at]) v.pause(); });
+        paint();
+        if (onIndex) onIndex(at);
+      }, { passive: true });
+      function go(i, smooth = true) {
+        const to = Math.max(0, Math.min(media.length - 1, i));
+        track.scrollTo({ left: to * track.clientWidth, behavior: smooth ? 'smooth' : 'auto' });
+      }
+      paint();
+      return {
+        el: root,
+        index: () => at,
+        go,
+        current: () => media[at],
+        pause: () => videos().forEach((v) => v.pause()),
+        // Plays the item on show if it is a video; the sound stays on unless the browser refuses it.
+        play() {
+          const v = track.children[at] && track.children[at].querySelector('video');
+          if (!v) return;
+          v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
+        },
+        // Keeps the item on show in place when the frame changes size.
+        realign: () => { track.scrollLeft = at * track.clientWidth; },
+      };
+    }
+
     // --- One post ------------------------------------------------------------------
-    function postCard(p, { lane, single = false } = {}) {
+    // onOpen(i): a tap on an image opens the full-screen post viewer instead
+    // of the photo viewer (the feed, where the viewer pages through the posts).
+    function postCard(p, { lane, single = false, onOpen } = {}) {
       const id = intOf(p.id);
       if (!id) return null;
       const media = (p.media || []).filter((m) => intOf(m.id));
-      let at = 0;
-      const stage = h('div', { class: 'sg-stage' });
-      const dots = h('div', { class: 'sg-dots' });
       const dl = h('a', { class: 'sg-act', title: 'Download this file', 'aria-label': 'Download this file', download: '' }, ic('download', 22));
-      function show(i) {
-        at = Math.max(0, Math.min(media.length - 1, i));
-        const m = media[at];
-        if (!m) { fill(stage, h('div', { class: 'sg-missing' }, 'No media')); return; }
-        // A video is paused before it is replaced.
-        for (const v of stage.querySelectorAll('video')) v.pause();
-        const ratio = m.width && m.height ? Math.max(0.5, Math.min(1.91, m.width / m.height)) : 1;
-        stage.style.aspectRatio = String(ratio < 0.8 ? 0.8 : ratio);
-        const el = m.kind === 'video'
-          ? h('video', { src: mediaUrl(m.id, lane), poster: thumbUrl(m.id, lane, 1080), controls: true, playsinline: true, preload: 'metadata', 'data-media-bg': '1' })
-          : h('img', { src: mediaUrl(m.id, lane), alt: p.caption ? String(p.caption).slice(0, 120) : '', loading: single ? 'eager' : 'lazy', decoding: 'async', 'data-media-bg': '1', class: 'sg-zoomable', title: 'Open full screen', onclick: () => openViewer(viewerItems(), at, lane) });
-        fill(stage, el,
-          media.length > 1 && at > 0 ? h('button', { type: 'button', class: 'sg-nav prev', 'aria-label': 'Previous', onclick: () => show(at - 1) }, ic('prev')) : null,
-          media.length > 1 && at < media.length - 1 ? h('button', { type: 'button', class: 'sg-nav next', 'aria-label': 'Next', onclick: () => show(at + 1) }, ic('next')) : null);
-        fill(dots, media.length > 1 ? media.map((_, i) => h('span', { class: i === at ? 'on' : null })) : null);
-        dl.href = mediaUrl(m.id, lane, { download: '1' });
+      const setDl = (i) => { if (media[i]) dl.href = mediaUrl(media[i].id, lane, { download: '1' }); };
+      const car = media.length ? carousel(media, lane, {
+        eager: single,
+        alt: p.caption ? String(p.caption).slice(0, 120) : '',
+        onIndex: setDl,
+        onOpen: (i) => (onOpen ? onOpen(i) : openViewer(viewerItems(), i, lane)),
+      }) : null;
+      const stage = car ? car.el : h('div', { class: 'sg-stage' }, h('div', { class: 'sg-missing' }, 'No media'));
+      if (car) {
+        const m = media[0];
+        const ratio = m.width && m.height ? m.width / m.height : 1;
+        stage.style.aspectRatio = String(Math.max(0.8, Math.min(1.91, ratio)));
+        setDl(0);
       }
-      // Swipe between items on touch screens.
-      let x0 = null;
-      stage.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; }, { passive: true });
-      stage.addEventListener('touchend', (e) => {
-        if (x0 == null) return;
-        const dx = e.changedTouches[0].clientX - x0;
-        x0 = null;
-        if (Math.abs(dx) > 50) show(at + (dx < 0 ? 1 : -1));
-      });
-      show(0);
 
       const a = p.author || {};
       const creatorHref = a.type === 'creator' && a.handle ? link(`creator/${enc(a.handle)}`, lane === 'review' ? { lane: 'review' } : null) : null;
@@ -375,6 +472,8 @@
       const meta = p.meta && typeof p.meta === 'object' ? p.meta : null;
       const tags = meta && Array.isArray(meta.tags) ? meta.tags.filter((t) => typeof t === 'string').slice(0, 12) : [];
       const caption = h('p', { class: 'sg-caption', hidden: !p.caption }, captionNodes(single ? p.caption : String(p.caption || '').slice(0, 400)));
+      // In the feed the caption shows three lines; a tap shows the rest (a tag link still opens the tag).
+      if (!single) caption.addEventListener('click', (e) => { if (!e.target.closest('a')) caption.classList.toggle('sg-open'); });
 
       return h('article', { class: `sg-post${single ? ' single' : ''}`, 'data-post': id },
         h('header', { class: 'sg-post-head' },
@@ -384,7 +483,6 @@
             h('span', { class: 'muted small' }, ago(p.created_at), meta && typeof meta.platform === 'string' ? ` · ${meta.platform}` : '')),
           !single ? h('a', { class: 'sg-act', href: link(`post/${id}`, lane === 'review' ? { lane: 'review' } : null), 'aria-label': 'Open the post', title: 'Open' }, ic('external', 20)) : null),
         stage,
-        dots,
         h('div', { class: 'sg-actions' },
           likeBtn, likeN, commentBtn, commentN, shareBtn, favBtn, saveBtn, dl,
           source ? h('a', { class: 'sg-act', href: source, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Open the source', title: 'Open the source' }, ic('external', 22)) : null),
@@ -646,7 +744,8 @@
       document.removeEventListener('webkitfullscreenchange', viewerFs);
       viewerKeys = null;
       viewerFs = null;
-      document.documentElement.classList.remove('sg-viewer-open');
+      // The post viewer under it keeps the page locked.
+      if (!postsEl) document.documentElement.classList.remove('sg-viewer-open');
     }
     function openViewer(items, index, lane) {
       closeViewer();
@@ -855,17 +954,329 @@
       document.addEventListener('fullscreenchange', viewerFs);
       document.addEventListener('webkitfullscreenchange', viewerFs);
       document.documentElement.classList.add('sg-viewer-open');
-      document.body.append(viewerEl);
+      // Over the post viewer it is drawn inside it, which may be the fullscreen element.
+      (postsEl || document.body).append(viewerEl);
       paint();
       // Browser fullscreen needs the click that opened the viewer, so it is asked for now.
-      if (matchMedia('(pointer: coarse)').matches) toggleFs();
+      if (matchMedia('(pointer: coarse)').matches && !fsEl()) toggleFs();
       viewerEl.querySelector('.sg-viewer-btn.close').focus({ preventScroll: true });
+    }
+
+    // --- The full-screen post viewer ---------------------------------------------------
+    // Opens from a tile in a grid (Explore, tags, a creator, favorites ...) and
+    // from an image in the feed, like Elitogram's FeedViewer: one post fills
+    // the screen, a vertical swipe, the wheel or the arrow keys move to the
+    // next or previous post, a sideways swipe moves through a post's items,
+    // and the list loads more posts as the end comes near. The post's buttons
+    // (like, comments, share, favorite, save, download, zoom, open) sit on it.
+    // Back closes it, onto the page it was opened from.
+    //   src   a pager's list (items, els, more(), done, listeners)
+    let postsEl = null;
+    let postsClose = null;
+    function closePosts(how) {
+      if (postsClose) postsClose(how);
+    }
+    // Like and favorite, shared by the viewer's buttons and the double tap.
+    async function setLike(id, on, lane) {
+      return call(`posts/${id}/like`, { method: on ? 'POST' : 'DELETE', lane });
+    }
+    function openPosts(src, start, lane) {
+      closeViewer();
+      closePosts('replace');
+      if (!src || !src.items.length) return;
+      const WINDOW = 2; // posts drawn on each side of the one on show
+      let active = Math.max(0, Math.min(src.items.length - 1, start || 0));
+      const full = new Map(); // post id -> the post from Elitogram (or a promise of it)
+      const reels = []; // { el, it, drawn, car, destroy }
+      const scroller = h('div', { class: 'sg-reels-scroll' });
+      const fsBtn = h('button', { type: 'button', class: 'sg-viewer-btn', 'aria-label': 'Full screen', title: 'Full screen (F)', onclick: () => toggleFs() }, ic('fullscreen', 22));
+      const closeBtn = h('button', { type: 'button', class: 'sg-viewer-btn close', 'aria-label': 'Close', title: 'Close (Esc)', onclick: () => close() }, ic('close', 24));
+      const counter = h('span', { class: 'sg-viewer-count' });
+      postsEl = h('div', { class: 'sg-reels', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Posts' },
+        scroller,
+        h('div', { class: 'sg-viewer-top' }, counter, fsBtn, closeBtn));
+
+      const postOf = (it) => {
+        if (it && Array.isArray(it.media)) return Promise.resolve(it);
+        const id = intOf(it && it.id);
+        if (!id) return Promise.reject(new Error('No such post'));
+        if (!full.has(id)) {
+          const pr = call(`posts/${id}`, { lane }).then((p) => { full.set(id, p); return p; });
+          pr.catch(() => full.delete(id));
+          full.set(id, pr);
+        }
+        return Promise.resolve(full.get(id));
+      };
+
+      function reelBody(r, p) {
+        const id = intOf(p.id);
+        const media = (p.media || []).filter((m) => intOf(m.id));
+        if (!id || !media.length) { fill(r.el, h('div', { class: 'sg-missing' }, 'This post has no media')); return; }
+        const a = p.author || {};
+        const creatorHref = a.type === 'creator' && a.handle ? link(`creator/${enc(a.handle)}`, lane === 'review' ? { lane: 'review' } : null) : null;
+        const dl = h('a', { class: 'sg-ract', download: '', 'aria-label': 'Download this file', title: 'Download this file' }, ic('download', 26));
+        const setDl = (i) => { if (media[i]) dl.href = mediaUrl(media[i].id, lane, { download: '1' }); };
+        const likeN = h('span', null, p.like_count ? num(p.like_count) : '');
+        const likeBtn = h('button', { type: 'button', class: `sg-ract${p.liked ? ' on' : ''}`, 'aria-pressed': p.liked ? 'true' : 'false', 'aria-label': 'Like', title: 'Like (L)' }, ic('heart', 28), likeN);
+        let liking = false;
+        async function like(force) {
+          const on = force === true ? true : likeBtn.getAttribute('aria-pressed') !== 'true';
+          if (liking || (force === true && likeBtn.getAttribute('aria-pressed') === 'true')) return;
+          liking = true;
+          try {
+            const d = await setLike(id, on, lane);
+            likeBtn.setAttribute('aria-pressed', d.liked ? 'true' : 'false');
+            likeBtn.classList.toggle('on', !!d.liked);
+            likeN.textContent = d.like_count ? num(d.like_count) : '';
+            p.liked = !!d.liked;
+            p.like_count = d.like_count;
+          } catch (e) { fail(e); } finally { liking = false; }
+        }
+        likeBtn.addEventListener('click', () => like());
+        const favBtn = h('button', { type: 'button', class: `sg-ract sg-fav${p.favorited ? ' on' : ''}`, 'aria-pressed': p.favorited ? 'true' : 'false', 'aria-label': 'Favorite', title: 'Favorite' }, ic('bookmark', 26));
+        favBtn.addEventListener('click', async () => {
+          const on = favBtn.getAttribute('aria-pressed') !== 'true';
+          favBtn.disabled = true;
+          try {
+            const d = await call(`posts/${id}/favorite`, { method: on ? 'POST' : 'DELETE', lane });
+            favBtn.setAttribute('aria-pressed', d.favorited ? 'true' : 'false');
+            favBtn.classList.toggle('on', !!d.favorited);
+            p.favorited = !!d.favorited;
+            say(d.favorited ? 'Added to favorites' : 'Removed from favorites');
+          } catch (e) { fail(e); } finally { favBtn.disabled = false; }
+        });
+        const commentN = h('span', null, p.comment_count ? num(p.comment_count) : '');
+        const viewerItems = () => media.map((m) => ({ media_id: m.id, post_id: id, kind: m.kind, width: m.width, height: m.height, author_handle: a.handle }));
+        const car = carousel(media, lane, {
+          full: true,
+          eager: true,
+          alt: p.caption ? String(p.caption).slice(0, 120) : '',
+          onIndex: (i) => { setDl(i); paintCount(); if (r.index === active) car.play(); },
+          onDoubleTap: () => like(true),
+          // A single tap does nothing here: the double tap likes, the zoom button zooms.
+          onOpen: () => {},
+        });
+        r.car = car;
+        r.like = like;
+        setDl(0);
+        const caption = String(p.caption || '');
+        const capEl = caption ? h('p', { class: 'sg-reel-cap' }, captionNodes(caption)) : null;
+        const capMore = caption.length > 90 || caption.includes('\n')
+          ? h('button', { type: 'button', class: 'sg-reel-more', 'aria-expanded': 'false', onclick: (e) => {
+            const open = info.classList.toggle('sg-open');
+            e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
+            e.currentTarget.textContent = open ? 'less' : 'more';
+          } }, 'more')
+          : null;
+        // Links leave the viewer by replacing its history entry, so Back from them lands on the page under it.
+        const leaveTo = (e) => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          const to = e.currentTarget.getAttribute('href');
+          close('replace');
+          location.replace(to);
+        };
+        const info = h('div', { class: 'sg-reel-info' },
+          h('div', { class: 'sg-reel-who' },
+            avatar(a.avatar, a.name || a.handle, lane, 32),
+            creatorHref ? h('a', { href: creatorHref, class: 'sg-handle', onclick: leaveTo }, a.handle) : h('span', { class: 'sg-handle' }, a.handle || 'unknown'),
+            h('span', { class: 'sg-reel-ago' }, ago(p.created_at))),
+          capEl, capMore);
+        const rail = h('div', { class: 'sg-reel-rail' },
+          likeBtn,
+          h('button', { type: 'button', class: 'sg-ract', 'aria-label': 'Comments', title: 'Comments', onclick: () => commentsSheet(id, lane, (n) => { commentN.textContent = n ? num(n) : ''; p.comment_count = n; }) }, ic('comment', 28), commentN),
+          h('button', { type: 'button', class: 'sg-ract', 'aria-label': 'Share', title: 'Share', onclick: () => shareSheet(id, lane) }, ic('share', 26)),
+          favBtn,
+          h('button', { type: 'button', class: 'sg-ract', 'aria-label': 'Save to a collection', title: 'Save to a collection', onclick: () => collectionSheet(id, lane) }, ic('folder', 26)),
+          dl,
+          h('button', { type: 'button', class: 'sg-ract', 'aria-label': 'Zoom', title: 'Zoom', onclick: () => openViewer(viewerItems(), car.index(), lane) }, ic('zoomin', 26)),
+          h('a', { class: 'sg-ract', href: link(`post/${id}`, lane === 'review' ? { lane: 'review' } : null), 'aria-label': 'Open the post', title: 'Open the post', onclick: leaveTo }, ic('external', 24)));
+        fill(r.el, car.el, info, rail);
+        if (r.index === active) activate(r);
+      }
+
+      function draw(r) {
+        if (r.drawn) return;
+        r.drawn = true;
+        const it = r.it;
+        const mid = intOf(it.media_id) || intOf(it.media && it.media[0] && it.media[0].id);
+        // The tile's thumbnail holds the frame until the post arrives.
+        fill(r.el, mid ? h('img', { class: 'sg-reel-wait', alt: '', src: thumbUrl(mid, lane, 1080), 'data-media-bg': '1' }) : null);
+        const my = r.token = (r.token || 0) + 1;
+        postOf(it).then((p) => {
+          if (!r.drawn || r.token !== my || !postsEl) return;
+          reelBody(r, p);
+        }).catch((e) => {
+          if (!r.drawn || r.token !== my) return;
+          fill(r.el, h('div', { class: 'sg-missing' }, e && e.status === 404 ? 'This post is not available' : (e && e.message) || 'Could not load the post'));
+        });
+      }
+      function undraw(r) {
+        if (!r.drawn) return;
+        r.drawn = false;
+        if (r.car) r.car.pause();
+        r.car = null;
+        r.like = null;
+        r.el.replaceChildren();
+      }
+
+      const viewed = new Set();
+      function activate(r) {
+        for (const o of reels) if (o !== r && o.car) o.car.pause();
+        if (r.car) r.car.play();
+        paintCount();
+        const id = intOf(r.it.id);
+        if (id && !viewed.has(id)) { viewed.add(id); call(`posts/${id}/view`, { method: 'POST', lane }).catch(() => {}); }
+      }
+      function paintCount() {
+        const r = reels[active];
+        const n = r && r.car ? r.car.el.querySelectorAll('.sg-slide').length : 0;
+        counter.textContent = n > 1 ? `${r.car.index() + 1} / ${n}` : '';
+      }
+      let started = false;
+      function setActive(i) {
+        if (started && i === active) return;
+        started = true;
+        active = i;
+        reels.forEach((r) => (Math.abs(r.index - active) <= WINDOW ? draw(r) : undraw(r)));
+        if (reels[active]) activate(reels[active]);
+        if (!src.done && active >= src.items.length - 4) src.more();
+      }
+
+      const io = new IntersectionObserver((es) => {
+        for (const e of es) if (e.isIntersecting && e.intersectionRatio >= 0.6) setActive(Number(e.target.dataset.i));
+      }, { root: scroller, threshold: [0.6] });
+      function addReels() {
+        for (let i = reels.length; i < src.items.length; i++) {
+          const el = h('section', { class: 'sg-reel', 'data-i': String(i) });
+          const r = { el, it: src.items[i], index: i, drawn: false, car: null };
+          reels.push(r);
+          scroller.append(el);
+          io.observe(el);
+          if (Math.abs(i - active) <= WINDOW) draw(r);
+        }
+      }
+      src.listeners.add(addReels);
+      addReels();
+
+      // Key presses during a smooth scroll count from where it is heading.
+      let target = null;
+      let targetTimer = 0;
+      const step = (d) => {
+        const to = Math.max(0, Math.min(reels.length - 1, (target == null ? active : target) + d));
+        target = to;
+        clearTimeout(targetTimer);
+        targetTimer = setTimeout(() => { target = null; }, 800);
+        scroller.scrollTo({ top: to * scroller.clientHeight, behavior: 'smooth' });
+        if (d > 0 && to >= reels.length - 2 && !src.done) src.more();
+      };
+      // A resize (rotation, fullscreen) keeps the same post and item on show.
+      const onResize = () => {
+        scroller.scrollTop = active * scroller.clientHeight;
+        for (const r of reels) if (r.car) r.car.realign();
+      };
+      window.addEventListener('resize', onResize);
+
+      function toggleFs() {
+        if (fsEl()) { exitFs(); return; }
+        const req = postsEl.requestFullscreen || postsEl.webkitRequestFullscreen;
+        if (!req) { say('This browser has no full screen; the viewer fills the window'); return; }
+        try {
+          Promise.resolve(req.call(postsEl, { navigationUI: 'hide' })).catch(() => say('Full screen was refused; the viewer fills the window'));
+        } catch { say('Full screen was refused; the viewer fills the window'); }
+      }
+      const onFs = () => {
+        const on = !!postsEl && fsEl() === postsEl;
+        fill(fsBtn, ic(on ? 'unfullscreen' : 'fullscreen', 22));
+        fsBtn.setAttribute('aria-label', on ? 'Leave full screen' : 'Full screen');
+        requestAnimationFrame(onResize);
+      };
+
+      const keys = (e) => {
+        // The photo viewer and sheets on top handle their own keys.
+        if (viewerEl || sheetEl || !postsEl) return;
+        if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        const r = reels[active];
+        const k = e.key;
+        if (k === 'Escape') {
+          if (fsEl()) return; // the browser leaves fullscreen first
+          close();
+        } else if (k === 'ArrowDown' || k === 'j' || k === 'PageDown') step(1);
+        else if (k === 'ArrowUp' || k === 'k' || k === 'PageUp') step(-1);
+        else if (k === 'ArrowRight' && r && r.car) r.car.go(r.car.index() + 1);
+        else if (k === 'ArrowLeft' && r && r.car) r.car.go(r.car.index() - 1);
+        else if ((k === 'l' || k === 'L') && r && r.like) r.like();
+        else if (k === 'f' || k === 'F') toggleFs();
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      document.addEventListener('keydown', keys, true);
+      document.addEventListener('fullscreenchange', onFs);
+      document.addEventListener('webkitfullscreenchange', onFs);
+
+      // Back closes the viewer: it has its own history entry on the same address.
+      history.pushState({ ...(history.state || {}), sgPosts: true }, '');
+      const onPop = () => close('popped');
+      window.addEventListener('popstate', onPop);
+
+      // how: undefined = Close/Escape (step back past the viewer's entry),
+      // 'popped' = Back was pressed, 'replace' = a link replaces the entry or
+      // the page is left.
+      function close(how) {
+        if (!postsEl) return;
+        const el = postsEl;
+        const at = active;
+        postsEl = null;
+        postsClose = null;
+        closeSheet();
+        closeViewer();
+        if (fsEl() === el) exitFs();
+        for (const r of reels) if (r.car) r.car.pause();
+        io.disconnect();
+        src.listeners.delete(addReels);
+        window.removeEventListener('resize', onResize);
+        window.removeEventListener('popstate', onPop);
+        document.removeEventListener('keydown', keys, true);
+        document.removeEventListener('fullscreenchange', onFs);
+        document.removeEventListener('webkitfullscreenchange', onFs);
+        el.remove();
+        clearTimeout(targetTimer);
+        document.documentElement.classList.remove('sg-viewer-open');
+        // The page under the viewer shows the post that was on show last,
+        // once Back has restored the page's own scroll position.
+        const tileEl = src.els[at];
+        const reveal = () => { if (tileEl && tileEl.isConnected) tileEl.scrollIntoView({ block: 'center' }); };
+        if (!how && history.state && history.state.sgPosts) {
+          window.addEventListener('popstate', () => requestAnimationFrame(reveal), { once: true });
+          history.back();
+        } else if (how === 'popped') requestAnimationFrame(reveal);
+      }
+      postsClose = close;
+
+      document.documentElement.classList.add('sg-viewer-open');
+      document.body.append(postsEl);
+      scroller.scrollTop = active * scroller.clientHeight;
+      setActive(active);
+      // Browser fullscreen needs the tap that opened the viewer, so it is asked for now.
+      if (matchMedia('(pointer: coarse)').matches) toggleFs();
+      closeBtn.focus({ preventScroll: true });
     }
 
     // --- Pages ---------------------------------------------------------------------
     function viewFeed() {
       const box = h('div', { class: 'sg-feed' });
-      return [pageHead('Feed'), pager(box, (cur) => call(`feed${cur ? `?cursor=${enc(cur)}` : ''}`), (p) => postCard(p), { emptyText: 'No general posts yet. Classify creators in the Review lane to fill this feed.' })];
+      // One post per scroll step, like Elitogram's feed: the page settles on
+      // the next post instead of stopping anywhere.
+      const root = document.documentElement;
+      root.classList.add('sg-snap');
+      const top = document.querySelector('.top');
+      const syncTop = () => root.style.setProperty('--sg-snap-top', `${top && getComputedStyle(top).position === 'sticky' ? top.offsetHeight : 0}px`);
+      syncTop();
+      window.addEventListener('resize', syncTop);
+      onLeave(() => { root.classList.remove('sg-snap'); root.style.removeProperty('--sg-snap-top'); window.removeEventListener('resize', syncTop); });
+      return [pageHead('Feed'), pager(box, (cur) => call(`feed${cur ? `?cursor=${enc(cur)}` : ''}`), (p, c) => postCard(p, { onOpen: () => openPosts(c.src, c.src.items.indexOf(p)) }), { emptyText: 'No general posts yet. Classify creators in the Review lane to fill this feed.' })];
     }
 
     function viewPhotos(r) {
@@ -906,7 +1317,7 @@
         chips([['', 'Everything'], ['image', 'Photos'], ['video', 'Videos']], kind, (v) => link('explore', { ...keep, kind: v })),
         chips([['', 'Any shape'], ['portrait', 'Portrait'], ['landscape', 'Landscape'], ['square', 'Square']], orient, (v) => link('explore', { ...keep, orient: v })),
         q || kind ? null : cats,
-        pager(grid, (cur) => call(`explore?${qs(cur)}`), (t) => tile(t), { emptyText: 'Nothing matches.' }),
+        pager(grid, (cur) => call(`explore?${qs(cur)}`), (t, c) => tile(t, null, null, c), { emptyText: 'Nothing matches.' }),
       ];
     }
 
@@ -921,7 +1332,7 @@
           const d = await call(`hashtags/${enc(tag)}${cur ? `?cursor=${enc(cur)}` : ''}`);
           if (d.total != null) total.textContent = plural(d.total, 'post', 'posts');
           return d;
-        }, (t) => tile(t), { emptyText: 'No general posts with this tag.' }),
+        }, (t, c) => tile(t, null, null, c), { emptyText: 'No general posts with this tag.' }),
       ];
     }
 
@@ -937,7 +1348,7 @@
           (d.tags || []).length ? h('div', { class: 'sg-chips' }, d.tags.map((t) => h('a', { class: 'sg-chip', href: link(`tag/${enc(t.tag)}`) }, `#${t.tag}`))) : null);
       }).catch((e) => { if (live(gen)) fill(top, h('p', { class: 'muted' }, e.message)); });
       const grid = tileGrid();
-      return [pageHead('Search', h('span', { class: 'muted' }, `"${q}"`)), top, pager(grid, (cur) => call(`explore?q=${enc(q)}${cur ? `&cursor=${enc(cur)}` : ''}`), (t) => tile(t), { emptyText: 'No posts match.' })];
+      return [pageHead('Search', h('span', { class: 'muted' }, `"${q}"`)), top, pager(grid, (cur) => call(`explore?q=${enc(q)}${cur ? `&cursor=${enc(cur)}` : ''}`), (t, c) => tile(t, null, null, c), { emptyText: 'No posts match.' })];
     }
 
     function viewCreators(r) {
@@ -986,7 +1397,7 @@
               lane === 'review' && canClassify() ? classifyCreatorButtons([c.handle], () => { location.hash = link('review'); }) : null)));
       }).catch((e) => { if (live(gen)) fill(head, empty(e.status === 404 ? 'This creator is not in Social & Photos.' : e.message)); });
       const grid = tileGrid();
-      return [lane === 'review' ? reviewBanner() : null, head, pager(grid, (cur) => call(`creators/${enc(handle)}/posts${cur ? `?cursor=${enc(cur)}` : ''}`, { lane }), (t) => tile(t, lane), { emptyText: 'No posts here.' })];
+      return [lane === 'review' ? reviewBanner() : null, head, pager(grid, (cur) => call(`creators/${enc(handle)}/posts${cur ? `?cursor=${enc(cur)}` : ''}`, { lane }), (t, c) => tile(t, lane, null, c), { emptyText: 'No posts here.' })];
     }
 
     function viewPost(r) {
@@ -1047,12 +1458,12 @@
           const d = await call(`collections/${id}/posts${cur ? `?cursor=${enc(cur)}` : ''}`);
           if (d.collection && d.collection.name) title.textContent = d.collection.name;
           return d;
-        }, (t) => tile(t), { emptyText: 'This collection is empty.' }),
+        }, (t, c) => tile(t, null, null, c), { emptyText: 'This collection is empty.' }),
       ];
     }
 
     function viewFavorites() {
-      return [pageHead('Favorites'), pager(tileGrid(), (cur) => call(`favorites${cur ? `?cursor=${enc(cur)}` : ''}`), (t) => tile(t), { emptyText: 'No favorites yet.' })];
+      return [pageHead('Favorites'), pager(tileGrid(), (cur) => call(`favorites${cur ? `?cursor=${enc(cur)}` : ''}`), (t, c) => tile(t, null, null, c), { emptyText: 'No favorites yet.' })];
     }
 
     function viewHistory() {
@@ -1060,7 +1471,7 @@
         if (!confirm('Clear your viewing history?')) return;
         try { await call('history', { method: 'DELETE' }); hub.rerender(); } catch (e) { fail(e); }
       } }, 'Clear history');
-      return [pageHead('History', clear), pager(tileGrid(), (cur) => call(`history${cur ? `?cursor=${enc(cur)}` : ''}`), (t) => tile(t), { emptyText: 'Nothing viewed yet.' })];
+      return [pageHead('History', clear), pager(tileGrid(), (cur) => call(`history${cur ? `?cursor=${enc(cur)}` : ''}`), (t, c) => tile(t, null, null, c), { emptyText: 'Nothing viewed yet.' })];
     }
 
     // --- Review lane -------------------------------------------------------------------
@@ -1110,7 +1521,7 @@
       const tab = r.params.get('tab') === 'posts' ? 'posts' : 'creators';
       const tabs = chips([['creators', 'Creators'], ['posts', 'Posts']], tab, (v) => link('review', { tab: v }));
       if (tab === 'posts') {
-        return [pageHead('Review'), reviewBanner(), tabs, pager(tileGrid(), (cur) => call(`explore${cur ? `?cursor=${enc(cur)}` : ''}`, { lane: 'review' }), (t) => tile(t, 'review'), { emptyText: 'Nothing left to review.' })];
+        return [pageHead('Review'), reviewBanner(), tabs, pager(tileGrid(), (cur) => call(`explore${cur ? `?cursor=${enc(cur)}` : ''}`, { lane: 'review' }), (t, c) => tile(t, 'review', null, c), { emptyText: 'Nothing left to review.' })];
       }
       const selected = new Set();
       const count = h('span', { class: 'muted small' }, '0 chosen');

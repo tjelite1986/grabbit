@@ -59,10 +59,35 @@
 }
 .sg-nav.prev { left: 8px; }
 .sg-nav.next { right: 8px; }
-.sg-dots { display: flex; justify-content: center; gap: 4px; padding-top: 8px; min-height: 0; }
-.sg-dots:empty { display: none; }
-.sg-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
-.sg-dots span.on { background: var(--accent-2); }
+
+/* Feed: one post per scroll step (social.js viewFeed sets html.sg-snap) */
+html.sg-snap { scroll-snap-type: y mandatory; scroll-padding-top: var(--sg-snap-top, 0px); }
+html.sg-snap .sg-root > .sg-head, html.sg-snap .sg-feed > .sg-post { scroll-snap-align: start; scroll-snap-stop: always; }
+/* A post fits one screen, so each step lands on a whole post: the media
+   gives way to the head, the buttons and three lines of caption. */
+html.sg-snap .sg-feed .sg-carousel { max-height: calc(100vh - var(--sg-snap-top, 0px) - 210px); max-height: calc(100dvh - var(--sg-snap-top, 0px) - 210px); min-height: 240px; }
+.sg-feed .sg-caption { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.sg-feed .sg-caption.sg-open { display: block; -webkit-line-clamp: unset; }
+.sg-feed .sg-tags { max-height: 30px; overflow: hidden; }
+
+/* Carousel: a post's items in a horizontal scroll-snap track */
+.sg-carousel { position: relative; width: 100%; background: #000; overflow: hidden; max-height: 80vh; }
+.sg-track { display: flex; height: 100%; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; overscroll-behavior-x: contain; scrollbar-width: none; }
+.sg-track::-webkit-scrollbar { display: none; }
+.sg-slide {
+  flex: 0 0 100%; min-width: 0; height: 100%; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center;
+  scroll-snap-align: center; scroll-snap-stop: always; overflow: hidden;
+}
+.sg-slide img, .sg-slide video { width: 100%; height: 100%; object-fit: contain; display: block; -webkit-user-drag: none; }
+.sg-carousel .sg-nav[hidden] { display: none; }
+.sg-cdots { position: absolute; left: 0; right: 0; bottom: 8px; display: flex; justify-content: center; gap: 4px; pointer-events: none; }
+.sg-cdots span { width: 6px; height: 6px; border-radius: 50%; background: rgba(255, 255, 255, .45); box-shadow: 0 0 2px rgba(0, 0, 0, .6); }
+.sg-cdots span.on { background: #fff; }
+.sg-heart-pop { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: #fff; opacity: 0; }
+.sg-heart-pop svg { fill: #ff3b5c; stroke: #ff3b5c; filter: drop-shadow(0 2px 8px rgba(0, 0, 0, .5)); }
+.sg-heart-pop.on { animation: sg-heart .8s ease-out; }
+@keyframes sg-heart { 0% { opacity: 0; transform: scale(.4); } 20% { opacity: 1; transform: scale(1.1); } 70% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1); } }
+@media (hover: none) { .sg-carousel .sg-nav { display: none; } }
 .sg-actions { display: flex; align-items: center; gap: 2px; padding: 6px 6px 0; }
 .sg-act {
   display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: 10px;
@@ -274,3 +299,48 @@
   max-width: calc(100vw - 32px);
 }
 .sg-up-tools .sg-act:disabled { visibility: hidden; }
+
+/* Full-screen post viewer (social.js openPosts): one post per screen,
+   vertical scroll-snap between posts, the carousel sideways inside each */
+.sg-reels { position: fixed; inset: 0; z-index: 68; background: #000; color: #fff; overflow: hidden; }
+.sg-reels-scroll { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; scroll-snap-type: y mandatory; overscroll-behavior: contain; scrollbar-width: none; }
+.sg-reels-scroll::-webkit-scrollbar { display: none; }
+.sg-reel { position: relative; height: 100%; scroll-snap-align: start; scroll-snap-stop: always; overflow: hidden; display: grid; place-items: center; }
+.sg-reel .sg-carousel { position: absolute; inset: 0; max-height: none; background: #000; }
+.sg-reel .sg-missing { color: #ccc; }
+.sg-reel-wait { width: 100%; height: 100%; object-fit: contain; filter: blur(2px); opacity: .8; }
+.sg-reel-info {
+  position: absolute; left: 0; right: 72px; bottom: 0; padding: 40px 14px calc(16px + env(safe-area-inset-bottom));
+  background: linear-gradient(transparent, rgba(0, 0, 0, .65)); text-shadow: 0 1px 3px rgba(0, 0, 0, .8); pointer-events: none;
+}
+.sg-reel-info > * { pointer-events: auto; }
+.sg-reel-who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sg-reel-who .sg-handle { color: #fff; }
+.sg-reel-ago { color: #ccc; font-size: 13px; white-space: nowrap; }
+.sg-reel-cap { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sg-reel-info.sg-open .sg-reel-cap { display: block; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
+.sg-reel-info.sg-open { background: rgba(0, 0, 0, .7); }
+.sg-reel-cap a { color: #cfd6ff; text-decoration: none; }
+.sg-reel-more { background: none; border: 0; padding: 2px 0; color: #ddd; font: inherit; font-weight: 600; cursor: pointer; }
+.sg-reel-rail {
+  position: absolute; right: 6px; bottom: calc(18px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.sg-ract {
+  display: grid; justify-items: center; gap: 1px; min-width: 52px; padding: 6px 4px; border: 0; border-radius: 12px; background: none;
+  color: #fff; font: inherit; font-size: 12px; cursor: pointer; text-decoration: none; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .7));
+}
+.sg-ract:hover { background: rgba(255, 255, 255, .12); }
+.sg-ract:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 0; }
+.sg-ract:disabled { opacity: .5; }
+.sg-ract span:empty { display: none; }
+.sg-ract.on { color: #ff3b5c; }
+.sg-ract.on svg { fill: currentColor; }
+.sg-ract.sg-fav.on { color: var(--warn); }
+.sg-reels .sg-viewer-top { z-index: 2; }
+.sg-reels .sg-sheet { z-index: 3; }
+.sg-reels .sg-toast { z-index: 4; }
+.sg-reels .sg-viewer { z-index: 5; }
+@media (max-height: 520px) {
+  .sg-reel-rail { flex-direction: row; flex-wrap: wrap-reverse; justify-content: flex-end; right: 6px; left: auto; max-width: 60%; gap: 2px; }
+  .sg-reel-info { right: 0; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+}

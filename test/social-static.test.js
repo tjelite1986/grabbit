@@ -55,7 +55,8 @@ test('the Review lane is labelled, opt-in per request, and the only unclassified
   assert.match(js, /lane === 'review' \? `\$\{sep\}lane=review`/);
   // Only the review pages and links they build ask for the review lane.
   const asks = [...js.matchAll(/lane: 'review'/g)].length;
-  assert.ok(asks >= 3 && asks <= 12, `lane: 'review' appears ${asks} times`);
+  // The post viewer's creator and post links keep the lane like the post card's (2 of them).
+  assert.ok(asks >= 3 && asks <= 14, `lane: 'review' appears ${asks} times`);
   assert.doesNotMatch(js, /lane=adult|audience: 'unknown'/);
 });
 
@@ -157,7 +158,7 @@ test('viewer: fullscreen, pinch/wheel/double-tap zoom, pan, swipe, original file
   // The original file, not a thumbnail, once loaded.
   assert.match(js, /full\.src = mediaUrl\(it\.media_id, lane\);/);
   // Sheets and toasts are drawn inside the viewer, so menus work in fullscreen.
-  assert.match(js, /const layer = \(\) => viewerEl \|\| document\.body;/);
+  assert.match(js, /const layer = \(\) => viewerEl \|\| postsEl \|\| document\.body;/);
   assert.match(js, /layer\(\)\.append\(sheetEl\)/);
   // A sheet open in the viewer gets Escape first.
   assert.match(js, /if \(sheetEl \|\| !viewerEl\) return;/);
@@ -169,12 +170,88 @@ test('viewer: fullscreen, pinch/wheel/double-tap zoom, pan, swipe, original file
 test('the pager says "Loading ..." only while a page is on its way', () => {
   const start = js.indexOf('function pager(');
   const body = js.slice(start, js.indexOf('// --- Tiles', start));
-  // The sentinel starts empty; next() puts the text in and marks it busy.
+  // The sentinel starts empty; a page on its way puts the text in and marks it busy.
   assert.match(body, /const more = h\('div', \{ class: 'sg-more' \}\);/);
-  assert.match(body, /busy = true;\s*more\.setAttribute\('aria-busy', 'true'\);\s*fill\(more, h\('span', \{ class: 'muted' \}, 'Loading \.\.\.'\)\);/);
+  assert.match(body, /more\.setAttribute\('aria-busy', 'true'\);\s*fill\(more, h\('span', \{ class: 'muted' \}, 'Loading \.\.\.'\)\);/);
   // After a page the sentinel is emptied again (or shows the empty text), and the busy mark goes.
-  assert.match(body, /fill\(more, done && !count \? h\('p', \{ class: 'muted' \}, emptyText\) : null\);/);
-  assert.match(body, /finally \{\s*busy = false;\s*more\.removeAttribute\('aria-busy'\);/);
+  assert.match(body, /fill\(more, src\.done && !count \? h\('p', \{ class: 'muted' \}, emptyText\) : null\);/);
+  assert.match(body, /finally \{\s*more\.removeAttribute\('aria-busy'\);/);
+  // One page at a time: a second call while one is running gets the same promise.
+  assert.match(body, /if \(running\) return running;/);
+});
+
+test('the pager keeps loading on scroll and shares its list with the post viewer', () => {
+  const start = js.indexOf('function pager(');
+  const body = js.slice(start, js.indexOf('// --- Tiles', start));
+  assert.match(body, /const src = \{ items: \[\], els: \[\], done: false, failed: false, more: \(\) => next\(\), listeners: new Set\(\) \};/);
+  assert.match(body, /const el = draw\(it, \{ src, index \}\);/);
+  assert.match(body, /for \(const fn of src\.listeners\) fn\(\);/);
+  // A scroll check besides the observer, removed when the page is left.
+  assert.match(body, /window\.addEventListener\('scroll', onScroll, \{ passive: true \}\);/);
+  assert.match(body, /window\.removeEventListener\('scroll', onScroll\)/);
+});
+
+test('grid tiles open the full-screen post viewer; a modifier click still opens the post page', () => {
+  const start = js.indexOf('function tile(');
+  const body = js.slice(start, js.indexOf('const tileGrid', start));
+  assert.match(body, /if \(e\.button !== 0 \|\| e\.metaKey \|\| e\.ctrlKey \|\| e\.shiftKey \|\| e\.altKey\) return;/);
+  assert.match(body, /openPosts\(ctx\.src, ctx\.src\.els\.indexOf\(e\.currentTarget\), lane\)/);
+  assert.match(body, /href: link\(`post\/\$\{id\}`/);
+  // Every pager grid passes its context; Explore is one of them.
+  assert.match(js, /pager\(grid, \(cur\) => call\(`explore\?\$\{qs\(cur\)\}`\), \(t, c\) => tile\(t, null, null, c\)/);
+  assert.equal((js.match(/\(t, c\) => tile\(/g) || []).length, 8);
+});
+
+test('carousel: a horizontal scroll-snap track, one item at a time, only the item on show plays', () => {
+  assert.match(css, /\.sg-track \{[^}]*overflow-x: auto;[^}]*scroll-snap-type: x mandatory/);
+  assert.match(css, /\.sg-slide \{[^}]*flex: 0 0 100%;[^}]*grid-template: minmax\(0, 1fr\) \/ minmax\(0, 1fr\);[^}]*scroll-snap-align: center;[^}]*scroll-snap-stop: always/);
+  const start = js.indexOf('function carousel(');
+  const body = js.slice(start, js.indexOf('// --- One post', start));
+  assert.match(body, /Math\.round\(track\.scrollLeft \/ w\)/);
+  assert.match(body, /if \(v\.closest\('\.sg-slide'\) !== track\.children\[at\]\) v\.pause\(\);/);
+  assert.match(body, /track\.scrollTo\(\{ left: to \* track\.clientWidth/);
+  // The post card uses it; the old one-item stage with its own swipe is gone.
+  assert.match(js, /const car = media\.length \? carousel\(media, lane, \{/);
+  assert.doesNotMatch(js, /stage\.addEventListener\('touchstart'/);
+});
+
+test('feed: one post per scroll step, and a post fits one screen', () => {
+  assert.match(js, /root\.classList\.add\('sg-snap'\);/);
+  assert.match(js, /onLeave\(\(\) => \{ root\.classList\.remove\('sg-snap'\);/);
+  assert.match(css, /html\.sg-snap \{ scroll-snap-type: y mandatory; scroll-padding-top: var\(--sg-snap-top, 0px\); \}/);
+  assert.match(css, /html\.sg-snap \.sg-feed > \.sg-post \{ scroll-snap-align: start; scroll-snap-stop: always; \}/);
+  assert.match(css, /html\.sg-snap \.sg-feed \.sg-carousel \{ max-height: calc\(100vh - var\(--sg-snap-top, 0px\) - 210px\);/);
+  // An image in the feed opens the post viewer on that post.
+  assert.match(js, /postCard\(p, \{ onOpen: \(\) => openPosts\(c\.src, c\.src\.items\.indexOf\(p\)\) \}\)/);
+});
+
+test('post viewer: vertical snap between posts, more loaded near the end, Back closes it', () => {
+  const start = js.indexOf('function openPosts(');
+  const body = js.slice(start, js.indexOf('// --- Pages', start));
+  assert.match(css, /\.sg-reels-scroll \{[^}]*overflow-y: auto;[^}]*scroll-snap-type: y mandatory;[^}]*overscroll-behavior: contain/);
+  assert.match(css, /\.sg-reel \{[^}]*height: 100%;[^}]*scroll-snap-align: start;[^}]*scroll-snap-stop: always/);
+  // Only a window of posts is drawn; the rest are empty frames.
+  assert.match(body, /Math\.abs\(r\.index - active\) <= WINDOW \? draw\(r\) : undraw\(r\)/);
+  assert.match(body, /if \(!src\.done && active >= src\.items\.length - 4\) src\.more\(\);/);
+  assert.match(body, /src\.listeners\.add\(addReels\);/);
+  // Every button of a post, on the post.
+  for (const label of ['Like', 'Comments', 'Share', 'Favorite', 'Save to a collection', 'Download this file', 'Zoom', 'Open the post']) {
+    assert.ok(body.includes(`'aria-label': '${label}'`), label);
+  }
+  // Back closes the viewer; Close steps back past its history entry; links replace it.
+  assert.match(body, /history\.pushState\(\{ \.\.\.\(history\.state \|\| \{\}\), sgPosts: true \}, ''\);/);
+  assert.match(body, /window\.addEventListener\('popstate', onPop\);/);
+  assert.match(body, /history\.back\(\);/);
+  assert.match(body, /location\.replace\(to\);/);
+  // Keys: up/down between posts, left/right inside one, L likes, Escape closes; not while a sheet or the photo viewer is open.
+  assert.match(body, /if \(viewerEl \|\| sheetEl \|\| !postsEl\) return;/);
+  assert.match(body, /k === 'ArrowDown' \|\| k === 'j' \|\| k === 'PageDown'/);
+  // The double tap likes, never unlikes.
+  assert.match(body, /onDoubleTap: \(\) => like\(true\)/);
+  // Leaving the page closes it; the photo viewer opened from it is drawn inside it.
+  assert.match(js, /closeViewer\(\);\s*closePosts\('replace'\);\s*\}/);
+  assert.match(js, /\(postsEl \|\| document\.body\)\.append\(viewerEl\);/);
+  assert.match(js, /data-media-bg': '1', class: 'sg-reel-wait'|class: 'sg-reel-wait', alt: '', src: thumbUrl\(mid, lane, 1080\), 'data-media-bg': '1'/);
 });
 
 test('Review: "Choose all shown" and "Choose whole lane", and big choices go out in parts of 200', () => {
