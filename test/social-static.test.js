@@ -239,11 +239,11 @@ test('post viewer: vertical snap between posts, more loaded near the end, Back c
   for (const label of ['Like', 'Comments', 'Share', 'Favorite', 'Save to a collection', 'Download this file', 'Zoom', 'Open the post']) {
     assert.ok(body.includes(`'aria-label': '${label}'`), label);
   }
-  // Back closes the viewer; Close steps back past its history entry; links replace it.
+  // Back closes the viewer; Close steps back past its history entry; links push after it.
   assert.match(body, /history\.pushState\(\{ \.\.\.\(history\.state \|\| \{\}\), sgPosts: true \}, ''\);/);
   assert.match(body, /window\.addEventListener\('popstate', onPop\);/);
   assert.match(body, /history\.back\(\);/);
-  assert.match(body, /location\.replace\(to\);/);
+  assert.match(body, /location\.assign\(to\);/);
   // Keys: up/down between posts, left/right inside one, L likes, Escape closes; not while a sheet or the photo viewer is open.
   assert.match(body, /if \(viewerEl \|\| sheetEl \|\| !postsEl\) return;/);
   assert.match(body, /k === 'ArrowDown' \|\| k === 'j' \|\| k === 'PageDown'/);
@@ -339,5 +339,9 @@ test('opening a post or a photo never asks for browser fullscreen by itself', ()
 test('Back from a page reached through the post viewer opens the viewer again on that post', () => {
   assert.match(js, /else if \(how === 'link'\) \{ src\.reopen = \{ at, lane \}; reveal\(\); \}/);
   assert.match(js, /anchor, reopen: src\.reopen \|\| null \}\);/);
-  assert.match(js, /if \(saved\.reopen && saved\.reopen\.at < src\.items\.length\) openPosts\(src, saved\.reopen\.at, saved\.reopen\.lane\);/);
+  assert.match(js, /if \(saved\.reopen && saved\.reopen\.at < src\.items\.length\) openPosts\(src, saved\.reopen\.at, saved\.reopen\.lane, \{ reuseEntry: /);
+  // Reopened on the viewer's own entry: nothing is pushed without a tap
+  // (Chrome would mark the page skippable and Back would close the app).
+  assert.match(js, /if \(!reuseEntry\) history\.pushState\(/);
+  assert.match(js, /close\('link'\);\s*location\.assign\(to\);/);
 });

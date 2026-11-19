@@ -395,8 +395,11 @@
           else window.scrollTo(0, 0);
           requestAnimationFrame(() => root.style.removeProperty('scroll-snap-type'));
           // The page was left through a link in the post viewer: Back opens
-          // the viewer again on the post that was on show.
-          if (saved.reopen && saved.reopen.at < src.items.length) openPosts(src, saved.reopen.at, saved.reopen.lane);
+          // the viewer again on the post that was on show, on the viewer's
+          // own history entry (Back returns to it). No entry is pushed here:
+          // Chrome marks an entry that pushes without a tap as skippable, and
+          // the next Back then jumps past the page and closes the app.
+          if (saved.reopen && saved.reopen.at < src.items.length) openPosts(src, saved.reopen.at, saved.reopen.lane, { reuseEntry: !!(history.state && history.state.sgPosts) });
         };
         requestAnimationFrame(restore);
       } else next();
@@ -1077,7 +1080,7 @@
     async function setLike(id, on, lane) {
       return call(`posts/${id}/like`, { method: on ? 'POST' : 'DELETE', lane });
     }
-    function openPosts(src, start, lane) {
+    function openPosts(src, start, lane, { reuseEntry = false } = {}) {
       closeViewer();
       closePosts('replace');
       if (!src || !src.items.length) return;
@@ -1165,13 +1168,15 @@
             e.currentTarget.textContent = open ? 'less' : 'more';
           } }, 'more')
           : null;
-        // Links leave the viewer by replacing its history entry, so Back from them lands on the page under it.
+        // Links leave the viewer as a new history entry after the viewer's
+        // own, so Back from them returns to the viewer (the pager's snapshot
+        // opens it again) and a second Back to the page under it.
         const leaveTo = (e) => {
           if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
           e.preventDefault();
           const to = e.currentTarget.getAttribute('href');
           close('link');
-          location.replace(to);
+          location.assign(to);
         };
         const info = h('div', { class: 'sg-reel-info' },
           h('div', { class: 'sg-reel-who' },
@@ -1314,7 +1319,8 @@
       document.addEventListener('webkitfullscreenchange', onFs);
 
       // Back closes the viewer: it has its own history entry on the same address.
-      history.pushState({ ...(history.state || {}), sgPosts: true }, '');
+      // Reopened by Back onto that entry: it is already there.
+      if (!reuseEntry) history.pushState({ ...(history.state || {}), sgPosts: true }, '');
       const onPop = () => close('popped');
       window.addEventListener('popstate', onPop);
 
