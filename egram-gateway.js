@@ -133,6 +133,7 @@ const ROUTES = [
   r('GET', 'api/creators'),
   r('GET', `api/creators/${HANDLE}`),
   r('GET', `api/creators/${HANDLE}/posts`),
+  r('GET', `api/creators/${HANDLE}/mentioned`),
   r('POST', `api/creators/${HANDLE}/follow`),
   r('DELETE', `api/creators/${HANDLE}/follow`),
   // Photos, categories, collections, favorites, history

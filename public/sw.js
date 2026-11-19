@@ -11,7 +11,8 @@
 // v12: Grabbit 3.0.2 (For You resume, sheets above the keyboard).
 // v13: Grabbit 3.0 phase 2, the Social & Photos pages (public/hub/social/).
 // v14: phase 2 final: comments, share, upload, notifications, settings, the full-screen viewer.
-const CACHE = 'grabbit-v14';
+// v15: Grabbit 3.0.3 (wide feed, clickable @mentions, Mentioned in on profiles).
+const CACHE = 'grabbit-v15';
 const SHELL = [
   '/',
   '/classic/',

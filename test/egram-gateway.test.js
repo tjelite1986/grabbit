@@ -321,6 +321,34 @@ test('answers are filtered against the lane and Grabbit 18+ profiles', async () 
   adultSet = new Set();
 });
 
+test('a post keeps only the mentions that are not 18+ in Grabbit', async () => {
+  adultSet = new Set(['secretly18', 'alias18']);
+  // u-sam is known to Elitogram as alias18 too; u-gone is outside the scope.
+  identities['u-sam'] = ['alias18'];
+  hidden.add('u-gone');
+  const mentions = [
+    { type: 'creator', handle: 'ann', name: 'ann' },
+    { type: 'creator', handle: 'Secretly18', name: 'Secretly18' },
+    { type: 'creator', handle: 'u-sam', name: '_sam' },
+    { type: 'creator', handle: 'u-gone', name: '_gone' },
+  ];
+  const post = (id) => ({ id, caption: '@ann @Secretly18 @_sam @_gone', author: { handle: 'bob', type: 'creator' }, media: [], audience: 'general', mentions });
+  handlers['/api/feed'] = json(200, { items: [post(1)], next: null });
+  const d = await (await call('GET', '/api/egram/api/feed')).json();
+  assert.deepEqual(d.items.map((x) => x.id), [1], 'the post itself stays');
+  assert.deepEqual(d.items[0].mentions.map((m) => m.handle), ['ann']);
+  // The same holds for a single post and for a creator's "Mentioned in" list.
+  handlers['/api/posts/1'] = json(200, post(1));
+  assert.deepEqual((await (await call('GET', '/api/egram/api/posts/1')).json()).mentions.map((m) => m.handle), ['ann']);
+  handlers['/api/creators/ann/mentioned'] = json(200, { items: [post(1), { ...post(2), author: { handle: 'secretly18', type: 'creator' } }], next: null });
+  const m = await (await call('GET', '/api/egram/api/creators/ann/mentioned')).json();
+  assert.deepEqual(m.items.map((x) => x.id), [1]);
+  assert.deepEqual(m.items[0].mentions.map((x) => x.handle), ['ann']);
+  delete identities['u-sam'];
+  hidden.delete('u-gone');
+  adultSet = new Set();
+});
+
 test('media: refused without the right audience header, passed with it', async () => {
   handlers['/m/10'] = file({ 'x-egram-audience': 'general', 'x-egram-creator': 'ann', 'content-disposition': 'attachment; filename="a.jpg"' });
   handlers['/m/11'] = file({ 'x-egram-audience': 'unknown', 'x-egram-creator': 'bob' });
