@@ -2822,19 +2822,19 @@
     async function removeGroup(g) {
       if (!confirm(`Move the ${g.removable} extra ${g.removable === 1 ? 'copy' : 'copies'} of this group to the trash? The copy marked Keep stays. You can restore for 30 days.`)) return;
       try {
-        const r = await jsonPost('/api/hub/dupes/remove-all', { sha256: g.sha256 });
+        const r = await jsonPost('/api/hub/dupes/remove-all', { sha256: g.sha256, confirm: true });
         toast(r.failed.length ? `${r.files} moved, ${r.failed.length} refused: ${r.failed[0].error}` : `${r.files} moved to the trash.`);
         fill();
       } catch (e) { toast(e.message); }
     }
     async function removeAll() {
       try {
-        const p = await jsonPost('/api/hub/dupes/remove-all', { dryRun: true });
+        const p = await jsonPost('/api/hub/dupes/remove-all', {});
         if (!p.files) return toast('No extra copy can be removed. The rest sit in app folders.');
         if (!confirm(`Move ${p.files} extra copies in ${p.groups} groups (${bytes(p.bytes)}) to the trash?\n\nOne copy of each group stays: the one an app reads, else the one linked to an item, else the oldest. Groups marked known/OK are left alone. You can restore for 30 days.`)) return;
         removeAllBtn.disabled = true;
         removeAllBtn.textContent = 'Removing ...';
-        const r = await jsonPost('/api/hub/dupes/remove-all', {});
+        const r = await jsonPost('/api/hub/dupes/remove-all', { confirm: true, expect: { files: p.files, bytes: p.bytes } });
         toast(`${r.files} copies (${bytes(r.bytes)}) moved to the trash${r.failed.length ? `; ${r.failed.length} refused (${r.failed[0].error})` : ''}.`);
       } catch (e) { toast(e.message); }
       removeAllBtn.disabled = false;

@@ -38,25 +38,71 @@ test('a linked copy is kept before an older unlinked one, and the only linked co
   assert.equal(q[3].suggested, true);
 });
 
-test('purge deletes only trashed files past the hold time', () => {
+test('purge deletes only trashed files past the hold time, and only while another copy remains', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-'));
   test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-lib-'));
+  test.after(() => fs.rmSync(lib, { recursive: true, force: true }));
+  const sha = require('crypto').createHash('sha256').update('x').digest('hex');
   const now = 10 * HOLD_MS;
   const rows = [
-    { id: 1, trash_name: 'old', at: now - HOLD_MS - 1 },
-    { id: 2, trash_name: 'new', at: now - 1000 },
+    { id: 1, trash_name: 'old', at: now - HOLD_MS - 1, sha256: sha },
+    { id: 2, trash_name: 'new', at: now - 1000, sha256: sha },
   ];
   for (const r of rows) fs.writeFileSync(path.join(dir, r.trash_name), 'x');
+  fs.writeFileSync(path.join(lib, 'keep.mp4'), 'x');
   const purged = [];
   const store = {
     trashDue: (before) => rows.filter((r) => r.at < before && !purged.includes(r.id)),
     trashPurged: (id) => (purged.push(id), 1),
+    dupeMembers: () => [{ root: lib, rel: 'keep.mp4' }],
   };
-  const t = new DupeTrash({ store, trashDir: dir, rootOf, now: () => now });
-  assert.equal(t.purge(), 1);
+  const roots = { [lib]: { owner: 'grabbit' } };
+  const t = new DupeTrash({ store, trashDir: dir, rootOf: (p) => roots[p] || null, now: () => now });
+  assert.equal(await t.purge(), 1);
   assert.deepEqual(purged, [1]);
   assert.ok(!fs.existsSync(path.join(dir, 'old')));
   assert.ok(fs.existsSync(path.join(dir, 'new')));
+});
+
+test('a permanent delete keeps the last copy: no verified survivor, nothing is deleted', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-'));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-lib-'));
+  test.after(() => fs.rmSync(lib, { recursive: true, force: true }));
+  const imp = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-trash-imp-'));
+  test.after(() => fs.rmSync(imp, { recursive: true, force: true }));
+  const crypto = require('crypto');
+  const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+  fs.writeFileSync(path.join(dir, 'held'), 'original');
+  // The copy that stayed was removed by hand; another indexed copy now has
+  // other bytes, and the only exact copy left waits in an import folder.
+  fs.writeFileSync(path.join(lib, 'other.mp4'), 'changed');
+  fs.writeFileSync(path.join(imp, 'waiting.mp4'), 'original');
+  const row = { id: 1, trash_name: 'held', at: 1, sha256: sha('original'), root: lib, rel: 'gone.mp4' };
+  const purged = [];
+  let members = [{ root: lib, rel: 'kept.mp4' }, { root: lib, rel: 'other.mp4' }, { root: imp, rel: 'waiting.mp4' }];
+  const store = {
+    trashGet: () => (purged.length ? { ...row, purged_at: 2 } : row),
+    trashPurged: (id) => (purged.push(id), 1),
+    dupeMembers: () => members,
+  };
+  const roots = { [lib]: { owner: 'grabbit' }, [imp]: { owner: 'app', app: 'egram', import: true } };
+  let keep = { keep_root: lib, keep_rel: 'kept.mp4', keep_sha256: sha('original') };
+  const t = new DupeTrash({ store, trashDir: dir, rootOf: (p) => roots[p] || null, keepOf: () => keep });
+  await assert.rejects(() => t.deletePermanently(1), /No other copy of this file could be verified/);
+  assert.ok(fs.existsSync(path.join(dir, 'held')));
+  assert.deepEqual(purged, []);
+  // A near duplicate kept in its place counts only with the bytes it had at the move.
+  fs.writeFileSync(path.join(lib, 'similar.jpg'), 'similar v2');
+  keep = { keep_root: lib, keep_rel: 'similar.jpg', keep_sha256: sha('similar v1') };
+  members = [];
+  await assert.rejects(() => t.deletePermanently(1), /No other copy/);
+  keep = { keep_root: lib, keep_rel: 'similar.jpg', keep_sha256: sha('similar v2') };
+  const r = await t.deletePermanently(1);
+  assert.equal(r.bytes, 8);
+  assert.ok(!fs.existsSync(path.join(dir, 'held')));
+  assert.deepEqual(purged, [1]);
 });
 
 test('a move across mounts (EXDEV) copies through a .part, then unlinks the source', async () => {
@@ -322,7 +368,7 @@ test('restore makes no folder through a symlinked parent, even when the folder i
   for (const d of [g, outside, trashDir]) fs.mkdirSync(d);
   fs.symlinkSync(outside, path.join(g, 'sub'));
   fs.writeFileSync(path.join(trashDir, 'held'), 'kept bytes');
-  const entry = { id: 1, root: g, rel: path.join('sub', 'new', 'b.mp4'), trash_name: 'held', bytes: 10, sha256: null };
+  const entry = { id: 1, root: g, rel: path.join('sub', 'new', 'b.mp4'), trash_name: 'held', bytes: 10, sha256: require('crypto').createHash('sha256').update('kept bytes').digest('hex') };
   const store = { trashGet: () => entry, trashRestored: () => { throw new Error('must not be recorded'); }, fileSeen: () => {} };
   const t = new DupeTrash({ store, trashDir, rootOf: () => ({ owner: 'grabbit' }), now: () => 5 });
   await assert.rejects(t.restore(1), /symlink/);
@@ -424,7 +470,7 @@ test('a restore beside a reused 255-byte name stays within the name limit', asyn
   fs.mkdirSync(trashDir, { recursive: true });
   fs.writeFileSync(path.join(trashDir, 'held-1'), 'old bytes');
   fs.writeFileSync(path.join(g, long), 'a newer file');
-  trash.push({ id: 1, root: g, rel: long, sha256: null, bytes: 9, trash_name: 'held-1' });
+  trash.push({ id: 1, root: g, rel: long, sha256: require('crypto').createHash('sha256').update('old bytes').digest('hex'), bytes: 9, trash_name: 'held-1' });
   t.mergeOf = () => null;
   const r = await t.restore(1);
   assert.equal(r.renamed, true);
@@ -849,4 +895,20 @@ test('merge puts back a file a writer put at the live name after the last look',
   assert.equal(trash[0].purged_at, 1, 'the trash row is closed');
   assert.ok(!fs.readdirSync(g).some((n) => n.startsWith('.')), 'no stage or aside name left');
   assert.equal(fs.readdirSync(trashDir).length, 1, 'the held original stays (its live name holds other bytes now)');
+});
+
+test('restore refuses a held file whose bytes are not the ones moved to the trash', async () => {
+  const { g, trash, trashDir, t } = mergeFixture();
+  const id = await t.mergeLocal(2, 1);
+  const held = path.join(trashDir, trash[id - 1].trash_name);
+  // Same size, other bytes, written in place: a same-disk restore would
+  // otherwise publish it by a hard link without reading it.
+  const before = fs.readFileSync(held, 'utf8');
+  fs.writeFileSync(held, before.replace(/./, (c) => (c === 'X' ? 'Y' : 'X')));
+  const b = path.join(g, 'b.mp4');
+  fs.unlinkSync(b);
+  await assert.rejects(t.restore(id), /no longer matches what was moved to the trash/);
+  assert.ok(!fs.existsSync(b), 'nothing was published');
+  assert.ok(fs.existsSync(held), 'the held file stays');
+  assert.equal(trash[id - 1].restored_at || null, null);
 });

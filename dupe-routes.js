@@ -56,7 +56,11 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
 
   r.get('/overview', wrap(() => service.overview()));
   r.get('/library', wrap(() => ({ roots: service.libraryStatus() })));
-  r.get('/groups', wrap((req) => service.list(listQuery(req.query))));
+  r.get('/groups', wrap(async (req) => {
+    // egram's own audience decides whether its copies are 18+ (best effort).
+    try { await service.refreshAppAudience(); } catch {}
+    return service.list(listQuery(req.query));
+  }));
   r.get('/groups/:key/references', wrap(async (req) => {
     if (!KEY_RE.test(req.params.key)) throw new DupeError('Not a group key');
     return { references: await service.references(req.params.key) };
@@ -141,6 +145,9 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
       if (!row || !row.sha256) return notFound();
       const kind = kindOfName(row.rel);
       if (!['video', 'image'].includes(kind)) return notFound();
+      // An 18+ (or not yet verified) copy is previewed only on request of a
+      // view that shows 18+.
+      if (req.query.adult !== '1' && service.audienceFor(service.rootInfo(row.root), { ...row, item_audience: null }) === 'adult') return notFound();
       const out = path.join(thumbDir, row.sha256.slice(0, 2), `${row.sha256}.jpg`);
       if (!fs.existsSync(out)) {
         const { safePath } = require('./dupe-analyzer');

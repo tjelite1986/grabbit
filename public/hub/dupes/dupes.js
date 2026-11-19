@@ -191,7 +191,7 @@
       }
       if (m.kind === 'audio') return h('div', { class: `dm-thumb dm-thumb-${size} dm-thumb-hidden` }, ic('identical', 22));
       return h('div', { class: `dm-thumb dm-thumb-${size}` },
-        h('img', { src: `${BASE}/thumb/${m.id}`, alt: '', loading: 'lazy', decoding: 'async', 'data-media-bg': '1', onerror: (e) => { e.currentTarget.replaceWith(ic(m.kind === 'video' ? 'video' : 'photo', 22)); } }),
+        h('img', { src: `${BASE}/thumb/${m.id}${m.audience === 'adult' ? '?adult=1' : ''}`, alt: '', loading: 'lazy', decoding: 'async', 'data-media-bg': '1', onerror: (e) => { e.currentTarget.replaceWith(ic(m.kind === 'video' ? 'video' : 'photo', 22)); } }),
         m.kind === 'video' ? h('span', { class: 'dm-thumb-badge' }, m.duration ? fmtDur(m.duration) : ic('play', 12)) : null);
     }
 

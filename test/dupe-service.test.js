@@ -457,7 +457,7 @@ test('trash: extras move, the kept copy stays, restore works, nothing is deleted
   assert.equal(list.total, 2);
   assert.ok(list.items.every((x) => x.reason === 'Identical copy' && x.source === 'grabbit'));
   // The hourly purge with the default hold deletes nothing fresh.
-  assert.equal(trash.purge(), 0);
+  assert.equal(await trash.purge(), 0);
   assert.equal(await svc.purgeAppTrash(), 0);
   assert.equal(await svc.purgeGrabbitTrash(), 0);
   assert.equal(fs.readdirSync(trashDir).length, 2);
@@ -1066,6 +1066,11 @@ test('a merge whose answer was lost is resolved by asking the app with its op ke
   answer = (op) => ({ op, found: true, inProgress: true });
   await assert.rejects(svc.resolveOp(u.id, 'owner'), /still working/);
   assert.equal(svc.trashList().unfinished.length, 1);
+  // The app stopped part way and cannot tell: no trash entry, stays pending.
+  answer = (op) => ({ op, found: true, inProgress: false, id: 42, uid: 'd'.repeat(32), bytes: 16, state: 'pending', stopped: true, posts: [1] });
+  await assert.rejects(svc.resolveOp(u.id, 'owner'), (e) => e.status === 409 && /stopped part way/.test(e.message));
+  assert.equal(dx.appTrashHeld().length, 0, 'a stopped merge is no restorable entry');
+  assert.equal(svc.trashList().unfinished.length, 1);
   // The app merged it: recorded like any merge, so it can be restored.
   const uid = 'd'.repeat(32);
   answer = (op) => ({ op, found: true, inProgress: false, id: 42, uid, bytes: 16, state: 'linked', posts: [1] });
@@ -1089,4 +1094,46 @@ test('a merge whose answer was lost is resolved by asking the app with its op ke
   assert.deepEqual(svc.trashList().unfinished, []);
   assert.equal(dx.appTrashHeld().length, 1, 'only the merge the app reported is in the trash');
   await assert.rejects(svc.resolveOp(left[0].id, 'owner'), (e) => e.status === 404);
+});
+
+test('copies in a mixed-audience app library stay hidden as 18+ until the app reports them general', async (t) => {
+  const adapters = new Map();
+  const mixedDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-dupesvc-mixed-')));
+  t.after(() => fs.rmSync(mixedDir, { recursive: true, force: true }));
+  const ctx = setup(t, { adapters, extra: [{ path: mixedDir, label: 'egram library', owner: 'app', app: 'egram', mixedAudience: true }] });
+  const { own, svc, scan } = ctx;
+  write(path.join(own, 'a.jpg'), 'adult post bytes', 1000);
+  write(path.join(mixedDir, 'adult.jpg'), 'adult post bytes', 2000);
+  write(path.join(own, 'b.jpg'), 'general post bytes', 1000);
+  write(path.join(mixedDir, 'general.jpg'), 'general post bytes', 2000);
+  let reachable = false;
+  const aud = { 'adult.jpg': 'adult', 'general.jpg': 'general' };
+  adapters.set(mixedDir, stubAdapter({
+    id: 'egram', app: 'egram', caps: ['lookup', 'cache'],
+    lookup: (rels) => {
+      if (!reachable) throw new AdapterError('egram is not reachable right now');
+      return new Map(rels.map((r) => [r, { path: r, role: 'media', refs: [{ type: 'post', id: 1, audience: aud[r] }] }]));
+    },
+  }));
+  await scan();
+  const hidden = () => svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 });
+  // egram not reachable: both groups count as 18+ and stay out of the default view.
+  await svc.refreshAppAudience();
+  assert.equal(hidden().items.length, 0);
+  assert.equal(hidden().hiddenAdult, 2);
+  // egram answers: only the general one shows, the adult one stays hidden.
+  reachable = true;
+  svc.audRetryAt.clear(); // the one-minute pause after the failure
+  await svc.refreshAppAudience();
+  const shown = hidden().items;
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].key, `exact:${sha('general post bytes')}`);
+  assert.ok(shown[0].members.every((m) => m.preview !== false || m.kind !== 'image'));
+  // A rewritten file is unverified again.
+  write(path.join(mixedDir, 'general.jpg'), 'general post bytes', 5000);
+  await scan();
+  reachable = false;
+  await svc.refreshAppAudience();
+  assert.equal(hidden().items.length, 0);
+  assert.ok(svc.audRetryAt.size === 1, 'a failed app is paused for a minute');
 });

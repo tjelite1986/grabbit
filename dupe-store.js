@@ -147,6 +147,11 @@ const MIGRATIONS = [
   );
   CREATE INDEX dx.prevention_job ON prevention (job_id);
   `,
+  // The kept copy's bytes at the time of the move, so a permanent delete of a
+  // near duplicate can tell that the copy kept in its place is still that one.
+  `
+  ALTER TABLE dx.trash_meta ADD COLUMN keep_sha256 TEXT;
+  `,
 ];
 
 class DupeStoreError extends Error {}
@@ -340,11 +345,11 @@ function attach(db, file) {
     // --- trash ------------------------------------------------------------------
     trashMeta: (id) => db.prepare('SELECT * FROM dx.trash_meta WHERE trash_id = ?').get(Number(id)),
     putTrashMeta(id, m) {
-      db.prepare(`INSERT INTO dx.trash_meta (trash_id, reason, app, kind, audience, keep_root, keep_rel)
-        VALUES (@trash_id, @reason, @app, @kind, @audience, @keep_root, @keep_rel)
+      db.prepare(`INSERT INTO dx.trash_meta (trash_id, reason, app, kind, audience, keep_root, keep_rel, keep_sha256)
+        VALUES (@trash_id, @reason, @app, @kind, @audience, @keep_root, @keep_rel, @keep_sha256)
         ON CONFLICT (trash_id) DO UPDATE SET reason = excluded.reason, app = excluded.app, kind = excluded.kind,
-          audience = excluded.audience, keep_root = excluded.keep_root, keep_rel = excluded.keep_rel`)
-        .run({ reason: null, app: null, kind: null, audience: null, keep_root: null, keep_rel: null, ...m, trash_id: Number(id) });
+          audience = excluded.audience, keep_root = excluded.keep_root, keep_rel = excluded.keep_rel, keep_sha256 = excluded.keep_sha256`)
+        .run({ reason: null, app: null, kind: null, audience: null, keep_root: null, keep_rel: null, keep_sha256: null, ...m, trash_id: Number(id) });
     },
     allTrashMeta() {
       const out = new Map();

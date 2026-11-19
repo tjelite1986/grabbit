@@ -68,6 +68,11 @@ class DupeService {
     this.log = o.log || ((m) => console.log(`dupes: ${m}`));
     this.now = o.now || Date.now;
     this.cache = null;
+    // What a mixed-audience app (egram) reported for its copies:
+    // "root\0rel" -> { aud: 'general' | 'adult', ino, mtime }.
+    this.appAud = new Map();
+    this.audBusy = null;
+    this.audRetryAt = new Map(); // root -> time before which a failed app is not asked again
     this.busy = null;
     this.lookupCache = new Map();
   }
@@ -189,6 +194,15 @@ class DupeService {
         this.log(`unfinished ${o.id}: ${ad.app} reports nothing changed`);
         return { id: o.id, outcome: 'nothing changed' };
       }
+      // Only a merge the app has verified as finished ('linked': the held
+      // original and the keeper in the clip's place) becomes a trash entry.
+      // A merge that stopped part way stays here until the app can tell.
+      if (st.state !== 'linked') {
+        const why = st.stopped
+          ? `${ad.app} stopped part way through this merge and cannot tell safely how far it got; check it in ${ad.app}, then mark it checked`
+          : `${ad.app} reports this merge as ${String(st.state).slice(0, 40)}; check again later or check it in ${ad.app}`;
+        throw new DupeError(why, 409);
+      }
       const ref = `${st.id}:${st.uid}`;
       const tid = this.recordAppDone(o.id, ad, { ref, result: st }, () => this.dx.appTrashAdd({
         adapter: ad.id, ref, root: p.root, rel: p.drop, sha256: p.sha256, bytes: Number.isSafeInteger(p.bytes) ? p.bytes : st.bytes,
@@ -227,6 +241,66 @@ class DupeService {
   // --- reading the records ----------------------------------------------------
   rootInfo(p) {
     return this.rootOf(p) || { path: p, label: p, owner: null };
+  }
+
+  // A copy in a mixed-audience app library counts as 18+ until the app has
+  // reported it (for this inode and mtime) as used only by general posts.
+  audienceFor(r, row) {
+    const base = audienceOf(r, row.item_audience);
+    if (base === 'adult' || !r.mixedAudience) return base;
+    const c = this.appAud.get(`${row.root}\0${row.rel}`);
+    return c && c.ino === String(row.ino) && c.mtime === row.mtime_ms && c.aud === 'general' ? 'general' : 'adult';
+  }
+
+  audienceUnverified(r, row) {
+    if (!r.mixedAudience) return false;
+    const c = this.appAud.get(`${row.root}\0${row.rel}`);
+    return !(c && c.ino === String(row.ino) && c.mtime === row.mtime_ms);
+  }
+
+  // Asks the mixed-audience apps about every copy of theirs in a group that
+  // they have not reported on yet. Best effort: an app that does not answer
+  // leaves its copies counted as 18+.
+  async refreshAppAudience() {
+    if (this.audBusy) return this.audBusy;
+    this.audBusy = (async () => {
+      const byRoot = new Map();
+      for (const g of this.build().groups) {
+        for (const m of g.members) {
+          if (!m.audienceUnverified) continue;
+          const ad = this.adapters.get(m.root);
+          if (!ad || !ad.caps.has('lookup')) continue;
+          if ((this.audRetryAt.get(m.root) || 0) > this.now()) continue;
+          if (!byRoot.has(m.root)) byRoot.set(m.root, { ad, members: new Map() });
+          byRoot.get(m.root).members.set(m.rel, m);
+        }
+      }
+      let changed = false;
+      for (const [root, { ad, members }] of byRoot) {
+        const list = [...members.values()];
+        for (let i = 0; i < list.length; i += 200) {
+          const part = list.slice(i, i + 200);
+          let r;
+          try {
+            r = await ad.lookup(part.map((m) => m.rel));
+          } catch {
+            // Not asked again for a minute, so a down app does not slow every list.
+            this.audRetryAt.set(root, this.now() + 60000);
+            break;
+          }
+          for (const m of part) {
+            const it = r.get(m.rel);
+            if (!it) continue;
+            const refs = Array.isArray(it.refs) ? it.refs : [];
+            const aud = refs.length && refs.every((x) => x && x.audience === 'general') ? 'general' : 'adult';
+            this.appAud.set(`${m.root}\0${m.rel}`, { aud, ino: String(m.ino), mtime: m.mtime_ms });
+            changed = true;
+          }
+        }
+      }
+      if (changed) this.invalidate();
+    })().finally(() => { this.audBusy = null; });
+    return this.audBusy;
   }
 
   // Every present file that has a twin with the same bytes, plus Grabbit's
@@ -279,7 +353,8 @@ class DupeService {
       what: c.what,
       webOptimized: c.webOptimized,
       derivative: c.cls !== 'media',
-      audience: audienceOf(r, row.item_audience),
+      audience: this.audienceFor(r, row),
+      audienceUnverified: this.audienceUnverified(r, row),
       adultFolder: Boolean(r.adult),
       link: row.link,
       item_id: row.item_id,

@@ -3480,7 +3480,9 @@ const DUPE_ROOT_CANDIDATES = [
   { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts', import: true },
   { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram', import: true, importFor: EGRAM_LIBRARY_DIR },
   { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
-  { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram' },
+  // egram holds general and 18+ posts side by side: its copies count as 18+
+  // until egram itself reports every post using them as general.
+  { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram', mixedAudience: true },
   { path: PLATFORM_LIBRARY_DIR, label: 'Platform library', owner: 'app', app: 'Platform' },
 ];
 // An import folder's copy may go only when its app's library has the bytes.
@@ -3513,6 +3515,7 @@ const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({
     DUPE_DX.putTrashMeta(id, {
       reason: info.reason || 'Identical copy', app: r.app || 'Grabbit', kind,
       audience: require('./dupe-classify').audienceOf(r, null), keep_root: k.root || null, keep_rel: k.rel || null,
+      keep_sha256: k.sha256 || null,
     });
   } : null,
   // Local moves into the trash are journaled like app operations, so one
@@ -3527,11 +3530,14 @@ const DUPE_TRASH = ITEM_STORE && ITEM_STORE.trashAdd ? new DupeTrash({
     const m = DUPE_DX.trashMeta(id);
     return m && m.reason === 'merged' ? m : null;
   } : null,
+  // The copy kept in place of a trashed one (any reason), for the last-copy
+  // check of a permanent delete.
+  keepOf: DUPE_DX ? (id) => DUPE_DX.trashMeta(id) || null : null,
 }) : null;
 if (DUPE_TRASH) {
   const purge = async () => {
     try {
-      const n = DUPE_SERVICE ? await DUPE_SERVICE.purgeGrabbitTrash() : DUPE_TRASH.purge();
+      const n = DUPE_SERVICE ? await DUPE_SERVICE.purgeGrabbitTrash() : await DUPE_TRASH.purge();
       if (n) console.log(`dupes: purged ${n} trashed copies past the hold time`);
     } catch (e) {
       console.error(`dupes: trash purge failed (${e.message})`);
@@ -4669,18 +4675,40 @@ app.post('/api/hub/dupes/remove', async (req, res) => {
   }
 });
 
-// POST /api/hub/dupes/remove-all { dryRun?, sha256? } -> every suggested extra
-// copy of every open group (or of one group), best copy kept.
+// POST /api/hub/dupes/remove-all { confirm?, expect?, sha256? } -> every
+// suggested extra copy of every open group (or of one group), best copy kept.
+// Without `confirm: true` it is a dry run (an empty request moves nothing).
+// A confirmed run over every group also needs `expect` ({ files, bytes }, the
+// dry run the owner saw); if the plan changed since, nothing moves.
 app.post('/api/hub/dupes/remove-all', async (req, res) => {
   if (!metaStore(res) || trashOff(res)) return;
   const body = req.body || {};
   if (body.sha256 != null && !SHA256_RE.test(String(body.sha256))) return res.status(400).json({ ok: false, error: 'Not a SHA-256 hash' });
-  const dryRun = body.dryRun === true;
+  const dryRun = body.confirm !== true;
+  const sha256s = body.sha256 ? [String(body.sha256)] : null;
+  const expect = body.expect && typeof body.expect === 'object' ? body.expect : null;
+  if (!dryRun && !sha256s && (!expect || !Number.isSafeInteger(expect.files) || !Number.isSafeInteger(expect.bytes))) {
+    return res.status(400).json({ ok: false, error: 'Removing every extra copy needs the counts you confirmed (expect)' });
+  }
   if (!dryRun && dupeRemoveBusy) return res.status(409).json({ ok: false, error: 'Another removal is running' });
   if (!dryRun) dupeRemoveBusy = true;
   try {
-    const run = () => DUPE_TRASH.removeAll({ by: actorOf(req), dryRun, sha256s: body.sha256 ? [String(body.sha256)] : null });
-    const r = DUPE_SERVICE && !dryRun ? await DUPE_SERVICE.exclusive('remove all', run) : await run();
+    const run = async () => {
+      if (!dryRun && !sha256s) {
+        const p = await DUPE_TRASH.removeAll({ by: actorOf(req), dryRun: true, sha256s: null });
+        if (p.files !== expect.files || p.bytes !== expect.bytes) {
+          throw Object.assign(new Error('The duplicates changed since you confirmed; check them again'), { status: 409 });
+        }
+      }
+      return DUPE_TRASH.removeAll({ by: actorOf(req), dryRun, sha256s });
+    };
+    let r;
+    try {
+      r = DUPE_SERVICE && !dryRun ? await DUPE_SERVICE.exclusive('remove all', run) : await run();
+    } catch (e) {
+      if (e.status === 409) return res.status(409).json({ ok: false, error: e.message });
+      throw e;
+    }
     if (!dryRun) console.log(`dupes: ${r.files} copies (${r.bytes} bytes) moved to the trash by ${actorOf(req) || 'owner'}, ${r.failed.length} refused`);
     res.json({ ok: true, dryRun, ...r });
   } catch (e) {

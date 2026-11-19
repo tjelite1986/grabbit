@@ -417,7 +417,16 @@ test('removing copies: app copies stay, the oldest Grabbit copy is kept, removed
   const dry = await s.post('/api/hub/dupes/remove-all', { dryRun: true });
   assert.deepEqual([dry.body.files, dry.body.groups], [3, 2]);
   assert.ok(fs.existsSync(a[0]) && fs.existsSync(a[2]) && fs.existsSync(bNew), 'a dry run moves nothing');
-  const all = await s.post('/api/hub/dupes/remove-all', {});
+  // An empty request is a dry run, a confirm without the counts is refused,
+  // and counts that no longer match move nothing.
+  const empty = await s.post('/api/hub/dupes/remove-all', {});
+  assert.equal(empty.body.dryRun, true);
+  assert.ok(fs.existsSync(a[0]) && fs.existsSync(a[2]) && fs.existsSync(bNew), 'an empty request moves nothing');
+  assert.equal((await s.post('/api/hub/dupes/remove-all', { confirm: true })).status, 400);
+  const stale = await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files + 1, bytes: dry.body.bytes } });
+  assert.equal(stale.status, 409);
+  assert.ok(fs.existsSync(a[0]) && fs.existsSync(a[2]) && fs.existsSync(bNew), 'a stale confirm moves nothing');
+  const all = await s.post('/api/hub/dupes/remove-all', { confirm: true, expect: { files: dry.body.files, bytes: dry.body.bytes } });
   assert.equal(all.status, 200);
   assert.deepEqual([all.body.files, all.body.failed.length], [3, 0]);
   for (const f of [...a, bNew]) assert.ok(!fs.existsSync(f), `${f} moved`);
