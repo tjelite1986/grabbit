@@ -18,6 +18,8 @@ const handlers = {};
 // in `hidden` (Elitogram leaves it out: outside the scope) or `accountNames`
 // (listed under `accounts`).
 const identities = {};
+// handle -> identity binding Elitogram returns with the names (`revs`).
+const identityRevs = {};
 const hidden = new Set();
 const accountNames = new Set();
 // Names that are both an account and a (visible) creator.
@@ -41,8 +43,10 @@ const upstream = http.createServer((req, res) => {
         items[h] = identities[h] || [];
       }
       for (const a of q.getAll('a')) if (accountNames.has(a)) accounts.push(a);
+      const revs = {};
+      for (const h of Object.keys(items)) if (identityRevs[h]) revs[h] = identityRevs[h];
       res.setHeader('content-type', 'application/json');
-      return res.end(JSON.stringify({ items, accounts }));
+      return res.end(JSON.stringify({ items, accounts, revs }));
     }
     const h = handlers[`${req.method} ${path}`] || handlers[path];
     if (h) return h(req, res, rec);
@@ -281,7 +285,7 @@ test('a write carries only the keys its route allows', async () => {
 });
 
 test('an edit may move a post only to a creator this lane would show', async () => {
-  const REV = 'a'.repeat(64);
+  const REV = '9.4';
   const creator = (handle, extra = {}) => ({ id: 9, handle, post_count: 1, mentioned_count: 0, follower_count: 0, audience: 'general', identity_rev: REV, ...extra });
   handlers['/api/posts/5'] = json(200, { id: 5, caption: '', author: { handle: 'ann' }, media: [], audience: 'general' });
   handlers['PATCH /api/posts/5'] = json(200, { id: 5, caption: 'x', can_edit: true, audience: 'general' });
@@ -291,6 +295,7 @@ test('an edit may move a post only to a creator this lane would show', async () 
   handlers['/api/creators/alias1'] = json(200, creator('dana')); // Elitogram resolved an alias
   handlers['/api/creators/nobody'] = json(404, { error: 'Profile not found' });
   adultSet = new Set(['eve18']);
+  for (const h of ['dana', 'eve18', 'rev', 'oldeg', 'badrev', 'otherid']) identityRevs[h] = REV;
   try {
     // A general creator: passes, re-encoded as the canonical handle bound to
     // the id and identity fingerprint read with the check (R9-01).
@@ -317,6 +322,19 @@ test('an edit may move a post only to a creator this lane would show', async () 
     await refused({ creator: 'oldeg' }, 'no identity_rev', 424);
     handlers['/api/creators/badrev'] = json(200, creator('badrev', { identity_rev: 'x' }));
     await refused({ creator: 'badrev' }, 'malformed identity_rev', 424);
+    handlers['/api/creators/otherid'] = json(200, creator('otherid', { identity_rev: '8.4' }));
+    await refused({ creator: 'otherid' }, 'binding of another creator id', 424);
+    // R10-01: the profile and the identity names were read at different
+    // bindings (changed in between, even if reverted): refused.
+    handlers['/api/creators/aba'] = json(200, creator('aba'));
+    identityRevs.aba = '9.5';
+    await refused({ creator: 'aba' }, 'identities read at another binding', 409);
+    delete identityRevs.aba;
+    await refused({ creator: 'aba' }, 'identity lookup without a binding', 409);
+    // The binding never reaches the browser.
+    const prof = await call('GET', '/api/egram/api/creators/dana');
+    assert.equal(prof.status, 200);
+    assert.ok(!('identity_rev' in (await prof.json())), 'identity_rev stripped');
     await refused({ self: true }, 'an account');
     await refused({ creator: 'dana', self: true }, 'extra keys');
     await refused('dana', 'not an object');
@@ -324,7 +342,7 @@ test('an edit may move a post only to a creator this lane would show', async () 
     await refused({ creator: '' }, 'empty');
     handlers['/api/creators/down'] = json(503, { error: 'busy' });
     await refused({ creator: 'down' }, 'Elitogram down', 424);
-  } finally { adultSet = new Set(); }
+  } finally { adultSet = new Set(); for (const k of Object.keys(identityRevs)) delete identityRevs[k]; }
 });
 
 test('reads below a post and writes to it need the post itself to pass', async () => {

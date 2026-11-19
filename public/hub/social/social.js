@@ -704,10 +704,12 @@
       const lastPart = parts[parts.length - 1].trim();
       if (parts.length > 1 || /^#/.test(lastPart)) {
         if (lastPart && /^(#[\p{L}\p{N}_]+[\s,]*)+$/u.test(lastPart)) {
-          return { desc: parts.slice(0, -1).join('\n\n').trim(), tags: tagsOf(lastPart).join(' ') };
+          // Every tag is shown (no upload cap), and the paragraph as stored is
+          // kept so an edit that leaves the tags alone writes them unchanged.
+          return { desc: parts.slice(0, -1).join('\n\n').trim(), tags: tagsOf(lastPart, Infinity).join(' '), rawTags: lastPart };
         }
       }
-      return { desc: text, tags: '' };
+      return { desc: text, tags: '', rawTags: '' };
     }
 
     // Edit post: creator, description and tags. A new creator goes through the
@@ -726,18 +728,25 @@
       desc.value = split.desc;
       const tags = h('input', { type: 'text', maxlength: '600', placeholder: 'beach, summer, travel', 'aria-label': 'Tags' });
       tags.value = split.tags;
+      // What the fields hold after loading (a textarea turns CRLF into LF), so
+      // an untouched field is never taken for an edited one.
+      const initDesc = desc.value;
+      const initTags = tags.value;
       const err = h('p', { class: 'sg-up-err', role: 'alert', hidden: true });
       const form = h('form', { class: 'sg-form', onsubmit: async (e) => {
         e.preventDefault();
         const btn = form.querySelector('button[type=submit]');
-        const tagList = tagsOf(tags.value);
-        const caption = [desc.value.trim(), tagList.map((t) => `#${t}`).join(' ')].filter(Boolean).join('\n\n');
+        const descEdited = desc.value !== initDesc;
+        const tagsEdited = tags.value !== initTags;
+        // An untouched part is written as it was stored.
+        const descPart = descEdited ? desc.value.trim() : split.desc;
+        const tagsPart = tagsEdited ? tagsOf(tags.value, Infinity).map((t) => `#${t}`).join(' ') : split.rawTags;
+        const caption = [descPart, tagsPart].filter(Boolean).join('\n\n');
         const handle = creator.value.trim().replace(/^@/, '').toLowerCase();
         const moving = !!handle && handle !== was.toLowerCase();
         // The caption is sent only when description or tags were edited: a
-        // rebuilt caption is not the stored one (tags are capped and
-        // deduplicated), and a creator-only edit must not rewrite it.
-        const captionEdited = desc.value !== split.desc || tags.value !== split.tags;
+        // creator-only edit must not rewrite it.
+        const captionEdited = descEdited || tagsEdited;
         if (!moving && !captionEdited) { closeSheet(); return; }
         const body = {};
         if (captionEdited) body.caption = caption;
@@ -1948,13 +1957,13 @@
     // only an account that may classify can publish straight to general.
     const UPLOAD_SOFT_LIMIT = 100 * 1024 * 1024; // what Cloudflare passes per request
     const fmtBytes = (n) => (n >= 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} kB`);
-    function tagsOf(text) {
+    function tagsOf(text, max = 30) {
       const out = [];
       for (const raw of String(text || '').split(/[\s,]+/)) {
         const t = raw.replace(/^#+/, '').replace(/[^\p{L}\p{N}_]/gu, '').slice(0, 100);
         if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
       }
-      return out.slice(0, 30);
+      return out.slice(0, max);
     }
     // A creator name field with suggestions from both lanes the account may
     // see (Elitogram resolves the name; the gateway checks it on an edit).

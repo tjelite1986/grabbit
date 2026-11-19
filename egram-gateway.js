@@ -493,6 +493,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   // below treats them as 18+. An untyped handle is asked as both.
   async function identitiesFor(req, cur, lane, refs, downstream = null) {
     const out = new Map();
+    out.revs = new Map();
     if (!isAdultHandle || !refs.length) return out;
     const creators = new Set();
     const accounts = new Set();
@@ -520,6 +521,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
         }
       }
       for (const h of aPart) if (listed.has(h)) out.set(`u:${h}`, []);
+      // The identity binding read with each creator's names (Elitogram 3.0.4).
+      const revs = d.revs && typeof d.revs === 'object' && !Array.isArray(d.revs) ? d.revs : {};
+      for (const h of cPart) if (Object.prototype.hasOwnProperty.call(revs, h) && typeof revs[h] === 'string') out.revs.set(h, revs[h]);
     }
     return out;
   }
@@ -656,8 +660,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
   }
 
   // Would the creator `handle` be passed back in this lane? -> true | false | 401
-  // `seen`, when given, receives the creator's id and identity fingerprint
-  // (identity_rev) as read with this check, so a write can be bound to them.
+  // `seen`, when given, receives the creator's id and identity binding
+  // (identity_rev) from the profile read, and the binding the identity lookup
+  // returned with the names it judged, so a write can be bound to both.
   async function subjectVerdict(req, cur, lane, handle, downstream = null, seen = null) {
     const r = await upstream(req, { method: 'GET', path: `/api/creators/${encodeURIComponent(handle)}`, headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
     if (r.statusCode === 401) { r.resume(); return 401; }
@@ -666,6 +671,7 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     if (!d || typeof d !== 'object' || norm(d.handle) !== handle) return false;
     if (seen) { seen.id = d.id; seen.rev = d.identity_rev; }
     const ids = await identitiesFor(req, cur, lane, [...new Set([...handlesIn(d), `c:${handle}`])], downstream);
+    if (seen) { seen.identitiesAsked = !!isAdultHandle; seen.identityRev = ids.revs.get(handle); }
     const { value, dropped } = filterAnswer(d, LANES[lane], adultTest(ids));
     if (!(value !== null && dropped === 0 && value.audience === LANES[lane] && !adultTest(ids)?.(handle, 'c'))) return false;
     if (value.limited) return mentionReachable(req, cur, lane, handle, downstream);
@@ -839,11 +845,15 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       if (verdict !== true) return fail(res, 400, `Unknown creator "${handle}"`);
       // The move is bound to the creator just checked: Elitogram accepts the
       // handle only as that creator's own (never an alias) and only while its
-      // id and identity fingerprint are unchanged, up to its commit. Without a
-      // fingerprint (an older Elitogram) the move is refused, not sent unbound.
-      if (!Number.isInteger(seen.id) || seen.id < 1 || typeof seen.rev !== 'string' || !/^[0-9a-f]{64}$/.test(seen.rev)) {
+      // identity binding (`<id>.<sequence>`, never repeating) is unchanged, up
+      // to its commit. The profile and the identity names were read in two
+      // calls, so both must carry the same binding: a change between them
+      // (even one reverted) is refused. Without a binding (an older
+      // Elitogram) the move is refused, not sent unbound.
+      if (!Number.isInteger(seen.id) || seen.id < 1 || typeof seen.rev !== 'string' || seen.rev !== `${seen.id}.${seen.rev.split('.')[1]}` || !/^\d{1,15}\.\d{1,15}$/.test(seen.rev)) {
         return fail(res, 424, 'Elitogram cannot bind this move to the creator; update Elitogram');
       }
+      if (seen.identitiesAsked && seen.identityRev !== seen.rev) return fail(res, 409, 'The creator changed meanwhile; reload and try again');
       src.author = { creator: handle, id: seen.id, rev: seen.rev };
     }
     if (route.upload) return uploadPost(req, res, cur, lane, headers);
@@ -931,6 +941,9 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
       if (reachable !== true) return fail(res, 404, 'Not found');
     }
     res.status(status).set('Cache-Control', 'private, no-store');
+    // The identity binding is for the gateway only: it changes with fields a
+    // limited profile hides, so the browser never gets it.
+    if (value && typeof value === 'object' && !Array.isArray(value)) delete value.identity_rev;
     return res.json(value);
   }
 

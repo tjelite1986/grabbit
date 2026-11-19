@@ -412,7 +412,11 @@ test('Edit post asks before a creator change moves the post', () => {
 test('Edit post sends the caption only when description or tags changed', () => {
   const at = js.indexOf('function editPostSheet');
   const body = js.slice(at, js.indexOf('function postMenu', at));
-  assert.match(body, /const captionEdited = desc\.value !== split\.desc \|\| tags\.value !== split\.tags;/);
+  assert.match(body, /const initDesc = desc\.value;\n\s+const initTags = tags\.value;/);
+  assert.match(body, /const captionEdited = descEdited \|\| tagsEdited;/);
+  // Untouched parts are written as stored (R10-04: CRLF, more than 30 tags).
+  assert.match(body, /const descPart = descEdited \? desc\.value\.trim\(\) : split\.desc;/);
+  assert.match(body, /const tagsPart = tagsEdited \? tagsOf\(tags\.value, Infinity\)[^\n]+ : split\.rawTags;/);
   assert.match(body, /const body = \{\};\n\s+if \(captionEdited\) body\.caption = caption;\n\s+if \(moving\) body\.author = \{ creator: handle \};/);
   assert.match(body, /if \(!moving && !captionEdited\) \{ closeSheet\(\); return; \}/);
   assert.doesNotMatch(body, /const body = \{ caption \};/);
@@ -423,4 +427,23 @@ test('a destructive dialog focuses Cancel, and Keep selected names the removal',
   const dm = read('hub/dupes/dupes.js');
   assert.match(dm, /danger \? '\.dm-dialog-actions \.btn:first-child'/);
   assert.match(dm, /label: can\.length \? `Remove \$\{plural\(can\.length, 'copy', 'copies'\)\}`/);
+});
+
+// Codex r10 (R10-04): the editor loads every stored tag and keeps the stored paragraph.
+test('splitCaption keeps more than 30 tags and the stored tag paragraph', () => {
+  const grab = (name) => {
+    const at = js.indexOf(`function ${name}(`);
+    let depth = 0;
+    for (let i = js.indexOf('{', at); i < js.length; i++) {
+      if (js[i] === '{') depth++;
+      else if (js[i] === '}' && --depth === 0) return js.slice(at, i + 1);
+    }
+    throw new Error(`no ${name}`);
+  };
+  const { splitCaption } = new Function(`${grab('tagsOf')}\n${grab('splitCaption')}\nreturn { splitCaption };`)();
+  const tags = Array.from({ length: 31 }, (_, i) => `#t${i}`).join(' ');
+  const r = splitCaption(`first\r\nsecond\n\n${tags}`);
+  assert.equal(r.tags.split(' ').length, 31);
+  assert.equal(r.rawTags, tags);
+  assert.equal(r.desc, 'first\r\nsecond');
 });
