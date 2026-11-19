@@ -330,6 +330,10 @@ class DupeService {
         for (let i = 0; i < list.length; i += 200) {
           const part = list.slice(i, i + 200);
           let r;
+          // An answer is as old as the question: it is stamped with the time
+          // the lookup was sent, so a reply that arrives during a later
+          // request never passes that request's cutoff (or a longer TTL).
+          const askedAt = this.now();
           try {
             r = await ad.lookup(part.map((m) => m.rel));
           } catch {
@@ -345,7 +349,7 @@ class DupeService {
             const aud = refs.length && refs.every((x) => x && x.audience === 'general') ? 'general' : 'adult';
             const k = `${m.root}\0${m.rel}`;
             const was = this.appAud.get(k);
-            this.appAud.set(k, { aud, ino: String(m.ino), mtime: m.mtime_ms, at: this.now() });
+            this.appAud.set(k, { aud, ino: String(m.ino), mtime: m.mtime_ms, at: askedAt });
             if (!was || was.aud !== aud || was.ino !== String(m.ino) || was.mtime !== m.mtime_ms) changed = true;
           }
         }

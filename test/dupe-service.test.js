@@ -1177,7 +1177,9 @@ async function mixedFixture(t) {
     lookup: (rels) => {
       state.asked++;
       if (!state.reachable) throw new AdapterError('egram is not reachable right now');
-      return new Map(rels.map((r) => [r, { path: r, role: 'media', refs: [{ type: 'post', id: 1, audience: state.aud }] }]));
+      const answer = new Map(rels.map((r) => [r, { path: r, role: 'media', refs: [{ type: 'post', id: 1, audience: state.aud }] }]));
+      // state.hold: the reply is decided now and delivered later.
+      return state.hold ? state.hold.then(() => answer) : answer;
     },
   }));
   await ctx.scan();
@@ -1252,4 +1254,23 @@ test('a list counts only answers given during its request: a copy outside every 
   svc.invalidate();
   const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audSince: since });
   assert.equal(list.items.length, 0, 'an answer from before the request does not show the copy');
+});
+
+test('a reply that was asked for before a list request began does not count for that list', async (t) => {
+  const { svc, state, tick } = await mixedFixture(t);
+  let release;
+  state.hold = new Promise((r) => { release = r; });
+  // Refresh A asks egram while the post is general; the reply is held.
+  const a = svc.refreshAppAudience();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(state.asked, 1);
+  // The post turns 18+, and a list request B begins; A's reply then lands.
+  state.aud = 'adult';
+  tick(5 * 1000);
+  const since = svc.now();
+  release();
+  await a;
+  state.hold = null;
+  const list = svc.list({ tab: 'identical', status: 'all', adult: 'hide', limit: 200 }, { audSince: since });
+  assert.equal(list.items.length, 0, 'an answer asked for before the request is older than its cutoff');
 });
