@@ -177,10 +177,16 @@ test('the pager says "Loading ..." only while a page is on its way', () => {
   assert.match(body, /finally \{\s*busy = false;\s*more\.removeAttribute\('aria-busy'\);/);
 });
 
-test('Review: "Choose all shown" picks every loaded creator, and big choices go out in parts of 200', () => {
+test('Review: "Choose all shown" and "Choose whole lane", and big choices go out in parts of 200', () => {
   assert.match(js, /'aria-label': 'Choose all creators shown'/);
   assert.match(js, /h\('label', \{ class: 'sg-review-all small' \}, all, 'Choose all shown'\)/);
-  assert.match(js, /all\.indeterminate = selected\.size > 0 && selected\.size < shown;/);
+  assert.match(js, /all\.indeterminate = on > 0 && on < ps\.length;/);
+  // "Choose whole lane" lists every Review creator without samples and chooses them, loaded or not.
+  assert.match(js, /'Choose whole lane'/);
+  assert.match(js, /call\(`creators\$\{cur \? `\?offset=\$\{enc\(cur\)\}` : ''\}`, \{ lane: 'review' \}\)/);
+  assert.match(js, /pick\.checked = selected\.has\(c\.handle\);/);
+  // A large choice shows its progress on the button.
+  assert.match(js, /btn\.textContent = `Sending \$\{Math\.min\(i \+ 200, handles\.length\)\} of \$\{handles\.length\} \.\.\.`;/);
   // The server takes at most 200 handles per request.
   assert.match(js, /for \(let i = 0; i < handles\.length; i \+= 200\)/);
   assert.match(js, /handles: handles\.slice\(i, i \+ 200\)/);

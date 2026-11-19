@@ -1072,10 +1072,12 @@
         if (aud === 'adult' && !confirm(`Mark ${handles.length} creator(s) 18+? They leave Social & Photos.`)) return;
         if (aud === 'general' && handles.length > 1 && !confirm(`Mark ${handles.length} creators general? Their posts show up in every Social & Photos page.`)) return;
         btn.disabled = true;
+        const label = btn.textContent;
         // Grabbit takes at most 200 handles per request, so a large choice is sent in parts.
         const d = { updated: [], skipped: [], mirror_failed: [] };
         try {
           for (let i = 0; i < handles.length; i += 200) {
+            if (handles.length > 200) btn.textContent = `Sending ${Math.min(i + 200, handles.length)} of ${handles.length} ...`;
             const r = await fetch('/api/egram/creators-classify', {
               method: 'POST',
               credentials: 'same-origin',
@@ -1093,6 +1095,7 @@
           fail(d.updated.length ? new Error(`${err.message} (${d.updated.length} were classified before this)`) : err);
         } finally {
           btn.disabled = false;
+          btn.textContent = label;
           // Parts that went through are shown as done even when a later part failed.
           if (after && d.updated.length) after(d);
         }
@@ -1116,21 +1119,43 @@
       const all = h('input', { type: 'checkbox', 'aria-label': 'Choose all creators shown' });
       const picks = () => [...box.querySelectorAll('.sg-review-who input[type="checkbox"]')];
       const sync = () => {
-        const shown = picks().length;
+        const ps = picks();
+        const on = ps.filter((p) => p.checked).length;
         count.textContent = `${selected.size} chosen`;
-        all.checked = shown > 0 && selected.size === shown;
-        all.indeterminate = selected.size > 0 && selected.size < shown;
+        all.checked = ps.length > 0 && on === ps.length;
+        all.indeterminate = on > 0 && on < ps.length;
       };
       all.addEventListener('change', () => {
+        // Clearing it clears the whole choice, including creators chosen by "Choose whole lane".
+        if (!all.checked) selected.clear();
         for (const p of picks()) {
           p.checked = all.checked;
-          const hnd = p.closest('[data-handle]').dataset.handle;
-          if (all.checked) selected.add(hnd); else selected.delete(hnd);
+          if (all.checked) selected.add(p.closest('[data-handle]').dataset.handle);
         }
         sync();
       });
+      // "Choose whole lane" lists every creator in the Review lane (without
+      // samples, page by page) and chooses them all, loaded or not.
+      const whole = h('button', { type: 'button', class: 'btn small ghost' }, 'Choose whole lane');
+      whole.addEventListener('click', async () => {
+        whole.disabled = true;
+        try {
+          let cur = null;
+          do {
+            whole.textContent = `Listing creators ... ${selected.size}`;
+            const d = await call(`creators${cur ? `?offset=${enc(cur)}` : ''}`, { lane: 'review' });
+            for (const c of d.items || []) if (c.post_count && typeof c.handle === 'string') selected.add(c.handle);
+            cur = d.next;
+          } while (cur != null);
+          for (const p of picks()) p.checked = true;
+          sync();
+        } catch (err) { fail(err); } finally {
+          whole.disabled = false;
+          whole.textContent = 'Choose whole lane';
+        }
+      });
       const bar = canClassify()
-        ? h('div', { class: 'sg-review-bar' }, h('label', { class: 'sg-review-all small' }, all, 'Choose all shown'), count, classifyCreatorButtons(() => [...selected], (d) => {
+        ? h('div', { class: 'sg-review-bar' }, h('label', { class: 'sg-review-all small' }, all, 'Choose all shown'), whole, count, classifyCreatorButtons(() => [...selected], (d) => {
           for (const hnd of d.updated || []) {
             const row = box.querySelector(`[data-handle="${CSS.escape(hnd)}"]`);
             if (row) row.remove();
@@ -1150,6 +1175,8 @@
         }, (c) => {
           if (!c.post_count) return null;
           const pick = h('input', { type: 'checkbox', 'aria-label': `Choose ${c.handle}`, disabled: !canClassify() });
+          // A creator already chosen (by "Choose whole lane") arrives ticked.
+          pick.checked = selected.has(c.handle);
           pick.addEventListener('change', () => {
             if (pick.checked) selected.add(c.handle); else selected.delete(c.handle);
             sync();
