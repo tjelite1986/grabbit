@@ -29,6 +29,13 @@ const { hashFrame, hamming } = require('./dupe-phash');
 const ai = require('./dupe-ai');
 const { readCfg, sanitizeCfg, CFG_KEY, flags } = require('./dupe-analyzer');
 
+function sizeText(n) {
+  const u = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return i ? `${n < 10 ? n.toFixed(1) : Math.round(n)} ${u[i]}` : `${n} bytes`;
+}
+
 class DupeError extends Error {
   constructor(message, status = 400, fix = null) {
     super(message);
@@ -75,8 +82,9 @@ class DupeService {
     const shorter = next.trashRetentionDays && (!before.trashRetentionDays || next.trashRetentionDays < before.trashRetentionDays);
     if (shorter && !confirmRetention) {
       const cut = this.now() - next.trashRetentionDays * 86400000;
-      const due = this.trashEntries().filter((t) => t.at < cut).length;
-      throw new DupeError(`Keeping removed copies for ${next.trashRetentionDays} days deletes ${due} held ${due === 1 ? 'copy' : 'copies'} within the hour. Confirm the shorter time to save it.`, 409);
+      const due = this.trashEntries().filter((t) => t.at < cut);
+      const size = sizeText(due.reduce((n, t) => n + t.bytes, 0));
+      throw new DupeError(`Keeping removed copies for ${next.trashRetentionDays} days deletes ${due.length} held ${due.length === 1 ? 'copy' : 'copies'} (${size}) within the hour. Confirm the shorter time to save it.`, 409);
     }
     this.store.setSetting(CFG_KEY, JSON.stringify(next), this.now());
     if (this.analyzer) {
@@ -92,6 +100,41 @@ class DupeService {
   }
 
   invalidate() { this.cache = null; }
+
+  // An app call that failed is closed in the journal. One the app stopped
+  // answering half way stays pending: the app may have carried it out, so
+  // the trash page lists it until the owner has checked it in the app.
+  opFailed(opId, err) {
+    if (err && err.stalled) return;
+    this.dx.opEnd(opId, false, { error: err && err.message }, this.now());
+  }
+
+  // Pending journal rows older than any running call (the adapter gives up
+  // after its timeout), with what the owner should look at.
+  unfinishedOps() {
+    const cut = this.now() - 2 * 60 * 1000;
+    const apps = new Map([...this.adapters.values()].map((a) => [a.id, a.app]));
+    return this.dx.opsPending().filter((o) => o.at < cut).map((o) => {
+      let p = {};
+      try { p = JSON.parse(o.payload) || {}; } catch {}
+      const app = apps.get(o.adapter) || o.adapter;
+      const what = o.op === 'link' ? `Share ${p.drop} with ${p.keep}`
+        : o.op === 'restore' ? `Restore held copy ${p.ref}`
+          : o.op === 'purge' ? `Delete held copy ${p.ref} for good`
+            : `${o.op.replace('cache-', 'Cache ')}`;
+      const check = o.op === 'link' ? `Open ${p.drop} in ${app}: if it now shows the kept file, the share went through and the copy is in ${app}'s trash.`
+        : o.op === 'restore' ? `Check whether the item is back in ${app}; if not, restore it again.`
+          : o.op === 'purge' ? `Check whether the copy is still in ${app}'s trash; if so, delete it again.`
+            : `Check ${app}'s cache page.`;
+      return { id: o.id, app, op: o.op, what, check, at: o.at };
+    });
+  }
+
+  opChecked(id, by) {
+    if (!this.dx.opChecked(id, by, this.now())) throw new DupeError('That operation is not waiting for a check', 404);
+    this.log(`unfinished ${id} checked by ${by || 'owner'}`);
+    return { checked: Number(id) };
+  }
 
   // Background work (retention purge, duplicate prevention) takes the same
   // lock as the owner's actions, but waits for no one: when the lock is held
@@ -663,7 +706,7 @@ class DupeService {
         this.dx.opEnd(opId, true, { result: r }, this.now());
         return { trash: `a${tid}`, merged: true };
       } catch (e) {
-        this.dx.opEnd(opId, false, { error: e.message }, this.now());
+        this.opFailed(opId, e);
         throw e;
       }
     }
@@ -780,6 +823,7 @@ class DupeService {
       hiddenAdult,
       apps: [...new Set(this.trashEntries().map((t) => t.app))].sort(),
       summary: this.trashSummary(),
+      unfinished: this.unfinishedOps(),
       offset,
       limit,
       items: all.slice(offset, offset + limit).map((t) => ({ ...t, preview: t.preview && !(t.audience === 'adult' && adult === 'hide') })),
@@ -812,7 +856,7 @@ class DupeService {
               this.dx.appTrashDone(t.id, 'restored_at', this.now());
               this.dx.opEnd(opId, true, {}, this.now());
             } catch (err) {
-              this.dx.opEnd(opId, false, { error: err.message }, this.now());
+              this.opFailed(opId, err);
               throw err;
             }
             out.done.push({ id: raw, rel: e.rel });
@@ -857,7 +901,7 @@ class DupeService {
       this.dx.opEnd(opId, true, { result: r }, this.now());
       return { bytes: e.bytes };
     } catch (err) {
-      this.dx.opEnd(opId, false, { error: err.message }, this.now());
+      this.opFailed(opId, err);
       throw err;
     }
   }
@@ -951,7 +995,7 @@ class DupeService {
         this.log(`cache ${action} in ${ad.app} by ${by || 'owner'}: ${JSON.stringify(r).slice(0, 200)}`);
         return r;
       } catch (e) {
-        this.dx.opEnd(opId, false, { error: e.message }, this.now());
+        this.opFailed(opId, e);
         throw e;
       }
     });

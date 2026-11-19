@@ -835,8 +835,27 @@
             h('button', { class: 'btn small ghost', type: 'button', onclick: () => doRestore([t.id]) }, ic('restore', 14), ' Restore'),
             h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => doDelete([t.id]) }, 'Delete')))));
       }
+      // App calls that stopped half way: the app may have carried them out,
+      // so they wait here until the owner has looked in the app.
+      const unfinished = (d.unfinished || []).length ? h('section', { class: 'card dm-card' },
+        h('h2', null, ic('restore', 16), ' Unfinished app operations'),
+        h('p', { class: 'dm-warn' }, 'These apps stopped answering half way. The change may or may not have happened; Grabbit has not recorded it in the trash.'),
+        h('ul', { class: 'dm-trash' }, d.unfinished.map((o) => h('li', { class: 'dm-trow' },
+          h('div', { class: 'dm-minfo' },
+            h('b', { class: 'dm-break' }, `${o.app}: ${o.what}`),
+            h('div', { class: 'small dm-break' }, o.check),
+            h('div', { class: 'muted small' }, `Started ${date(o.at)}`)),
+          h('div', { class: 'dm-tact' },
+            h('button', { class: 'btn small ghost', type: 'button', onclick: async (e) => {
+              const btn = e.currentTarget;
+              const ok = await dialog('Mark as checked?', [h('p', null, `Only do this after you have looked in ${o.app}. The entry leaves this list; nothing is changed in ${o.app} or in Grabbit's trash.`)], [{ label: 'Checked', value: true }]);
+              if (!ok) return;
+              await busyBtn(btn, async () => {
+                try { await post(`ops/${o.id}/checked`); viewTrash(body, generation, r); } catch (err) { toast(err.message); }
+              });
+            } }, 'Mark checked')))))) : null;
       const pages = Math.ceil(d.total / PAGE);
-      fill(body, stats, filters, bar, rowsBox,
+      fill(body, stats, unfinished, filters, bar, rowsBox,
         pages > 1 ? h('nav', { class: 'dm-pager' },
           f.page > 0 ? h('a', { class: 'btn small ghost', href: link('trash', { ...f, page: f.page - 1 }) }, 'Previous') : null,
           h('span', { class: 'muted small' }, `Page ${f.page + 1} of ${pages}`),
@@ -916,8 +935,18 @@
         const days = patch.trashRetentionDays;
         let confirmRetention = false;
         if (days && (!was || days < was)) {
+          // Ask the server first: it refuses the shorter time and says how
+          // many held copies, and how much, it would delete.
+          let warning = null;
+          try {
+            await post('settings', { settings: patch });
+          } catch (err) {
+            if (!/Confirm the shorter time/.test(err.message)) { toast(err.message); return; }
+            warning = err.message.replace(/\s*Confirm the shorter time to save it\.$/, '');
+          }
+          if (warning == null) { toast('Settings saved.'); viewSettings(body, generation); return; }
           confirmRetention = await dialog('Shorten how long removed copies are kept?',
-            [h('p', null, `Held copies older than ${days} days are deleted for good within the hour. Copies you may still want back should be restored first.`)],
+            [h('p', null, h('b', null, warning)), h('p', null, 'Copies you may still want back should be restored first.')],
             [{ label: `Keep for ${days} days`, value: true, danger: true }]);
           if (!confirmRetention) return;
         }

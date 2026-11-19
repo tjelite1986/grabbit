@@ -201,3 +201,24 @@ test('a copy across mounts is checked against the sha256 and leaves the source o
   assert.deepEqual(fs.readdirSync(dir).sort(), ['ok.bin', 'src.bin'], 'no .part and no bad copy left');
   assert.equal(fs.readFileSync(path.join(dir, 'ok.bin'), 'utf8'), 'payload');
 });
+
+test('a similar copy never goes when the copy that stays is only waiting in an import folder', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-similar-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const g = path.join(dir, 'g');
+  const imp = path.join(dir, 'imp');
+  fs.mkdirSync(g);
+  fs.mkdirSync(imp);
+  fs.writeFileSync(path.join(g, 'a.jpg'), 'picture a');
+  fs.writeFileSync(path.join(imp, 'b.jpg'), 'picture b');
+  const sha = (b) => require('crypto').createHash('sha256').update(b).digest('hex');
+  const rows = [
+    { id: 1, root: g, rel: 'a.jpg', bytes: 9, sha256: sha('picture a'), mtime_ms: 1, link: 'none', item_id: null },
+    { id: 2, root: imp, rel: 'b.jpg', bytes: 9, sha256: sha('picture b'), mtime_ms: 2, link: 'none', item_id: null },
+  ];
+  const store = { dupeFile: (id) => rows.find((r) => r.id === Number(id)), trashAdd: () => 1, fileGoneNow: () => {} };
+  const roots = { [g]: { owner: 'grabbit' }, [imp]: { owner: 'app', app: 'egram', importFor: '/lib' } };
+  const trash = new DupeTrash({ store, trashDir: path.join(dir, 'trash'), rootOf: (p) => roots[p] || null, now: () => 5 });
+  await assert.rejects(trash.removeSimilar(1, 2), /waiting in egram's import folder/);
+  assert.ok(fs.existsSync(path.join(g, 'a.jpg')), 'nothing moved');
+});

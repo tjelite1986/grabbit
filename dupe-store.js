@@ -371,6 +371,11 @@ function attach(db, file) {
       db.prepare('UPDATE dx.ops SET state = ?, result = ?, error = ?, done_at = ? WHERE id = ?')
         .run(ok ? 'done' : 'failed', result == null ? null : JSON.stringify(result), error ? String(error).slice(0, 500) : null, now, Number(id));
     },
+    // The owner checked an operation the app never answered for.
+    opChecked(id, by = null, now = Date.now()) {
+      return db.prepare("UPDATE dx.ops SET state = 'failed', error = ?, done_at = ? WHERE id = ? AND state = 'pending'")
+        .run(`Checked by ${by || 'the owner'} after the app stopped answering`, now, Number(id)).changes;
+    },
     opsPending: () => db.prepare("SELECT * FROM dx.ops WHERE state = 'pending' ORDER BY id").all(),
     opsRecent: (limit = 50) => db.prepare('SELECT * FROM dx.ops ORDER BY id DESC LIMIT ?').all(Math.min(500, Number(limit) || 50)),
 

@@ -231,6 +231,11 @@ class DupeTrash {
     const r = this.rootOf(row.root);
     if (!r || r.owner !== 'grabbit') throw new TrashError(r && r.app ? `${r.app} owns this file` : 'Unknown folder');
     if (row.link === 'filename' && row.item_id != null) throw new TrashError('Kept: a library item uses this file');
+    // A copy waiting in an import folder may still be moved, rejected or
+    // deleted by its app, so it cannot be the copy that stays.
+    const kr = this.rootOf(keepRow.root);
+    if (!kr) throw new TrashError('The copy that stays is in an unknown folder');
+    if (kr.importFor) throw new TrashError(`The copy that stays is only waiting in ${kr.app || 'an app'}'s import folder; keep another copy`);
     const doomed = realFileOf(row);
     const kept = realFileOf(keepRow);
     if (doomed.stat.size !== row.bytes || kept.stat.size !== keepRow.bytes) throw new TrashError('A file changed since the scan; scan again first');

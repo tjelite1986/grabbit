@@ -258,6 +258,26 @@ test('an adapter that is not ready or refuses leaves the app copy and records no
   assert.equal(r.refused[0].fix, 'Check the app.');
   assert.deepEqual(dx.appTrashHeld(), []);
   assert.deepEqual(dx.opsRecent().map((o) => o.state), ['failed']);
+  // An app that stops answering half way may have done the link: the journal
+  // row stays pending and the trash page lists it until the owner checked it.
+  let clock = 1_000_000;
+  svc.now = () => clock;
+  const stalled = stubAdapter({ link: () => { throw new AdapterError('TikShortis stopped answering half way', { status: 424, stalled: true }); } });
+  adapters.set(tik, stalled);
+  svc.invalidate();
+  r = await svc.act(exactGroup(svc, body).key, 'merge');
+  assert.match(r.refused[0].error, /half way/);
+  assert.deepEqual(dx.opsRecent().map((o) => o.state), ['pending', 'failed']);
+  assert.deepEqual(svc.trashList().unfinished, [], 'a call that may still be running is not listed');
+  clock += 3 * 60 * 1000;
+  const [u] = svc.trashList().unfinished;
+  assert.equal(u.app, 'TikShortis');
+  assert.equal(u.what, 'Share two.mp4 with one.mp4');
+  assert.match(u.check, /Open two\.mp4 in TikShortis/);
+  assert.deepEqual(svc.opChecked(u.id, 'owner'), { checked: u.id });
+  assert.deepEqual(svc.trashList().unfinished, []);
+  assert.throws(() => svc.opChecked(u.id, 'owner'), (e) => e.status === 404);
+  assert.deepEqual(dx.appTrashHeld(), []);
   assert.ok(fs.existsSync(path.join(tik, 'two.mp4')));
 });
 
@@ -752,6 +772,9 @@ test('the trash defaults to manual cleanup, and a time limit needs its own confi
   assert.equal(svc.setCfg({ trashRetentionDays: 30 }, 'owner', { confirmRetention: true }).trashRetentionDays, 30);
   assert.equal(svc.setCfg({ trashRetentionDays: 60 }).trashRetentionDays, 60, 'longer needs no confirmation');
   assert.throws(() => svc.setCfg({ trashRetentionDays: 7 }), /Confirm the shorter time/);
+  svc.trashEntries = () => [{ at: 0, bytes: 3 * 1024 * 1024 }, { at: 0, bytes: 1024 * 1024 }, { at: svc.now(), bytes: 1 }];
+  assert.throws(() => svc.setCfg({ trashRetentionDays: 14 }), /deletes 2 held copies \(4\.0 MB\) within the hour/);
+  delete svc.trashEntries;
   assert.equal(svc.setCfg({ trashRetentionDays: 0 }).trashRetentionDays, 0, 'back to manual needs none');
 });
 

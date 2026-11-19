@@ -212,6 +212,10 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     return { started: true };
   }));
   r.get('/prevention', wrap((req) => ({ items: service.dx.preventionRecent(req.query.limit) })));
+  r.post('/ops/:id/checked', wrap((req) => {
+    if (!/^[1-9][0-9]{0,15}$/.test(req.params.id)) throw new DupeError('Not a valid id');
+    return service.opChecked(req.params.id, who(req));
+  }));
   r.get('/history', wrap(() => ({ history: service.dx.history(50), ops: service.dx.opsRecent(50) })));
 
   r.use((req, res) => res.status(404).json({ ok: false, error: 'Not found' }));

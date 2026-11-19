@@ -27,10 +27,12 @@
 const fs = require('fs');
 
 class AdapterError extends Error {
-  constructor(message, { status = 409, fix = null } = {}) {
+  constructor(message, { status = 409, fix = null, stalled = false } = {}) {
     super(message);
     this.status = status;
     this.fix = fix;
+    // The app may or may not have carried the request out.
+    this.stalled = stalled;
   }
 }
 
@@ -103,7 +105,7 @@ class AppAdapter {
       clearTimeout(timer);
     }
     if (stalled) {
-      throw new AdapterError(`${this.app} stopped answering half way`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.` });
+      throw new AdapterError(`${this.app} stopped answering half way`, { status: 424, fix: `The request may have been carried out; check the item in ${this.app} before trying again.`, stalled: true });
     }
     if (res.status === 404 && (!j || !j.error)) {
       throw new AdapterError(`${this.app} does not have the dedupe operations yet`, { status: 424, fix: `Install the ${this.app} version that ships the Grabbit dedupe v1 routes.` });
