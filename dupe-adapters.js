@@ -203,12 +203,23 @@ class AppAdapter {
   async purge(ref) {
     const body = refBody(ref);
     const j = await this.call('POST', 'purge', body);
-    return this.confirm(j, (x) => x.id === body.id && (x.bytes == null || (Number.isFinite(x.bytes) && x.bytes >= 0)), 'delete');
+    return this.confirm(j, (x) => x.id === body.id && Number.isSafeInteger(x.bytes) && x.bytes >= 0, 'delete');
   }
 
   async cache() {
     if (!this.caps.has('cache')) return null;
     return this.call('GET', 'cache');
+  }
+
+  // A rebuild answer must say what it made and where it stopped: `cursor` is
+  // present and a string, or null for "done". An answer without it ({}, [])
+  // would read as finished and drop the saved place, so it stays pending.
+  async cacheRebuild(body) {
+    if (!this.caps.has('cache')) throw new AdapterError(`${this.app} has no thumbnail rebuild`);
+    const j = await this.call('POST', 'cache/rebuild', body);
+    const count = (n) => Number.isSafeInteger(n) && n >= 0;
+    if (body && body.dryRun) return this.confirm(j, (x) => count(x.missing) && 'cursor' in x && (x.cursor === null || typeof x.cursor === 'string'), 'thumbnail check');
+    return this.confirm(j, (x) => count(x.made) && count(x.failed) && 'cursor' in x && (x.cursor === null || typeof x.cursor === 'string'), 'thumbnail rebuild');
   }
 
   async cacheClean(dryRun) {

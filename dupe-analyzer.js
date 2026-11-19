@@ -17,7 +17,7 @@ const media = require('./dupe-media');
 const { hashFrame } = require('./dupe-phash');
 const { classify } = require('./dupe-classify');
 const ai = require('./dupe-ai');
-const { groupPhotos } = require('./dupe-photo');
+const { groupPhotosAsync } = require('./dupe-photo');
 const { groupVideos, packFrames, packProbes, PROBE_AT } = require('./dupe-video');
 
 const STATE_KEY = 'dupes.analyze.state';
@@ -361,11 +361,24 @@ class Analyzer {
     for (const kind of ['photo', 'video']) {
       if (!this.dirty[kind]) continue;
       if (!force && this.now() - this.lastGroupAt[kind] < 10 * 60 * 1000) continue;
-      this.regroup(kind);
+      await this.regroup(kind);
     }
   }
 
+  // Photo grouping hands the event loop back while it works; the previous
+  // groups stay in place until the new ones replace them. One regroup per
+  // kind at a time: a second call waits for the running one.
   regroup(kind) {
+    this.grouping = this.grouping || {};
+    if (this.grouping[kind]) return this.grouping[kind];
+    const run = this.regroupNow(kind)
+      .catch((e) => { this.dirty[kind] = true; throw e; })
+      .finally(() => { this.grouping[kind] = null; });
+    this.grouping[kind] = run;
+    return run;
+  }
+
+  async regroupNow(kind) {
     const c = this.cfg();
     const t0 = this.now();
     this.phase = `grouping ${kind}s`;
@@ -376,12 +389,14 @@ class Analyzer {
       const en = this.enabled();
       const vecs = new Map();
       if (en.ai) for (const e of this.dx.embeddings(c.model, ai.versionOf(c.model))) vecs.set(e.sha256, e.vec);
-      r = groupPhotos(feats, vecs, { mode: c.mode === 'custom' ? 'balanced' : c.mode, threshold: ai.thresholdFor(c.model, c.sensitivity), decisions });
+      // Cleared before the work: a change while it runs marks it dirty again.
+      this.dirty[kind] = false;
+      r = await groupPhotosAsync(feats, vecs, { mode: c.mode === 'custom' ? 'balanced' : c.mode, threshold: ai.thresholdFor(c.model, c.sensitivity), decisions });
     } else {
       r = groupVideos(this.dx.featureRows('video'), { decisions });
     }
     this.dx.replaceGroups(kind, r.groups, this.now());
-    this.dirty[kind] = false;
+    if (kind !== 'photo') this.dirty[kind] = false;
     this.lastGroupAt[kind] = this.now();
     this.lastGroupStats[kind] = { groups: r.groups.length, compared: r.compared, candidates: r.candidates, ms: this.now() - t0, at: this.now() };
     return this.lastGroupStats[kind];

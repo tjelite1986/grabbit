@@ -1048,7 +1048,7 @@ class DupeService {
       throw badCursor();
     }
     const body = { dryRun: Boolean(dryRun), retryFailed: Boolean(retryFailed), ...(cursor != null ? { cursor } : {}) };
-    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.call('POST', 'cache/rebuild', body).catch((e) => {
+    const run = () => (action === 'clean' ? ad.cacheClean(dryRun) : ad.cacheRebuild(body).catch((e) => {
       // egram answers a cursor it did not hand out with 400 "Invalid cursor".
       if (cursor != null && e instanceof AdapterError && !e.stalled && /^Invalid cursor$/i.test(e.message)) throw badCursor();
       throw e;
@@ -1156,15 +1156,30 @@ class DupeService {
               const realRoot = fs.realpathSync(o.root);
               if (fs.realpathSync(keepAbs) !== path.join(realRoot, path.relative(o.root, keepAbs))) throw new Error('the existing copy is reached through a symlink');
               if (ks.dev !== st.dev) throw new Error('different disks');
-              const tmp = `${abs}.dedupe-${process.pid}`;
+              const tmp = `${abs}.dedupe-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
               fs.linkSync(keepAbs, tmp);
-              if ((await sha256File(tmp)) !== sha) { fs.unlinkSync(tmp); throw new Error('the existing copy changed'); }
-              // The download must still be the file that was hashed; a newer file
-              // in its place is never overwritten.
+              // The stage is the existing copy's inode; it is removed again
+              // only while it still is that inode.
+              const ss = fs.lstatSync(tmp);
+              const drop = () => { try { const n = fs.lstatSync(tmp); if (n.dev === ss.dev && n.ino === ss.ino) fs.unlinkSync(tmp); } catch {} };
+              if (ss.dev !== ks.dev || ss.ino !== ks.ino) { drop(); throw new Error('the existing copy changed'); }
+              let hashed;
+              try { hashed = await sha256File(tmp); } catch (e) { drop(); throw e; }
+              if (hashed !== sha) { drop(); throw new Error('the existing copy changed'); }
+              // The hash was slow: right before the rename the stage must
+              // still be the inode that was hashed (unchanged), and the
+              // download still the file that was hashed. A newer file in
+              // either place is never renamed or overwritten.
+              let stage = null;
               let now = null;
+              try { stage = fs.lstatSync(tmp); } catch {}
               try { now = fs.lstatSync(abs); } catch {}
-              if (!now || now.dev !== st.dev || now.ino !== st.ino || now.size !== st.size) {
-                fs.unlinkSync(tmp);
+              if (!stage || !stage.isFile() || stage.dev !== ss.dev || stage.ino !== ss.ino || stage.size !== ss.size || stage.mtimeMs !== ss.mtimeMs) {
+                drop();
+                throw new Error('the existing copy changed while it was checked');
+              }
+              if (!now || !now.isFile() || now.dev !== st.dev || now.ino !== st.ino || now.size !== st.size || now.mtimeMs !== st.mtimeMs) {
+                drop();
                 throw new Error('the new file changed while it was checked');
               }
               fs.renameSync(tmp, abs);

@@ -452,6 +452,38 @@ test('where hard links are refused, a published copy never replaces a name that 
   assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.part')), []);
 });
 
+// Round 8: on a read error the exclusive copy's descriptor is closed exactly
+// once, by its owner, after the writer has settled (a stream destroy would
+// close it too, and a later close could hit a reused descriptor number).
+test('a read error during the exclusive copy closes its descriptor once', async () => {
+  const { placeCopy } = require('../dupe-trash');
+  const { Readable } = require('stream');
+  const { g, dir } = mergeFixture();
+  const to = path.join(dir, 'target-fd.mp4');
+  const link = fs.linkSync, open = fs.openSync, crs = fs.createReadStream, close = fs.close, closeSync = fs.closeSync;
+  let fd = null;
+  const closes = [];
+  fs.linkSync = () => { const e = new Error('no links'); e.code = 'EPERM'; throw e; };
+  fs.openSync = (p, flags, ...rest) => { const n = open(p, flags, ...rest); if (p === to && flags === 'wx') fd = n; return n; };
+  fs.createReadStream = (p, ...rest) => {
+    if (String(p).endsWith('.part')) {
+      return new Readable({ read() { this.push(Buffer.from('some')); this.destroy(Object.assign(new Error('EIO: read'), { code: 'EIO' })); } });
+    }
+    return crs(p, ...rest);
+  };
+  fs.close = (n, cb) => { if (n === fd) closes.push('close'); return close(n, cb); };
+  fs.closeSync = (n) => { if (n === fd) closes.push('closeSync'); return closeSync(n); };
+  try {
+    await assert.rejects(placeCopy(path.join(g, 'a.mp4'), to), /EIO/);
+    await new Promise((r) => setTimeout(r, 50));
+  } finally {
+    Object.assign(fs, { linkSync: link, openSync: open, createReadStream: crs, close, closeSync });
+  }
+  assert.ok(fd != null, 'the exclusive create ran');
+  assert.deepEqual(closes, ['closeSync'], 'closed once, by its owner');
+  assert.ok(!fs.existsSync(to), 'the half copy is removed');
+});
+
 // Round 5: the directory syncs are slow disk I/O, so they come before the
 // last identity check, never between it and the unlink.
 test('a source replaced while the trash folder is synced is never unlinked', async () => {

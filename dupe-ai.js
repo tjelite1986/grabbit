@@ -235,7 +235,33 @@ const dot = (a, b) => {
 // Random-hyperplane LSH over normalised vectors: candidate pairs share a
 // bucket in at least one of `tables` tables of `bits` signs each. Seeded, so
 // a run is reproducible.
-function lshPairs(vecs, { tables = 14, bits = 12, maxBucket = 300, seed = 1 } = {}) {
+// Long grouping work is written as a generator that yields at checkpoints.
+// runSync() drives it to the end in one go (tests, small inputs); runAsync()
+// hands the event loop back at every checkpoint, so a large library never
+// stalls the server's other requests.
+function runSync(gen) {
+  for (;;) {
+    const r = gen.next();
+    if (r.done) return r.value;
+  }
+}
+async function runAsync(gen, { sliceMs = 20 } = {}) {
+  let t = Date.now();
+  for (;;) {
+    const r = gen.next();
+    if (r.done) return r.value;
+    if (Date.now() - t >= sliceMs) {
+      await new Promise((resolve) => setImmediate(resolve));
+      t = Date.now();
+    }
+  }
+}
+
+function lshPairs(vecs, opts) {
+  return runSync(lshPairsGen(vecs, opts));
+}
+
+function* lshPairsGen(vecs, { tables = 14, bits = 12, maxBucket = 300, seed = 1 } = {}) {
   if (!vecs.length) return new Set();
   const dim = vecs[0].length;
   let s = seed >>> 0;
@@ -250,19 +276,24 @@ function lshPairs(vecs, { tables = 14, bits = 12, maxBucket = 300, seed = 1 } = 
   for (let tb = 0; tb < tables; tb++) {
     const planes = Array.from({ length: bits }, () => Float32Array.from({ length: dim }, rnd));
     const buckets = new Map();
-    vecs.forEach((v, idx) => {
+    for (let idx = 0; idx < vecs.length; idx++) {
+      const v = vecs[idx];
       let key = 0;
       for (let b = 0; b < bits; b++) if (dot(v, planes[b]) > 0) key |= 1 << b;
       let arr = buckets.get(key);
       if (!arr) buckets.set(key, (arr = []));
       arr.push(idx);
-    });
+      if (idx % 256 === 255) yield;
+    }
     for (const arr of buckets.values()) {
       if (arr.length < 2 || arr.length > maxBucket) continue;
-      for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) pairs.add(`${arr[i]}|${arr[j]}`);
+      for (let i = 0; i < arr.length; i++) {
+        for (let j = i + 1; j < arr.length; j++) pairs.add(`${arr[i]}|${arr[j]}`);
+        yield;
+      }
     }
   }
   return pairs;
 }
 
-module.exports = { MODELS, MODES, DEFAULT_SENSITIVITY, PREP_VERSION, versionOf, thresholdFor, ModelManager, Embedder, toTensorData, normalise, dot, lshPairs, runtime };
+module.exports = { MODELS, MODES, DEFAULT_SENSITIVITY, PREP_VERSION, versionOf, thresholdFor, ModelManager, Embedder, toTensorData, normalise, dot, lshPairs, lshPairsGen, runSync, runAsync, runtime };

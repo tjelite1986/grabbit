@@ -187,8 +187,8 @@ test('content is analysed once per sha256 and look-alike pictures and videos gro
     assert.equal(f.duration, 8);
     assert.ok(f.frames.length >= 3 * 12);
   }
-  assert.equal(an.regroup('photo').groups, 1);
-  assert.equal(an.regroup('video').groups, 1);
+  assert.equal((await an.regroup('photo')).groups, 1);
+  assert.equal((await an.regroup('video')).groups, 1);
   const pg = dx.simGroups('photo');
   assert.deepEqual(pg[0].members.map((m) => m.sha256).sort(), [a1, a2].sort());
   const vg = dx.simGroups('video');

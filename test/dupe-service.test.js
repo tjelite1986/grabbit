@@ -138,6 +138,7 @@ function stubAdapter(o = {}) {
     async cache() { calls.push(['cache']); if (o.cache) return o.cache(); return null; },
     async cacheClean(dryRun) { calls.push(['cacheClean', dryRun]); return { removed: dryRun ? 0 : 2, dryRun }; },
     async call(method, route, body) { calls.push(['call', method, route, body]); return { ok: true }; },
+    async cacheRebuild(body) { return ad.call('POST', 'cache/rebuild', body); },
   };
   return ad;
 }
@@ -679,6 +680,40 @@ test('prevention link stores a new Grabbit copy once, with the existing file', a
   assert.equal(hit.action, 'link');
   assert.equal(ino(abs), ino(path.join(own, 'old.mp4')));
   assert.deepEqual(fs.readdirSync(own).sort(), ['new.mp4', 'old.mp4'], 'no temp file left behind');
+});
+
+// Round 8: the stage is hashed asynchronously; a file put at the stage name
+// meanwhile is never renamed over the download, and is not removed either.
+test('prevention link refuses a stage replaced while it is hashed', async (t) => {
+  const { own, svc, scan } = setup(t);
+  const body = 'link me too';
+  write(path.join(own, 'old.mp4'), body, 1000);
+  await scan();
+  svc.setCfg({ prevention: { exact: 'link' } });
+  const abs = path.join(own, 'new.mp4');
+  write(abs, body);
+  const before = ino(abs);
+  const crs = fs.createReadStream;
+  let intruder = null;
+  fs.createReadStream = (p, ...rest) => {
+    const rs = crs(p, ...rest);
+    if (String(p).includes('.dedupe-') && !intruder) {
+      rs.on('open', () => { fs.writeFileSync(`${p}.x`, body); fs.renameSync(`${p}.x`, p); intruder = String(p); });
+    }
+    return rs;
+  };
+  let hit;
+  try {
+    [hit] = await svc.checkSaved({ id: 'j', savedPaths: [abs] });
+  } finally {
+    fs.createReadStream = crs;
+  }
+  assert.ok(intruder, 'the stage was replaced during the hash');
+  assert.equal(hit.action, 'review');
+  assert.match(hit.detail, /changed while it was checked/);
+  assert.equal(ino(abs), before, 'the download is untouched');
+  assert.ok(fs.existsSync(intruder), "the stage name now holds someone else's file, which stays");
+  fs.unlinkSync(intruder);
 });
 
 test('prevention never skips or links a new file in an app folder: it is a post of its own', async (t) => {

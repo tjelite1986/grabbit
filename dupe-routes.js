@@ -187,11 +187,11 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     console.log(`dupes: scan ${a} by ${who(req)}`);
     return { scan: scanner[map[a]]() };
   }));
-  r.post('/analysis', wrap((req) => {
+  r.post('/analysis', wrap(async (req) => {
     if (!analyzer) throw new DupeError('The analysis is not available on this server', 409);
     const a = (req.body || {}).action;
     if (a === 'regroup') {
-      return { photo: analyzer.regroup('photo'), video: analyzer.regroup('video') };
+      return { photo: await analyzer.regroup('photo'), video: await analyzer.regroup('video') };
     }
     const map = { start: 'start', resume: 'start', pause: 'pause', stop: 'stop' };
     if (typeof a !== 'string' || !Object.hasOwn(map, a)) throw new DupeError('action must be start, pause, resume, stop or regroup');

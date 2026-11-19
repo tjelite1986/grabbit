@@ -734,7 +734,10 @@
                 for (let round = 0; round < 50; round++) {
                   btn.textContent = made ? `Rebuilding ... ${num(made)} made` : 'Rebuilding ...';
                   try {
-                    x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0, ...(cursor != null ? { cursor } : {}) })).result || {};
+                    x = (await post(`cache/${a.id}/rebuild`, { dryRun: false, retryFailed: retryFailed && round === 0, ...(cursor != null ? { cursor } : {}) })).result;
+                    // Only an answer that names where it stopped (a cursor,
+                    // or null for done) moves the saved place.
+                    if (!x || typeof x !== 'object' || !('cursor' in x)) throw new Error(`${a.app} answered the rebuild in a form Grabbit does not recognise; the saved place is kept`);
                   } catch (err) {
                     // Only a place the app says it no longer accepts is
                     // dropped, so the next run starts over instead of failing

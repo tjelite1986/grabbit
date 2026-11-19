@@ -362,3 +362,23 @@ test('a refusal carrying mayHaveChanged in any form stays pending', async () => 
     await assert.rejects(adapter({ fetchImpl }).purge('1:' + 'a'.repeat(32)), (e) => e.stalled === true, `mayHaveChanged ${JSON.stringify(flag)}`);
   }
 });
+
+// Round 8: a rebuild answer must carry its counts and an explicit cursor
+// (string or null); anything else stays pending instead of reading as done.
+test('cacheRebuild accepts only an answer with counts and an explicit cursor', async () => {
+  const ok = { made: 2, failed: 0, cursor: 'v1.40' };
+  assert.deepEqual(await adapter({ fetchImpl: stubFetch(() => jsonRes(200, ok)) }).cacheRebuild({ dryRun: false }), ok);
+  assert.equal((await adapter({ fetchImpl: stubFetch(() => jsonRes(200, { made: 0, failed: 0, cursor: null })) }).cacheRebuild({ dryRun: false })).cursor, null);
+  for (const bad of [{}, [], { made: 1, failed: 0 }, { made: 1, failed: 0, cursor: 7 }, { made: -1, failed: 0, cursor: null }]) {
+    await assert.rejects(adapter({ fetchImpl: stubFetch(() => jsonRes(200, bad)) }).cacheRebuild({ dryRun: false }), (e) => e.status === 424 && e.stalled === true, JSON.stringify(bad));
+  }
+  assert.equal((await adapter({ fetchImpl: stubFetch(() => jsonRes(200, { missing: 3, cursor: null })) }).cacheRebuild({ dryRun: true })).missing, 3);
+  await assert.rejects(adapter({ fetchImpl: stubFetch(() => jsonRes(200, { missing: 3 })) }).cacheRebuild({ dryRun: true }), (e) => e.status === 424);
+});
+
+test('purge needs an integer byte count', async () => {
+  const ref = '12:abc';
+  for (const bad of [{ id: 12 }, { id: 12, bytes: null }, { id: 12, bytes: 1.5 }]) {
+    await assert.rejects(adapter({ fetchImpl: stubFetch(() => jsonRes(200, bad)) }).purge(ref), (e) => e.status === 424, JSON.stringify(bad));
+  }
+});

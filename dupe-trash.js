@@ -175,13 +175,23 @@ async function streamExclusive(from, to, sha256) {
     const st0 = fs.fstatSync(fd);
     made = { dev: st0.dev, ino: st0.ino };
     const h = crypto.createHash('sha256');
+    // The descriptor belongs to this function alone: the write stream never
+    // closes it (autoClose: false, and it is never destroyed, since destroy
+    // closes even then). On a read error the pipe is cut and the writer is
+    // ended, and the promise settles only once every pending write has
+    // finished or failed; only then does `finally` close the descriptor.
     await new Promise((resolve, reject) => {
       const out = fs.createWriteStream(null, { fd, autoClose: false });
       const src = fs.createReadStream(from);
-      src.on('error', (e) => { out.destroy(); reject(e); });
-      out.on('error', reject);
+      let readErr = null;
+      src.on('error', (e) => {
+        readErr = e;
+        src.unpipe(out);
+        out.end();
+      });
+      out.on('error', (e) => reject(readErr || e));
       src.on('data', (c) => h.update(c));
-      out.on('finish', resolve);
+      out.on('finish', () => (readErr ? reject(readErr) : resolve()));
       src.pipe(out);
     });
     if (sha256 && h.digest('hex') !== sha256) throw new TrashError('The copy does not match the original; nothing changed');

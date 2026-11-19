@@ -17,7 +17,7 @@
 // and AI matches are review-only.
 
 const { hamming, bandPairs } = require('./dupe-phash');
-const { lshPairs, dot } = require('./dupe-ai');
+const { lshPairsGen, dot, runSync, runAsync } = require('./dupe-ai');
 const { cliques, pk } = require('./dupe-group');
 
 // Per mode: the largest pHash distance that still counts as the same picture,
@@ -61,6 +61,15 @@ function explainPair(a, b, link) {
 // features: rows of dx.features (kind image). embeddings: Map sha -> Float32Array.
 // opts: { mode, threshold (cosine for "similar"), decisions: Map "a|b" -> decision }
 function groupPhotos(features, embeddings = new Map(), opts = {}) {
+  return runSync(groupPhotosGen(features, embeddings, opts));
+}
+
+// The same, handing the event loop back while it works (the analyzer's path).
+function groupPhotosAsync(features, embeddings = new Map(), opts = {}) {
+  return runAsync(groupPhotosGen(features, embeddings, opts));
+}
+
+function* groupPhotosGen(features, embeddings = new Map(), opts = {}) {
   const mode = PHASH_NEAR[opts.mode] != null ? opts.mode : 'balanced';
   const near = opts.phashNear != null ? opts.phashNear : PHASH_NEAR[mode];
   const thr = opts.threshold != null ? opts.threshold : 0.955;
@@ -70,14 +79,16 @@ function groupPhotos(features, embeddings = new Map(), opts = {}) {
   const cand = bandPairs(items.map((f) => ({ hashes: phashList(f) })), { bands: 8, maxBucket: 400 });
   const withVec = items.map((f, i) => [i, embeddings.get(f.sha256)]).filter(([, v]) => v);
   if (withVec.length > 1) {
-    for (const p of lshPairs(withVec.map(([, v]) => v))) {
+    for (const p of yield* lshPairsGen(withVec.map(([, v]) => v))) {
       const [x, y] = p.split('|').map(Number);
       cand.add(pk(withVec[x][0], withVec[y][0]));
     }
   }
 
   const links = new Map();
+  let n = 0;
   for (const p of cand) {
+    if (++n % 512 === 0) yield;
     const [i, j] = p.split('|').map(Number);
     const a = items[i];
     const b = items[j];
@@ -132,4 +143,4 @@ function groupPhotos(features, embeddings = new Map(), opts = {}) {
   return { groups, candidates: cand.size, links: links.size, compared: items.length };
 }
 
-module.exports = { groupPhotos, phashDistance, PHASH_NEAR, COS_NEAR, explainPair };
+module.exports = { groupPhotos, groupPhotosAsync, phashDistance, PHASH_NEAR, COS_NEAR, explainPair };

@@ -155,3 +155,26 @@ test('real pictures: resized, recompressed, converted and rotated copies group w
     for (const g of r.groups) assert.equal(g.match, 'near');
   }
 });
+
+// Round 8: photo grouping over many embeddings hands the event loop back
+// while it works, and gives the same groups as the one-go version.
+test('groupPhotosAsync yields to the event loop and matches groupPhotos', async () => {
+  const { groupPhotosAsync } = require('../dupe-photo');
+  const rnd = (() => { let s = 7; return () => ((s = (s * 1103515245 + 12345) >>> 0) / 4294967296) - 0.5; })();
+  const unitv = (a) => { const n = Math.hypot(...a); return Float32Array.from(a, (x) => x / n); };
+  const rows = [];
+  const vecs = new Map();
+  for (let i = 0; i < 3000; i++) {
+    const sha = `s${i}`;
+    rows.push(feat(sha, i % 2 ? A : UNRELATED));
+    vecs.set(sha, unitv(Array.from({ length: 64 }, rnd)));
+  }
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 1);
+  const r = await groupPhotosAsync(rows, vecs, {});
+  clearInterval(timer);
+  assert.ok(ticks > 0, 'timers ran while grouping');
+  const s = groupPhotos(rows, vecs, {});
+  assert.equal(r.groups.length, s.groups.length);
+  assert.equal(r.candidates, s.candidates);
+});
