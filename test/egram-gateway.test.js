@@ -801,6 +801,12 @@ test('identities are asked afresh for every answer: a new 18+ alias applies at o
 
 test('notifications/read forwards only the ids the module showed', async () => {
   handlers['POST /api/notifications/read'] = json(200, { ok: true });
+  handlers['/api/notifications'] = json(200, { items: [
+    { id: 3, kind: 'like', text: 'a', post_id: null, creator_handle: null, post_author_handle: null },
+    { id: 4, kind: 'like', text: 'b', post_id: null, creator_handle: null, post_author_handle: null },
+    { id: 5, kind: 'like', text: 'c', post_id: 9, creator_handle: null, post_author_handle: 'hid18', post_author_type: 'user' },
+  ] });
+  adultSet = new Set(['hid18']);
   try {
     assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: {} })).status, 400, 'no ids');
     assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: { ids: [] } })).status, 400);
@@ -808,7 +814,15 @@ test('notifications/read forwards only the ids the module showed', async () => {
     const r = await call('POST', '/api/egram/api/notifications/read', { body: { ids: [3, 4], extra: 1 } });
     assert.equal(r.status, 200);
     assert.deepEqual(JSON.parse(last().body), { ids: [3, 4] });
+    // An id Grabbit hid (an 18+ author) and an unknown one are dropped.
+    assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: { ids: [4, 5, 99] } })).status, 200);
+    assert.deepEqual(JSON.parse(last().body), { ids: [4] });
+    const before = seen.length;
+    assert.equal((await call('POST', '/api/egram/api/notifications/read', { body: { ids: [5] } })).status, 200);
+    assert.ok(!seen.slice(before).some((q) => q.method === 'POST'), 'nothing to mark: no write upstream');
   } finally {
+    adultSet = new Set();
+    delete handlers['/api/notifications'];
     delete handlers['POST /api/notifications/read'];
   }
 });

@@ -635,6 +635,18 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     return value !== null && dropped === 0 && value.audience === LANES[lane];
   }
 
+  // The notification ids this lane lists after Grabbit's filter. -> Set | 401
+  async function visibleNotificationIds(req, cur, lane, downstream) {
+    const r = await upstream(req, { method: 'GET', path: '/api/notifications', headers: { accept: 'application/json', ...authHeaders(cur, lane) } });
+    if (r.statusCode === 401) { r.resume(); return 401; }
+    if (r.statusCode !== 200) { r.resume(); throw new Error(`Elitogram answered ${r.statusCode}`); }
+    const d = await readJson(r);
+    const ids = await identitiesFor(req, cur, lane, handlesIn(d), downstream);
+    const { value } = filterAnswer(d, LANES[lane], adultTest(ids));
+    const items = value && Array.isArray(value.items) ? value.items : [];
+    return new Set(items.filter((n) => n && Number.isInteger(n.id)).map((n) => n.id));
+  }
+
   // A new post. The multipart body goes upstream as it arrives (Elitogram
   // stores files at original quality). The answer is reduced to the new id and
   // the files Elitogram refused: whether the post is general, in review or 18+
@@ -710,6 +722,18 @@ function createGateway({ apiUrl, secret, isAdultHandle = null, bindingOf = () =>
     }
     if (route.ids && !(Array.isArray(src.ids) && src.ids.length >= 1 && src.ids.length <= 500 && src.ids.every((x) => Number.isInteger(x) && x > 0))) {
       return fail(res, 400, 'ids must list 1 to 500 notification ids');
+    }
+    if (route.ids) {
+      // Only ids this lane would list after Grabbit's own filter: a client may
+      // not mark read a notification the gateway hid from it.
+      let shown;
+      try { shown = await visibleNotificationIds(req, cur, lane, res); } catch (e) {
+        log.warn(`[egram] notifications check: ${e.message}`);
+        return fail(res, 424, 'Elitogram is not reachable right now');
+      }
+      if (shown === 401) { res.setHeader('Set-Cookie', cookieHeader(req, '', 0)); return fail(res, 401, 'Link your Elitogram account first'); }
+      src.ids = [...new Set(src.ids)].filter((x) => shown.has(x));
+      if (!src.ids.length) return res.status(200).set('Cache-Control', 'no-store').json({ ok: true });
     }
     if (route.parent) {
       const pid = route.parent === 'body' ? src.post_id : Number(route.p.exec(rest)[route.parent === 'path2' ? 2 : 1]);
