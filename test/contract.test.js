@@ -275,6 +275,17 @@ test('v1: whoami, targets, jobs, status and scope', async () => {
   const bad = await post({ url: 'file:///etc/passwd', target: 'server.downloads' });
   assert.equal(bad.status, 400);
 
+  // quality is an optional integer height cap; anything else is refused before a job exists.
+  for (const quality of [100, 9000, '720', 720.5, 'best']) {
+    const r = await post({ url: 'http://127.0.0.1:9/q', target: 'server.downloads', quality });
+    assert.equal(r.status, 400, `quality ${JSON.stringify(quality)}`);
+    assert.equal((await r.json()).error.code, 'invalid_request');
+  }
+  const capped = await post({ url: 'http://127.0.0.1:9/q', target: 'server.downloads', quality: 720 });
+  assert.equal(capped.status, 202);
+  const nullQuality = await post({ url: 'http://127.0.0.1:9/q2', target: 'server.downloads', quality: null });
+  assert.equal(nullQuality.status, 202);
+
   // A private address: the URL guard fails the job without any network call.
   const ok = await post({ url: 'http://127.0.0.1:9/x', target: 'server.downloads' }, { 'Idempotency-Key': 'k1' });
   assert.equal(ok.status, 202);

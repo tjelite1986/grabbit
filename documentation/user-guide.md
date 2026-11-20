@@ -920,7 +920,7 @@ v1 endpoints take `Authorization: Bearer gda_<client>_<random>` and answer
 |---|---|
 | `GET /api/v1/whoami` | client id, audience, allowed targets |
 | `GET /api/v1/targets` | targets this client may use |
-| `POST /api/v1/jobs` | `{ "url", "target" }`, optional `Idempotency-Key` header, returns `202` and `job_id` |
+| `POST /api/v1/jobs` | `{ "url", "target" }`, optional `"quality"` (integer max height 144–4320, e.g. `720`: the best format at or below it, else the best there is; yt-dlp sites only), optional `Idempotency-Key` header, returns `202` and `job_id` |
 | `GET /api/v1/jobs/:id` | `queued`, `fetching`, `stored`, `delivered`, `failed` or `cancelled` (only the client's own jobs) |
 
 
