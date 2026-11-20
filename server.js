@@ -8538,10 +8538,15 @@ app.post('/api/v1/jobs', (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const url = typeof body.url === 'string' ? body.url : '';
   const target = typeof body.target === 'string' ? body.target : '';
+  // Optional resolution cap (max height in px). yt-dlp then takes the best
+  // format at or below it, and the best there is when nothing is that small.
+  const hasQuality = body.quality !== undefined && body.quality !== null;
+  const quality = hasQuality && Number.isInteger(body.quality) ? parseQuality(String(body.quality)) : null;
   try {
     if (!gda.TARGETS[target]) throw new gda.GdaError('unknown_target');
     gda.authorize(who, target, 'job');
     if (!validUrl(url)) throw new gda.GdaError('invalid_request', 'Invalid URL');
+    if (hasQuality && !quality) throw new gda.GdaError('invalid_request', 'quality must be an integer height from 144 to 4320');
   } catch (e) {
     console.log(`gda: client=${who.id} target=${target || '-'} via=v1 result=deny code=${e.code || 'invalid'}`);
     return v1Fail(res, e);
@@ -8556,6 +8561,7 @@ app.post('/api/v1/jobs', (req, res) => {
   }
   const l = gda.TARGETS[target].legacy;
   const query = { url, dest: l.dest, channel: l.channel, folder: l.folder, device: '0' };
+  if (quality) query.quality = String(quality);
   const out = startJobFromQuery(query, who, 'v1');
   if (out.gdaError) return v1Fail(res, out.gdaError);
   if (!out.body.ok) return v1Fail(res, new gda.GdaError('invalid_request', out.body.error));
