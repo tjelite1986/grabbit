@@ -305,7 +305,8 @@ panel afterwards.
 Install Node.js 22 or newer (the version the image uses, and the version
 yt-dlp's YouTube challenge solver needs as its JavaScript runtime), ffmpeg,
 and Python 3 with the `venv` module (on Debian and Ubuntu: `sudo apt install
-python3 python3-venv ffmpeg`).
+python3 python3-venv ffmpeg`). Contributors: code must also build and run on
+Node 20; see [runtime.md](runtime.md).
 
 Many Linux distributions refuse a system-wide `pip install`, so put the Python
 tools in a virtual environment inside the checkout:
