@@ -136,6 +136,13 @@ function stubAdapter(o = {}) {
       const n = calls.filter((c) => c[0] === 'link').length;
       return { id: 100 + n, uid: String(100 + n).padStart(32, '0'), bytes: 1 };
     },
+    async hold(rel, twin, sha256, op) {
+      calls.push(['hold', rel, twin, sha256]);
+      if (op) ad.ops.push(op);
+      if (o.hold) return o.hold(rel, twin, sha256);
+      const n = calls.filter((c) => c[0] === 'hold').length;
+      return { id: 200 + n, uid: String(200 + n).padStart(32, '0'), bytes: 1 };
+    },
     async restore(id) { calls.push(['restore', id]); return { id: Number(String(id).split(':')[0]) }; },
     async purge(id) { calls.push(['purge', id]); return { id: Number(String(id).split(':')[0]), bytes: 1 }; },
     async lookup(rels) {
@@ -275,6 +282,99 @@ test('a copy no post uses is an orphan candidate: never merged, never the copy t
   assert.deepEqual(changes(ad), []);
   assert.deepEqual(dx.opsRecent(), []);
   assert.deepEqual(snapshot(tik), before);
+});
+
+test('an orphan with a live twin can be held by the app, only when the owner asks', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  const { tik, svc, scan, dx } = ctx;
+  const body = 'orphan held';
+  write(path.join(tik, 'c', 'old-orphan.web.mp4'), body, 1000);
+  write(path.join(tik, 'c', 'live.web.mp4'), body, 2000);
+  let posts = [path.join('c', 'live.web.mp4')];
+  const ad = stubAdapter({ caps: ['lookup', 'link', 'opstatus', 'hold'], lookup: (rels) => tikLookup(posts)(rels) });
+  adapters.set(tik, ad);
+  await scan();
+  const before = snapshot(tik);
+  const g = exactGroup(svc, body);
+  const planned = svc.findGroup(g.key);
+  const m = byName(g);
+  const o = m['old-orphan.web.mp4'];
+  assert.equal(o.state, 'orphan');
+  assert.equal(o.action, 'hold');
+  assert.equal(o.holdTo, m['live.web.mp4'].id);
+  assert.ok(!o.suggested, 'a hold is never suggested');
+  assert.match(o.why, /can hold it in its trash/);
+  // Neither merge nor trash_extras nor a batch touches it.
+  assert.deepEqual((await svc.act(g.key, 'merge')).done, []);
+  assert.deepEqual((await svc.act(g.key, 'trash_extras')).done, []);
+  assert.deepEqual(changes(ad), []);
+  // The app is asked again first: a post that appeared meanwhile keeps it.
+  posts = [path.join('c', 'live.web.mp4'), path.join('c', 'old-orphan.web.mp4')];
+  const r0 = await svc.applyGroup(svc.findGroup(g.key), 'hold', {});
+  assert.equal(r0.done.length, 0);
+  assert.match(r0.refused[0].error, /post uses old-orphan\.web\.mp4 now/);
+  // And a twin that lost its post refuses too (the orphan may be the last copy).
+  // (Against the plan from before: the fresh answer above already took the
+  // hold off the current one.)
+  assert.equal(byName(exactGroup(svc, body))['old-orphan.web.mp4'].action, null);
+  posts = [];
+  const r1 = await svc.applyGroup(planned, 'hold', {});
+  assert.match(r1.refused[0].error, /may be the last copy/);
+  assert.deepEqual(changes(ad), []);
+  assert.deepEqual(dx.opsRecent(), []);
+  posts = [path.join('c', 'live.web.mp4')];
+  svc.invalidate();
+  await svc.refreshAppRefs();
+  const r = await svc.act(g.key, 'hold');
+  assert.equal(r.done.length, 1);
+  assert.equal(r.done[0].held, true);
+  assert.deepEqual(changes(ad), [['hold', path.join('c', 'old-orphan.web.mp4'), path.join('c', 'live.web.mp4'), sha(body)]]);
+  assert.match(ad.ops[0], /^[0-9a-f]{32}$/, 'the hold carried an op key');
+  const held = dx.appTrashHeld();
+  assert.equal(held.length, 1);
+  assert.equal(held[0].reason, 'Held in the app (no post used it)');
+  assert.equal(held[0].keep_rel, path.join('c', 'live.web.mp4'));
+  const entry = svc.trashList().items.find((x) => x.id === r.done[0].trash);
+  assert.ok(entry, 'listed in the trash');
+  assert.equal(entry.merged, false);
+  // Grabbit itself never wrote to the app's folder (the stub app did nothing).
+  assert.deepEqual(snapshot(tik), before);
+});
+
+test('a hold whose answer was lost is resolved with its op key', async (t) => {
+  const adapters = new Map();
+  const { tik, svc, scan, dx } = setup(t, { adapters });
+  const body = 'orphan hold resolve';
+  write(path.join(tik, 'a.web.mp4'), body, 1000);
+  write(path.join(tik, 'b.web.mp4'), body, 2000);
+  let clock = 1_000_000;
+  svc.now = () => clock;
+  let answer = null;
+  const ad = stubAdapter({
+    caps: ['lookup', 'link', 'opstatus', 'hold'],
+    lookup: tikLookup(['b.web.mp4']),
+    hold: () => { throw new AdapterError('TikShortis stopped answering half way', { status: 424, stalled: true }); },
+    opStatus: (op) => answer(op),
+  });
+  adapters.set(tik, ad);
+  await scan();
+  const r = await svc.act(exactGroup(svc, body).key, 'hold');
+  assert.equal(r.done.length, 0);
+  clock += 3 * 60 * 1000;
+  const [u] = svc.trashList().unfinished;
+  assert.equal(u.op, 'hold');
+  assert.equal(u.canResolve, true);
+  assert.match(u.what, /Hold a\.web\.mp4/);
+  answer = (op) => ({ op, found: true, inProgress: false, id: 7, uid: 'e'.repeat(32), bytes: 16, state: 'pending', stopped: true, posts: [] });
+  await assert.rejects(svc.resolveOp(u.id, 'owner'), /stopped part way through this hold/);
+  answer = (op) => ({ op, found: true, inProgress: false, id: 7, uid: 'e'.repeat(32), bytes: 16, state: 'linked', posts: [] });
+  const res = await svc.resolveOp(u.id, 'owner');
+  assert.equal(res.outcome, 'held');
+  const held = dx.appTrashHeld();
+  assert.equal(held.length, 1);
+  assert.equal(held[0].ref, `7:${'e'.repeat(32)}`);
+  assert.equal(held[0].reason, 'Held in the app (no post used it)');
 });
 
 test('without an answer from the app nothing is merged, and the copies are protected', async (t) => {

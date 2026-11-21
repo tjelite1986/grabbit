@@ -18,7 +18,7 @@ const { MODELS } = require('./dupe-ai');
 
 const KEY_RE = /^(exact:[0-9a-f]{64}|photo:[1-9][0-9]{0,12}|video:[1-9][0-9]{0,12})$/;
 const TRASH_ID_RE = /^[ga][1-9][0-9]{0,15}$/;
-const GROUP_ACTIONS = ['keep', 'keep_both', 'keep_selected', 'trash_extras', 'mark_known', 'ignore', 'reopen', 'merge'];
+const GROUP_ACTIONS = ['keep', 'keep_both', 'keep_selected', 'trash_extras', 'mark_known', 'ignore', 'reopen', 'merge', 'hold'];
 
 function createRouter({ service, scanner, analyzer, models, trash, actorOf, kindOfName, thumbDir, media }) {
   const r = express.Router();
