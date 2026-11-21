@@ -50,7 +50,7 @@ const {
   videoMime,
 } = require('./download-params');
 const { foldName, plainName, titleClose } = require('./name-match');
-const { splitArtists, splitList, splitGenres } = require('./name-lists');
+const { splitArtists, splitList, splitGenres, addEntity, joinEntityRuns } = require('./name-lists');
 const sourceMeta = require('./source-meta');
 const smartRouting = require('./smart-routing');
 const itemMeta = require('./item-meta');
@@ -950,6 +950,36 @@ function getMusicIndex() {
     musicIndexVersion = musicVersion;
   }
   return musicIndex;
+}
+
+// Artist names the library already files as ONE artist although they look like
+// a credit line ("Simon & Garfunkel", "Earth, Wind & Fire"). splitArtists keeps
+// those whole on the write surface; a tagged library is the only deterministic
+// evidence that "A & B" is a band rather than two people. Only names holding a
+// separator are worth keeping. Rebuilt when the library changes.
+let knownArtistSet = null;
+let knownArtistVersion = -1;
+
+function knownArtist(name) {
+  if (!knownArtistSet || knownArtistVersion !== musicVersion) {
+    const set = new Set();
+    for (const t of readMusic()) {
+      for (const a of t.artists || []) {
+        if (/[,;&]/.test(String(a))) set.add(foldName(a));
+      }
+    }
+    knownArtistSet = set;
+    knownArtistVersion = musicVersion;
+  }
+  const f = foldName(name);
+  return Boolean(f) && knownArtistSet.has(f);
+}
+
+// Deezer artist names that read like a credit line, collected per lookup so
+// joinEntityRuns (name-lists.js) can put a split band back together.
+function addDeezerEntity(entities, c) {
+  if (!c || c.source !== 'deezer' || !c.artists || c.artists.length !== 1) return;
+  addEntity(entities, c.artists[0], foldName);
 }
 
 // What a video title might mean as a song title. Video titles are written as
@@ -5390,7 +5420,7 @@ function itunesCandidate(r) {
   return {
     source: 'itunes',
     title: r.trackName || null,
-    artists: splitArtists(r.artistName),
+    artists: splitArtists(r.artistName, knownArtist),
     album: r.collectionName || null,
     date: r.releaseDate ? String(r.releaseDate).slice(0, 10) : null,
     // Normalised at the source like the SoundCloud arm, so the three arms
@@ -5527,13 +5557,13 @@ function soundcloudCandidate(e) {
     if (!names(parsed.artist) && names(parsed.track)) parsed = { artist: parsed.track, track: parsed.artist };
   }
   const title = (parsed && parsed.track) || raw || null;
-  // The credit line, split the way iTunes (splitArtists(r.artistName)) and
-  // Deezer already split theirs — without it "SoDown, Oblivinatti, TwinnFlame"
-  // travels as ONE artist and comes back out of splitList as three anyway,
+  // The credit line, split the way iTunes splits its own
+  // (splitArtists(r.artistName, knownArtist)) — without it "SoDown,
+  // Oblivinatti, TwinnFlame" travels as ONE artist and comes back out of splitList as three anyway,
   // with SoDown in the tag twice.
   const artists = [];
   const addArtists = (s) => {
-    for (const part of splitArtists(s)) {
+    for (const part of splitArtists(s, knownArtist)) {
       const f = foldName(part);
       // Folds to nothing: an account literally named "." is punctuation, not
       // an artist, and it was reaching the tag as one.
@@ -5759,7 +5789,9 @@ async function soundcloudCandidates(q, n = 4, deadline = 0) {
  * remix is a different song the picker must still be able to offer.
  */
 function candidateKey(c) {
-  const artist = foldName(((c && c.artists) || [])[0] || '');
+  // The first piece of the first artist, so a row that keeps a band whole
+  // ("Simon & Garfunkel", Deezer) still dedupes against one that split it.
+  const artist = foldName(splitArtists(((c && c.artists) || [])[0] || '')[0] || '');
   const title = String((c && c.title) || '')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
@@ -5802,6 +5834,7 @@ function mergeMatchNames(kept, extra) {
 
 async function musicMetaCandidates(q, deadline = 0) {
   const out = [];
+  const deezerEntities = [];
   const seen = new Map();   // candidateKey -> index in out
   const push = (c) => {
     if (!c.title || !c.artists.length) return;
@@ -5833,10 +5866,13 @@ async function musicMetaCandidates(q, deadline = 0) {
     );
     rows.forEach((r, i) => {
       const alb = albums[i].status === 'fulfilled' ? albums[i].value : null;
+      addDeezerEntity(deezerEntities, { source: 'deezer', artists: [r.artist && r.artist.name].filter(Boolean) });
       push({
         source: 'deezer',
         title: r.title || null,
-        artists: splitArtists(r.artist && r.artist.name),
+        // Deezer's artist object is one artist entity (featured artists are
+        // contributors, not part of the name), so its name is never split.
+        artists: r.artist && r.artist.name ? [r.artist.name] : [],
         album: (r.album && r.album.title) || null,
         date: (alb && alb.release_date) || null,
         genres: normalizeGenres(alb && alb.genres && Array.isArray(alb.genres.data) ? alb.genres.data.map((g) => g.name).filter(Boolean) : []),
@@ -5862,7 +5898,12 @@ async function musicMetaCandidates(q, deadline = 0) {
   // happens in musicMetaLookup, AFTER the rows are ranked by match, which is
   // the only place where dropping a candidate is a decision and not an
   // accident of arrival order.
-  return out.slice(0, 14);
+  // Joined here, before musicMetaLookup sees the rows: `push` keeps only the
+  // first row per candidateKey, so the Deezer row naming the band may already
+  // have been merged into the iTunes row that split it.
+  return out.slice(0, 14).map((c) =>
+    c.source === 'deezer' ? c : { ...c, artists: joinEntityRuns(c.artists, deezerEntities, foldName) }
+  );
 }
 
 /**
@@ -5938,8 +5979,12 @@ async function musicMetaLookup({ artist, title, channel }) {
 
   const out = [];
   const seen = new Map();   // candidateKey -> index in out
+  // Deezer artist names that read like a credit line (see joinEntityRuns),
+  // for the iTunes catalogue rows, which no Deezer search came with.
+  const entities = [];
   const take = (candidates, keepOnlyMatches) => {
     for (const c of candidates) {
+      addDeezerEntity(entities, c);
       const key = candidateKey(c);
       const at = seen.get(key);
       if (at !== undefined) {
@@ -5977,6 +6022,11 @@ async function musicMetaLookup({ artist, title, channel }) {
       take(await artistCatalogue(name).catch(() => []), true);
       if (settled()) break;
     }
+  }
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].source === 'deezer') continue;
+    const joined = joinEntityRuns(out[i].artists, entities, foldName);
+    if (joined.length !== out[i].artists.length) out[i] = { ...out[i], artists: joined };
   }
   out.sort((a, b) => MATCH_RANK[a.match] - MATCH_RANK[b.match]);
   return out.slice(0, 10);
@@ -7857,7 +7907,7 @@ async function produceAudio(job, meta, params, onProgress) {
       if (nav) {
         // Tags: UI-provided fields win; site metadata (yt-dlp) fills the gaps.
         const m = meta.music || {};
-        const artists = params.artists ? splitList(params.artists) : splitArtists(m.artist);
+        const artists = params.artists ? splitList(params.artists) : splitArtists(m.artist, knownArtist);
         if (!artists.length) artists.push(meta.creator || 'Unknown Artist');
         const songTitle = (params.titleOverride || m.track || meta.title || 'Unknown').trim();
         // A single is filed as its own album (standard music-library layout);
