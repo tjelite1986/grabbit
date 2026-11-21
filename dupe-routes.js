@@ -63,6 +63,9 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     // counts as 18+. A refresh that failed outright counts none (run 0).
     let run = 0;
     try { run = await service.refreshAppAudience({ fresh: true }); } catch {}
+    // Which posts use each app copy: a copy no post uses is never offered
+    // for a merge (best effort; without an answer nothing is merged).
+    try { if (service.refreshAppRefs) await service.refreshAppRefs(); } catch {}
     return service.list(listQuery(req.query), { audRun: run || 0 });
   }));
   r.get('/groups/:key/references', wrap(async (req) => {
