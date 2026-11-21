@@ -38,16 +38,17 @@ Run the test file for the area (see the feature map), not the whole suite
 first:
 
 ```bash
-node --test test/smart-routing.test.js; rc=$?; echo "exit=$rc"
+node --test test/smart-routing.test.js; rc=$?; echo "exit=$rc"; (exit "$rc")
 ```
 
-Here `echo` runs after the test and `rc` keeps the runner's status. Do not
-pipe the runner into `tail`/`head` without preserving its status: a pipe
-reports the last command's code and can hide a failure. Use one of:
+`rc` keeps the runner's status and the final `(exit "$rc")` hands it back, so
+the line still fails when the test fails. Do not pipe the runner into
+`tail`/`head` without preserving its status: a pipe reports the last
+command's code and can hide a failure. Use one of:
 
 ```bash
-log="$(mktemp)"; node --test test/x.test.js > "$log" 2>&1; rc=$?; tail -15 "$log"; echo "exit=$rc"; rm -f "$log"
-( set -o pipefail; node --test test/x.test.js 2>&1 | tail -15; ); echo "exit=$?"
+log="$(mktemp)"; node --test test/x.test.js > "$log" 2>&1; rc=$?; tail -15 "$log"; rm -f "$log"; echo "exit=$rc"; (exit "$rc")
+( set -o pipefail; node --test test/x.test.js 2>&1 | tail -15 )
 ```
 
 One exact command per area (names are real files in `test/`):
@@ -73,8 +74,8 @@ open risks. Do not paste diffs or file contents the reviewer can read.
 Savings are claimed only from captured usage, never estimated.
 
 1. Pick a fixed task (for example "add a field to smart-routing and its test").
-2. Run it twice from a clean session, once with the old workflow and once
-   with this one, same model and settings.
+2. Run it with the old workflow and with this one (the two arms), each run
+   from a clean session, same model and settings.
 3. Record per run: input tokens, output tokens, cache read/write tokens, tool
    call count, files read, and wall time. Take them from the session's usage
    report (`/cost` or the job's usage record), not from a guess.

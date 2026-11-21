@@ -12,23 +12,21 @@ Which Node.js Grabbit runs on. Verified against commit `73547d3`.
 | `package.json` | No `engines` field. |
 | CI | No workflow files are tracked in this checkout (`git ls-files .github` is empty), so no CI Node version is known. |
 | `CLAUDE.md` ("Target platform") | States that the image runs Node 22 and that code must build and run on linux/arm64 with Node 20 until the owner decides otherwise. |
-| Tooling sandbox used for documentation jobs | `node -v` prints v20.20.2. A tooling sandbox, not the deployed runtime. |
+| Development sandbox | May run Node 20 (for example v20.20.2). A tooling sandbox, not the deployed runtime. |
 
 Both facts hold:
 
 1. **The deployed runtime is Node 22** (image and running production
    container, linux/arm64 on a Raspberry Pi and x86 Linux behind a reverse
    proxy).
-2. **Code must also keep running on Node 20 until the owner decides
-   otherwise.** This keeps the `CLAUDE.md` rule in force. Do not use APIs newer
+2. **Code must build and run on linux/arm64 with Node 20 until the owner
+   decides otherwise.** This keeps the `CLAUDE.md` rule in force. Do not use APIs newer
    than Node 20 without checking both versions.
-
-This documentation job does not change the Dockerfile.
 
 Practical consequences:
 
 - Tests may run in a Node 20 sandbox. A green run there says nothing about
-  Node 22. The unit suite was only partly run on Node 20 in this job.
+  Node 22, and a green run on Node 22 says nothing about Node 20.
 - Any new native dependency must ship linux/arm64 builds (`better-sqlite3`
   and optional `onnxruntime-node` are the existing ones).
 

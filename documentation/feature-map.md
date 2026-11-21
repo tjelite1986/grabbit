@@ -8,15 +8,15 @@ not by line number. "Test" names are files in `test/`.
 | Feature | Files | Tests |
 |---------|-------|-------|
 | HTTP server, auth, cross-site checks, job engine, history, watcher | `server.js` | `contract.test.js`, `social-static.test.js` |
-| Site extractors (resolve, profile listing) | `extractors/index.js`, `extractors/<site>.js`, `extractors/util.js` | `facebook-title-id.test.js`, `source-tags-generic.test.js` |
+| Site extractors (resolve, profile listing) | `extractors/index.js`, `extractors/<site>.js`, `extractors/util.js`. URL rules: `CLAUDE.md` "Security" section; plain `fetch` in eight extractors is open decision D2 in `documentation/open-decisions.md` | `facebook-title-id.test.js`, `source-tags-generic.test.js` |
 | URL safety (public-address guard, safe fetch) | `url-guard.js` | `contract.test.js` |
 | Cookies for yt-dlp | `cookies.js` | |
-| Retry queue (retryable upstream failures) | `retry-queue.js`, `retry-queue.json` | `retry-queue.test.js` |
+| Retry queue (retryable upstream failures) | `retry-queue.js`, `DATA_DIR/retry-queue.json` | `retry-queue.test.js` |
 | Premium fallback (YouTube Music) | `premium-fallback.js` | |
 | Safe cross-mount copy | `safe-copy.js` | `safe-copy.test.js` |
 | Release SHA | `release.js` | `release.test.js` |
 | Per-app API access (`/api/v1`) | `gda.js`, `gda-admin.js` | `gda.test.js` |
-| Extra yt-dlp args allowlist (`ALLOWED_ARGS`, `parseExtraArgs`) | `server.js`. Find: `rg -n "ALLOWED_ARGS" server.js` (`parseExtraArgs` is at the same place) | `contract.test.js` passes one allowed `xargs` flag; no dedicated allowlist test found |
+| Extra yt-dlp args allowlist (`ALLOWED_ARGS`, `parseExtraArgs`) | `server.js`: `ALLOWED_ARGS` and `parseExtraArgs()` (about line 395 and 423); callers are `POST /api/templates/save` (validates on save, about line 5374) and `GET /api/jobs/start` (`xargs` query, about line 8587). Find: `rg -n -e ALLOWED_ARGS -e parseExtraArgs server.js` . Binding rule: `CLAUDE.md` "Security" (allowlist only, never a denylist). The synchronous `/api/download` and `/api/download-all` contracts take no `xargs`, so an allowlist change does not affect them; `/api/jobs/start` strips `xargs` for app clients without the admin audience, but the internal principal keeps it | `contract.test.js` checks that an app client's `xargs` is dropped; no dedicated test; future phase 1 candidate. `parseExtraArgs` is not exported, so such a test would go through HTTP like `test/contract.test.js` (in that file or a new `test/<topic>.test.js` that starts the server the same way) |
 
 ## Classification and routing
 
@@ -51,7 +51,12 @@ these concepts (see `START-HERE.md`).
 
 Files `dupe-*.js` (service, scan, store, analyzer, trash, adapters, routes,
 media, photo, video, phash, ai, classify, group, quality), UI in
-`public/hub/dupes/`. Tests are `test/dupe-*.test.js` and `meta-dupes-e2e.test.js`.
+`public/hub/dupes/`. Tests: `dupe-adapters.test.js`, `dupe-ai.test.js`,
+`dupe-analyzer.test.js`, `dupe-classify.test.js`, `dupe-group.test.js`,
+`dupe-media.test.js`, `dupe-phash.test.js`, `dupe-photo.test.js`,
+`dupe-quality.test.js`, `dupe-routes.test.js`, `dupe-scan.test.js`,
+`dupe-service.test.js`, `dupe-store.test.js`, `dupe-trash.test.js`,
+`dupe-video.test.js` and `meta-dupes-e2e.test.js`.
 Data: `dupes.db`, `dupe-trash/`, `dupe-thumbs/`, `models/`.
 
 ## Front ends
