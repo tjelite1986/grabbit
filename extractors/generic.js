@@ -287,7 +287,11 @@ async function resolve(url) {
   const site = info ? String(info.extractor_key || info.extractor || '').toLowerCase() || null : null;
   // The uploader's own page, for importers that make a profile per creator.
   const creatorUrl = info ? info.uploader_url || info.channel_url || null : null;
-  const job = { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, filename, sourceUrl, music, probeError, probeFatal, mediaId, site, creatorUrl };
+  // Pixel size of the format yt-dlp would pick, for smart routing's
+  // orientation. Missing on some sites; routing then treats it as unknown.
+  const width = info && Number.isFinite(info.width) ? info.width : null;
+  const height = info && Number.isFinite(info.height) ? info.height : null;
+  const job = { kind: 'ytdlp', url, creator, title, description, tags, thumbnail, duration, width, height, filename, sourceUrl, music, probeError, probeFatal, mediaId, site, creatorUrl };
   // What the site itself said, for the item store: its explicit tags and
   // categories (not the hashtags read out of the caption above) and the
   // descriptive part of the info dict.

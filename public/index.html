@@ -879,6 +879,22 @@
         </div>
 
         <div class="section">
+          <h2>Smart video routing</h2>
+          <div class="setrow">
+            <div class="label"><div class="t">Route videos automatically</div><div class="d">Portrait goes to Shorts at any length, landscape to Long Videos (the server library), square and unknown to Review. 18+ always goes to the 18+ libraries.</div></div>
+            <label class="switch"><input type="checkbox" id="setSmartRoute" /><span class="track"></span></label>
+          </div>
+          <p style="margin:0;padding:0 16px 10px;color:var(--muted);font-size:13px">
+            Applies to single links and pasted lists saved to Shorts or the server
+            library. Profile batches keep the destination you pick. Review is the
+            server-library folder <b id="srcReviewFolder">review</b>; no app imports from it.
+            A General source is only a suggestion: a creator reaches Shorts after
+            you classify them General in the hub's Review queue.
+          </p>
+          <div style="padding:0 16px 14px" id="srcList"><span style="color:var(--muted);font-size:13px">Loading sources…</span></div>
+        </div>
+
+        <div class="section">
           <h2>Music library</h2>
           <p style="margin:0;padding:0 16px 10px;color:var(--muted);font-size:13px">
             Every track saved to a Navidrome library is logged with its tags, so
@@ -1106,6 +1122,8 @@
         <!-- Which Navidrome instance/library the track lands in. The kids
              library is served by a separate Navidrome (barnmusik) and never
              mixes with the main one. -->
+        <p class="sh-sub hidden" id="shRouteHint" style="margin:-4px 0 10px"></p>
+
         <div class="field hidden" id="shNavLibField">
           <label>Music library</label>
           <div class="seg" id="shNavLib">
@@ -1397,7 +1415,7 @@
 
       // ----------------------------------------------------------------- settings (defaults)
       const SETTINGS_KEY = 'grabbit.settings.v1';
-      const defaults = { dest: '', channel: 'main', navLib: 'main', folder: 'videos', quality: '', device: true, web: false, afmt: 'm4a', aq: '', container: 'mp4' };
+      const defaults = { dest: '', channel: 'main', navLib: 'main', folder: 'videos', quality: '', device: true, web: false, afmt: 'm4a', aq: '', container: 'mp4', smartRoute: false };
       let settings = Object.assign({}, defaults);
       // Only adopt known keys from storage, and coerce each to an allowed value, so
       // poisoned/legacy data can neither accumulate junk nor feed an unexpected
@@ -1418,6 +1436,7 @@
       settings.folder = String(settings.folder || 'videos').replace(/[^a-zA-Z0-9 _-]+/g, '').slice(0, 40) || 'videos';
       settings.device = !!settings.device;
       settings.web = !!settings.web;
+      settings.smartRoute = !!settings.smartRoute;
       function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} }
 
       // Playlist view: hide entries already in the downloaded registry.
@@ -1461,7 +1480,7 @@
         $('fab').classList.toggle('show', tab === 'home' && profileMode && profileItems.length > 0);
         window.scrollTo(0, 0);
         if (tab === 'downloads') loadHistory();
-        if (tab === 'more') { loadMusicStats(); loadHealth(); }
+        if (tab === 'more') { loadMusicStats(); loadHealth(); loadSources(); }
         if (tab === 'playlists') loadPlaylists();
         // The job stream keeps jobMap current whatever tab is open, but only
         // paints while Queue is the current one — so opening Queue shows
@@ -2554,6 +2573,13 @@
         const dest = segValue($('shDest'));
         const isServer = dest === 'server';
         const channel = segValue($('shChannel'));
+        // Say where smart routing takes over, and where a profile batch does not.
+        const routeHint = $('shRouteHint');
+        const viaBatch = sheetAll || (sheetItem && !sheetSingle && !sheetItem.standalone);
+        routeHint.classList.toggle('hidden', !smartRouteApplies(dest));
+        routeHint.textContent = viaBatch
+          ? 'Smart routing is on, but profile batches keep the destination picked here.'
+          : 'Smart routing is on: the server picks Shorts, Long Videos or Review from the orientation, the source and the creator.';
         // The audio libraries are audio-only: a video pick saves the extracted
         // audio track.
         const audioish = isAudio || isAudioLib;
@@ -2942,6 +2968,11 @@
       $('shMusicSearch').addEventListener('click', () => musicLookup());
       bindSeg($('shMusicRelease'), syncSheet);
 
+      // Whether smart routing takes a video save to this sheet destination.
+      function smartRouteApplies(dest) {
+        return settings.smartRoute && sheetMode === 'video' && (dest === '' || dest === 'server');
+      }
+
       // Build a query string for /api/download or /api/download-all.
       function buildQuery({ batch }) {
         const dest = segValue($('shDest'));
@@ -3025,6 +3056,9 @@
         }
         if (creator) p.set('creator', creator);
         if (!batch) p.set('device', $('shDevice').checked ? '1' : '0');
+        // Smart routing: the server picks Shorts, Long Videos or Review once the
+        // link is resolved. Jobs only; a cut or split keeps its own library.
+        if (!batch && smartRouteApplies(dest) && !p.has('sections') && !p.has('split')) p.set('route', 'smart');
         return p;
       }
 
@@ -3789,6 +3823,7 @@
         $('setAq').value = settings.aq;
         $('setDevice').checked = settings.device;
         $('setWeb').checked = settings.web;
+        $('setSmartRoute').checked = settings.smartRoute;
         $('setNavLib').value = settings.navLib;
         $('setChannelRow').classList.toggle('hidden', settings.dest !== '');
         $('setNavLibRow').classList.toggle('hidden', settings.dest !== 'navidrome');
@@ -3805,6 +3840,32 @@
       $('setAq').addEventListener('change', () => { settings.aq = $('setAq').value; saveSettings(); });
       $('setDevice').addEventListener('change', () => { settings.device = $('setDevice').checked; saveSettings(); });
       $('setWeb').addEventListener('change', () => { settings.web = $('setWeb').checked; saveSettings(); });
+      $('setSmartRoute').addEventListener('change', () => { settings.smartRoute = $('setSmartRoute').checked; saveSettings(); });
+
+      // The source table of the routing spec, plus every source the registry
+      // has seen. Read-only: the table changes with the spec, not from here.
+      const SOURCE_CLASS_LABEL = { general: 'General (suggestion)', review: 'Review', adult: '18+' };
+      async function loadSources() {
+        const box = $('srcList');
+        try {
+          const d = await fetchJson('/api/hub/sources');
+          if (d.reviewFolder) $('srcReviewFolder').textContent = d.reviewFolder;
+          box.replaceChildren(...(d.sources || []).map((src) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px';
+            const name = document.createElement('span');
+            name.textContent = src.label + (src.detected ? ' (new source)' : '');
+            const cls = document.createElement('span');
+            cls.style.color = 'var(--muted)';
+            cls.textContent = (SOURCE_CLASS_LABEL[src.class] || src.class)
+              + (src.specClass && src.specClass !== src.class ? ' (18+ site)' : '');
+            row.append(name, cls);
+            return row;
+          }));
+        } catch (err) {
+          box.textContent = 'Could not load the sources: ' + err.message;
+        }
+      }
       reflectSettings();
 
       // ----------------------------------------------------------------- cookies
