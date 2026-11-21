@@ -16,6 +16,7 @@ not by line number. "Test" names are files in `test/`.
 | Safe cross-mount copy | `safe-copy.js` | `safe-copy.test.js` |
 | Release SHA | `release.js` | `release.test.js` |
 | Per-app API access (`/api/v1`) | `gda.js`, `gda-admin.js` | `gda.test.js` |
+| Extra yt-dlp args allowlist (`ALLOWED_ARGS`, `parseExtraArgs`) | `server.js`. Find: `rg -n "ALLOWED_ARGS" server.js` (`parseExtraArgs` is at the same place) | `contract.test.js` passes one allowed `xargs` flag; no dedicated allowlist test found |
 
 ## Classification and routing
 
@@ -23,10 +24,10 @@ not by line number. "Test" names are files in `test/`.
 |---------|-------|-------|
 | Audience gate (general / adult / unknown) | `audience.js` | `audience.test.js`, `audience-gate.test.js`, `adult-separation.test.js` |
 | Smart Video Routing (destination decision) | `smart-routing.js`, `smartRoute()` in `server.js` | `smart-routing.test.js` |
-| Source tags and hashtags | `source-meta.js` | `item-meta.test.js`, `source-tags-generic.test.js` |
+| Source tags and hashtags (what a source said; never decides a destination) | `source-meta.js` | `item-meta.test.js`, `source-tags-generic.test.js` |
 | Routing decision log | `logRoutingDecision()` in `server.js`, `DATA_DIR/routing.jsonl` | |
 | Creator profiles | `profiles.js` | `profiles.test.js` |
-| Item and delivery store (SQLite) | `item-store.js`, `item-meta.js` | `item-store.test.js`, `item-meta.test.js` |
+| Item and delivery store (SQLite); owner tags | `item-store.js`, `item-meta.js` | `item-store.test.js`, `item-meta.test.js` |
 
 `smart-routing.js` decides destinations. `source-meta.js` only records what a
 source said. `routing.jsonl` is a log. Folders are directories. Do not merge
@@ -36,7 +37,7 @@ these concepts (see `START-HERE.md`).
 
 | Feature | Files | Tests |
 |---------|-------|-------|
-| Hub dashboard counts | `hub.js`, `public/hub/` | `hub.test.js`, `hub-default.test.js` |
+| Hub dashboard counts | `hub.js` (server side), `public/hub/` (browser) | `hub.test.js`, `hub-default.test.js` |
 | Module registry (on/off per section) | `modules.js` | `tik-modules.test.js` |
 | TikShortis gateway and embed | `tikshortis-gateway.js`, `tikshortis-embed.js`, `public/hub/tik/` | `tik-gateway.test.js`, `tik-server.test.js`, `tikshortis-embed.test.js`, `tik-player-static.test.js` |
 | Social & Photos (Elitogram) gateway | `egram-gateway.js`, `public/hub/social/` | `egram-gateway.test.js`, `egram-server.test.js` |
@@ -57,12 +58,12 @@ Data: `dupes.db`, `dupe-trash/`, `dupe-thumbs/`, `models/`.
 
 | Surface | Path |
 |---------|------|
-| Hub (`/`) | `public/hub/index.html`, `hub.js`, `hub.css` |
+| Hub (`/`) | `public/hub/index.html`, `public/hub/hub.js`, `public/hub/hub.css` |
 | Classic (`/classic/`) | `public/index.html` |
 | Share target (`/share`) | serves `public/index.html` |
 | Service worker | `public/sw.js` (must never intercept `/api/` or `/login`) |
 
-## API surface (prefix counts from `server.js`)
+## Selected prefix map (not a complete route list)
 
 `/api/hub/*` (most routes), `/api/library`, `/api/playlists`, `/api/music`,
 `/api/jobs/*`, `/api/v1/*` (GDA), `/api/retry`, `/api/templates`, `/api/push`,
@@ -70,5 +71,15 @@ Data: `dupes.db`, `dupe-trash/`, `dupe-thumbs/`, `models/`.
 `/api/history`, `/api/downloaded`, `/api/resolve`, `/api/profile`,
 `/api/download` and `/api/download-all` (synchronous contracts for co-hosted
 callers, keep their shape), `/api/thumb`, `/api/media`, `/api/folders`,
-`/api/creators-classify`, `/api/config`, `/api/sites`, `/api/search`.
-List live routes with: `rg -n "app\.(get|post|put|delete|patch)\(" server.js`.
+`/api/egram/creators-classify`, `/api/config`, `/api/sites`, `/api/search`.
+
+Route discovery needs both direct routes and mounts:
+
+```bash
+rg -n "app\.(get|post|put|delete|patch)\(" server.js
+rg -n "app\.use\(['\"]/api" server.js     # Tik, Elitogram, Duplicate Manager, /api/v1
+```
+
+Tik (`/api/tik`), Elitogram (`/api/egram`) and the Duplicate Manager
+(`/api/hub/dupes/v2`, `dupe-routes.js` `createRouter`) are mounted with
+`app.use`, so many of their sub-routes do not appear in the first command.

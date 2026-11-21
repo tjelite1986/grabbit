@@ -20,6 +20,8 @@ rg -l "symbol" --glob '!node_modules' .            # which files
 
 Then read a bounded window around the hit: 40 to 120 lines (Read with `offset`
 and `limit`, or `sed -n 'A,Bp'`). Widen only if the window ends mid-function.
+Extra bounded reads for related symbols are fine: the auth middleware, the
+mount point, the handler's helpers. Each is its own search plus window.
 Never read `server.js` or `public/index.html` in full. Small modules
 (`smart-routing.js`, `audience.js`, `source-meta.js`) are fine to read whole.
 
@@ -36,16 +38,27 @@ Run the test file for the area (see the feature map), not the whole suite
 first:
 
 ```bash
-node --test test/smart-routing.test.js; echo "exit=$?"
+node --test test/smart-routing.test.js; rc=$?; echo "exit=$rc"
 ```
 
-Do not pipe the runner into `tail`/`head` without preserving its status. A
-pipe reports the last command's code and can hide a failure. Use one of:
+Here `echo` runs after the test and `rc` keeps the runner's status. Do not
+pipe the runner into `tail`/`head` without preserving its status: a pipe
+reports the last command's code and can hide a failure. Use one of:
 
 ```bash
-node --test test/x.test.js > "$TMPDIR/t.log" 2>&1; rc=$?; tail -15 "$TMPDIR/t.log"; echo "exit=$rc"
-set -o pipefail; node --test test/x.test.js 2>&1 | tail -15
+log="$(mktemp)"; node --test test/x.test.js > "$log" 2>&1; rc=$?; tail -15 "$log"; echo "exit=$rc"; rm -f "$log"
+( set -o pipefail; node --test test/x.test.js 2>&1 | tail -15; ); echo "exit=$?"
 ```
+
+One exact command per area (names are real files in `test/`):
+
+| Area | Command |
+|------|---------|
+| Smart routing | `node --test test/smart-routing.test.js` |
+| Audience gate | `node --test test/audience.test.js test/audience-gate.test.js test/adult-separation.test.js` |
+| Extractor naming | `node --test test/facebook-title-id.test.js test/source-tags-generic.test.js` |
+| Server contract | `node --test test/contract.test.js` |
+| Duplicate Manager | `node --test test/dupe-routes.test.js test/dupe-service.test.js` |
 
 Run the full suite (`node --test test/`) once before handoff when the change
 touches shared code. Report failures verbatim, and say which tests were not run.
@@ -65,7 +78,7 @@ Savings are claimed only from captured usage, never estimated.
 3. Record per run: input tokens, output tokens, cache read/write tokens, tool
    call count, files read, and wall time. Take them from the session's usage
    report (`/cost` or the job's usage record), not from a guess.
-4. Repeat at least 3 times per arm; report the median and the range.
+4. Do 3 clean runs per arm (three per workflow, each from a clean session); report the median and the range.
 5. Always-loaded context is measured separately: bytes of `CLAUDE.md` (and
    `START-HERE.md` if loaded) at the base and new commit. Bytes are exact;
    tokens are about bytes/4 for English and are only an estimate.

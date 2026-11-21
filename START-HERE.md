@@ -18,53 +18,82 @@ TikShortis and Elitogram are separate apps reached through gateways.
 
 ```bash
 npm ci                                   # needs network; skip in offline sandboxes
-npm start                                # node server.js, port 3000, data in ./data
-node --test test/                        # whole suite (npm test)
 node --test test/smart-routing.test.js   # one focused file
+node --test test/                        # whole suite (npm test)
+# Run the app locally: password-protected, disposable data (never a real DATA_DIR)
+GRABBIT_PASSWORD="$(openssl rand -hex 16)" DATA_DIR="$PWD/data" \
+  DOWNLOAD_DIR="$PWD/downloads" npm start
 ```
 
-Without `DATA_DIR` the server uses `./data` and `./downloads` (both gitignored).
-Never point a test at a real data directory. See `documentation/runtime.md`
-for Node versions and `documentation/storage-map.md` for what is in `DATA_DIR`.
+Bare `npm start` with no password exits ("refusing to start an ungated
+service"), unless auth is explicitly disabled. **Never disable auth as a
+workaround**: the listener binds all interfaces (`0.0.0.0:3000`). Use the
+password start above, as in the local install section of
+[`documentation/installation.md`](documentation/installation.md), with an
+explicit disposable `DATA_DIR` and `DOWNLOAD_DIR`. The cookie store defaults to
+`/data/cookies` separately; see that guide. Print the password only to your own
+terminal. See `documentation/runtime.md` for Node versions and
+`documentation/storage-map.md` for what is in `DATA_DIR`.
 
 ## Entry points
 
 | What | Where |
 |------|-------|
 | Server, routes, job engine | `server.js` (about 10k lines; never read whole, see `documentation/claude-workflow.md`) |
-| Hub (start page, `/`) | `public/hub/index.html`, `hub.js`, `hub.css`, plus `dupes/`, `social/`, `tik/` |
+| Hub (start page, `/`) | `public/hub/index.html`, `public/hub/hub.js` (browser), `public/hub/hub.css`, plus `public/hub/dupes/`, `social/`, `tik/`. Root `hub.js` is server-side (dashboard counts), not the browser file |
 | Classic UI (`/classic/`) | `public/index.html` (about 5k lines, vanilla SPA) |
 | Service worker, PWA manifest | `public/sw.js`, `public/manifest.webmanifest` |
-| Site extractors | `extractors/index.js` (registry) and one file per site |
+| Site extractors | `extractors/index.js` (auto-loads every file in `extractors/`) and one file per site |
 | Container | `Dockerfile` (the image decides the runtime) |
 
 ## Where to change what
 
 See `documentation/feature-map.md` for the full table. Short version:
 
-- New or broken site: `extractors/<site>.js`, registered in `extractors/index.js`.
+- New or broken site: `extractors/<site>.js`. `extractors/index.js` loads every
+  file in the folder, so there is nothing to register. Then:
+  - An adult site must also be added to `ADULT_SITE_DOMAINS` / `ADULT_SITE_SLUGS`
+    in `audience.js`; otherwise it is classified "review", not "adult".
+  - New direct fetches use `safeFetch()` from `url-guard.js`. Eight existing
+    extractors use plain `fetch` (open decision D2).
+  - Add a test in `test/` named for the area, next to `test/facebook-title-id.test.js`
+    or `test/source-tags-generic.test.js`; run only that file.
 - Where a download is saved (route/folder): `smart-routing.js` for decisions,
   `server.js` `smartRoute()` and the destination constants for folders.
 - General vs 18+ decisions: `audience.js` (pure), called by `server.js` before
   every write into an app folder.
-- Tags a source supplied: `source-meta.js`. Owner tags: `item-store.js`.
+- Tags a source supplied: `source-meta.js`. Owner tags: `item-meta.js` (stored via `item-store.js`).
 - Duplicate Manager: `dupe-*.js`, UI in `public/hub/dupes/`.
 - State file safety: `writeJsonAtomic()`, `readJsonState()`, `STATE_FILES` in `server.js`.
+  Per-app API client registry I/O is owned by `gda.js` (with `gda-admin.js`).
+- Audio and music tags: Python with mutagen, called from `server.js`.
 
 ## Routing terminology (do not mix these)
 
 - **`smart-routing.js`**: pure functions. Decides the destination of a video
-  being downloaded now (orientation, source class, 18+ override). Exports
-  `decideRoute`, `suggestionForSites`, `SOURCE_CLASSES`, `REVIEW_FOLDER`.
+  being downloaded now. It runs only when the owner's web UI starts an eligible
+  video job with `route=smart` (opt-in). Synchronous `/api/download*` and
+  `/api/v1` jobs never take it. Decision order: 18+ first (adult source class or
+  adult audience), then the hard-coded `SOURCE_CLASSES` table (an unknown source
+  goes to review), then orientation. Shorts destinations only count when
+  `ELITE_ENABLED` and `shortsUnavailable()` allow them. The exports
+  (`decideRoute`, `suggestionForSites`, `SOURCE_CLASSES`, `REVIEW_FOLDER`, ...)
+  are a selection; read the file (it is small) for the rest.
 - **`source-meta.js`**: what a source said about an item (site tags, categories,
   caption hashtags). Metadata only. It never decides a destination.
 - **`routing.jsonl`**: the append-only log in `DATA_DIR` of each routing
   decision, written by `logRoutingDecision()` in `server.js`. A log, not
-  configuration; rotated at 5 MB to `routing.jsonl.1`.
-- **Routes (`route`)**: the outcome of `decideRoute` stored on the job.
+  configuration; rotated at 5 MiB to `routing.jsonl.1`. Fields: `at`, `jobId`,
+  `sourceUrl`, `site`, `mediaId`, `creator`, `width`, `height`, then the
+  decision (`route`, `orientation`, `source`, `sourceClass`, `audience`, `dest`,
+  `channel`, `folder`, `reasons`). Sensitive: it holds URLs and creator data.
+- **Routes (`route`)**: the outcome of `decideRoute`. `job.route` is a decision
+  object (the same fields as above), not a string.
 - **Folders**: directories on disk (`VIDEOS_DIR`, `ADULTS_DIR`, `PHOTOS_DIR`,
-  the `review` folder, app import folders). `GET /api/folders` lists them.
-  Routing chooses a folder; it does not create audiences.
+  the `review` folder, app import folders). `GET /api/folders` lists the
+  built-in names (`videos`, `adults`, `photos`) plus visible immediate children
+  of `DOWNLOAD_DIR`, not every mount. Routing chooses a folder; it does not
+  create audiences. Guarded writes go through `assertDeliverable()`.
 - **HTTP routes** (`app.get('/api/...')`) are unrelated to smart routing. Say
   "API route" for those.
 
@@ -77,8 +106,10 @@ See `documentation/feature-map.md` for the full table. Short version:
   (`audienceVerdict(..., { readOnly: true })`) and again at write time. Routing
   suggests, the gate decides. A routing change must never bypass the gate.
 - Adult-site detection is `isAdultSite()` in `audience.js`.
-- Tests: `test/audience*.test.js`, `test/adult-separation.test.js`,
-  `test/smart-routing.test.js`. Run them after any routing or audience change.
+- Tests: `test/audience.test.js`, `test/audience-gate.test.js`,
+  `test/adult-separation.test.js`, `test/smart-routing.test.js`. Run them after
+  any routing or audience change, for example:
+  `node --test test/audience.test.js test/audience-gate.test.js test/adult-separation.test.js test/smart-routing.test.js`
 - Keep examples and docs free of real domains, host paths and accounts.
 
 ## Retained entry paths
@@ -93,6 +124,7 @@ are kept on purpose; installed apps and push notifications still use them.
 - Self-hosted Docker images behind a reverse proxy. A cloud or sandbox session
   has no host, live data, `.env` or container logs. Deliver a branch and say
   how to verify live; do not claim production works.
+- Open owner decisions (D1-D4) are listed in `documentation/open-decisions.md`.
 - Do not change the Dockerfile, CI, compose files or secrets as a side effect
   of a code or documentation task.
 - `docs/` is local-only and gitignored. `documentation/` is tracked.
@@ -104,6 +136,8 @@ are kept on purpose; installed apps and push notifications still use them.
 | `CLAUDE.md` | Invariants and lessons learned (authoritative rules) |
 | `documentation/feature-map.md` | Feature to file map, tests |
 | `documentation/storage-map.md` | `DATA_DIR` stores, owner, backup, rollback |
-| `documentation/runtime.md` | Node version truth, tools, discrepancies |
+| `documentation/runtime.md` | Node version truth, external tools |
+| `documentation/open-decisions.md` | D1-D4 and other open owner decisions (not fixes) |
+| `documentation/music-library-rules.md` | Music and library rules (moved from `CLAUDE.md`) |
 | `documentation/claude-workflow.md` | Token-efficient working method |
 | `documentation/architecture.md`, `configuration.md`, `installation.md`, `user-guide.md` | Product docs |
