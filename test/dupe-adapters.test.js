@@ -148,6 +148,21 @@ test('link sends keep, drop and sha256 as app paths', async () => {
   assert.deepEqual(fetchImpl.calls[0].body, { keep: 'keep.mp4', drop: 'drop.mp4', sha256: sha });
 });
 
+test('hold sends path, twin, sha256 and the op key as app paths', async () => {
+  const fetchImpl = stubFetch(() => jsonRes(200, { id: 4, uid: 'c'.repeat(32), bytes: 7 }));
+  const sha = 'b'.repeat(64);
+  const op = 'f'.repeat(32);
+  const a = adapter({ prefix: 'tik', fetchImpl, caps: ['lookup', 'link', 'opstatus', 'hold'] });
+  const j = await a.hold('tik/orphan.mp4', 'tik/live.mp4', sha, op);
+  assert.equal(j.id, 4);
+  assert.equal(fetchImpl.calls[0].url, 'http://tik.internal:3000/api/dedupe/v1/hold');
+  assert.deepEqual(fetchImpl.calls[0].body, { path: 'orphan.mp4', twin: 'live.mp4', sha256: sha, op });
+  await rejectsAdapter(adapter({ fetchImpl, caps: ['lookup', 'link'] }).hold('a.mp4', 'b.mp4', sha), { message: /cannot hold/ });
+  // An answer without an entry id stays pending (the app may have held it).
+  const bad = stubFetch(() => jsonRes(200, { ok: true }));
+  await assert.rejects(adapter({ fetchImpl: bad, caps: ['hold'] }).hold('a.mp4', 'b.mp4', sha), (e) => e.stalled === true && e.status === 424);
+});
+
 test('restore, purge and cacheClean coerce their inputs; cache is a GET without a body', async () => {
   const fetchImpl = stubFetch(okReply);
   const a = adapter({ fetchImpl });

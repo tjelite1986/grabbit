@@ -47,6 +47,8 @@ class DupeError extends Error {
 const TABS = ['identical', 'photos', 'videos', 'cache'];
 const SORTS = ['space', 'similarity', 'size', 'newest', 'oldest', 'type'];
 const MAX_BATCH_GROUPS = 2000;
+// The trash reason for an app copy no post used, held by the app on request.
+const APP_HOLD_REASON = 'Held in the app (no post used it)';
 // How long an app's audience answer for one of its copies holds.
 const AUD_TTL_MS = 60 * 1000;
 // How long an app's answer about which posts use a copy is trusted for the
@@ -173,17 +175,19 @@ class DupeService {
       }
       const app = apps.get(o.adapter) || o.adapter;
       const what = o.op === 'link' ? `Share ${p.drop} with ${p.keep}`
+        : o.op === 'hold' ? `Hold ${p.drop} (no post used it)`
         : o.op === 'restore' ? `Restore held copy ${p.ref}`
           : o.op === 'purge' ? `Delete held copy ${p.ref} for good`
             : `${o.op.replace('cache-', 'Cache ')}`;
       const check = o.op === 'link' ? `Open ${p.drop} in ${app}: if it now shows the kept file, the share went through and the copy is in ${app}'s trash.`
+        : o.op === 'hold' ? `Check whether ${p.drop} is still in ${app}'s library folder; if it is gone, it is in ${app}'s dedupe trash.`
         : o.op === 'restore' ? `Check whether the item is back in ${app}; if not, restore it again.`
           : o.op === 'purge' ? `Check whether the copy is still in ${app}'s trash; if so, delete it again.`
             : `Check ${app}'s cache page.`;
       const note = res.appDone ? ` ${app} reported it done${res.appRef ? ` (held entry ${res.appRef})` : ''}, but Grabbit could not record it.`
         : res.appRef ? ` ${app} reported held entry ${res.appRef}.` : '';
       const ad = [...this.adapters.values()].find((a) => a.id === o.adapter);
-      const canResolve = o.op === 'link' && !!p.opKey && !!ad && ad.caps.has('opstatus');
+      const canResolve = (o.op === 'link' || o.op === 'hold') && !!p.opKey && !!ad && ad.caps.has('opstatus');
       return { id: o.id, app, op: o.op, what, check: check + note, appRef: res.appRef || null, at: o.at, canResolve };
     });
   }
@@ -199,7 +203,7 @@ class DupeService {
       let p = {};
       try { p = JSON.parse(o.payload) || {}; } catch {}
       const ad = [...this.adapters.values()].find((a) => a.id === o.adapter);
-      if (o.op !== 'link' || !p.opKey || !ad || !ad.caps.has('opstatus')) throw new DupeError('This operation cannot be checked automatically; check it in the app and mark it checked', 409);
+      if (!['link', 'hold'].includes(o.op) || !p.opKey || !ad || !ad.caps.has('opstatus')) throw new DupeError('This operation cannot be checked automatically; check it in the app and mark it checked', 409);
       const st = await ad.opStatus(p.opKey);
       if (st.found && st.inProgress) throw new DupeError(`${ad.app} is still working on it; check again in a minute`, 409);
       if (!st.found || st.state === 'failed') {
@@ -212,17 +216,17 @@ class DupeService {
       // A merge that stopped part way stays here until the app can tell.
       if (st.state !== 'linked') {
         const why = st.stopped
-          ? `${ad.app} stopped part way through this merge and cannot tell safely how far it got; check it in ${ad.app}, then mark it checked`
-          : `${ad.app} reports this merge as ${String(st.state).slice(0, 40)}; check again later or check it in ${ad.app}`;
+          ? `${ad.app} stopped part way through this ${o.op === 'hold' ? 'hold' : 'merge'} and cannot tell safely how far it got; check it in ${ad.app}, then mark it checked`
+          : `${ad.app} reports this ${o.op === 'hold' ? 'hold' : 'merge'} as ${String(st.state).slice(0, 40)}; check again later or check it in ${ad.app}`;
         throw new DupeError(why, 409);
       }
       const ref = `${st.id}:${st.uid}`;
       const tid = this.recordAppDone(o.id, ad, { ref, result: st }, () => this.dx.appTrashAdd({
         adapter: ad.id, ref, root: p.root, rel: p.drop, sha256: p.sha256, bytes: Number.isSafeInteger(p.bytes) ? p.bytes : st.bytes,
-        keep_root: p.keep_root, keep_rel: p.keep, reason: 'Merged in the app (both posts kept)', kind: p.kind, audience: p.audience, app: ad.app, by: o.by || by,
+        keep_root: p.keep_root, keep_rel: p.keep, reason: o.op === 'hold' ? APP_HOLD_REASON : 'Merged in the app (both posts kept)', kind: p.kind, audience: p.audience, app: ad.app, by: o.by || by,
       }, this.now()));
-      this.log(`unfinished ${o.id}: ${ad.app} merged it (entry ${st.id}), now in the trash`);
-      return { id: o.id, outcome: 'merged', trash: `a${tid}` };
+      this.log(`unfinished ${o.id}: ${ad.app} ${o.op === 'hold' ? 'held' : 'merged'} it (entry ${st.id}), now in the trash`);
+      return { id: o.id, outcome: o.op === 'hold' ? 'held' : 'merged', trash: `a${tid}` };
     });
   }
 
@@ -603,6 +607,20 @@ class DupeService {
         const mine = used(m);
         if (mine === false) {
           m.state = 'orphan';
+          // A copy a post uses keeps the bytes, so the app can hold this one
+          // in its own trash (restorable; it deletes it only while that twin
+          // still has the bytes). Never suggested: the owner asks for it.
+          const twin = ad.caps.has('hold')
+            ? (peers.includes(keep) && used(keep) === true ? keep : null)
+              || peers.filter((x) => used(x) === true).sort((a, b) => (b.score - a.score) || (a.mtime_ms - b.mtime_ms))[0]
+            : null;
+          if (twin) {
+            m.action = 'hold';
+            m.holdTo = twin.id;
+            m.why = `No ${ad.app} post uses this copy; ${ad.app} can hold it in its trash, where it stays restorable`;
+            m.fix = `${ad.app} refuses a file less than a day old, because an import may still be adding its post.`;
+            continue;
+          }
           m.why = `No ${ad.app} post uses this copy, so there is nothing to merge`;
           m.fix = `Check it in ${ad.app}: it may be left over from an earlier import. Grabbit never removes an app's files.`;
           continue;
@@ -872,7 +890,7 @@ class DupeService {
         bitrate: m.bitrate, container: m.container,
         recommended: m.recommended, score: m.score, reasons: m.reasons, action: m.action, suggested: Boolean(m.suggested),
         state: m.state || (m.action === 'trash' ? 'trash' : m.action ? 'merge' : 'protected'),
-        linkTo: m.linkTo || null, why: m.why || null, fix: m.fix || null, related: Boolean(m.related),
+        linkTo: m.linkTo || null, holdTo: m.holdTo || null, why: m.why || null, fix: m.fix || null, related: Boolean(m.related),
         similarity: m.similarity, distance: m.distance, cosine: m.cosine, rotated: m.rotated, role: m.role, offset: m.offset,
         matchWhy: m.matchWhy || null, copies: m.copies || 1,
       })),
@@ -943,7 +961,7 @@ class DupeService {
 
   // --- actions on one group -----------------------------------------------------
   // action: keep | keep_both | keep_selected | trash_extras | mark_known |
-  //         ignore | reopen | merge
+  //         ignore | reopen | merge | hold
   async act(key, action, { keep = [], by = null, note = null } = {}) {
     const g = this.findGroup(key);
     const kind = g.key.split(':')[0];
@@ -977,7 +995,8 @@ class DupeService {
         this.invalidate();
         return { ok: true, status: 'open' };
       case 'keep_selected':
-      case 'merge': {
+      case 'merge':
+      case 'hold': {
         // The plan must rest on what the app says now about these copies.
         await this.refreshAppRefs({ members: g.members.filter((m) => this.refsAdapter(m.root)) });
         const fresh = this.findGroup(key);
@@ -1000,6 +1019,8 @@ class DupeService {
       return g.members.filter((m) => !keepSet.has(m.id));
     }
     if (g.match !== 'exact') throw new DupeError('Choose the copies to keep yourself: a similarity match is never removed for you');
+    // hold: the copies no post uses, which the owner asked the app to hold.
+    if (action === 'hold') return g.members.filter((m) => m.action === 'hold');
     // trash_extras moves copies to the trash and nothing else: a merge or an
     // app link is its own confirmed action, never a side effect of this one.
     const kinds = action === 'merge' ? ['merge', 'link'] : ['trash'];
@@ -1079,6 +1100,33 @@ class DupeService {
         // The app merged but could not confirm its folder reached the disk.
         if (r.durable === false) this.log(`${ad.app} merged ${m.rel} (entry ${r.id}) without confirming it on disk`);
         return { trash: `a${tid}`, merged: true };
+      } catch (e) {
+        this.opFailed(opId, e);
+        throw e;
+      }
+    }
+    if (m.action === 'hold') {
+      const ad = this.adapters.get(m.root);
+      const twin = g.members.find((x) => x.id === m.holdTo && x.root === m.root);
+      if (!ad || !ad.caps.has('hold') || !twin) throw new DupeError('No copy a post uses in the same app');
+      await this.confirmOrphan(ad, twin, m);
+      const opKey = crypto.randomBytes(16).toString('hex');
+      const opId = this.dx.opBegin(ad.id, 'hold', {
+        drop: m.rel, keep: twin.rel, sha256: m.sha256, opKey,
+        root: m.root, bytes: m.bytes, keep_root: twin.root, kind: m.kind, audience: m.audience,
+      }, by, this.now());
+      try {
+        const r = await ad.hold(m.rel, twin.rel, m.sha256, opKey);
+        if (!r || !Number.isSafeInteger(r.id) || r.id < 1 || !/^[0-9a-f]{32}$/i.test(String(r.uid))) {
+          throw new AdapterError(`${ad.app} answered the hold without a valid entry id`, { status: 424, stalled: true, fix: `Check the item in ${ad.app}; it may have been held.` });
+        }
+        const ref = `${r.id}:${r.uid}`;
+        const tid = this.recordAppDone(opId, ad, { ref, result: r }, () => this.dx.appTrashAdd({
+          adapter: ad.id, ref, root: m.root, rel: m.rel, sha256: m.sha256, bytes: m.bytes,
+          keep_root: twin.root, keep_rel: twin.rel, reason: APP_HOLD_REASON, kind: m.kind, audience: m.audience, app: ad.app, by,
+        }, this.now()));
+        if (r.durable === false) this.log(`${ad.app} held ${m.rel} (entry ${r.id}) without confirming it on disk`);
+        return { trash: `a${tid}`, held: true };
       } catch (e) {
         this.opFailed(opId, e);
         throw e;
@@ -1170,7 +1218,7 @@ class DupeService {
       return {
         id: `a${t.id}`, source: 'app', app: t.app || r.app, name: path.basename(t.rel), rel: t.rel, rootLabel: r.label || t.root,
         bytes: t.bytes, at: t.at, by: t.by, expiresAt: days ? t.at + days * 86400000 : null, reason: t.reason, kind: t.kind,
-        audience: t.audience || audienceOf(r, null), merged: true, preview: false,
+        audience: t.audience || audienceOf(r, null), merged: t.reason !== APP_HOLD_REASON, preview: false,
       };
     });
     return own.concat(apps).sort((a, b) => b.at - a.at);
@@ -1425,6 +1473,29 @@ class DupeService {
     if (kept === 0) {
       throw new DupeError(`No ${ad.app} post uses the copy to keep (${target.name})`, 409, 'Keep a copy that a post uses.');
     }
+  }
+
+  // Right before a hold: the app is asked again. The copy must still have no
+  // post and the twin must still have one (it keeps the bytes).
+  async confirmOrphan(ad, twin, m) {
+    if (!ad.caps.has('lookup')) throw new DupeError(`${ad.app} cannot say which posts use these copies, so Grabbit does not ask it to hold one`, 409);
+    const askedAt = this.now();
+    let r;
+    try {
+      r = await ad.lookup([twin.rel, m.rel]);
+    } catch (e) {
+      throw new DupeError(`${ad.app} could not say which posts use these copies (${e.message}); nothing changed`, 409);
+    }
+    if (this.noteRefs([twin, m], r, askedAt)) this.invalidate();
+    const count = (x) => {
+      const it = r.get(x.rel);
+      return it && Array.isArray(it.refs) ? it.refs.length : null;
+    };
+    const mine = count(m);
+    const kept = count(twin);
+    if (mine == null || kept == null) throw new DupeError(`${ad.app} did not report on these copies; nothing changed`, 409);
+    if (mine > 0) throw new DupeError(`A ${ad.app} post uses ${m.name} now, so it stays`, 409);
+    if (kept === 0) throw new DupeError(`No ${ad.app} post uses ${twin.name} any more, so ${m.name} may be the last copy; nothing changed`, 409);
   }
 
   // --- app references ----------------------------------------------------------------

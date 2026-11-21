@@ -14,6 +14,10 @@
 //     into its own dedupe trash and puts a hard link to `keep` in its place.
 //     Every post keeps its own record, metadata, likes and comments; the
 //     bytes are stored once. -> { id, bytes }
+//   POST /api/dedupe/v1/hold    { path, twin, sha256, op? }
+//     A file no post uses whose bytes the twin (a file a post uses) has too.
+//     The app checks both, moves `path` into its dedupe trash and answers
+//     { id, uid, bytes }. restore and purge work on it like on a link.
 //   POST /api/dedupe/v1/restore { id }  -> puts the original file back.
 //   POST /api/dedupe/v1/purge   { id }  -> deletes the held original for good.
 //   GET  /api/dedupe/v1/cache            -> generated files the app can rebuild.
@@ -195,7 +199,16 @@ class AppAdapter {
     return this.confirm(j, (x) => Number.isSafeInteger(x.id) && x.id > 0, 'merge');
   }
 
-  // What became of the link call with key `op`: { found: false } (nothing
+  // Asks the app to hold a file no post uses (see the contract above).
+  async hold(rel, twinRel, sha256, op = null) {
+    if (!this.caps.has('hold')) throw new AdapterError(`${this.app} cannot hold a file no post uses`);
+    const body = { path: this.appPath(rel), twin: this.appPath(twinRel), sha256 };
+    if (op && this.caps.has('opstatus')) body.op = op;
+    const j = await this.call('POST', 'hold', body);
+    return this.confirm(j, (x) => Number.isSafeInteger(x.id) && x.id > 0, 'hold');
+  }
+
+  // What became of the link or hold call with key `op`: { found: false } (nothing
   // changed; the app closed the key), { found: true, inProgress: true }, or
   // { found: true, id, uid, bytes, state }. Any other shape throws.
   async opStatus(op) {

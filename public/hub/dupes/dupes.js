@@ -599,6 +599,9 @@
         const extras = g.members.filter((m) => m.suggested && m.action);
         const hasLink = extras.some((m) => m.action === 'link' || m.action === 'merge');
         const hasTrash = extras.some((m) => m.action === 'trash');
+        // Copies no post uses, which their app can hold in its own trash.
+        const holds = g.members.filter((m) => m.action === 'hold');
+        const holdApp = holds.length ? holds[0].app || holds[0].rootLabel : '';
         const actions = h('div', { class: 'dm-gactions' },
           h('button', { class: 'btn small', type: 'button', onclick: () => compare(g) }, ic('compare', 14), ' Compare side by side'),
           act('keep', 'Keep', { title: 'Keep the recommended copy and mark the group reviewed' }),
@@ -606,6 +609,7 @@
           act('keep_selected', 'Keep selected', { danger: true, confirm: confirmKeepSelected }),
           g.match === 'exact' && hasTrash ? act('trash_extras', 'Move extra copies to Trash', { danger: true, confirm: () => dialog('Move the extra copies to the trash?', [h('p', null, `${plural(extras.filter((m) => m.action === 'trash').length, 'copy moves', 'copies move')} to the trash. The recommended copy stays. You can restore them.`)], [{ label: 'Move to Trash', value: true, danger: true }]) }) : null,
           g.match === 'exact' && hasLink ? act('merge', 'Merge references', { title: 'Every post or library entry keeps working; the file is stored once', confirm: () => dialog('Merge references?', [h('p', null, 'The copies become one stored file with several names. Every post, library entry, like and comment keeps working. The original extra copy is held in the trash until you empty it.')], [{ label: 'Merge', value: true }]) }) : null,
+          g.match === 'exact' && holds.length ? act('hold', `Move unused ${holds.length > 1 ? 'copies' : 'copy'} to ${holdApp}'s trash`, { title: 'No post uses these copies; the app keeps them restorable until you empty the trash', confirm: () => dialog(`Move ${plural(holds.length, 'unused copy', 'unused copies')} to ${holdApp}'s trash?`, [h('p', null, `No ${holdApp} post uses ${holds.length > 1 ? 'these copies' : 'this copy'}, and a copy that a post uses has the same bytes. ${holdApp} moves ${holds.length > 1 ? 'them' : 'it'} into its own trash and checks again first. You can restore ${holds.length > 1 ? 'them' : 'it'} from the trash.`)], [{ label: 'Move to trash', value: true, danger: true }]) }) : null,
           act('mark_known', 'Mark known/OK'),
           act('ignore', 'Ignore group'),
           g.status !== 'open' ? act('reopen', 'Open again') : null);
@@ -979,7 +983,7 @@
               await busyBtn(btn, async () => {
                 try {
                   const res = await post(`ops/${o.id}/resolve`);
-                  toast(res.outcome === 'merged' ? `${o.app} did merge it; it is now in the trash and can be restored` : `${o.app} reports that nothing changed`);
+                  toast(res.outcome === 'merged' ? `${o.app} did merge it; it is now in the trash and can be restored` : res.outcome === 'held' ? `${o.app} did hold it; it is now in the trash and can be restored` : `${o.app} reports that nothing changed`);
                   viewTrash(body, generation, r);
                 } catch (err) { toast(err.message); }
               });
