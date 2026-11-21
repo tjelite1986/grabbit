@@ -1,0 +1,332 @@
+'use strict';
+// Guard tests for the HTTP gate in server.js: who gets in, with which status
+// code and body shape, and which requests are refused before the session is
+// consulted. These pin today's contract so a later split of server.js cannot
+// change it unnoticed. Binding rules: CLAUDE.md "Contracts with callers and
+// deployments" (internal secret, cross-site refusal, 422 not 5xx).
+//
+// Jobs are always started with `at` a year ahead, so they are only scheduled:
+// nothing is resolved or downloaded, and no network is used.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const { boot, PASSWORD, INTERNAL_TOKEN, FUTURE } = require('./helpers/guard-server');
+
+const scheduledIds = (s) => {
+  try {
+    return s.readJson('scheduled.json').map((x) => x.id);
+  } catch {
+    return [];
+  }
+};
+const startQuery = (extra = {}) =>
+  new URLSearchParams({ url: 'https://example.com/clip/1', dest: 'server', channel: 'main', device: '0', at: String(FUTURE()), ...extra });
+
+test('authentication gate', async (t) => {
+  const s = await boot(t);
+
+  await t.test('the shared password sets an HttpOnly, Secure, SameSite=Lax session cookie and redirects to /', async () => {
+    const r = await s.login();
+    assert.equal(r.status, 302);
+    assert.match(r.cookie, /^grabbit_auth=[0-9a-f]{64}$/);
+    const raw = r.setCookie.find((v) => v.startsWith('grabbit_auth='));
+    assert.match(raw, /;\s*HttpOnly/i);
+    assert.match(raw, /;\s*Secure/i);
+    assert.match(raw, /;\s*SameSite=Lax/i);
+    // The same password always yields the same session value (HMAC of the password).
+    assert.equal((await s.login()).cookie, r.cookie);
+  });
+
+  await t.test('a wrong or missing password is a 401 HTML page with no cookie', async () => {
+    for (const body of ['password=wrong', 'password=', '']) {
+      const r = await fetch(`${s.base}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+        redirect: 'manual',
+      });
+      assert.equal(r.status, 401, body);
+      assert.match(r.headers.get('content-type'), /text\/html/);
+      assert.equal(r.headers.getSetCookie().filter((v) => /^grabbit_auth=[^;]/.test(v)).length, 0);
+      await r.text();
+    }
+  });
+
+  await t.test('unauthenticated API calls get 401 JSON; pages redirect to /login', async () => {
+    for (const p of ['/api/history', '/api/jobs', '/api/jobs/start?url=https://example.com/x', '/api/download?url=https://example.com/x']) {
+      const r = await s.call(p, { headers: {} });
+      assert.equal(r.status, 401, p);
+      assert.deepEqual(r.body, { ok: false, error: 'Unauthorized' }, p);
+    }
+    // Upper-case /API/ reaches the same Express routes, but the 401 branch
+    // matches '/api/' case-sensitively, so it is redirected to the login page
+    // instead. Either way nothing is served without a session.
+    const upper = await s.call('/API/history', { headers: {} });
+    assert.equal(upper.status, 302);
+    assert.equal(upper.headers.get('location'), '/login');
+    const v1 = await s.call('/api/v1/whoami', { headers: {} });
+    assert.equal(v1.status, 401);
+    assert.equal(v1.body.ok, false);
+    assert.equal(v1.body.error.code, 'unauthorized');
+    const page = await s.call('/', { headers: {} });
+    assert.equal(page.status, 302);
+    assert.equal(page.headers.get('location'), '/login');
+  });
+
+  await t.test('a forged session cookie is treated as no session', async () => {
+    const r = await s.call('/api/history', { headers: { Cookie: `grabbit_auth=${'0'.repeat(64)}` } });
+    assert.equal(r.status, 401);
+  });
+
+  await t.test('public assets and the release probe need no session', async () => {
+    assert.equal((await s.call('/sw.js', { headers: {} })).status, 200);
+    assert.equal((await s.call('/manifest.webmanifest', { headers: {} })).status, 200);
+    assert.notEqual((await s.call('/api/health/release', { headers: {} })).status, 401);
+  });
+
+  await t.test('the owner session reaches the API', async () => {
+    const r = await s.call('/api/history');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+  });
+});
+
+test('internal principal: recognised only by the exact secret, never by a missing header', async (t) => {
+  const s = await boot(t);
+
+  await t.test('the right secret is admitted without a cookie', async () => {
+    const r = await s.call('/api/history', { headers: { 'X-Grabbit-Token': INTERNAL_TOKEN } });
+    assert.equal(r.status, 200);
+  });
+
+  await t.test('no credential at all is refused (absence of X-Forwarded-Host is not trust)', async () => {
+    // The 2026 regression: a request without X-Forwarded-Host counted as internal.
+    assert.equal((await s.call('/api/history', { headers: {} })).status, 401);
+    assert.equal((await s.call(`/api/jobs/start?${startQuery()}`, { headers: {} })).status, 401);
+  });
+
+  await t.test('a wrong, empty or differently cased secret is refused', async () => {
+    // (Surrounding whitespace is not tested: HTTP strips it from header values.)
+    for (const v of ['wrong', '', INTERNAL_TOKEN.toUpperCase(), `${INTERNAL_TOKEN}x`, INTERNAL_TOKEN.slice(0, -1)]) {
+      const r = await s.call('/api/history', { headers: { 'X-Grabbit-Token': v } });
+      assert.equal(r.status, 401, JSON.stringify(v));
+    }
+  });
+
+  await t.test('the right secret through the proxy (X-Forwarded-Host set) is not internal', async () => {
+    const r = await s.call('/api/history', { headers: { 'X-Grabbit-Token': INTERNAL_TOKEN, 'X-Forwarded-Host': 'grabbit.example.com' } });
+    assert.equal(r.status, 401);
+  });
+
+  await t.test('the internal principal may start jobs on every target and keeps owner-only parameters', async () => {
+    const before = scheduledIds(s).length;
+    const r = await s.call(`/api/jobs/start?${startQuery({ dest: 'elite', channel: '18plus', folder: 'custom-folder' })}`, {
+      headers: { 'X-Grabbit-Token': INTERNAL_TOKEN },
+    });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(Object.keys(r.body).sort(), ['jobId', 'ok', 'scheduled']);
+    assert.equal(scheduledIds(s).length, before + 1);
+    const sched = s.readJson('scheduled.json').find((x) => x.id === r.body.jobId);
+    assert.equal(sched.params.folder, 'custom-folder');
+    assert.equal(sched.clientId, 'internal');
+  });
+});
+
+test('without GRABBIT_INTERNAL_TOKEN the internal header opens nothing', async (t) => {
+  const s = await boot(t, { internalToken: null });
+  for (const v of ['', 'undefined', 'null', INTERNAL_TOKEN]) {
+    const r = await s.call('/api/history', { headers: { 'X-Grabbit-Token': v } });
+    assert.equal(r.status, 401, JSON.stringify(v));
+  }
+});
+
+test('cross-site requests to /api/* are refused before the session is used', async (t) => {
+  const s = await boot(t);
+  const blocked = { ok: false, error: 'Cross-site request blocked' };
+  const host = new URL(s.base).host;
+
+  await t.test('Sec-Fetch-Site: cross-site on the three GETs with side effects', async () => {
+    const before = scheduledIds(s);
+    for (const p of [`/api/jobs/start?${startQuery()}`, '/api/download?url=https://example.com/x', '/api/download-all?url=https://example.com/x', `/API/jobs/start?${startQuery()}`]) {
+      const r = await s.call(p, { headers: { ...s.headers, 'Sec-Fetch-Site': 'cross-site' } });
+      assert.equal(r.status, 403, p);
+      assert.deepEqual(r.body, blocked, p);
+    }
+    assert.deepEqual(scheduledIds(s), before, 'a refused request must not schedule a job');
+  });
+
+  await t.test('the internal secret does not lift the cross-site refusal', async () => {
+    const r = await s.call(`/api/jobs/start?${startQuery()}`, { headers: { ...s.internal, 'Sec-Fetch-Site': 'cross-site' } });
+    assert.equal(r.status, 403);
+  });
+
+  await t.test('a foreign, malformed or schemeless Origin is refused', async () => {
+    for (const origin of ['https://attacker.example', `https://${host}.attacker.example`, 'not a url', `http://${host}:1`]) {
+      const r = await s.call('/api/history', { headers: { ...s.headers, Origin: origin } });
+      assert.equal(r.status, 403, origin);
+      assert.deepEqual(r.body, blocked, origin);
+    }
+  });
+
+  await t.test('same-origin, same-site and no-header requests pass', async () => {
+    for (const h of [{ 'Sec-Fetch-Site': 'same-origin' }, { 'Sec-Fetch-Site': 'same-site' }, { 'Sec-Fetch-Site': 'none' }, { Origin: `http://${host}` }, { Origin: 'null' }, {}]) {
+      const r = await s.call('/api/history', { headers: { ...s.headers, ...h } });
+      assert.equal(r.status, 200, JSON.stringify(h));
+    }
+  });
+
+  await t.test('behind the proxy the Origin is compared with X-Forwarded-Host', async () => {
+    const h = { ...s.headers, 'X-Forwarded-Host': 'grabbit.example.com' };
+    assert.equal((await s.call('/api/history', { headers: { ...h, Origin: 'https://grabbit.example.com' } })).status, 200);
+    assert.equal((await s.call('/api/history', { headers: { ...h, Origin: `http://${host}` } })).status, 403);
+  });
+
+  await t.test('non-API pages are not subject to the API cross-site check', async () => {
+    const r = await s.call('/', { headers: { ...s.headers, 'Sec-Fetch-Site': 'cross-site' } });
+    assert.notEqual(r.status, 403);
+  });
+});
+
+test('job start: parameter validation and response shape', async (t) => {
+  const s = await boot(t);
+
+  await t.test('a missing, non-http or malformed URL is 400 JSON and schedules nothing', async () => {
+    const before = scheduledIds(s);
+    for (const url of [null, '', 'example.com/x', 'javascript:alert(1)', 'file:///etc/passwd', 'ftp://example.com/x', 'http://']) {
+      const q = startQuery();
+      if (url === null) q.delete('url');
+      else q.set('url', url);
+      const r = await s.call(`/api/jobs/start?${q}`);
+      assert.equal(r.status, 400, String(url));
+      assert.deepEqual(r.body, { ok: false, error: 'Invalid URL' }, String(url));
+    }
+    assert.deepEqual(scheduledIds(s), before);
+  });
+
+  await t.test('cutting or splitting outside the server and audiobook libraries is 400', async () => {
+    for (const extra of [{ dest: 'elite', split: '1' }, { dest: 'elite', sections: '*0:10-0:20' }]) {
+      const r = await s.call(`/api/jobs/start?${startQuery(extra)}`);
+      assert.equal(r.status, 400, JSON.stringify(extra));
+      assert.equal(r.body.ok, false);
+      assert.equal(typeof r.body.error, 'string');
+    }
+  });
+
+  await t.test('route=smart is refused for audio, non-video destinations and cuts', async () => {
+    for (const extra of [{ route: 'smart', audio: '1' }, { route: 'smart', dest: 'navidrome' }, { route: 'smart', split: '1' }]) {
+      const r = await s.call(`/api/jobs/start?${startQuery(extra)}`);
+      assert.equal(r.status, 400, JSON.stringify(extra));
+    }
+  });
+
+  await t.test('a scheduled job: 200 { ok, jobId, scheduled }, listed as scheduled, persisted in scheduled.json', async () => {
+    const r = await s.call(`/api/jobs/start?${startQuery()}`);
+    assert.equal(r.status, 200);
+    assert.deepEqual(Object.keys(r.body).sort(), ['jobId', 'ok', 'scheduled']);
+    assert.equal(r.body.scheduled, true);
+    assert.equal(typeof r.body.jobId, 'string');
+    const { body } = await s.call('/api/jobs');
+    const j = body.jobs.find((x) => x.id === r.body.jobId);
+    assert.equal(j.status, 'scheduled');
+    const sched = s.readJson('scheduled.json').find((x) => x.id === r.body.jobId);
+    assert.equal(sched.params.url, 'https://example.com/clip/1');
+    assert.equal(sched.clientId, 'legacy-shared');
+  });
+
+  await t.test('an `at` in the past or unparseable does not schedule (the job would run now)', async () => {
+    // Characterisation only: a past `at` makes the job immediate. Here the
+    // resolve then fails (yt-dlp is /bin/false), so nothing is downloaded.
+    const r = await s.call(`/api/jobs/start?${startQuery({ at: '1' })}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.scheduled, false);
+  });
+
+  await t.test('cancel: scheduled jobs only; unknown id is 404; cancelled jobs leave scheduled.json', async () => {
+    const r = await s.call(`/api/jobs/start?${startQuery()}`);
+    const id = r.body.jobId;
+    const c = await s.call(`/api/jobs/${id}/cancel`, { method: 'POST' });
+    assert.equal(c.status, 200);
+    assert.deepEqual(c.body, { ok: true });
+    assert.ok(!scheduledIds(s).includes(id));
+    const { body } = await s.call('/api/jobs');
+    assert.equal(body.jobs.find((x) => x.id === id).status, 'cancelled');
+    const again = await s.call(`/api/jobs/${id}/cancel`, { method: 'POST' });
+    assert.equal(again.status, 400);
+    const missing = await s.call('/api/jobs/no-such-job/cancel', { method: 'POST' });
+    assert.equal(missing.status, 404);
+    assert.deepEqual(missing.body, { ok: false, error: 'Job not found' });
+  });
+
+  await t.test('the synchronous /api/download keeps its plain-text 400 for a bad URL', async () => {
+    const r = await s.call('/api/download?url=notaurl&device=0');
+    assert.equal(r.status, 400);
+    assert.equal(r.text, 'Invalid URL');
+  });
+
+  await t.test('a failed save on the synchronous route is 422, never 5xx', async () => {
+    // yt-dlp is /bin/false and 192.0.2.1 is a literal (no DNS lookup), so
+    // nothing leaves the machine. 422 keeps Cloudflare from replacing the body.
+    for (const dest of ['elite', 'server']) {
+      const r = await s.call(`/api/download?url=https://192.0.2.1/v/1&device=0&dest=${dest}`);
+      assert.equal(r.status, 422, `${dest}: ${r.text}`);
+      assert.doesNotMatch(r.text, /<html/i);
+    }
+  });
+
+  await t.test('a private address is refused by the URL guard with 422', async () => {
+    for (const url of ['http://127.0.0.1/x', 'http://169.254.169.254/latest/meta-data/', 'http://[::1]/x', 'http://10.0.0.1/x']) {
+      const r = await s.call(`/api/download?url=${encodeURIComponent(url)}&device=0`);
+      assert.equal(r.status, 422, url);
+      assert.match(r.text, /non-public address/, url);
+    }
+  });
+});
+
+test('route=smart access (D3, characterised; the decision stays with the owner)', async (t) => {
+  const s = await boot(t, {
+    seed: (dataDir) => {
+      const gda = require('../gda');
+      const reg = gda.createRegistry({ file: path.join(dataDir, 'gda-clients.json'), sessionSecret: 'x' });
+      reg.upsertClient({
+        client_id: 'guard-app',
+        audience: 'general',
+        allowed_targets: ['legacy.tikshortis', 'server.downloads'],
+        allowed_ops: ['job', 'status'],
+        legacy_main_target: 'legacy.tikshortis',
+      });
+      fs.writeFileSync(path.join(dataDir, 'guard-app.pw'), reg.setPassword('guard-app'));
+    },
+  });
+  const smart = startQuery({ dest: 'elite', route: 'smart' });
+
+  await t.test('the owner session may request smart routing', async () => {
+    const r = await s.call(`/api/jobs/start?${smart}`);
+    assert.equal(r.status, 200, r.text);
+    assert.equal(s.readJson('scheduled.json').find((x) => x.id === r.body.jobId).params.route, 'smart');
+  });
+
+  await t.test('an app client is refused with 400', async () => {
+    const pw = fs.readFileSync(path.join(s.dataDir, 'guard-app.pw'), 'utf8');
+    const { cookie } = await s.login(pw);
+    assert.ok(cookie);
+    const r = await s.call(`/api/jobs/start?${smart}`, { headers: { Cookie: cookie } });
+    assert.equal(r.status, 400);
+    assert.deepEqual(r.body, { ok: false, error: 'route=smart is only available to the owner.' });
+  });
+
+  await t.test('D3: the internal principal is admitted today (spec says owner web UI only)', async () => {
+    // Current behaviour, pinned so a change is deliberate. The desired
+    // behaviour, if the owner decides so, is in test/known-gaps.test.js.
+    const r = await s.call(`/api/jobs/start?${smart}`, { headers: s.internal });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(s.readJson('scheduled.json').find((x) => x.id === r.body.jobId).params.route, 'smart');
+  });
+
+  await t.test('the shared password is the owner (legacy-shared), not an app', async () => {
+    assert.ok(PASSWORD);
+    const r = await s.call('/api/v1/whoami');
+    assert.equal(r.body.data.client_id, 'legacy-shared');
+    assert.equal(r.body.data.audience, 'admin');
+  });
+});
