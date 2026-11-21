@@ -43,6 +43,8 @@ test('health endpoints over HTTP: sha first, release route public and minimal', 
     env: {
       PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data'), DOWNLOAD_DIR: mk('dl'),
       GRABBIT_PASSWORD: 'pw-test', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none,
+      // Never start the developer's real downloaders (boot runs yt-dlp --list-extractors).
+      YTDLP_BIN: '/bin/false', GALLERY_DL_BIN: '/bin/false',
     },
     stdio: 'ignore',
   });
@@ -65,7 +67,7 @@ test('full /api/health: sha is the first key, within 4 KiB, existing fields kept
   const mk = (n) => { const p = path.join(dir, n); fs.mkdirSync(p, { recursive: true }); return p; };
   const proc = spawn('node', ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data2'), DOWNLOAD_DIR: mk('dl2'), GRABBIT_AUTH_DISABLED: '1', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none },
+    env: { PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data2'), DOWNLOAD_DIR: mk('dl2'), GRABBIT_AUTH_DISABLED: '1', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none, YTDLP_BIN: '/bin/false', GALLERY_DL_BIN: '/bin/false' },
     stdio: 'ignore',
   });
   t.after(() => proc.kill());

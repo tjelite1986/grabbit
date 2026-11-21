@@ -156,3 +156,28 @@ test('Shorts destinations are opt-in: with no app roots, a smart portrait save g
   assert.equal(media(path.join(s.downloads, 'review')).length, 1, filesUnder(s.downloads).join('\n'));
   for (const d of ['tik', 'ads', 'plat']) assert.deepEqual(filesUnder(path.join(s.root, d)), [], d);
 });
+
+test('ELITE_ENABLED: with no Shorts or posts root, dest=elite (and no dest) fall back to the server library', async (t) => {
+  const s = await boot(t, { apps: false });
+  const cfg = await s.call('/api/config');
+  assert.equal(cfg.body.elite, false);
+  assert.equal(cfg.body.shorts, false);
+  assert.deepEqual(cfg.body.channels, []);
+  for (const dest of ['elite', undefined, 'bogus']) {
+    const q = new URLSearchParams({ url: 'https://example.com/e/1', channel: 'main', device: '0', at: String(Date.now() + 3600e3) });
+    if (dest) q.set('dest', dest);
+    const r = await s.call(`/api/jobs/start?${q}`);
+    assert.equal(r.status, 200, r.text);
+    assert.equal(s.readJson('scheduled.json').find((x) => x.id === r.body.jobId).dest, 'server', String(dest));
+  }
+});
+
+test('ELITE_ENABLED: with app roots, no dest means elite and the configured channels are listed', async (t) => {
+  const s = await boot(t);
+  const cfg = await s.call('/api/config');
+  assert.equal(cfg.body.elite, true);
+  assert.ok(cfg.body.channels.includes('main'), JSON.stringify(cfg.body.channels));
+  const q = new URLSearchParams({ url: 'https://example.com/e/2', channel: 'main', device: '0', at: String(Date.now() + 3600e3) });
+  const r = await s.call(`/api/jobs/start?${q}`);
+  assert.equal(s.readJson('scheduled.json').find((x) => x.id === r.body.jobId).dest, 'elite');
+});
