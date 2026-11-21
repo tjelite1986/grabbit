@@ -42,12 +42,15 @@ const ADULT_SITE_DOMAINS = [
   'imagefap.com',
   'nuditok.com',
   'onlytik.com',
+  'pornhub.com',
   'redgifs.com',
   'tik.porn',
   'xfree.com',
+  'xhamster.com',
+  'xvideos.com',
   'xxxfollow.com',
 ];
-const ADULT_SITE_SLUGS = new Set(['erome', 'imagefap', 'nuditok', 'onlytik', 'redgifs', 'tikporn', 'xfree', 'xxxfollow']);
+const ADULT_SITE_SLUGS = new Set(['erome', 'imagefap', 'nuditok', 'onlytik', 'redgifs', 'tikporn', 'xfree', 'xxxfollow', 'pornhub', 'xhamster', 'xvideos']);
 
 // The site of a job is a hostname (`redgifs.com`), a slug yt-dlp gave itself
 // (`RedGifs`) or an extractor name. Any of them may name an adult site.

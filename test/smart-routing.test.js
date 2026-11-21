@@ -29,6 +29,10 @@ test('classifySource: the approved table, by slug, host or extractor key', () =>
   // An 18+ site outranks the table, RedGIFs included.
   assert.equal(cls({ site: 'redgifs' }), 'adult');
   assert.equal(cls({ site: 'tiktok', sourceUrl: 'https://erome.com/a/1' }), 'adult');
+  for (const site of ['pornhub', 'PornHub', 'xhamster', 'XHamster', 'xvideos', 'XVideos']) assert.equal(cls({ site }), 'adult', site);
+  for (const u of ['https://www.pornhub.com/view_video.php?viewkey=1', 'https://xhamster.com/videos/x', 'https://www.xvideos.com/video1/x']) {
+    assert.equal(cls({ sourceUrl: u }), 'adult', u);
+  }
   // A host that only contains a known name is not that source.
   assert.equal(cls({ sourceUrl: 'https://tiktok.com.attacker.example/v' }), 'review');
 });
