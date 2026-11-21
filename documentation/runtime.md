@@ -11,7 +11,7 @@ Which Node.js Grabbit runs on. Verified against commit `73547d3`.
 | `README.md`, `documentation/installation.md` | Node.js 22 or newer. |
 | `package.json` | No `engines` field. |
 | CI | No workflow files are tracked in this checkout (`git ls-files .github` is empty), so no CI Node version is known. |
-| `CLAUDE.md` ("Target platform") | Says Node 20 at this commit. A corrected wording is proposed in `documentation/claude-md-round2.patch` (see the job report); until it is applied the statement is out of date. |
+| `CLAUDE.md` ("Target platform") | States that the image runs Node 22 and that code must build and run on linux/arm64 with Node 20 until the owner decides otherwise. |
 | Tooling sandbox used for documentation jobs | `node -v` prints v20.20.2. A tooling sandbox, not the deployed runtime. |
 
 Both facts hold:
