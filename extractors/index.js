@@ -19,6 +19,8 @@
 //     ext?: string,                 // image jobs only: the file extension
 //     duration?: number | null,     // SECONDS. null/absent means unknown, and
 //                                   // the shorts length cap then never fires
+//     width?: number | null,        // pixel size, for smart routing's
+//     height?: number | null,       // orientation; null/absent means unknown
 //     tags?: string[],              // '#lowercase' strings, carried into imports
 //     // for kind 'direct':
 //     downloadUrl?: string,

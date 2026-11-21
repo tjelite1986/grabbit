@@ -47,6 +47,9 @@ function emptyStore() {
 }
 
 const CLASSIFY_MAX = 5000;
+// Why a classification was made, kept on the profile and in its log entry so
+// every decision can be traced.
+const CLASSIFY_REASONS = ['hand', 'source-suggestion'];
 
 // The audience the gate reads for a profile: 'adult', 'general' or 'unknown'.
 function effectiveAudience(p) {
@@ -113,6 +116,9 @@ function normalizeStore(raw) {
       origin: p.origin || 'manual',
       classifiedAs: p.classifiedAs === undefined ? null : p.classifiedAs,
       classifiedAt: Number(p.classifiedAt) || null,
+      // How the owner's decision was made ('hand', or 'source-suggestion' when
+      // the owner confirmed a General-source suggestion). Absent on older rows.
+      classifiedReason: CLASSIFY_REASONS.includes(p.classifiedReason) ? p.classifiedReason : null,
       createdAt: Number(p.createdAt) || 0,
       updatedAt: Number(p.updatedAt) || 0,
     })),
@@ -212,6 +218,7 @@ function sync(store, stats, now) {
       origin: 'registry',
       classifiedAs: null,
       classifiedAt: null,
+      classifiedReason: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -263,6 +270,7 @@ function create(store, input, now) {
     origin: 'manual',
     classifiedAs: null,
     classifiedAt: null,
+    classifiedReason: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -333,8 +341,9 @@ function merge(store, targetId, sourceIds, now) {
 // The owner's decision for many profiles at once (the review queue).
 // General is refused for anything 18+; 18+ may be set on any profile. Returns
 // the profiles changed and, per refused id, why.
-function classifyProfiles(store, ids, audience, now) {
+function classifyProfiles(store, ids, audience, now, { reason = 'hand' } = {}) {
   if (!AUDIENCES.includes(audience)) throw bad('audience must be general or adult');
+  if (!CLASSIFY_REASONS.includes(reason)) throw bad(`reason must be one of ${CLASSIFY_REASONS.join(', ')}`);
   if (!Array.isArray(ids) || !ids.length) throw bad('choose at least one profile');
   if (ids.length > CLASSIFY_MAX) throw bad(`at most ${CLASSIFY_MAX} profiles at a time`);
   const next = clone(store);
@@ -353,10 +362,11 @@ function classifyProfiles(store, ids, audience, now) {
     }
     p.classifiedAs = audience;
     p.classifiedAt = now;
+    p.classifiedReason = reason;
     p.updatedAt = now;
     changed.push(p.id);
   }
-  if (changed.length) logEntry(next, now, 'classify', { audience, ids: changed });
+  if (changed.length) logEntry(next, now, 'classify', { audience, ids: changed, reason });
   const problems = check(next);
   if (problems.length) throw new Error(`classify broke the store: ${problems.join('; ')}`);
   return { store: changed.length ? next : store, changed, skipped };
@@ -394,6 +404,7 @@ function split(store, id, input, now) {
     // new profile is classified again before a general app takes it.
     classifiedAs: from.classifiedAs === 'adult' ? 'adult' : null,
     classifiedAt: from.classifiedAs === 'adult' ? from.classifiedAt : null,
+    classifiedReason: from.classifiedAs === 'adult' ? from.classifiedReason || null : null,
     createdAt: now,
     updatedAt: now,
   };
@@ -447,6 +458,7 @@ function view(p, stats) {
     origin: p.origin,
     classifiedAs: p.classifiedAs || null,
     classifiedAt: p.classifiedAt || null,
+    classifiedReason: p.classifiedReason || null,
     status: effectiveAudience(p),
     accounts: p.accounts,
     aliases,
@@ -513,5 +525,5 @@ module.exports = {
   VERSION, AUDIENCES, PLATFORMS, LIMITS, ProfileError,
   emptyStore, normalizeStore, check, aliasStats, audienceOfChannel, aliasKey, accountKey,
   sync, create, update, merge, split, view, list, findProfile,
-  effectiveAudience, classifyProfiles, matching, groups, groupKey, historyOf, CLASSIFY_MAX,
+  effectiveAudience, classifyProfiles, matching, groups, groupKey, historyOf, CLASSIFY_MAX, CLASSIFY_REASONS,
 };

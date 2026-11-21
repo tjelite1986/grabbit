@@ -229,6 +229,8 @@ function jobFromGif(gif) {
     ext,
     thumbnail: urls.poster || urls.thumbnail || null,
     duration: Number.isFinite(gif.duration) ? gif.duration : null,
+    width: Number.isFinite(gif.width) ? gif.width : null,
+    height: Number.isFinite(gif.height) ? gif.height : null,
     // The site's own claim about an audio track. Advisory only — see the note
     // at the top: it under-reports, so the download never branches on it.
     hasAudio: !!gif.hasAudio,

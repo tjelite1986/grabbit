@@ -605,3 +605,119 @@ test('posts to Elitogram: a second source with the same name is published under 
   assert.equal(images.length, 3, files.join('\n'));
   assert.equal(new Set(sidecars.map((x) => x.source_id)).size, 3);
 });
+
+// --- Smart Video Routing (Settings spec 2026-11-21) --------------------------
+// route=smart on the job route: the server picks the destination from the
+// orientation, the source and the audience. Review never reaches a general app.
+
+const smartJob = (s, url) => s.saveJob(url, 'main', { route: 'smart' });
+const portrait = '?w=1080&h=1920';
+const landscape = '?w=1920&h=1080';
+const mediaFiles = (dir) => filesUnder(dir).filter((f) => !f.endsWith('.md') && !f.endsWith('.json'));
+
+test('smart route: portrait from a General source and a general creator goes to Shorts at any length', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  // 40 minutes: far past the shorts length cap, which a smart portrait route lifts.
+  const r = await smartJob(s, s.fakeUrl('video', 'tiktok', 'Jane Doe', 'p1') + portrait + '&dur=2400');
+  assert.equal(r.job.status, 'done', JSON.stringify(r.job) + s.logs());
+  assert.equal(r.job.route.route, 'shorts');
+  assert.equal(r.job.route.orientation, 'portrait');
+  assert.equal(mediaFiles(s.apps.tik).length, 1, filesUnder(s.apps.tik).join('\n'));
+});
+
+test('smart route: an unclassified creator from a General source waits in Review', async (t) => {
+  const s = await boot(t);
+  const r = await smartJob(s, s.fakeUrl('video', 'tiktok', 'stranger', 'p2') + portrait);
+  assert.equal(r.job.status, 'done', JSON.stringify(r.job) + s.logs());
+  assert.equal(r.job.route.route, 'review');
+  assert.match(r.job.route.reasons.join(' '), /not classified General/);
+  assert.deepEqual(s.generalFiles(), []);
+  const root = path.dirname(s.dataDir);
+  assert.equal(filesUnder(path.join(root, 'downloads', 'review')).length, 1);
+});
+
+test('smart route: landscape goes to Long Videos, square and unknown orientation to Review', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  const root = path.dirname(s.dataDir);
+  const wide = await smartJob(s, s.fakeUrl('video', 'youtube', 'Jane Doe', 'l1') + landscape);
+  assert.equal(wide.job.route.route, 'long-videos', JSON.stringify(wide.job));
+  assert.equal(filesUnder(path.join(root, 'downloads', 'videos')).length, 1);
+  const square = await smartJob(s, s.fakeUrl('video', 'instagram', 'Jane Doe', 's1') + '?w=1080&h=1080');
+  assert.equal(square.job.route.route, 'review');
+  assert.equal(square.job.route.orientation, 'square');
+  const unknown = await smartJob(s, s.fakeUrl('video', 'facebook', 'Jane Doe', 'u1'));
+  assert.equal(unknown.job.route.route, 'review');
+  assert.equal(unknown.job.route.orientation, 'unknown');
+  assert.equal(filesUnder(path.join(root, 'downloads', 'review')).length, 2);
+  assert.deepEqual(mediaFiles(s.apps.tik), []);
+});
+
+test('smart route: Review and unknown sources stay out of Shorts, and 18+ always wins', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  const root = path.dirname(s.dataDir);
+  for (const site of ['fikfap', 'brandnewsite']) {
+    const r = await smartJob(s, s.fakeUrl('video', site, 'Jane Doe', `r-${site}`) + portrait);
+    assert.equal(r.job.route.route, 'review', JSON.stringify(r.job));
+    assert.equal(r.job.route.sourceClass, 'review');
+  }
+  // RedGIFs is Review in the table, but it is an 18+ site, and 18+ wins.
+  const red = await smartJob(s, s.fakeUrl('video', 'redgifs', 'Jane Doe', 'a1') + portrait);
+  assert.equal(red.job.route.route, 'shorts-18', JSON.stringify(red.job));
+  // A General source with an 18+ flag on the item: still 18+.
+  const flagged = await smartJob(s, s.fakeUrl('video', 'tiktok', 'Jane Doe', 'a2') + landscape + '&adult=1');
+  assert.equal(flagged.job.route.route, 'adults', JSON.stringify(flagged.job));
+  assert.equal(filesUnder(path.join(root, 'downloads', 'adults')).length, 1);
+  assert.equal(mediaFiles(s.apps.ads).length, 1);
+  assert.deepEqual(mediaFiles(s.apps.tik), []);
+  assert.deepEqual(s.generalFiles().filter((f) => !f.endsWith('.md') && !f.endsWith('.json')), []);
+  // Every decision is traceable in the routing log.
+  const log = fs.readFileSync(path.join(s.dataDir, 'routing.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(log.map((l) => l.route), ['review', 'review', 'shorts-18', 'adults']);
+  assert.ok(log.every((l) => l.reasons.length && l.sourceUrl && l.at));
+});
+
+test('smart route: only for video saves to Shorts or the server library', async (t) => {
+  const s = await boot(t);
+  for (const extra of [{ audio: '1' }, { dest: 'navidrome' }, { split: '1', dest: 'server' }]) {
+    const q = new URLSearchParams({ url: s.fakeUrl('video', 'tiktok', 'x', 'n1'), dest: 'elite', channel: 'main', device: '0', route: 'smart', ...extra });
+    const r = await fetch(`${s.base}/api/jobs/start?${q}`, { headers: s.headers });
+    assert.equal(r.status, 400, JSON.stringify(extra));
+  }
+});
+
+test('review: a General-source suggestion is shown, and confirming it is recorded as such', async (t) => {
+  const registry = {
+    'id:tiktok:1': { filename: 'tikonly_-_clip 1.mp4', channel: null, at: NOW },
+    'id:fikfap:2': { filename: 'fikonly_-_clip 2.mp4', channel: null, at: NOW },
+  };
+  const s = await boot(t, { registry });
+  const json = async (url, opts) => (await fetch(`${s.base}${url}`, { ...opts, headers: { ...s.headers, ...(opts && opts.body ? { 'Content-Type': 'application/json' } : {}) } })).json();
+  const { groups } = await json('/api/hub/review/groups');
+  const tik = groups.find((g) => g.sites.join() === 'tiktok');
+  const fik = groups.find((g) => g.sites.join() === 'fikfap');
+  assert.ok(tik && fik, JSON.stringify(groups));
+  assert.equal(tik.suggestion.audience, 'general');
+  assert.equal(fik.suggestion, null);
+  const { items } = await json('/api/hub/review/creators');
+  const tikP = items.find((p) => p.name === 'tikonly');
+  const fikP = items.find((p) => p.name === 'fikonly');
+  // A suggestion that is not there cannot be confirmed.
+  const refused = await fetch(`${s.base}/api/hub/review/creators`, {
+    method: 'POST', headers: { ...s.headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audience: 'general', ids: [fikP.id], reason: 'source-suggestion' }),
+  });
+  assert.equal(refused.status, 409);
+  const ok = await json('/api/hub/review/creators', { method: 'POST', body: JSON.stringify({ audience: 'general', ids: [tikP.id], reason: 'source-suggestion' }) });
+  assert.deepEqual(ok.changed, [tikP.id]);
+  const { profile } = await json(`/api/hub/profiles/${tikP.id}`);
+  assert.equal(profile.classifiedReason, 'source-suggestion');
+  assert.equal(profile.status, 'general');
+  const stored = JSON.parse(fs.readFileSync(path.join(s.dataDir, 'profiles.json'), 'utf8'));
+  assert.equal(stored.log.at(-1).reason, 'source-suggestion');
+  // Nothing else moved: the FikFap creator is still unclassified.
+  const after = await json('/api/hub/review/creators');
+  assert.ok(after.items.some((p) => p.id === fikP.id));
+  const { sources } = await json('/api/hub/sources');
+  assert.deepEqual(sources.filter((x) => x.known).map((x) => `${x.id}:${x.specClass}:${x.class}`),
+    ['tiktok:general:general', 'facebook:general:general', 'instagram:general:general', 'youtube:general:general', 'redgifs:review:adult', 'fikfap:review:review']);
+});

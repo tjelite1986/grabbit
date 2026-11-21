@@ -311,6 +311,9 @@
   function destinations() {
     const cfg = state.config || {};
     const out = [{ value: 'server', label: 'Server library', q: { dest: 'server' } }];
+    // Smart Video Routing: the server picks Shorts, Long Videos or Review for a
+    // video from its orientation, source and creator (see Settings).
+    out.push({ value: 'smart', label: 'Smart routing (Shorts, Long Videos or Review)', q: { dest: 'server', route: 'smart' } });
     const ch = cfg.channels || [];
     if (ch.includes('platform')) out.unshift({ value: 'platform', label: 'Platform inbox (social app)', q: { dest: 'elite', channel: 'platform' }, platform: true });
     if (ch.includes('main')) out.push({ value: 'main', label: 'Tikshortis (shorts)', q: { dest: 'elite', channel: 'main' }, shorts: true });
@@ -2372,7 +2375,7 @@
     };
     if (p.status === 'adult') return h('p', { class: 'note' }, '18+: never delivered to a general app, and never classified general again.');
     return h('div', { class: 'toolbar' },
-      p.status === 'unknown' ? h('span', { class: 'muted' }, 'Not classified: general apps refuse this creator.') : h('span', { class: 'muted' }, 'General (classified by hand).'),
+      p.status === 'unknown' ? h('span', { class: 'muted' }, 'Not classified: general apps refuse this creator.') : h('span', { class: 'muted' }, p.classifiedReason === 'source-suggestion' ? 'General (you confirmed a General-source suggestion).' : 'General (classified by hand).'),
       p.status === 'unknown' ? h('button', { class: 'btn small', type: 'button', onclick: () => set('general') }, 'Classify general') : null,
       h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => set('adult') }, 'Classify 18+'));
   }
@@ -2408,14 +2411,18 @@
   function reviewGroups(ctl) {
     const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
 
-    async function decide(aud, g) {
+    // `suggested`: the owner confirms the group's General-source suggestion,
+    // which the server records as the reason for the decision.
+    async function decide(aud, g, suggested) {
       const where = `${g.sites.length ? g.sites.join(', ') : 'no site'}, delivered to ${historyLabel(g.history)}`;
       const msg = aud === 'adult'
         ? `Classify all ${num(g.count)} creators in the group "${where}" (${num(g.files)} files) as 18+? This cannot be undone.`
-        : `Classify all ${num(g.count)} creators in the group "${where}" (${num(g.files)} files) as general? Their files may then go to Tikshortis, Platform and the posts library.`;
+        : `${suggested ? `Confirm the suggestion (${g.suggestion.reason}): c` : 'C'}lassify all ${num(g.count)} creators in the group "${where}" (${num(g.files)} files) as general? Their files may then go to Tikshortis, Platform and the posts library.`;
       if (!confirm(msg)) return;
       try {
-        const r = await jsonPost('/api/hub/review/creators', { audience: aud, all: true, q: '', group: g.group, expected: g.count });
+        const body = { audience: aud, all: true, q: '', group: g.group, expected: g.count };
+        if (suggested) body.reason = 'source-suggestion';
+        const r = await jsonPost('/api/hub/review/creators', body);
         toast(`${num(r.changed.length)} classified ${aud === 'adult' ? '18+' : 'general'}.${skippedNote(r)}`);
         load(['review']).then(updateNav);
         ctl.refresh();
@@ -2429,14 +2436,17 @@
         box.replaceChildren(h('div', { class: 'scroll-x' }, h('table', { class: 'groups' },
           h('thead', null, h('tr', null, h('th', null, 'Sources'), h('th', null, 'Delivered before to'), h('th', { class: 'num' }, 'Creators'), h('th', { class: 'num' }, 'Files'), h('th', null, 'Latest'), h('th', null, ''))),
           h('tbody', null, d.groups.map((g) => h('tr', { class: ctl.group === g.group ? 'selected' : null },
-            h('td', null, g.sites.length ? g.sites.join(', ') : h('span', { class: 'muted' }, 'no site')),
+            h('td', null, g.sites.length ? g.sites.join(', ') : h('span', { class: 'muted' }, 'no site'),
+              g.suggestion ? h('div', { class: 'muted' }, 'Suggested: General') : null),
             h('td', { class: 'muted' }, historyLabel(g.history)),
             h('td', { class: 'num', 'data-label': 'Creators' }, num(g.count)),
             h('td', { class: 'num', 'data-label': 'Files' }, num(g.files)),
             h('td', { 'data-label': 'Latest' }, g.lastAt ? ago(g.lastAt) : ''),
             h('td', null, h('div', { class: 'toolbar' },
               h('button', { class: 'btn small ghost', type: 'button', onclick: () => ctl.show(ctl.group === g.group ? null : g) }, ctl.group === g.group ? 'Showing' : 'Show'),
-              h('button', { class: 'btn small', type: 'button', onclick: () => decide('general', g) }, `General (${num(g.count)})`),
+              g.suggestion
+                ? h('button', { class: 'btn small', type: 'button', title: g.suggestion.reason, onclick: () => decide('general', g, true) }, `Confirm General (${num(g.count)})`)
+                : h('button', { class: 'btn small', type: 'button', onclick: () => decide('general', g) }, `General (${num(g.count)})`),
               h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => decide('adult', g) }, `18+ (${num(g.count)})`)))))))));
       } catch (e) {
         box.replaceChildren(h('p', { class: 'empty' }, e.message));
@@ -2446,6 +2456,7 @@
     fill();
     return card('Creators by source and history', 'profiles', null,
       h('p', { class: 'note' }, 'Grouped by the exact sites and the exact channels their files were delivered to. Delivered before is not a classification: look at a group before you classify it.'),
+      h('p', { class: 'note' }, 'TikTok, Facebook, Instagram and YouTube are General sources: a group from only those sites is suggested General. A suggestion never applies itself; Confirm records that you accepted it.'),
       box);
   }
 
@@ -2510,7 +2521,8 @@
             h('tbody', null, d.items.map((p) => h('tr', null,
               h('td', null, h('input', { type: 'checkbox', 'aria-label': `Select ${p.name}`, checked: picked.has(p.id), onchange: (e) => { if (e.target.checked) picked.add(p.id); else picked.delete(p.id); fill(); } })),
               h('td', null, h('a', { href: `#/profiles?id=${p.id}` }, p.name)),
-              h('td', { class: 'muted' }, p.accounts.length ? p.accounts.map(accountLabel).join(', ') : p.sites.join(', ')),
+              h('td', { class: 'muted' }, p.accounts.length ? p.accounts.map(accountLabel).join(', ') : p.sites.join(', '),
+                p.suggestion ? h('div', null, 'Suggested: General') : null),
               h('td', { class: 'num' }, num(p.files)),
               h('td', null, ago(p.lastAt))))))),
           pager(page, d.total, SIZE, (n) => { page = n; fill(); }) || '');
@@ -3231,8 +3243,33 @@
           })))
         : h('p', { class: 'empty' }, 'Loading ...')),
       h('div', { style: 'height:18px' }),
+      smartRoutingCard(),
+      h('div', { style: 'height:18px' }),
       card('System status', 'pulse', null, h('ul', { class: 'rows' }, healthRows())),
     ];
+  }
+
+  // The routing rules and the source table of the Settings spec. Read-only:
+  // the table changes with the spec, and creators are classified in Review.
+  const SOURCE_CLASS_LABEL = { general: 'General (suggestion)', review: 'Review', adult: '18+' };
+  // Cached for a minute: live repaints rebuild this page on every job event.
+  let sourcesCache = null;
+  function smartRoutingCard() {
+    const box = h('div', null, h('p', { class: 'empty' }, 'Loading ...'));
+    const fresh = sourcesCache && Date.now() - sourcesCache.at < 60000;
+    (fresh ? Promise.resolve(sourcesCache.d) : api('/api/hub/sources').then((d) => { sourcesCache = { at: Date.now(), d }; return d; })).then((d) => {
+      box.replaceChildren(h('table', null,
+        h('thead', null, h('tr', null, h('th', null, 'Source'), h('th', null, 'Class'), h('th', null, ''))),
+        h('tbody', null, d.sources.map((src) => h('tr', null,
+          h('td', null, src.label),
+          h('td', null, SOURCE_CLASS_LABEL[src.class] || src.class,
+            src.specClass && src.specClass !== src.class ? h('span', { class: 'muted' }, ` (table: ${SOURCE_CLASS_LABEL[src.specClass]}; 18+ site, so 18+ wins)`) : null),
+          h('td', { class: 'muted' }, src.detected ? 'new source' : src.seen ? 'in use' : ''))))));
+    }).catch((e) => box.replaceChildren(h('p', { class: 'empty' }, e.message)));
+    return card('Smart video routing', 'share', null,
+      h('p', null, 'Pick "Smart routing" as the destination when you add a link. Portrait goes to Shorts at any length, landscape to Long Videos (the server library), square and unknown orientation to Review (the server-library folder "review", which no app imports from).'),
+      h('p', { class: 'note' }, '18+ always wins: an 18+ site, creator or item goes to the 18+ libraries. A General source is only a suggestion: a creator reaches Shorts after you classify them General in Review. New sources start as Review, and nothing already downloaded is reclassified. Every routing decision is logged in routing.jsonl in the data folder.'),
+      box);
   }
 
   // --- Menu, search, boot --------------------------------------------------

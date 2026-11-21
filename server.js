@@ -37,6 +37,7 @@ const adshortisLibrary = require('./adshortis-library');
 const adflixLibrary = require('./adflix-library');
 const { copyInto } = require('./safe-copy');
 const sourceMeta = require('./source-meta');
+const smartRouting = require('./smart-routing');
 const itemMeta = require('./item-meta');
 const dupeScan = require('./dupe-scan');
 const { DupeTrash, TrashError } = require('./dupe-trash');
@@ -546,6 +547,22 @@ for (const level of ['log', 'warn', 'error']) {
       /* logging must never break a download */
     }
   };
+}
+
+// Smart routing decisions, one JSON line each, so every routing choice can be
+// traced after the job list and the 200-row history have moved on. Rotated
+// once at ROUTING_LOG_MAX like the server log.
+const ROUTING_LOG = path.join(DATA_DIR, 'routing.jsonl');
+const ROUTING_LOG_MAX = 5 * 1024 * 1024;
+function logRoutingDecision(entry) {
+  try {
+    if ((fs.existsSync(ROUTING_LOG) ? fs.statSync(ROUTING_LOG).size : 0) > ROUTING_LOG_MAX) {
+      fs.renameSync(ROUTING_LOG, `${ROUTING_LOG}.1`);
+    }
+    fs.appendFileSync(ROUTING_LOG, JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
+  } catch (e) {
+    console.warn('routing log write failed:', e.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4382,7 +4399,24 @@ app.get('/api/hub/review', (_req, res) => {
 app.get('/api/hub/review/groups', (req, res) => {
   try {
     const { store, stats } = readProfiles();
-    res.json({ ok: true, groups: profiles.groups(store, stats, { status: 'unknown', q: req.query.q }) });
+    // A General-source suggestion per group: shown to the owner, who confirms
+    // it. It never classifies anything by itself.
+    const groups = profiles.groups(store, stats, { status: 'unknown', q: req.query.q })
+      .map((g) => ({ ...g, suggestion: smartRouting.suggestionForSites(g.sites) }));
+    res.json({ ok: true, groups });
+  } catch (e) {
+    profileError(res, e);
+  }
+});
+// GET /api/hub/sources -> the source table of the Settings spec and every
+// source the registry has seen. A site outside the table is a newly detected
+// source and is Review until the table names it. Read-only.
+app.get('/api/hub/sources', (_req, res) => {
+  try {
+    const { stats } = readProfiles();
+    const seen = new Set();
+    for (const s of stats.values()) s.sites.forEach((x) => seen.add(x));
+    res.json({ ok: true, reviewFolder: smartRouting.REVIEW_FOLDER, sources: smartRouting.sourceOverview([...seen]) });
   } catch (e) {
     profileError(res, e);
   }
@@ -4391,7 +4425,9 @@ app.get('/api/hub/review/groups', (req, res) => {
 app.get('/api/hub/review/creators', (req, res) => {
   try {
     const { store, stats } = readProfiles();
-    res.json({ ok: true, ...profiles.list(store, stats, { q: req.query.q, group: req.query.group, status: 'unknown', limit: Number(req.query.limit) || 100, offset: req.query.offset }) });
+    const r = profiles.list(store, stats, { q: req.query.q, group: req.query.group, status: 'unknown', limit: Number(req.query.limit) || 100, offset: req.query.offset });
+    r.items = r.items.map((v) => ({ ...v, suggestion: smartRouting.suggestionForSites(v.sites) }));
+    res.json({ ok: true, ...r });
   } catch (e) {
     profileError(res, e);
   }
@@ -4400,10 +4436,21 @@ app.get('/api/hub/review/creators', (req, res) => {
 // `all` classifies every unclassified profile matching q (and group, when
 // given); `expected` must be the count the owner saw, so a list that changed
 // meanwhile is not classified blind. Without `expected` nothing is classified.
+// `reason: 'source-suggestion'` records that the owner confirmed a General-source
+// suggestion; it is accepted for general only, and only for profiles the
+// suggestion actually covers, so the trace never claims a suggestion that was
+// not there.
 app.post('/api/hub/review/creators', (req, res) => {
   const b = req.body || {};
   const aud = reviewAudience(b.audience);
   if (!aud) return res.status(400).json({ ok: false, error: 'audience must be general or adult' });
+  const reason = b.reason == null ? 'hand' : b.reason;
+  if (!profiles.CLASSIFY_REASONS.includes(reason)) {
+    return res.status(400).json({ ok: false, error: `reason must be one of ${profiles.CLASSIFY_REASONS.join(', ')}` });
+  }
+  if (reason === 'source-suggestion' && aud !== 'general') {
+    return res.status(400).json({ ok: false, error: 'a source suggestion is only ever General' });
+  }
   try {
     const { store, stats } = readProfiles();
     let ids = b.ids;
@@ -4414,10 +4461,22 @@ app.post('/api/hub/review/creators', (req, res) => {
         return res.status(409).json({ ok: false, error: `The list changed: ${ids.length} creators match now, not ${b.expected}. Reload and check again.` });
       }
     }
-    const r = profiles.classifyProfiles(store, ids, aud, Date.now());
+    const notSuggested = [];
+    if (reason === 'source-suggestion' && Array.isArray(ids)) {
+      const covered = new Set(store.profiles
+        .filter((p) => smartRouting.suggestionForSites(profiles.view(p, stats).sites))
+        .map((p) => p.id));
+      ids = ids.filter((id) => {
+        if (covered.has(Number(id))) return true;
+        notSuggested.push({ id: Number(id), reason: 'no General-source suggestion for this profile' });
+        return false;
+      });
+      if (!ids.length) return res.status(409).json({ ok: false, error: 'None of these profiles has a General-source suggestion.', skipped: notSuggested });
+    }
+    const r = profiles.classifyProfiles(store, ids, aud, Date.now(), { reason });
     if (r.changed.length) saveProfiles(r.store);
-    console.log(`review: ${r.changed.length} creator profile(s) classified ${aud} by hand, ${r.skipped.length} skipped`);
-    res.json({ ok: true, changed: r.changed, skipped: r.skipped });
+    console.log(`review: ${r.changed.length} creator profile(s) classified ${aud} by hand (${reason}), ${r.skipped.length + notSuggested.length} skipped`);
+    res.json({ ok: true, changed: r.changed, skipped: [...r.skipped, ...notSuggested] });
   } catch (e) {
     profileError(res, e);
   }
@@ -7680,6 +7739,7 @@ function recordJobHistory(meta, params, channelLabel, filename, imported) {
     extractor: meta.extractor || null,
     imported,
     device: !!params.device,
+    ...(params.routeDecision ? { route: params.routeDecision } : {}),
   });
 }
 
@@ -7736,6 +7796,7 @@ function failJob(job, message, err) {
     imported: false,
     device: false,
     error,
+    ...(job.route ? { route: job.route } : {}),
   });
   if (job.fromSchedule) removeScheduled(job.id);
   // A run of failures grows jobsMap without bound otherwise: pruning only from
@@ -7785,6 +7846,53 @@ function queueJobRetry(job, params, err) {
   });
 }
 
+// The smart route for one resolved video: the read-only audience verdicts feed
+// smartRouting.decideRoute, the decision lands on the job and the routing log,
+// and the caller switches params to it. The audience gate still runs at write
+// time; this only chooses where to ask.
+function smartRoute(job, meta, params) {
+  const facts = { audience: 'unknown', mainRefusal: null, shortsMain: false, shorts18: false };
+  try {
+    facts.shortsMain = ELITE_ENABLED && !shortsUnavailable('main');
+    const main = audienceVerdict('main', meta, { readOnly: true });
+    facts.mainRefusal = main.why || null;
+    facts.audience = main.c ? main.c.audience : 'unknown';
+    if (ELITE_ENABLED && !shortsUnavailable('18plus')) {
+      facts.shorts18 = !audienceVerdict('18plus', meta, { readOnly: true }).why;
+    }
+  } catch (e) {
+    // Fail closed: an audience that cannot be judged is not general.
+    facts.audience = 'unknown';
+    facts.mainRefusal = `the audience check failed (${e.message})`;
+  }
+  const d = smartRouting.decideRoute(meta, facts);
+  const decision = {
+    route: d.route,
+    orientation: d.orientation,
+    source: d.source.id,
+    sourceClass: d.source.class,
+    audience: facts.audience,
+    dest: d.dest,
+    channel: d.channel,
+    folder: d.folder,
+    reasons: d.reasons,
+  };
+  params.routeDecision = decision;
+  setJob(job, { dest: d.dest, channel: d.channel, route: decision });
+  logRoutingDecision({
+    jobId: job.id,
+    sourceUrl: meta.sourceUrl || params.url,
+    site: meta.site || null,
+    mediaId: meta.mediaId || null,
+    creator: meta.creator || null,
+    width: Number.isFinite(meta.width) ? meta.width : null,
+    height: Number.isFinite(meta.height) ? meta.height : null,
+    ...decision,
+  });
+  console.log(`smart route: job ${job.id} -> ${d.route} (${d.reasons.join('; ')})`);
+  return d;
+}
+
 // Resolve, enforce the shorts length cap, then dispatch to the right producer.
 async function runJob(job, params) {
   setJob(job, { status: 'running', phase: 'resolving' });
@@ -7821,6 +7929,15 @@ async function runJob(job, params) {
     site: meta.site || null, mediaId: meta.mediaId || null,
   });
 
+  // Smart Video Routing picks the destination now that orientation, source
+  // and creator are known. Images keep the destination they were sent to.
+  if (params.route === 'smart' && mediaType === 'video' && !params.audio) {
+    const decision = smartRoute(job, { ...meta, mediaType }, params);
+    params.dest = decision.dest;
+    params.channel = decision.channel;
+    params.folder = decision.folder;
+  }
+
   // Refuse a save into a library this deploy has not been given. Audio-only is
   // exempt: with dest=elite it is streamed, never filed. An image is not: its
   // branch runs before the audio one, so it is filed whatever audio says.
@@ -7834,7 +7951,8 @@ async function runJob(job, params) {
     if (unavailable) return failJob(job, unavailable);
   }
 
-  if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && tooLongForShorts(meta)) {
+  // A smart route sends portrait to Shorts whatever its length (spec 2026-11-21).
+  if (params.dest === 'elite' && mediaType !== 'image' && !params.audio && !params.routeDecision && tooLongForShorts(meta)) {
     return failJob(job, shortsTooLongError(meta));
   }
 
@@ -8484,9 +8602,23 @@ function startJobFromQuery(query, who, via) {
         : req.query.single === '1' ? 'single' : 'album',
       date: req.query.date ? String(req.query.date).slice(0, 10) : null,
       genres: req.query.genres ? String(req.query.genres).slice(0, 200) : null,
+      // Smart Video Routing: the server picks the video destination from the
+      // orientation, the source and the audience once the URL is resolved.
+      route: req.query.route === 'smart' ? 'smart' : null,
     };
   } catch (e) {
     return { status: 400, body: { ok: false, error: String(e.message || e) } };
+  }
+  if (params.route) {
+    // The owner's web UI only: an app names its own target, and a smart route
+    // can end in a target the app was never allowed.
+    if (who.audience !== 'admin') return { status: 400, body: { ok: false, error: 'route=smart is only available to the owner.' } };
+    if (params.audio || !['elite', 'server'].includes(params.dest)) {
+      return { status: 400, body: { ok: false, error: 'route=smart only routes video saves to Shorts or the server library.' } };
+    }
+    if (params.sections.length || params.splitChapters) {
+      return { status: 400, body: { ok: false, error: 'route=smart cannot be combined with cutting or splitting.' } };
+    }
   }
   // Cut downloads produce several files at once: the server library takes them
   // as loose files, an audiobook takes them as numbered parts of one book. The
