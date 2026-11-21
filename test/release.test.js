@@ -49,7 +49,7 @@ function freePort() {
 test('health endpoints over HTTP: sha first, release route public and minimal', async (t) => {
   const port = await freePort();
   const mk = (n) => { const p = path.join(dir, n); fs.mkdirSync(p, { recursive: true }); return p; };
-  const proc = spawn('node', ['server.js'], {
+  const proc = spawn('node', ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data'), DOWNLOAD_DIR: mk('dl'),
@@ -75,7 +75,7 @@ test('health endpoints over HTTP: sha first, release route public and minimal', 
 test('full /api/health: sha is the first key, within 4 KiB, existing fields kept', async (t) => {
   const port = await freePort();
   const mk = (n) => { const p = path.join(dir, n); fs.mkdirSync(p, { recursive: true }); return p; };
-  const proc = spawn('node', ['server.js'], {
+  const proc = spawn('node', ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: { PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data2'), DOWNLOAD_DIR: mk('dl2'), GRABBIT_AUTH_DISABLED: '1', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none, TMPDIR: mk('tmp2'), HOME: mk('home2'), ...FAKE_TOOLS },
     stdio: 'ignore',

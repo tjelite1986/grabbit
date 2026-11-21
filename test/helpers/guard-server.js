@@ -60,7 +60,8 @@ function mediaServer() {
     }
     answer(req, res);
   });
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    srv.once('error', reject);
     srv.listen(0, '127.0.0.1', () => {
       resolve({
         state,
@@ -247,6 +248,7 @@ async function boot(t, opts = {}) {
 
   // fetch relative to the server, returning { status, body, text, headers }.
   async function call(p, { method = 'GET', headers: h = headers, body } = {}) {
+    if (h === null) throw new Error(`call(${p}): headers are null; s.internal is null when boot() ran without an internal token`);
     const r = await fetch(`${base}${p}`, { method, headers: h, body, redirect: 'manual', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const text = await r.text();
     let json = null;

@@ -53,7 +53,9 @@ test('a corrupt registry is quarantined and restored from the newest usable snap
   assert.equal(fs.readFileSync(path.join(s.dataDir, kept[0]), 'utf8'), CORRUPT, 'the damaged original must be kept byte for byte');
   assert.match(s.logs(), /downloaded\.json did not parse/);
   assert.match(s.logs(), /downloaded\.json restored from the snapshot of 2026-11-20/);
-  // Snapshots are read, never modified by a restore.
+  // Snapshots are read, never modified by a restore: the one restored from
+  // and the older one.
+  assert.equal(fs.readFileSync(path.join(s.dataDir, 'backups', '2026-11-20', 'downloaded.json'), 'utf8'), JSON.stringify(REG_NEW));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(s.dataDir, 'backups', '2026-11-19', 'downloaded.json'), 'utf8')), REG_OLD);
   assert.deepEqual(tmpLeftovers(s.dataDir), []);
   // The server loaded the restored registry, not just the file on disk: the

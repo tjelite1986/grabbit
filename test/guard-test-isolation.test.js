@@ -36,6 +36,7 @@ test('every test that boots server.js isolates its storage and downloaders', () 
     assert.match(src, /DATA_DIR\s*:/, `${rel}: no DATA_DIR for the server`);
     assert.match(src, /DOWNLOAD_DIR\s*:/, `${rel}: no DOWNLOAD_DIR for the server`);
     assert.match(src, /YTDLP_BIN\s*:/, `${rel}: the real yt-dlp could run`);
+    assert.match(src, /loopback-listen/, `${rel}: preload test/fixtures/loopback-listen.js, or the server listens on every interface`);
     assert.doesNotMatch(src, /\.\.\.process\.env\b/, `${rel}: inherits the whole parent environment`);
     assert.doesNotMatch(src, /env\s*:\s*process\.env\b/, `${rel}: inherits the whole parent environment`);
   }

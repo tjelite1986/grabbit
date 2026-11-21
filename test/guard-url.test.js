@@ -300,6 +300,17 @@ test('fetch scan: the matcher sees the call shapes it claims to see', () => {
     'x = (fetch)(u)',
     'run({ fetch })',
     'call(a, fetch, b)',
+    'fetch.call(null, u)',
+    'fetch.apply(null, [u])',
+    'const f = fetch.bind(null);',
+    'fetch?.(u)',
+    'window.fetch(u)',
+    'self.fetch(u)',
+    "globalThis['fetch'](u)",
+    // A `//` or `/*` inside a string is not a comment.
+    "const base = '/'; const url = base + '//x'; const r = await fetch(url);",
+    "const g = '/*'; await fetch(u); const h = '*/';",
+    'const re = /a/; await fetch(u);',
   ];
   const misses = [
     'await safeFetch(u)',
@@ -311,6 +322,8 @@ test('fetch scan: the matcher sees the call shapes it claims to see', () => {
     'const fetched = 1;',
     '// plain fetch(u) in a comment',
     '/* fetch(u) */ x()',
+    '/*\n fetch(u)\n*/ x()',
+    'x(); // fetch(u)',
     "const u = 'https://example.com/fetch';",
   ];
   for (const src of hits) assert.equal(usesPlainFetch(src), true, `should match: ${src}`);

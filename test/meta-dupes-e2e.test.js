@@ -67,7 +67,7 @@ async function boot(t, { mode = 'on', settings = null } = {}) {
   for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true });
   if (settings) fs.writeFileSync(path.join(dirs.data, 'inbox-settings.json'), JSON.stringify(settings));
   const port = await freePort();
-  const proc = spawn(process.execPath, ['server.js'], {
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH, PORT: String(port), DATA_DIR: dirs.data, DOWNLOAD_DIR: path.join(root, 'downloads'),

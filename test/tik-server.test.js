@@ -45,7 +45,7 @@ async function boot(name, extraEnv) {
   const data = path.join(root, name);
   fs.mkdirSync(data, { recursive: true });
   const port = await freePort();
-  const proc = spawn(process.execPath, ['server.js'], {
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH,

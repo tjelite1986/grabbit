@@ -13,6 +13,14 @@ const fs = require('fs');
 const path = require('path');
 const { boot, PASSWORD, INTERNAL_TOKEN, FUTURE } = require('./helpers/guard-server');
 
+const until = async (fn, what) => {
+  for (let i = 0; i < 200; i++) {
+    if (await fn()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+};
+
 const scheduledIds = (s) => {
   try {
     return s.readJson('scheduled.json').map((x) => x.id);
@@ -295,14 +303,22 @@ test('job start: parameter validation and response shape', async (t) => {
     assert.equal(r.text, 'Invalid URL');
   });
 
-  await t.test('a failed save on the synchronous route is 422, never 5xx', async () => {
+  await t.test('synchronous /api/download failures are 422, never 5xx, at each stage', async () => {
     // yt-dlp is /bin/false and 192.0.2.1 is a literal (no DNS lookup), so
     // nothing leaves the machine. 422 keeps Cloudflare from replacing the body.
-    for (const dest of ['elite', 'server']) {
-      const r = await s.call(`/api/download?url=https://192.0.2.1/v/1&device=0&dest=${dest}`);
-      assert.equal(r.status, 422, `${dest}: ${r.text}`);
-      assert.doesNotMatch(r.text, /<html/i);
-    }
+    // The generic resolve tolerates a failed probe, so the two destinations
+    // fail at different later stages; each is pinned with its own body.
+    const at = (dest) => s.call(`/api/download?url=https://192.0.2.1/v/1&device=0&dest=${dest}`);
+    // Shorts: refused by the audience gate (unknown creator, general app), JSON.
+    const elite = await at('elite');
+    assert.equal(elite.status, 422, elite.text);
+    assert.equal(elite.body.ok, false, elite.text);
+    assert.match(elite.body.error, /is not classified/, elite.text);
+    // Server library: the download itself fails, plain text.
+    const server = await at('server');
+    assert.equal(server.status, 422, server.text);
+    assert.match(server.text, /^Download failed: yt-dlp exited 1/, server.text);
+    for (const r of [elite, server]) assert.doesNotMatch(r.text, /<html/i);
   });
 
   await t.test('a private address is refused by the URL guard with 422', async () => {
@@ -429,6 +445,8 @@ test('synchronous co-hosted endpoints: /api/resolve, /api/download (device=0) an
     const r = await s.call(`/api/download-all?url=${encodeURIComponent('http://127.0.0.1/profile')}&dest=server`, { headers: s.internal });
     assert.equal(r.status, 200);
     assert.match(r.headers.get('content-type'), /^text\/event-stream/);
+    // An SSE client dispatches an event only at the blank line that ends it.
+    assert.ok(r.text.endsWith('\n\n'), JSON.stringify(r.text));
     const events = r.text.split('\n\n').filter(Boolean);
     assert.equal(events.length, 1, r.text);
     assert.match(events[0], /^data: /);
@@ -471,23 +489,54 @@ test('synchronous co-hosted endpoints: /api/resolve, /api/download (device=0) an
     }
   });
 
-  await t.test('/api/download-all success: start, one progress per item, done with counts', async (tt) => {
+  await t.test('/api/download-all streams: each event arrives while later items are still downloading', async (tt) => {
     const s = await boot(tt, { media: true });
+    s.media.state.mode = 'hold';
     const url = 'http://fake.test/profile/youtube/Jane%20Doe/2';
-    const r = await s.call(`/api/download-all?${new URLSearchParams({ url, dest: 'server' })}`, { headers: s.internal });
-    assert.equal(r.status, 200, r.text);
-    assert.match(r.headers.get('content-type'), /^text\/event-stream/);
-    assert.ok(r.text.endsWith('\n\n'), JSON.stringify(r.text.slice(-40)));
-    const events = r.text
-      .split('\n\n')
-      .filter(Boolean)
-      .map((e) => {
-        assert.match(e, /^data: [^\n]*$/, e);
-        return JSON.parse(e.slice('data: '.length));
-      });
-    assert.deepEqual(events.map((e) => e.type), ['start', 'progress', 'progress', 'done'], r.text + s.logs());
-    assert.equal(events[0].total, 2);
-    assert.deepEqual(events.slice(1, 3).map((e) => [e.index, e.status]), [[1, 'saved'], [2, 'saved']], r.text);
-    assert.deepEqual(events[3], { type: 'done', saved: 2, skipped: 0, failed: 0 });
+    const res = await fetch(`${s.base}/api/download-all?${new URLSearchParams({ url, dest: 'server' })}`, {
+      headers: s.internal,
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /^text\/event-stream/);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let ended = false;
+    // Next complete event (`data: <json>` + blank line), or null at EOF.
+    const next = async () => {
+      for (;;) {
+        const cut = buf.indexOf('\n\n');
+        if (cut >= 0) {
+          const raw = buf.slice(0, cut);
+          buf = buf.slice(cut + 2);
+          assert.match(raw, /^data: [^\n]*$/, raw);
+          return JSON.parse(raw.slice('data: '.length));
+        }
+        if (ended) {
+          assert.equal(buf, '', `trailing bytes after the last event: ${JSON.stringify(buf)}`);
+          return null;
+        }
+        const { value, done } = await reader.read();
+        if (done) ended = true;
+        else buf += decoder.decode(value, { stream: true });
+      }
+    };
+    const p1 = '/media/Jane%20Doe-p1/clip.mp4';
+    const p2 = '/media/Jane%20Doe-p2/clip.mp4';
+    const start = await next();
+    assert.deepEqual([start.type, start.total], ['start', 2], JSON.stringify(start));
+    await until(() => s.media.heldPaths().includes(p1), 'item 1 to be requested');
+    s.media.releaseOne(p1);
+    const first = await next();
+    assert.deepEqual([first.type, first.index, first.status], ['progress', 1, 'saved'], JSON.stringify(first));
+    // Item 2 is still held, so the event above was streamed, not buffered.
+    await until(() => s.media.heldPaths().includes(p2), 'item 2 to be requested');
+    assert.equal(s.media.heldCount(), 1);
+    s.media.releaseOne(p2);
+    const second = await next();
+    assert.deepEqual([second.type, second.index, second.status], ['progress', 2, 'saved'], JSON.stringify(second));
+    assert.deepEqual(await next(), { type: 'done', saved: 2, skipped: 0, failed: 0 });
+    assert.equal(await next(), null, 'the stream must end after done');
   });
 });

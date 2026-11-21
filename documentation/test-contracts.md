@@ -11,7 +11,7 @@ behaviour: fix the code, or get the owner's decision before changing the test.
 ```bash
 npm ci                                    # once, needs network
 node --test test/                         # whole suite (npm test), about 1 minute
-node --test test/guard-*.test.js          # guard tests only, about 20 seconds
+node --test test/guard-*.test.js          # guard tests only, about 25 seconds
 node --test test/guard-http.test.js       # one area
 ```
 
@@ -34,7 +34,7 @@ words `not ok` (a known gap prints `not ok ... # TODO`, see below).
 | File | Contract | Binding rule |
 |------|----------|--------------|
 | `guard-http.test.js` | Login cookie flags and `Location: /`; 401 JSON for `/api/*`, redirect for pages; internal secret exact match, ignored behind the proxy (`X-Forwarded-Host`) and when unset; cross-site refusal (`Sec-Fetch-Site`, `Origin`) before the session, also for unauthenticated callers; job start validation and response shape; cancel; 422 on failed synchronous saves and on `/api/resolve`; internal `device=0` JSON shapes (Shorts and server library); `/api/download-all` SSE framing (error and success); rules validation (`sanitizeRules`) over HTTP; `route=smart` access (D3 pinned) | `CLAUDE.md` "Contracts with callers and deployments", "Security" |
-| `guard-ytdlp-args.test.js` | Extra yt-dlp args: accepted and refused tables, token and length caps, template validation, internal principal, real argv (extra args before `--`, URL last) for video, audio and cut jobs, `/api/download` ignores `xargs`, every yt-dlp/gallery-dl spawn ends with `--` and one operand | `CLAUDE.md` "Security" (allowlist only) |
+| `guard-ytdlp-args.test.js` | Extra yt-dlp args: accepted and refused tables, token and length caps, template validation, internal principal, real argv (extra args before `--`, URL last) for video, audio and cut jobs, `/api/download` ignores `xargs`, a text scan that the yt-dlp/gallery-dl spawn sites it recognises end with `--` and one operand | `CLAUDE.md` "Security" (allowlist only) |
 | `guard-url.test.js` | Blocked and allowed address ranges (198.18.0.0/15 and mapped IPv4 deliberately allowed), schemes, encoded hosts, hostnames with mixed public and private DNS answers (stubbed DNS), `ALLOW_PRIVATE_ADDRESSES`, `safeFetch` redirect re-checks, extractor load filter, hostname-only `match()`, guard before any extractor, `--` in extractor argv, D2 list pinned (text scan, `test/helpers/fetch-scan.js`) | `CLAUDE.md` "Security" |
 | `guard-storage.test.js` | Corrupt state file kept as `.corrupt-*` byte for byte, restore from the newest non-empty snapshot, D1 pinned, fresh-install seeding, registry write integrity, no temp leftovers, `/api/health` state rows | `CLAUDE.md` "Writing files safely" |
 | `guard-jobs.test.js` | Job success and failure paths, failures never marked downloaded, retry queue with backoff, repeat saves skipped, `MAX_ACTIVE_JOBS` cap and FIFO (slots released one at a time), cancel of a queued job, routing log fields, D4 pinned, Shorts roots opt-in, `ELITE_ENABLED` fallback | `CLAUDE.md` "Downloads and extractors" |
@@ -97,6 +97,8 @@ Quick check that all five gaps are open, for a handoff or CI:
 
 ```bash
 node --test test/known-gaps.test.js 2>&1 | grep -c '^not ok .*# TODO D[0-9] open owner decision'   # must print 5
+# as a gate (exit 1 unless exactly five gaps are open):
+test "$(node --test test/known-gaps.test.js 2>&1 | grep -c '^not ok .*# TODO D[0-9] open owner decision')" = 5
 ```
 
 When the owner decides:
@@ -114,7 +116,14 @@ When the owner decides:
   "any Origin that doesn't match" in `CLAUDE.md`; left for the owner.
 - **Text scans:** the `--` checks over spawn sites and the D2 plain-`fetch()`
   scan read source text. They catch the usual shapes, not every possible one
-  (for example a name built at run time). Review still matters.
+  (for example a name built at run time). The D2 pin is per file: a new
+  plain `fetch()` inside one of the eight listed extractors is not flagged.
+  The runtime argv checks cover yt-dlp for video, audio, cut and the
+  synchronous route; gallery-dl and profile resolution are covered only by
+  the text scan. Review still matters.
+- **Loopback only:** every test that boots `server.js` preloads
+  `test/fixtures/loopback-listen.js`; `guard-test-isolation.test.js` fails a
+  new one that does not.
 - **Not verified by these tests:** the UI sinks `cssUrl()` and `safeHref()` in
   `public/index.html` (no browser test here); a server-level redirect through
   a real extractor fetch path with the guard on (the hop logic is covered by

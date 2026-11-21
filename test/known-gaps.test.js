@@ -124,21 +124,28 @@ gap('every smart routing decision has a matching history row', 'D4', async (t, p
     },
   });
   const url = s.fakeUrl('video', 'tiktok', 'Jane Doe', 'gap-d4', '?w=1080&h=1920');
-  const first = await s.runJob({ url, dest: 'elite', route: 'smart' });
-  const second = await s.runJob({ url, dest: 'elite', route: 'smart' });
-  for (const [n, r] of [['first', first], ['second', second]]) {
+  // Neither routing.jsonl nor history rows carry a job id today, so each job
+  // is paired with the rows and decisions it added (the delta per job).
+  const rowsFor = async () => (await s.call('/api/history')).body.items.filter((h) => h.sourceUrl === url);
+  const decisionsFor = () => {
+    const f = path.join(s.dataDir, 'routing.jsonl');
+    if (!fs.existsSync(f)) return [];
+    return fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((d) => d.sourceUrl === url);
+  };
+  const deltas = [];
+  for (const n of ['first', 'second']) {
+    const [rows0, dec0] = [(await rowsFor()).length, decisionsFor().length];
+    const r = await s.runJob({ url, dest: 'elite', route: 'smart' });
     pre(r.job && r.job.status === 'done', `${n} job did not finish as done: ${JSON.stringify(r.job || r.started)}`);
+    const d = { job: n, decisions: decisionsFor().length - dec0, rows: (await rowsFor()).length - rows0 };
+    pre(d.decisions === 1, `${n} job logged ${d.decisions} routing decisions, expected 1`);
+    deltas.push(d);
   }
-  const decisions = fs
-    .readFileSync(path.join(s.dataDir, 'routing.jsonl'), 'utf8')
-    .trim()
-    .split('\n')
-    .map((l) => JSON.parse(l))
-    .filter((d) => d.sourceUrl === url);
-  pre(decisions.length === 2, `expected 2 routing decisions for ${url}, found ${decisions.length}`);
-  // Neither routing.jsonl nor history rows carry a job id today, so rows are
-  // paired with decisions by URL and count.
-  const rows = (await s.call('/api/history')).body.items.filter((h) => h.sourceUrl === url);
-  assert.equal(rows.length, decisions.length, `${url}: ${decisions.length} routing decisions but ${rows.length} history rows`);
+  assert.deepEqual(
+    deltas.map((d) => d.rows),
+    [1, 1],
+    `${url}: every smart decision should add one history row; per job: ${JSON.stringify(deltas)}`
+  );
+  const rows = await rowsFor();
   assert.ok(rows.every((r) => r.route && r.route.route === 'shorts'), `history rows without the route: ${JSON.stringify(rows)}`);
 });

@@ -96,7 +96,7 @@ async function boot(t, { profileList = [], registry = null, breakItemStore = fal
     ELITE_POSTS_ROOT: apps.posts,
     ...(egram ? { POSTS_TO_EGRAM: '1', EGRAM_IMPORT_DIR: apps.egram } : {}),
   };
-  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'fake-extractors.js'), 'server.js'], {
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), '-r', path.join(__dirname, 'fixtures', 'fake-extractors.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
