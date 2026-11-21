@@ -205,18 +205,25 @@ test('job start: parameter validation and response shape', async (t) => {
   });
 
   await t.test('cutting or splitting outside the server and audiobook libraries is 400', async () => {
-    for (const extra of [{ dest: 'elite', split: '1' }, { dest: 'elite', sections: '*0:10-0:20' }]) {
+    for (const extra of [{ dest: 'elite', split: '1' }, { dest: 'elite', sections: '0:10-0:20' }]) {
       const r = await s.call(`/api/jobs/start?${startQuery(extra)}`);
       assert.equal(r.status, 400, JSON.stringify(extra));
-      assert.equal(r.body.ok, false);
-      assert.equal(typeof r.body.error, 'string');
+      assert.deepEqual(r.body, { ok: false, error: 'Cutting/splitting is only supported for the server and audiobook libraries.' });
     }
+    const bad = await s.call(`/api/jobs/start?${startQuery({ sections: 'nonsense' })}`);
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error, /^Bad cut section/);
   });
 
   await t.test('route=smart is refused for audio, non-video destinations and cuts', async () => {
-    for (const extra of [{ route: 'smart', audio: '1' }, { route: 'smart', dest: 'navidrome' }, { route: 'smart', split: '1' }]) {
+    for (const [extra, msg] of [
+      [{ route: 'smart', audio: '1' }, /only routes video saves/],
+      [{ route: 'smart', dest: 'navidrome' }, /only routes video saves/],
+      [{ route: 'smart', split: '1' }, /cannot be combined with cutting or splitting/],
+    ]) {
       const r = await s.call(`/api/jobs/start?${startQuery(extra)}`);
       assert.equal(r.status, 400, JSON.stringify(extra));
+      assert.match(r.body.error, msg, JSON.stringify(extra));
     }
   });
 

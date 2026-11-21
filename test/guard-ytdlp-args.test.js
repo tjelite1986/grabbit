@@ -165,6 +165,23 @@ test('extra yt-dlp args reach yt-dlp before the `--` separator; the synchronous 
     }
   });
 
+  await t.test('audio and cut jobs: extra args before `--`, URL last', async () => {
+    for (const extra of [{ audio: '1' }, { sections: '0:01-0:02' }]) {
+      const before = downloads().length;
+      const { started, job } = await s.runJob({ url: URL_, dest: 'server', xargs: '--embed-metadata', ...extra });
+      assert.equal(started.status, 200, started.text);
+      assert.ok(['failed', 'error'].includes(job.status), JSON.stringify(job));
+      const calls = downloads().slice(before);
+      assert.ok(calls.length >= 1, `${JSON.stringify(extra)}: no download call recorded`);
+      for (const argv of calls) {
+        const sep = argv.indexOf('--');
+        assert.equal(sep, argv.length - 2, `${JSON.stringify(extra)}: ${JSON.stringify(argv)}`);
+        assert.equal(argv[argv.length - 1], URL_);
+        assert.ok(argv.indexOf('--embed-metadata') < sep);
+      }
+    }
+  });
+
   await t.test('synchronous /api/download takes no xargs at all', async () => {
     const before = downloads().length;
     const q = new URLSearchParams({ url: URL_, dest: 'server', device: '0', xargs: '--exec "touch /tmp/x" --write-subs' });
@@ -178,4 +195,31 @@ test('extra yt-dlp args reach yt-dlp before the `--` separator; the synchronous 
       assert.equal(argv[argv.length - 1], URL_);
     }
   });
+});
+
+// Static net for spawn sites the runtime tests above do not reach (search,
+// playlist and premium-fallback lookups): every yt-dlp or gallery-dl argv in
+// application code ends with '--' and then exactly one operand.
+test('every yt-dlp and gallery-dl spawn in application code ends with `--` and one operand', () => {
+  const repo = path.join(__dirname, '..');
+  const files = ['server.js', 'premium-fallback.js', 'source-meta.js', 'cookies.js', ...fs.readdirSync(path.join(repo, 'extractors')).map((f) => `extractors/${f}`)].filter(
+    (f) => f.endsWith('.js') && fs.existsSync(path.join(repo, f))
+  );
+  let checked = 0;
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(repo, f), 'utf8');
+    for (const m of src.matchAll(/spawn\((YTDLP|GALLERY_DL),\s*(\[[^\n]*?\]|args)\s*[,)]/g)) {
+      const at = src.slice(0, m.index).split('\n').length;
+      if (m[2].startsWith('[') && /'--list-extractors'/.test(m[2])) continue; // no operand at all
+      let list = m[2];
+      if (list === 'args') {
+        const start = src.lastIndexOf('const args = [', m.index);
+        assert.ok(start >= 0, `${f}:${at}: argv variable not found`);
+        list = src.slice(start + 'const args = '.length, src.indexOf('];', start) + 1);
+      }
+      checked++;
+      assert.match(list.replace(/\s+/g, ' '), /'--',\s*[^,\]]+,?\s*\]$/, `${f}:${at}: argv does not end with '--', <operand>`);
+    }
+  }
+  assert.ok(checked >= 9, `expected every known spawn site, checked ${checked}`);
 });
