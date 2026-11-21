@@ -2,9 +2,9 @@
 // Artist and genre list splitters, moved verbatim out of server.js (Phase 2,
 // slice 4). Pure and stateless: no I/O, no requires, no module state. Callers
 // in server.js: splitArtists (musicIdentity, itunesCandidate, soundcloudCandidate,
-// deezer candidate, download route), splitList (audiobookMeta, genre tag query,
-// tag edit route, download route), splitGenres (audiobookMeta, tag edit route,
-// download route).
+// the Deezer branch of musicMetaCandidates, produceAudio), splitList
+// (audiobookMeta, GET /api/music-meta tag query, POST /api/music/edit,
+// produceAudio), splitGenres (audiobookMeta, POST /api/music/edit, produceAudio).
 
 // "A & B feat. C" -> ['A', 'B', 'C']: the separators music databases use in
 // their artist strings. Only for database/site strings — user-typed fields go

@@ -1,6 +1,9 @@
 'use strict';
 // Parity for the Phase 2 slice 4 move: name-lists.js must split exactly as the
 // in-server originals did. Expected values were captured from the pre-move server.js.
+// Some of them pin odd old behaviour on purpose ("Hootie & the Blowfish" splits in
+// splitArtists, "lo  fi hip hop" becomes four genres): this is a parity test, so a
+// behaviour change belongs in its own commit with its own test update.
 const test = require('node:test');
 const assert = require('node:assert');
 const { splitArtists, splitList, splitGenres } = require('../name-lists');
@@ -17,7 +20,7 @@ test('splitArtists: database separators split, empty input is empty', () => {
     ["R&B", ["R","B"]],
     ["", []],
     [null, []],
-    [null, []],
+    [undefined, []],
     ["  ", []],
     ["X featuring Y", ["X","Y"]],
     ["X FEAT Y", ["X","Y"]],
@@ -36,7 +39,7 @@ test('splitList: only comma and semicolon split, ampersand survives', () => {
     ["R&B", ["R&B"]],
     ["", []],
     [null, []],
-    [null, []],
+    [undefined, []],
     ["  ", []],
     ["X featuring Y", ["X featuring Y"]],
     ["X FEAT Y", ["X FEAT Y"]],
