@@ -18,6 +18,7 @@ const { spawnSync } = require('child_process');
 const REPO = path.join(__dirname, '..');
 const guard = require('../url-guard');
 const extractors = require('../extractors');
+const { usesPlainFetch, plainFetchFiles } = require('./helpers/fetch-scan');
 
 test('isAllowedAddress: blocked and allowed ranges', () => {
   const blocked = [
@@ -71,15 +72,67 @@ test('assertPublicUrl: schemes, literals and alternative encodings of private ho
   }
 });
 
+test('assertPublicUrl: a hostname with any private DNS answer is refused, whatever the order', async (t) => {
+  // url-guard.js resolves names with dns.promises.lookup({ all: true }). A
+  // regression that checked only the first answer would let a name with one
+  // public and one private record through. Stubbed, so no real lookup runs.
+  const dnsp = require('dns').promises;
+  const realLookup = dnsp.lookup;
+  t.after(() => {
+    dnsp.lookup = realLookup;
+  });
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  let fetched = 0;
+  globalThis.fetch = async () => {
+    fetched++;
+    return new Response('ok');
+  };
+  let answers = [];
+  const asked = [];
+  dnsp.lookup = async (host, opts) => {
+    asked.push([host, opts && opts.all]);
+    return answers;
+  };
+  const cases = [
+    [[{ address: '192.0.2.7', family: 4 }, { address: '10.0.0.5', family: 4 }], /non-public address 10\.0\.0\.5/],
+    [[{ address: '10.0.0.5', family: 4 }, { address: '192.0.2.7', family: 4 }], /non-public address 10\.0\.0\.5/],
+    [[{ address: '2001:4860:4860::8888', family: 6 }, { address: '::1', family: 6 }], /non-public address ::1/],
+    [[{ address: '::ffff:127.0.0.1', family: 6 }, { address: '192.0.2.7', family: 4 }], /non-public address ::ffff:127\.0\.0\.1/],
+    [[{ address: '192.0.2.7', family: 4 }, { address: '169.254.169.254', family: 4 }], /non-public address 169\.254\.169\.254/],
+  ];
+  for (const [list, pattern] of cases) {
+    answers = list;
+    const label = list.map((a) => a.address).join(', ');
+    await assert.rejects(guard.assertPublicUrl('https://mixed.example/x'), pattern, label);
+    await assert.rejects(guard.safeFetch('https://mixed.example/x'), pattern, label);
+  }
+  assert.equal(fetched, 0, 'safeFetch must refuse before fetching');
+  assert.ok(asked.every(([host, all]) => host === 'mixed.example' && all === true), JSON.stringify(asked));
+  // All public answers pass, and an empty answer is refused.
+  answers = [{ address: '192.0.2.7', family: 4 }, { address: '198.51.100.9', family: 4 }];
+  await guard.assertPublicUrl('https://mixed.example/x');
+  answers = [];
+  await assert.rejects(guard.assertPublicUrl('https://mixed.example/x'), /Could not resolve host/);
+});
+
 test('ALLOW_PRIVATE_ADDRESSES: only an explicit truthy value turns the guard off', () => {
   const probe = (value) => {
     const env = { PATH: process.env.PATH };
     if (value !== undefined) env.ALLOW_PRIVATE_ADDRESSES = value;
     const r = spawnSync(
       process.execPath,
-      ['-e', "require('./url-guard').assertPublicUrl('http://127.0.0.1/').then(() => console.log('open'), () => console.log('guarded'))"],
-      { cwd: REPO, env, encoding: 'utf8' }
+      [
+        '-e',
+        "require('./url-guard').assertPublicUrl('http://127.0.0.1/').then(() => console.log('open'), (e) => console.log(/non-public address 127\\.0\\.0\\.1/.test(e.message) ? 'guarded' : 'other: ' + e.message))",
+      ],
+      { cwd: REPO, env, encoding: 'utf8', timeout: 30_000 }
     );
+    // A probe that could not run proves nothing either way.
+    assert.equal(r.error, undefined, `probe could not run: ${r.error}`);
+    assert.equal(r.status, 0, `probe exited ${r.status} (signal ${r.signal}): ${r.stderr}`);
     return r.stdout.trim();
   };
   for (const v of [undefined, '', '0', 'false', 'off', 'no', 'TRUE1']) assert.equal(probe(v), 'guarded', String(v));
@@ -230,18 +283,48 @@ test('yt-dlp and gallery-dl argv in extractors put `--` before the URL', () => {
 // D2 (open owner decision): eight extractors call plain fetch() rather than
 // safeFetch(). This pins the list so a NEW plain fetch cannot slip in
 // unreviewed; migrating a file off the list is fine and does not fail here.
-// The desired end state is in test/known-gaps.test.js.
+// The desired end state is in test/known-gaps.test.js. Both use the same text
+// scan (test/helpers/fetch-scan.js).
 const D2_PLAIN_FETCH = ['erome.js', 'imagefap.js', 'nuditok.js', 'onlytik.js', 'reddclips.js', 'redgifs.js', 'tikporn.js', 'xxxfollow.js'];
 
+test('fetch scan: the matcher sees the call shapes it claims to see', () => {
+  const hits = [
+    'const r = await fetch(u);',
+    'return fetch(url, opts)',
+    'fetch (u)',
+    'globalThis.fetch(u)',
+    'globalThis . fetch(u)',
+    'const f = globalThis.fetch;',
+    'const f = fetch;',
+    'const f = fetch',
+    'x = (fetch)(u)',
+    'run({ fetch })',
+    'call(a, fetch, b)',
+  ];
+  const misses = [
+    'await safeFetch(u)',
+    'this.fetch(u)',
+    'client.fetch(u)',
+    'prefetch(u)',
+    'fetchJson(u)',
+    '$fetch(u)',
+    'const fetched = 1;',
+    '// plain fetch(u) in a comment',
+    '/* fetch(u) */ x()',
+    "const u = 'https://example.com/fetch';",
+  ];
+  for (const src of hits) assert.equal(usesPlainFetch(src), true, `should match: ${src}`);
+  for (const src of misses) assert.equal(usesPlainFetch(src), false, `should not match: ${src}`);
+  // A URL in a string is not a comment: the call after it is still seen.
+  assert.equal(usesPlainFetch("const a = 'https://example.com/x'; await fetch(a);"), true);
+});
+
 test('D2: no extractor beyond the documented eight calls plain fetch()', () => {
-  const dir = path.join(REPO, 'extractors');
-  const plain = fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith('.js'))
-    .filter((f) => /(^|[^.\w])fetch\(/m.test(fs.readFileSync(path.join(dir, f), 'utf8')))
-    .sort();
+  const plain = plainFetchFiles(path.join(REPO, 'extractors'));
   const unexpected = plain.filter((f) => !D2_PLAIN_FETCH.includes(f));
   assert.deepEqual(unexpected, [], 'a new extractor fetches without safeFetch(); see D2 in documentation/open-decisions.md');
+  // Not vacuous: the scan still finds the documented files.
+  assert.ok(plain.length >= 1, 'the fetch scan found nothing at all; check test/helpers/fetch-scan.js');
 });
 
 module.exports = { D2_PLAIN_FETCH };

@@ -56,9 +56,12 @@ test('a corrupt registry is quarantined and restored from the newest usable snap
   // Snapshots are read, never modified by a restore.
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(s.dataDir, 'backups', '2026-11-19', 'downloaded.json'), 'utf8')), REG_OLD);
   assert.deepEqual(tmpLeftovers(s.dataDir), []);
-  // The API serves the restored registry.
-  const sum = await s.call('/api/hub/summary');
-  assert.equal(sum.status, 200);
+  // The server loaded the restored registry, not just the file on disk: the
+  // hub's creator list is built from it (creator "new" from REG_NEW, two
+  // files; nothing from the older snapshot).
+  const creators = await s.call('/api/hub/creators');
+  assert.equal(creators.status, 200, creators.text);
+  assert.deepEqual(creators.body.items.map((c) => [c.name, c.files]), [['new', 2]], creators.text);
 });
 
 test('D1 (current behaviour): a damaged newest snapshot is not followed by an older one; the registry is rebuilt from history', async (t) => {
@@ -121,6 +124,7 @@ test('other state files: corrupt history and templates fall back empty, the dama
   });
   const h = await s.call('/api/history');
   assert.equal(h.status, 200);
+  assert.deepEqual(h.body, { ok: true, items: [] });
   const tpl = await s.call('/api/templates');
   assert.deepEqual(tpl.body, { ok: true, templates: [] });
   for (const [name, raw] of [['history.json', '[{"id":"x"'], ['templates.json', 'not json'], ['scheduled.json', '{']]) {

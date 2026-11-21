@@ -19,6 +19,7 @@ TikShortis and Elitogram are separate apps reached through gateways.
 ```bash
 npm ci                                   # needs network; skip in offline sandboxes
 node --test test/smart-routing.test.js   # one focused file
+node --test test/guard-*.test.js         # guard tests; see documentation/test-contracts.md
 node --test test/                        # whole suite (npm test)
 ```
 

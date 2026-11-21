@@ -5,12 +5,23 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { once } = require('events');
 const net = require('net');
 const { releaseSha } = require('../release');
 
 const SHA = 'a'.repeat(39) + 'b';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-release-'));
 const none = path.join(dir, 'missing');
+// Removed after every test in this file, once the servers below have exited.
+test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+// Never start the developer's real tools: boot runs yt-dlp --list-extractors,
+// and /api/health probes yt-dlp, ffmpeg, ffprobe, gallery-dl and python3.
+const FAKE_TOOLS = { YTDLP_BIN: '/bin/false', GALLERY_DL_BIN: '/bin/false', FFMPEG_BIN: '/bin/false', FFPROBE_BIN: '/bin/false', PYTHON_BIN: '/bin/false' };
+const stop = (proc) => async () => {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  proc.kill();
+  await once(proc, 'close');
+};
 
 test('valid env sha is reported', () => assert.equal(releaseSha({ RELEASE_SHA: SHA }, none), SHA));
 test('missing sha is null', () => assert.equal(releaseSha({}, none), null));
@@ -42,13 +53,12 @@ test('health endpoints over HTTP: sha first, release route public and minimal', 
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data'), DOWNLOAD_DIR: mk('dl'),
-      GRABBIT_PASSWORD: 'pw-test', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none,
-      // Never start the developer's real downloaders (boot runs yt-dlp --list-extractors).
-      YTDLP_BIN: '/bin/false', GALLERY_DL_BIN: '/bin/false',
+      GRABBIT_PASSWORD: 'pw-test', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none, TMPDIR: mk('tmp'), HOME: mk('home'),
+      ...FAKE_TOOLS,
     },
     stdio: 'ignore',
   });
-  t.after(() => proc.kill());
+  t.after(stop(proc));
   const base = `http://127.0.0.1:${port}`;
   let up = false;
   for (let i = 0; i < 100 && !up; i++) {
@@ -67,10 +77,10 @@ test('full /api/health: sha is the first key, within 4 KiB, existing fields kept
   const mk = (n) => { const p = path.join(dir, n); fs.mkdirSync(p, { recursive: true }); return p; };
   const proc = spawn('node', ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data2'), DOWNLOAD_DIR: mk('dl2'), GRABBIT_AUTH_DISABLED: '1', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none, YTDLP_BIN: '/bin/false', GALLERY_DL_BIN: '/bin/false' },
+    env: { PATH: process.env.PATH, PORT: String(port), DATA_DIR: mk('data2'), DOWNLOAD_DIR: mk('dl2'), GRABBIT_AUTH_DISABLED: '1', RELEASE_SHA: SHA, RELEASE_SHA_FILE: none, TMPDIR: mk('tmp2'), HOME: mk('home2'), ...FAKE_TOOLS },
     stdio: 'ignore',
   });
-  t.after(() => proc.kill());
+  t.after(stop(proc));
   const base = `http://127.0.0.1:${port}`;
   let up = false;
   for (let i = 0; i < 100 && !up; i++) {

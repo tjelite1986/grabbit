@@ -29,6 +29,7 @@ test('authentication gate', async (t) => {
   await t.test('the shared password sets an HttpOnly, Secure, SameSite=Lax session cookie and redirects to /', async () => {
     const r = await s.login();
     assert.equal(r.status, 302);
+    assert.equal(r.location, '/');
     assert.match(r.cookie, /^grabbit_auth=[0-9a-f]{64}$/);
     const raw = r.setCookie.find((v) => v.startsWith('grabbit_auth='));
     assert.match(raw, /;\s*HttpOnly/i);
@@ -82,7 +83,10 @@ test('authentication gate', async (t) => {
   await t.test('public assets and the release probe need no session', async () => {
     assert.equal((await s.call('/sw.js', { headers: {} })).status, 200);
     assert.equal((await s.call('/manifest.webmanifest', { headers: {} })).status, 200);
-    assert.notEqual((await s.call('/api/health/release', { headers: {} })).status, 401);
+    const rel = await s.call('/api/health/release', { headers: {} });
+    assert.equal(rel.status, 200, rel.text);
+    assert.deepEqual(Object.keys(rel.body), ['sha'], rel.text);
+    assert.equal(rel.headers.get('cache-control'), 'no-store');
   });
 
   await t.test('the owner session reaches the API', async () => {
@@ -156,6 +160,16 @@ test('cross-site requests to /api/* are refused before the session is used', asy
     assert.deepEqual(scheduledIds(s), before, 'a refused request must not schedule a job');
   });
 
+  await t.test('an unauthenticated cross-site request gets the same 403, not a 401', async () => {
+    // The cross-site check runs before the session is consulted, so a caller
+    // with no credential at all learns nothing more than a signed-in one.
+    for (const h of [{ 'Sec-Fetch-Site': 'cross-site' }, { Origin: 'https://attacker.example' }]) {
+      const r = await s.call(`/api/jobs/start?${startQuery()}`, { headers: h });
+      assert.equal(r.status, 403, JSON.stringify(h));
+      assert.deepEqual(r.body, blocked, JSON.stringify(h));
+    }
+  });
+
   await t.test('the internal secret does not lift the cross-site refusal', async () => {
     const r = await s.call(`/api/jobs/start?${startQuery()}`, { headers: { ...s.internal, 'Sec-Fetch-Site': 'cross-site' } });
     assert.equal(r.status, 403);
@@ -169,6 +183,11 @@ test('cross-site requests to /api/* are refused before the session is used', asy
     }
   });
 
+  // Current behaviour, documented for the owner: `Origin: null` (sandboxed
+  // frames, some redirects) is let through, and Origin is compared by host
+  // only, so the scheme and a default port are not checked. CLAUDE.md says
+  // "any Origin that doesn't match"; these exceptions are narrower than that
+  // wording and are pinned here so a change is deliberate.
   await t.test('same-origin, same-site and no-header requests pass', async () => {
     for (const h of [{ 'Sec-Fetch-Site': 'same-origin' }, { 'Sec-Fetch-Site': 'same-site' }, { 'Sec-Fetch-Site': 'none' }, { Origin: `http://${host}` }, { Origin: 'null' }, {}]) {
       const r = await s.call('/api/history', { headers: { ...s.headers, ...h } });
@@ -242,11 +261,16 @@ test('job start: parameter validation and response shape', async (t) => {
   });
 
   await t.test('an `at` in the past or unparseable does not schedule (the job would run now)', async () => {
-    // Characterisation only: a past `at` makes the job immediate. Here the
-    // resolve then fails (yt-dlp is /bin/false), so nothing is downloaded.
-    const r = await s.call(`/api/jobs/start?${startQuery({ at: '1' })}`);
-    assert.equal(r.status, 200);
-    assert.equal(r.body.scheduled, false);
+    // Characterisation only: such an `at` makes the job immediate. The URL is
+    // a TEST-NET literal (no DNS lookup) and yt-dlp is /bin/false, so the
+    // resolve fails and nothing leaves the machine.
+    const before = scheduledIds(s);
+    for (const at of ['1', 'not-a-date']) {
+      const r = await s.call(`/api/jobs/start?${startQuery({ url: 'https://192.0.2.1/clip/now', at })}`);
+      assert.equal(r.status, 200, `${at}: ${r.text}`);
+      assert.equal(r.body.scheduled, false, at);
+    }
+    assert.deepEqual(scheduledIds(s), before, 'an immediate job must not be written to scheduled.json');
   });
 
   await t.test('cancel: scheduled jobs only; unknown id is 404; cancelled jobs leave scheduled.json', async () => {
@@ -335,5 +359,135 @@ test('route=smart access (D3, characterised; the decision stays with the owner)'
     const r = await s.call('/api/v1/whoami');
     assert.equal(r.body.data.client_id, 'legacy-shared');
     assert.equal(r.body.data.audience, 'admin');
+  });
+});
+
+test('rules: every field is validated server-side; a refused save leaves the stored rules intact', async (t) => {
+  const stored = [{ id: 'r1', name: 'Keep', enabled: true, auto: false, match: { site: 'example' }, apply: { dest: 'server' } }];
+  const s = await boot(t, { seed: (d) => fs.writeFileSync(path.join(d, 'rules.json'), JSON.stringify(stored)) });
+  const post = (rules) =>
+    s.call('/api/rules', { method: 'POST', headers: { ...s.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ rules }) });
+  const onDisk = () => JSON.parse(fs.readFileSync(path.join(s.dataDir, 'rules.json'), 'utf8'));
+
+  await t.test('an invalid or catastrophic regex is 400 with the reason, nothing written', async () => {
+    for (const [pattern, reason] of [
+      ['/(unclosed/', /not a valid regular expression/],
+      ['/(a+)+$/', /can hang the server/],
+    ]) {
+      const r = await post([{ name: 'Bad', match: { title: pattern }, apply: { dest: 'server' } }]);
+      assert.equal(r.status, 400, pattern);
+      assert.equal(r.body.ok, false);
+      assert.match(r.body.error, reason, pattern);
+      assert.match(r.body.error, /"Bad" title/, pattern);
+      assert.deepEqual(onDisk(), stored, `${pattern}: the stored rules changed`);
+    }
+    const notList = await post('not a list');
+    assert.equal(notList.status, 400);
+    assert.deepEqual(notList.body, { ok: false, error: 'Invalid rules payload' });
+    assert.deepEqual(onDisk(), stored);
+  });
+
+  await t.test('values outside each enum are dropped, never stored or replayed', async () => {
+    const r = await post([
+      {
+        id: 'r2',
+        name: 'Enums',
+        match: { site: 'example', mediaType: 'script' },
+        apply: {
+          dest: '/etc', lib: 'root', channel: 'nope', quality: '9999', afmt: 'exe', aq: '1', container: 'sh',
+          sponsor: 'all', device: 'yes', audio: 'true', web: 1, folder: '../../escape', extra: '--exec id',
+        },
+      },
+    ]);
+    assert.equal(r.status, 200, r.text);
+    const [rule] = onDisk();
+    assert.deepEqual(rule.match, { site: 'example' });
+    // Only the folder survives, and only as a sanitised folder name.
+    assert.deepEqual(Object.keys(rule.apply), ['folder'], JSON.stringify(rule.apply));
+    assert.doesNotMatch(rule.apply.folder, /\.\.|\//, JSON.stringify(rule.apply));
+    assert.deepEqual((await s.call('/api/rules')).body.rules, onDisk());
+  });
+});
+
+test('synchronous co-hosted endpoints: /api/resolve, /api/download (device=0) and /api/download-all', async (t) => {
+  await t.test('/api/resolve failures are 422 JSON, never 5xx', async (tt) => {
+    const s = await boot(tt);
+    for (const url of ['http://127.0.0.1/x', 'http://[::1]/x']) {
+      const r = await s.call(`/api/resolve?url=${encodeURIComponent(url)}`, { headers: s.internal });
+      assert.equal(r.status, 422, `${url}: ${r.text}`);
+      assert.equal(r.body.ok, false, r.text);
+      assert.match(r.body.error, /non-public address/, url);
+      assert.deepEqual(Object.keys(r.body).sort(), ['error', 'ok']);
+    }
+    const bad = await s.call('/api/resolve?url=notaurl', { headers: s.internal });
+    assert.equal(bad.status, 400);
+    assert.deepEqual(bad.body, { ok: false, error: 'Invalid URL' });
+  });
+
+  await t.test('/api/download-all: a refused profile URL is one SSE error event, then the stream ends', async (tt) => {
+    const s = await boot(tt);
+    const r = await s.call(`/api/download-all?url=${encodeURIComponent('http://127.0.0.1/profile')}&dest=server`, { headers: s.internal });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type'), /^text\/event-stream/);
+    const events = r.text.split('\n\n').filter(Boolean);
+    assert.equal(events.length, 1, r.text);
+    assert.match(events[0], /^data: /);
+    const ev = JSON.parse(events[0].slice('data: '.length));
+    assert.equal(ev.type, 'error');
+    assert.match(ev.error, /non-public address/);
+  });
+
+  // The media boot turns the URL guard off (ALLOW_PRIVATE_ADDRESSES) so the
+  // server can fetch from the loopback fixture; these cases test shapes, not
+  // the guard.
+  await t.test('internal device=0 save: 200 JSON in the shape of each destination, and a history row', async (tt) => {
+    // The creator needs a classified profile, or the general Shorts app refuses the clip.
+    const s = await boot(tt, {
+      media: true,
+      seed: (dataDir) => {
+        const profiles = require('../profiles');
+        const store = profiles.create(profiles.emptyStore(), { name: 'Jane Doe', audience: 'general' }, 1).store;
+        fs.writeFileSync(path.join(dataDir, 'profiles.json'), JSON.stringify(store));
+      },
+    });
+    for (const [dest, keys, extra] of [
+      // The Shorts import (co-hosted apps): channel and file name.
+      ['elite', ['channel', 'filename', 'ok', 'saved'], { channel: 'main' }],
+      // The server library: its own shape, with the shelf it landed on.
+      ['server', ['dest', 'dir', 'filename', 'ok', 'saved'], { dest: 'server' }],
+    ]) {
+      const url = s.fakeUrl('video', 'youtube', 'Jane Doe', `sync-${dest}`, '?w=1080&h=1920&dur=20');
+      const r = await s.call(`/api/download?${new URLSearchParams({ url, dest, channel: 'main', device: '0' })}`, { headers: s.internal });
+      assert.equal(r.status, 200, `${dest}: ${r.text}\n${s.logs()}`);
+      assert.match(r.headers.get('content-type'), /application\/json/, dest);
+      assert.deepEqual(Object.keys(r.body).sort(), keys, `${dest}: ${r.text}`);
+      assert.equal(r.body.ok, true, dest);
+      assert.equal(r.body.saved, true, dest);
+      assert.equal(typeof r.body.filename, 'string', dest);
+      for (const [k, v] of Object.entries(extra)) assert.equal(r.body[k], v, `${dest}: ${k}`);
+      const rows = (await s.call('/api/history')).body.items.filter((h) => h.sourceUrl === url);
+      assert.equal(rows.length, 1, `${dest}: ${JSON.stringify(rows)}`);
+      assert.equal(rows[0].filename, r.body.filename, dest);
+    }
+  });
+
+  await t.test('/api/download-all success: start, one progress per item, done with counts', async (tt) => {
+    const s = await boot(tt, { media: true });
+    const url = 'http://fake.test/profile/youtube/Jane%20Doe/2';
+    const r = await s.call(`/api/download-all?${new URLSearchParams({ url, dest: 'server' })}`, { headers: s.internal });
+    assert.equal(r.status, 200, r.text);
+    assert.match(r.headers.get('content-type'), /^text\/event-stream/);
+    assert.ok(r.text.endsWith('\n\n'), JSON.stringify(r.text.slice(-40)));
+    const events = r.text
+      .split('\n\n')
+      .filter(Boolean)
+      .map((e) => {
+        assert.match(e, /^data: [^\n]*$/, e);
+        return JSON.parse(e.slice('data: '.length));
+      });
+    assert.deepEqual(events.map((e) => e.type), ['start', 'progress', 'progress', 'done'], r.text + s.logs());
+    assert.equal(events[0].total, 2);
+    assert.deepEqual(events.slice(1, 3).map((e) => [e.index, e.status]), [[1, 'saved'], [2, 'saved']], r.text);
+    assert.deepEqual(events[3], { type: 'done', saved: 2, skipped: 0, failed: 0 });
   });
 });

@@ -5,6 +5,11 @@
 // process.env, or left DATA_DIR unset, would write into the repo's ./data and
 // ./downloads (the server's defaults) or into whatever a developer's shell
 // points at, which can be a real library.
+//
+// This is a TEXT check of the test sources: it proves the words are there,
+// not that the values point into a temp directory. The real isolation lives in
+// test/helpers/guard-server.js, which builds the environment itself; this
+// guard catches a new test that forgets to, or that spreads process.env.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

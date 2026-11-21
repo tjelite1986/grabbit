@@ -11,11 +11,14 @@ extractors.resolve = async (url) => {
   const u = new URL(url);
   const [kind, site, creator, id] = u.pathname.split('/').slice(1).map(decodeURIComponent);
   const image = kind === 'image';
+  // The item id is part of the media path, so the loopback server can tell
+  // which job a request belongs to (the guard-jobs FIFO test needs that).
+  const file = `${BASE}/media/${encodeURIComponent(id)}/${image ? 'pic.jpg' : 'clip.mp4'}`;
   const job = {
     extractor: 'fake',
     kind: 'direct',
-    downloadUrl: `${BASE}/media/${image ? 'pic.jpg' : 'clip.mp4'}`,
-    url: `${BASE}/media/${image ? 'pic.jpg' : 'clip.mp4'}`,
+    downloadUrl: file,
+    url: file,
     mediaType: image ? 'image' : 'video',
     ext: image ? 'jpg' : 'mp4',
     creator: creator === '-' ? null : creator,
@@ -38,3 +41,19 @@ extractors.resolve = async (url) => {
   return job;
 };
 extractors.isProfile = () => false;
+
+// A profile URL http://fake.test/profile/<site>/<creator>/<count> lists
+// <count> fake videos (ids <creator>-p1 ... -pN), each resolved as above.
+// Used by the /api/download-all guard test.
+extractors.resolveProfile = async (url) => {
+  const u = new URL(url);
+  const [kind, site, creator, count] = u.pathname.split('/').slice(1).map(decodeURIComponent);
+  if (kind !== 'profile') throw new Error(`fake extractors: not a profile URL: ${url}`);
+  const items = [];
+  for (let i = 1; i <= Number(count); i++) {
+    const id = `${creator}-p${i}`;
+    const itemUrl = `http://fake.test/video/${encodeURIComponent(site)}/${encodeURIComponent(creator)}/${encodeURIComponent(id)}`;
+    items.push({ ...(await extractors.resolve(itemUrl)), id });
+  }
+  return { creator, items };
+};

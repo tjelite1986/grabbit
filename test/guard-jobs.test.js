@@ -84,34 +84,48 @@ test('a repeat save of the same item is skipped and writes no second file', asyn
   assert.equal(s.media.state.requests, requests, 'the repeat must not fetch the file again');
 });
 
-test('concurrency: at most MAX_ACTIVE_JOBS (2) run at once; the rest queue in order and can be cancelled', async (t) => {
+test('concurrency: at most MAX_ACTIVE_JOBS (2) run at once; the queue is FIFO and a queued job can be cancelled', async (t) => {
   const s = await boot(t, { media: true });
   s.media.state.mode = 'hold';
+  const names = ['c1', 'c2', 'c3', 'c4'];
+  const mediaPath = (n) => `/media/${n}/clip.mp4`;
   const ids = [];
-  for (const id of ['c1', 'c2', 'c3', 'c4']) {
-    const q = new URLSearchParams({ url: s.fakeUrl('video', 'youtube', 'Jane Doe', id, LANDSCAPE), dest: 'server', channel: 'main', device: '0' });
+  for (const n of names) {
+    const q = new URLSearchParams({ url: s.fakeUrl('video', 'youtube', 'Jane Doe', n, LANDSCAPE), dest: 'server', channel: 'main', device: '0' });
     const r = await s.call(`/api/jobs/start?${q}`);
-    assert.equal(r.status, 200);
+    assert.equal(r.status, 200, r.text);
     ids.push(r.body.jobId);
   }
+  const statuses = async () => Promise.all(ids.map(async (id) => (await jobById(s, id)).status));
+  // A job is marked running when it takes a slot, so no wait is needed to see
+  // that the third and fourth did not: the statuses say so directly.
   await until(() => s.media.heldCount() === 2, 'two held downloads');
-  // Give a third job every chance to start if the cap were broken.
-  await new Promise((r) => setTimeout(r, 300));
-  assert.equal(s.media.heldCount(), 2);
-  const statuses = await Promise.all(ids.map(async (id) => (await jobById(s, id)).status));
-  assert.deepEqual(statuses.slice(2), ['queued', 'queued'], statuses.join());
-  // Cancel the last queued job; it must never be fetched.
-  const c = await s.call(`/api/jobs/${ids[3]}/cancel`, { method: 'POST' });
-  assert.equal(c.status, 200);
+  assert.deepEqual(s.media.heldPaths().sort(), [mediaPath('c1'), mediaPath('c2')]);
+  assert.deepEqual((await statuses()).slice(2), ['queued', 'queued'], (await statuses()).join());
   // A running job cannot be cancelled through this route.
   const running = await s.call(`/api/jobs/${ids[0]}/cancel`, { method: 'POST' });
   assert.equal(running.status, 400);
+
+  // Free one slot: the oldest queued job (c3) takes it, c4 keeps waiting.
+  s.media.releaseOne(mediaPath('c1'));
+  await until(async () => (await jobById(s, ids[0])).status === 'done', 'c1 done');
+  await until(() => s.media.heldPaths().includes(mediaPath('c3')), 'c3 to start');
+  assert.deepEqual(s.media.heldPaths().sort(), [mediaPath('c2'), mediaPath('c3')]);
+  assert.equal((await jobById(s, ids[3])).status, 'queued');
+
+  // Cancel c4 while it is queued; it must never reach the network.
+  const c = await s.call(`/api/jobs/${ids[3]}/cancel`, { method: 'POST' });
+  assert.equal(c.status, 200, c.text);
   s.media.state.mode = 'ok';
-  s.media.release();
-  await until(async () => ['done', 'error'].includes((await jobById(s, ids[2])).status), 'the third job');
-  const final = await Promise.all(ids.map(async (id) => (await jobById(s, id)).status));
-  assert.deepEqual(final, ['done', 'done', 'done', 'cancelled'], final.join());
-  assert.equal(s.media.state.requests, 3, 'the cancelled job never reached the network');
+  s.media.releaseOne(mediaPath('c2'));
+  s.media.releaseOne(mediaPath('c3'));
+  await until(async () => (await statuses()).every((x) => ['done', 'error', 'failed', 'cancelled'].includes(x)), 'every job to end');
+  assert.deepEqual(await statuses(), ['done', 'done', 'done', 'cancelled']);
+  // Arrival order: c1 and c2 together (either order), then c3; never c4.
+  const paths = s.media.state.paths;
+  assert.equal(paths.length, 3, paths.join(', '));
+  assert.deepEqual(paths.slice(0, 2).sort(), [mediaPath('c1'), mediaPath('c2')], paths.join(', '));
+  assert.equal(paths[2], mediaPath('c3'), paths.join(', '));
   assert.equal(media(s.downloads).length, 3);
 });
 

@@ -5,12 +5,17 @@
 // middleware without importing server.js (which is not a module).
 //
 // Isolation rules, enforced here so each test cannot forget them:
-//  - every path the server writes (DATA_DIR, DOWNLOAD_DIR and the app roots)
-//    is under one mkdtemp directory that t.after() removes;
-//  - the environment is built from scratch (PATH only), so nothing from the
-//    developer's shell or a real install leaks in;
-//  - yt-dlp, gallery-dl, ffmpeg and ffprobe are /bin/false or a local fake, so
-//    nothing is ever downloaded;
+//  - every path the server writes (DATA_DIR, DOWNLOAD_DIR, the app roots,
+//    TMPDIR and HOME) is under one mkdtemp directory, removed after the test
+//    once the server process has exited;
+//  - the environment is built from scratch: PATH from the parent, plus the
+//    variables set in boot() below and the test's own `env` overrides.
+//    Nothing else from the developer's shell or a real install leaks in;
+//  - the server listens on 127.0.0.1 only, on a port the OS picks
+//    (test/fixtures/loopback-listen.js, preloaded), so it is never reachable
+//    from the LAN;
+//  - yt-dlp, gallery-dl, ffmpeg, ffprobe and python3 are /bin/false or a
+//    local fake, so nothing is ever downloaded and no installed tool runs;
 //  - with `media: true` downloads are served by a loopback server in this
 //    process (the fake extractors in test/fixtures/fake-extractors.js point at
 //    it), so no external network is used.
@@ -22,30 +27,23 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
-const net = require('net');
 
 const REPO = path.join(__dirname, '..', '..');
 const PASSWORD = 'guard-test-password';
 const INTERNAL_TOKEN = 'guard-internal-test-value';
-
-function freePort() {
-  return new Promise((resolve) => {
-    const s = net.createServer();
-    s.listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => resolve(port));
-    });
-  });
-}
+const REQUEST_TIMEOUT_MS = 30_000;
+const LOOPBACK_PRELOAD = path.join(REPO, 'test', 'fixtures', 'loopback-listen.js');
 
 // A loopback media server. `mode` changes how /media/* answers:
 //   'ok'   - 200 with unique bytes (default)
 //   404    - (or any number) that status with no body
-//   'hold' - the request waits until release() is called, then answers 200
+//   'hold' - the request waits until release() or releaseOne() answers it
+// `paths` lists every request path in arrival order; with the fake extractors
+// a path is /media/<item id>/clip.mp4, so it names the job.
 function mediaServer() {
   let served = 0;
   const held = [];
-  const state = { mode: 'ok', requests: 0 };
+  const state = { mode: 'ok', requests: 0, paths: [] };
   const answer = (req, res) => {
     served++;
     const body = Buffer.from(`fixture ${req.url} ${served} ${Math.random()}`);
@@ -54,7 +52,8 @@ function mediaServer() {
   };
   const srv = http.createServer((req, res) => {
     state.requests++;
-    if (state.mode === 'hold') return held.push(() => answer(req, res));
+    state.paths.push(req.url);
+    if (state.mode === 'hold') return held.push({ path: req.url, go: () => answer(req, res) });
     if (typeof state.mode === 'number') {
       res.writeHead(state.mode);
       return res.end();
@@ -67,8 +66,15 @@ function mediaServer() {
         state,
         base: `http://127.0.0.1:${srv.address().port}`,
         heldCount: () => held.length,
+        heldPaths: () => held.map((h) => h.path),
+        // Answer the held request for `path` (or the oldest one).
+        releaseOne(path) {
+          const i = path ? held.findIndex((h) => h.path === path) : 0;
+          if (i < 0) throw new Error(`no held request for ${path}; held: ${held.map((h) => h.path).join(', ')}`);
+          held.splice(i, 1)[0].go();
+        },
         release() {
-          while (held.length) held.shift()();
+          while (held.length) held.shift().go();
         },
         close() {
           this.release();
@@ -140,31 +146,43 @@ function filesUnder(dir) {
 // Boot options:
 //   seed(dataDir, root)  write state files before the server starts
 //   env                  extra or overriding environment variables
-//   internalToken        GRABBIT_INTERNAL_TOKEN (default INTERNAL_TOKEN; null = unset)
-//   media                start the loopback media server and preload the fake extractors
+//   internalToken        GRABBIT_INTERNAL_TOKEN (default INTERNAL_TOKEN; null = unset,
+//                        and then the returned `internal` headers are null)
+//   media                start the loopback media server and preload the fake
+//                        extractors; also sets ALLOW_PRIVATE_ADDRESSES=true so
+//                        the server may fetch from 127.0.0.1. The URL guard is
+//                        OFF in a media boot: security tests never use media.
 //   ytdlp                'false' (default) or 'record' (see recordingYtdlp)
 //   apps                 configure the Shorts/platform app roots (default true)
 async function boot(t, opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-guard-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // One cleanup hook, in a fixed order: stop the server and wait for it to
+  // exit, close the media server, then remove the directory it was writing to.
+  const cleanup = [];
+  t.after(async () => {
+    for (const fn of cleanup.reverse()) await fn();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const dataDir = path.join(root, 'data');
   const downloads = path.join(root, 'downloads');
+  const tmp = path.join(root, 'tmp');
+  const home = path.join(root, 'home');
   const apps = { tik: path.join(root, 'tik'), ads: path.join(root, 'ads'), plat: path.join(root, 'plat') };
-  for (const d of [dataDir, downloads, ...Object.values(apps)]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [dataDir, downloads, tmp, home, ...Object.values(apps)]) fs.mkdirSync(d, { recursive: true });
   if (opts.seed) opts.seed(dataDir, root);
 
   let media = null;
   if (opts.media) {
     media = await mediaServer();
-    t.after(() => media.close());
+    cleanup.push(() => media.close());
   }
   const yt = opts.ytdlp === 'record' ? recordingYtdlp(root) : null;
 
-  const port = await freePort();
   const env = {
     PATH: process.env.PATH,
-    TMPDIR: os.tmpdir(),
-    PORT: String(port),
+    TMPDIR: tmp,
+    HOME: home,
+    PORT: '0',
     DATA_DIR: dataDir,
     DOWNLOAD_DIR: downloads,
     GRABBIT_PASSWORD: PASSWORD,
@@ -173,20 +191,38 @@ async function boot(t, opts = {}) {
     GALLERY_DL_BIN: '/bin/false',
     FFMPEG_BIN: '/bin/false',
     FFPROBE_BIN: '/bin/false',
+    PYTHON_BIN: '/bin/false',
     ...(opts.apps === false ? {} : { ELITE_ROOT: apps.ads, TIKSHORTIS_ROOT: apps.tik, PLATFORM_IMPORT_ROOT: apps.plat }),
     ...(media ? { FAKE_MEDIA_BASE: media.base, ALLOW_PRIVATE_ADDRESSES: 'true' } : {}),
     ...(opts.internalToken === null ? {} : { GRABBIT_INTERNAL_TOKEN: opts.internalToken || INTERNAL_TOKEN }),
     ...(opts.env || {}),
   };
-  const argv = media ? ['-r', path.join(REPO, 'test', 'fixtures', 'fake-extractors.js'), 'server.js'] : ['server.js'];
-  const proc = spawn(process.execPath, argv, { cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const preload = ['-r', LOOPBACK_PRELOAD, ...(media ? ['-r', path.join(REPO, 'test', 'fixtures', 'fake-extractors.js')] : [])];
+  const proc = spawn(process.execPath, [...preload, 'server.js'], { cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = '';
+  let spawnError = null;
+  const exited = new Promise((resolve) => proc.once('close', resolve));
+  proc.once('error', (e) => (spawnError = e));
   proc.stdout.on('data', (d) => (logs += d));
   proc.stderr.on('data', (d) => (logs += d));
-  t.after(() => proc.kill());
-  for (let i = 0; i < 150 && !logs.includes('grabbit listening'); i++) await new Promise((r) => setTimeout(r, 100));
-  if (!logs.includes('grabbit listening')) throw new Error(`server did not start:\n${logs}`);
-  const base = `http://127.0.0.1:${port}`;
+  cleanup.push(async () => {
+    if (proc.exitCode !== null || proc.signalCode !== null || spawnError) return;
+    proc.kill('SIGTERM');
+    const timer = setTimeout(() => proc.kill('SIGKILL'), 5000);
+    await exited;
+    clearTimeout(timer);
+  });
+  const listening = () => /GUARD_LISTENING 127\.0\.0\.1 (\d+)/.exec(logs);
+  for (let i = 0; i < 150; i++) {
+    if (spawnError || proc.exitCode !== null) break;
+    if (logs.includes('grabbit listening') && listening()) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (spawnError) throw new Error(`server could not be spawned: ${spawnError.message}`);
+  if (!logs.includes('grabbit listening') || !listening()) {
+    throw new Error(`server did not start (exit ${proc.exitCode}, signal ${proc.signalCode}):\n${logs}`);
+  }
+  const base = `http://127.0.0.1:${listening()[1]}`;
 
   async function login(password = PASSWORD) {
     const r = await fetch(`${base}/login`, {
@@ -194,18 +230,24 @@ async function boot(t, opts = {}) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: `password=${encodeURIComponent(password)}`,
       redirect: 'manual',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const setCookie = r.headers.getSetCookie();
     const cookie = setCookie.map((v) => v.split(';')[0]).find((v) => v.startsWith('grabbit_auth=') && v.length > 13) || null;
-    return { status: r.status, cookie, setCookie };
+    return { status: r.status, cookie, setCookie, location: r.headers.get('location') };
   }
   const owner = await login();
+  if (owner.status !== 302 || !owner.cookie) {
+    throw new Error(`owner login failed (status ${owner.status}, Set-Cookie ${JSON.stringify(owner.setCookie)}):\n${logs}`);
+  }
   const headers = { Cookie: owner.cookie, Accept: 'application/json' };
-  const internal = { 'X-Grabbit-Token': env.GRABBIT_INTERNAL_TOKEN };
+  // Only when a token is configured: a header object built from an unset
+  // token would send the literal string "undefined".
+  const internal = env.GRABBIT_INTERNAL_TOKEN ? { 'X-Grabbit-Token': env.GRABBIT_INTERNAL_TOKEN } : null;
 
   // fetch relative to the server, returning { status, body, text, headers }.
   async function call(p, { method = 'GET', headers: h = headers, body } = {}) {
-    const r = await fetch(`${base}${p}`, { method, headers: h, body, redirect: 'manual' });
+    const r = await fetch(`${base}${p}`, { method, headers: h, body, redirect: 'manual', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const text = await r.text();
     let json = null;
     try {

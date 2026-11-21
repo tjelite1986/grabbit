@@ -166,18 +166,30 @@ test('extra yt-dlp args reach yt-dlp before the `--` separator; the synchronous 
   });
 
   await t.test('audio and cut jobs: extra args before `--`, URL last', async () => {
-    for (const extra of [{ audio: '1' }, { sections: '0:01-0:02' }]) {
+    // `--limit-rate 7K` is allowlisted and no argv builder adds --limit-rate
+    // itself, so finding it proves the user's args were passed on. The branch
+    // marker (`-x` for audio, `--download-sections` for a cut) proves the
+    // recorded call came from the path under test, not from another one.
+    for (const [extra, marker] of [
+      [{ audio: '1' }, '-x'],
+      [{ sections: '0:01-0:02' }, '--download-sections'],
+    ]) {
+      const label = JSON.stringify(extra);
       const before = downloads().length;
-      const { started, job } = await s.runJob({ url: URL_, dest: 'server', xargs: '--embed-metadata', ...extra });
+      const { started, job } = await s.runJob({ url: URL_, dest: 'server', xargs: '--limit-rate 7K', ...extra });
       assert.equal(started.status, 200, started.text);
       assert.ok(['failed', 'error'].includes(job.status), JSON.stringify(job));
       const calls = downloads().slice(before);
-      assert.ok(calls.length >= 1, `${JSON.stringify(extra)}: no download call recorded`);
+      assert.ok(calls.length >= 1, `${label}: no download call recorded`);
       for (const argv of calls) {
+        const msg = `${label}: ${JSON.stringify(argv)}`;
         const sep = argv.indexOf('--');
-        assert.equal(sep, argv.length - 2, `${JSON.stringify(extra)}: ${JSON.stringify(argv)}`);
-        assert.equal(argv[argv.length - 1], URL_);
-        assert.ok(argv.indexOf('--embed-metadata') < sep);
+        assert.equal(sep, argv.length - 2, msg);
+        assert.equal(argv[argv.length - 1], URL_, msg);
+        assert.ok(argv.includes(marker), `${msg}: branch marker ${marker} missing`);
+        const at = argv.indexOf('--limit-rate');
+        assert.ok(at >= 0 && at < sep, `${msg}: user extra args missing or after --`);
+        assert.equal(argv[at + 1], '7K', msg);
       }
     }
   });
