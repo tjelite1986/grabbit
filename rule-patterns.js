@@ -2,8 +2,7 @@
 // Rule field cleaning and pattern matching for the rules engine, moved verbatim
 // out of server.js (Phase 2, slice 6). Pure and stateless: no I/O, no requires,
 // no module state. Callers in server.js: sanitizeRules (cleanRuleStr,
-// rulePatternError, validRulePattern) and rule matching at resolve time
-// (ruleTextMatch).
+// rulePatternError) and matchRule (ruleTextMatch, which calls validRulePattern).
 
 function cleanRuleStr(v, max) {
   return typeof v === 'string' ? v.trim().slice(0, max) : '';
