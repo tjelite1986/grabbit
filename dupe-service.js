@@ -49,6 +49,9 @@ const SORTS = ['space', 'similarity', 'size', 'newest', 'oldest', 'type'];
 const MAX_BATCH_GROUPS = 2000;
 // How long an app's audience answer for one of its copies holds.
 const AUD_TTL_MS = 60 * 1000;
+// How long an app's answer about which posts use a copy is trusted for the
+// plan. A merge always asks again right before it runs (see applyMember).
+const REFS_TTL_MS = 10 * 60 * 1000;
 
 const sha256File = (file) => new Promise((resolve, reject) => {
   const h = crypto.createHash('sha256');
@@ -79,6 +82,12 @@ class DupeService {
     this.audRetryAt = new Map(); // root -> time before which a failed app is not asked again
     this.busy = null;
     this.lookupCache = new Map();
+    // Which posts an app that can merge (TikShortis) reported for its copies:
+    // "root\0rel" -> { used, ino, mtime, at }. used = how many posts use the
+    // copy; 0 means none (an orphan candidate). Read by planExact.
+    this.appRefs = new Map();
+    this.refsBusy = null;
+    this.refsRetryAt = new Map(); // root -> time before which a failed app is not asked again
   }
 
   cfg() { return readCfg(this.store); }
@@ -360,6 +369,81 @@ class DupeService {
     return run.p;
   }
 
+  // --- which posts use an app copy ---------------------------------------------
+  // Only apps that can merge are asked: a merge keeps two posts, so it needs a
+  // post on each side, and the copy to keep must be one a post uses.
+  refsAdapter(root) {
+    const ad = this.adapters.get(root);
+    return ad && ad.caps.has('lookup') && ad.caps.has('link') ? ad : null;
+  }
+
+  // The app's answer for this copy, when it is still current (same inode and
+  // mtime, younger than REFS_TTL_MS); null means "not known".
+  appRefsFor(row) {
+    const c = this.appRefs.get(`${row.root}\0${row.rel}`);
+    return c && c.ino === String(row.ino) && c.mtime === row.mtime_ms && this.now() - c.at < REFS_TTL_MS ? c : null;
+  }
+
+  // Records a lookup answer for the given copies. A copy the app left out of
+  // its answer is unknown, not unused: its earlier answer goes. Returns true
+  // when anything the plan reads changed.
+  noteRefs(members, answer, at) {
+    let changed = false;
+    for (const m of members) {
+      const k = `${m.root}\0${m.rel}`;
+      const it = answer.get(m.rel);
+      const was = this.appRefs.get(k);
+      if (!it || !Array.isArray(it.refs)) {
+        if (was) { this.appRefs.delete(k); changed = true; }
+        continue;
+      }
+      const next = { used: it.refs.length, ino: String(m.ino), mtime: m.mtime_ms, at };
+      if (!was || was.used !== next.used || was.ino !== next.ino || was.mtime !== next.mtime) changed = true;
+      this.appRefs.set(k, next);
+    }
+    return changed;
+  }
+
+  // Asks the apps that can merge which posts use their copies in identical
+  // groups. Best effort: a copy without a current answer is never merged.
+  // members: only these copies, asked again even when an answer is current
+  // (used right before a group action); otherwise every copy without one.
+  async refreshAppRefs({ members = null } = {}) {
+    if (!members && this.refsBusy) return this.refsBusy;
+    const run = (async () => {
+      const list = members || this.build().groups.filter((g) => g.match === 'exact').flatMap((g) => g.members)
+        .filter((m) => !this.appRefsFor(m));
+      const byRoot = new Map();
+      for (const m of list) {
+        const ad = this.refsAdapter(m.root);
+        if (!ad || !ad.ready().ok) continue;
+        if (!members && (this.refsRetryAt.get(m.root) || 0) > this.now()) continue;
+        if (!byRoot.has(m.root)) byRoot.set(m.root, { ad, members: new Map() });
+        byRoot.get(m.root).members.set(m.rel, m);
+      }
+      let changed = false;
+      for (const [root, { ad, members: ms }] of byRoot) {
+        const all = [...ms.values()];
+        for (let i = 0; i < all.length; i += 200) {
+          const part = all.slice(i, i + 200);
+          const askedAt = this.now();
+          let r;
+          try {
+            r = await ad.lookup(part.map((m) => m.rel));
+          } catch {
+            this.refsRetryAt.set(root, this.now() + 60000);
+            break;
+          }
+          if (this.noteRefs(part, r, askedAt)) changed = true;
+        }
+      }
+      if (changed) this.invalidate();
+    })();
+    if (members) return run;
+    this.refsBusy = run.finally(() => { this.refsBusy = null; });
+    return this.refsBusy;
+  }
+
   // Every present file that has a twin with the same bytes, plus Grabbit's
   // view of it, in one query.
   exactRows() {
@@ -444,15 +528,38 @@ class DupeService {
     // The copy to keep: Grabbit's safe plan decides among its own folders and
     // app anchors; the quality pick breaks ties.
     const keepId = grabbitPlan && grabbitPlan.keepId != null ? grabbitPlan.keepId : rec.keepId;
-    const keep = members.find((m) => m.id === keepId) || members[0];
+    // used(m): true when the app reported a post using the copy, false when
+    // it reported none, null when it has not answered (or cannot be asked).
+    const used = (m) => {
+      if (!this.refsAdapter(m.root)) return null;
+      const a = this.appRefsFor(m);
+      return a ? a.used > 0 : null;
+    };
+    let keep = members.find((m) => m.id === keepId) || members[0];
+    // A copy no post uses is never the one to keep while a copy a post uses
+    // is there: merging into it would leave that post on the extra copy.
+    if (used(keep) === false) {
+      const alt = members.filter((x) => used(x) === true)
+        .sort((a, b) => (Number(b.root === keep.root) - Number(a.root === keep.root))
+          || (rec.scores.get(b.id).score - rec.scores.get(a.id).score) || (a.mtime_ms - b.mtime_ms))[0];
+      if (alt) keep = alt;
+    }
     for (const m of members) {
       const sharing = units.get(`${m.dev}:${m.ino}`);
       m.recommended = m.id === keep.id;
       m.score = rec.scores.get(m.id).score;
       m.reasons = rec.scores.get(m.id).reasons;
       m.action = null;
+      // merge | trash | protected | orphan: what the review screen shows.
+      m.state = 'protected';
+      const ad = this.refsAdapter(m.root);
       if (m.id === keep.id) {
         m.why = 'Recommended copy to keep';
+        if (used(m) === false) {
+          m.state = 'orphan';
+          m.why = `Recommended copy to keep, but no ${ad.app} post uses it`;
+          m.fix = `Check it in ${ad.app}. Grabbit never removes an app's files.`;
+        }
         continue;
       }
       if (sharing.length > 1 && sharing.includes(keep.id)) {
@@ -467,36 +574,58 @@ class DupeService {
       const p = gp.get(m.id);
       if (m.owner === 'grabbit' && p && p.removable) {
         m.action = 'trash';
+        m.state = 'trash';
         m.suggested = p.suggested;
         m.why = p.suggested ? 'Extra copy: can go to the trash' : p.why || 'Can go to the trash';
         continue;
       }
       if (m.owner === 'grabbit' && keep.owner === 'grabbit' && m.dev === keep.dev) {
         m.action = 'merge';
+        m.state = 'merge';
         m.suggested = true;
         m.why = p && p.why ? `${p.why}. Merge stores it once and keeps every library entry working` : 'Can be merged with the kept copy';
         continue;
       }
-      const ad = this.adapters.get(m.root);
-      if (ad && ad.caps.has('link')) {
-        const sameRootKeep = members.find((x) => x.root === m.root && x.id !== m.id && x.recommended)
-          || members.filter((x) => x.root === m.root && x.id !== m.id && !(x.dev === m.dev && x.ino === m.ino))
-            .sort((a, b) => (b.score - a.score) || (a.mtime_ms - b.mtime_ms))[0];
-        const ready = ad.ready();
-        if (sameRootKeep && ready.ok) {
-          m.action = 'link';
-          m.linkTo = sameRootKeep.id;
-          m.suggested = true;
-          m.why = `${ad.app} keeps both posts and stores the file once`;
+      if (ad) {
+        // Other names of these bytes in the same app (a hard link to this copy is the same file).
+        const peers = members.filter((x) => x.root === m.root && x.id !== m.id && !(x.dev === m.dev && x.ino === m.ino));
+        if (!peers.length) {
+          m.why = `The other copy is outside ${ad.app}: each app keeps its own file`;
+          m.fix = 'Keep both, or delete the post in the app that should not have it.';
           continue;
         }
-        if (sameRootKeep) {
+        const ready = ad.ready();
+        if (!ready.ok) {
           m.why = ready.why;
           m.fix = ready.fix;
           continue;
         }
-        m.why = `The other copy is outside ${ad.app}: each app keeps its own file`;
-        m.fix = 'Keep both, or delete the post in the app that should not have it.';
+        const mine = used(m);
+        if (mine === false) {
+          m.state = 'orphan';
+          m.why = `No ${ad.app} post uses this copy, so there is nothing to merge`;
+          m.fix = `Check it in ${ad.app}: it may be left over from an earlier import. Grabbit never removes an app's files.`;
+          continue;
+        }
+        if (mine == null) {
+          m.why = `${ad.app} has not said yet which posts use this copy`;
+          m.fix = 'Open the list again in a moment. Nothing is merged until it has.';
+          continue;
+        }
+        // The copy to keep wins when a post uses it; otherwise the best peer a post uses.
+        const target = (peers.includes(keep) && used(keep) === true ? keep : null)
+          || peers.filter((x) => used(x) === true).sort((a, b) => (b.score - a.score) || (a.mtime_ms - b.mtime_ms))[0];
+        if (!target) {
+          const unknown = peers.some((x) => used(x) == null);
+          m.why = unknown ? `${ad.app} has not said yet which posts use the other copy` : `No ${ad.app} post uses the other copy, so there is nothing to merge into`;
+          m.fix = unknown ? 'Open the list again in a moment. Nothing is merged until it has.' : 'Keep this copy.';
+          continue;
+        }
+        m.action = 'link';
+        m.state = 'merge';
+        m.linkTo = target.id;
+        m.suggested = true;
+        m.why = `${ad.app} keeps both posts and stores the file once`;
         continue;
       }
       const na = noAdapterReason(this.rootOf(m.root)) || { why: (p && p.why) || 'Kept', fix: null };
@@ -742,6 +871,7 @@ class DupeService {
         width: m.width, height: m.height, duration: m.duration, fps: m.fps, vcodec: m.vcodec, acodec: m.acodec,
         bitrate: m.bitrate, container: m.container,
         recommended: m.recommended, score: m.score, reasons: m.reasons, action: m.action, suggested: Boolean(m.suggested),
+        state: m.state || (m.action === 'trash' ? 'trash' : m.action ? 'merge' : 'protected'),
         linkTo: m.linkTo || null, why: m.why || null, fix: m.fix || null, related: Boolean(m.related),
         similarity: m.similarity, distance: m.distance, cosine: m.cosine, rotated: m.rotated, role: m.role, offset: m.offset,
         matchWhy: m.matchWhy || null, copies: m.copies || 1,
@@ -847,8 +977,13 @@ class DupeService {
         this.invalidate();
         return { ok: true, status: 'open' };
       case 'keep_selected':
+      case 'merge': {
+        // The plan must rest on what the app says now about these copies.
+        await this.refreshAppRefs({ members: g.members.filter((m) => this.refsAdapter(m.root)) });
+        const fresh = this.findGroup(key);
+        return this.exclusive(`${action} ${fresh.key}`, () => this.applyGroup(fresh, action, { keep, by }));
+      }
       case 'trash_extras':
-      case 'merge':
         return this.exclusive(`${action} ${g.key}`, () => this.applyGroup(g, action, { keep, by }));
       default:
         throw new DupeError('Unknown action');
@@ -918,6 +1053,7 @@ class DupeService {
       // suggested target is only used when it is not.
       const target = g.members.find((x) => x.id === keepId && x.root === m.root) || g.members.find((x) => x.id === m.linkTo && x.root === m.root);
       if (!ad || !target) throw new DupeError('No copy in the same app to share with');
+      await this.confirmPosts(ad, target, m);
       // Everything needed to record the merge later, should the answer be
       // lost: the op key lets the app say what became of it (resolveOp).
       const opKey = crypto.randomBytes(16).toString('hex');
@@ -1263,6 +1399,34 @@ class DupeService {
     });
   }
 
+  // Right before a merge: the app is asked again which posts use the two
+  // copies. A merge keeps two posts, so each copy needs one; otherwise the
+  // app would refuse anyway, and Grabbit says why without asking it to.
+  async confirmPosts(ad, target, m) {
+    if (!ad.caps.has('lookup')) throw new DupeError(`${ad.app} cannot say which posts use these copies, so Grabbit does not merge them`, 409);
+    const askedAt = this.now();
+    let r;
+    try {
+      r = await ad.lookup([target.rel, m.rel]);
+    } catch (e) {
+      throw new DupeError(`${ad.app} could not say which posts use these copies (${e.message}); nothing changed`, 409);
+    }
+    if (this.noteRefs([target, m], r, askedAt)) this.invalidate();
+    const count = (x) => {
+      const it = r.get(x.rel);
+      return it && Array.isArray(it.refs) ? it.refs.length : null;
+    };
+    const drop = count(m);
+    const kept = count(target);
+    if (drop == null || kept == null) throw new DupeError(`${ad.app} did not report on these copies; nothing changed`, 409);
+    if (drop === 0) {
+      throw new DupeError(`No ${ad.app} post uses ${m.name}, so there is nothing to merge`, 409, `Check it in ${ad.app}: it may be left over from an earlier import.`);
+    }
+    if (kept === 0) {
+      throw new DupeError(`No ${ad.app} post uses the copy to keep (${target.name})`, 409, 'Keep a copy that a post uses.');
+    }
+  }
+
   // --- app references ----------------------------------------------------------------
   // What the apps say about the copies of one group (posts, likes, comments).
   async references(key) {
@@ -1277,7 +1441,9 @@ class DupeService {
     }
     for (const { ad, members } of byRoot.values()) {
       try {
+        const askedAt = this.now();
         const r = await ad.lookup(members.map((m) => m.rel));
+        if (this.refsAdapter(members[0].root) && this.noteRefs(members, r, askedAt)) this.invalidate();
         // A copy the app left out of its answer is unknown, not unused.
         for (const m of members) out[m.id] = { app: ad.app, ...(r.get(m.rel) || { error: `${ad.app} did not report on this copy` }) };
       } catch (e) {

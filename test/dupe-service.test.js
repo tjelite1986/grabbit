@@ -67,6 +67,8 @@ function setup(t, { adapters = null, extra = [] } = {}) {
     s.setSetting('dupes.scan.state', 'running');
     assert.equal(await sc.pass(), true);
     svc.invalidate();
+    // As the list route does: the apps that can merge say which posts use each copy.
+    await svc.refreshAppRefs();
   };
   return { dir, s, dx, own, adult, tik, imp, lib, candidates, rootOf, trash, svc, scan, trashDir: path.join(dir, 'trash') };
 }
@@ -114,6 +116,8 @@ function guardWrites(t, roots) {
 
 const exactGroup = (svc, body, tab = 'identical') => svc.list({ tab, status: 'all', adult: 'show', limit: 200 }).items.find((g) => g.key === `exact:${sha(body)}`);
 const byName = (g) => Object.fromEntries(g.members.map((m) => [m.name, m]));
+// The calls that change something in the app (lookups only read).
+const changes = (ad) => ad.calls.filter((c) => c[0] !== 'lookup');
 
 function stubAdapter(o = {}) {
   const calls = [];
@@ -129,14 +133,16 @@ function stubAdapter(o = {}) {
       calls.push(['link', keep, drop, sha256]);
       if (op) ad.ops.push(op);
       if (o.link) return o.link(keep, drop, sha256);
-      return { id: 100 + calls.length, uid: String(100 + calls.length).padStart(32, '0'), bytes: 1 };
+      const n = calls.filter((c) => c[0] === 'link').length;
+      return { id: 100 + n, uid: String(100 + n).padStart(32, '0'), bytes: 1 };
     },
     async restore(id) { calls.push(['restore', id]); return { id: Number(String(id).split(':')[0]) }; },
     async purge(id) { calls.push(['purge', id]); return { id: Number(String(id).split(':')[0]), bytes: 1 }; },
     async lookup(rels) {
       calls.push(['lookup', rels]);
       if (o.lookup) return o.lookup(rels);
-      return new Map();
+      // By default every copy is one post's file.
+      return new Map(rels.map((r) => [r, { path: r, role: 'video', refs: [{ type: 'clip', id: 1, label: '#1' }] }]));
     },
     async cache() { calls.push(['cache']); if (o.cache) return o.cache(); return null; },
     async cacheClean(dryRun) { calls.push(['cacheClean', dryRun]); return { removed: dryRun ? 0 : 2, dryRun }; },
@@ -211,11 +217,11 @@ test('an app copy goes only through its adapter, which keeps both posts; Grabbit
   // "Move extra copies to the trash" never links in an app as a side effect.
   const none = await svc.act(g.key, 'trash_extras');
   assert.deepEqual([none.done, none.refused], [[], []]);
-  assert.deepEqual(ad.calls, []);
+  assert.deepEqual(changes(ad), []);
   const r = await svc.act(exactGroup(svc, body).key, 'merge');
   assert.equal(r.done.length, 1);
   assert.match(r.done[0].trash, /^a\d+$/);
-  assert.deepEqual(ad.calls, [['link', 'one.mp4', 'two.mp4', sha(body)]]);
+  assert.deepEqual(changes(ad), [['link', 'one.mp4', 'two.mp4', sha(body)]]);
   assert.deepEqual(dx.opsRecent().map((o) => [o.op, o.state]), [['link', 'done']]);
   // The app holds the original; Grabbit holds the record and can ask it back.
   const list = svc.trashList({ adult: 'show' });
@@ -224,13 +230,119 @@ test('an app copy goes only through its adapter, which keeps both posts; Grabbit
   assert.equal(list.items[0].preview, false);
   const rr = await svc.trashRestore([list.items[0].id]);
   assert.equal(rr.done.length, 1);
-  assert.deepEqual(ad.calls[1], ['restore', `101:${'101'.padStart(32, '0')}`], 'the ref carries the uid');
+  assert.deepEqual(changes(ad)[1], ['restore', `101:${'101'.padStart(32, '0')}`], 'the ref carries the uid');
   assert.equal(svc.trashList({ adult: 'show' }).total, 0);
   const again = await svc.trashRestore([list.items[0].id]);
   assert.match(again.refused[0].error, /Not in the trash/);
   guard.undo();
   assert.deepEqual(guard.offences, []);
   assert.deepEqual(snapshot(tik), before);
+});
+
+// TikShortis answers per copy: `posts` names the files a clip uses.
+const tikLookup = (posts) => (rels) => new Map(rels.map((r) => [r, posts.includes(r)
+  ? { path: r, role: 'video', refs: [{ type: 'clip', id: 5176, label: '#5176' }] }
+  : { path: r, role: 'none', refs: [] }]));
+
+test('a copy no post uses is an orphan candidate: never merged, never the copy to keep', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  const { tik, svc, scan, dx } = ctx;
+  // As in the 2026-11-21 report: the older file is the orphan, so the quality
+  // pick alone would keep it and merge the clip's file away.
+  const body = 'orphan twin';
+  write(path.join(tik, 'c', 'old-orphan.web.mp4'), body, 1000);
+  write(path.join(tik, 'c', 'live.web.mp4'), body, 2000);
+  const ad = stubAdapter({ lookup: tikLookup([path.join('c', 'live.web.mp4')]) });
+  adapters.set(tik, ad);
+  await scan();
+  const before = snapshot(tik);
+  const g = exactGroup(svc, body);
+  const m = byName(g);
+  assert.equal(g.keepId, m['live.web.mp4'].id, 'the copy a post uses is kept');
+  assert.equal(m['live.web.mp4'].state, 'protected');
+  assert.equal(m['old-orphan.web.mp4'].state, 'orphan');
+  assert.equal(m['old-orphan.web.mp4'].action, null);
+  assert.match(m['old-orphan.web.mp4'].why, /No TikShortis post uses this copy/);
+  assert.ok(m['old-orphan.web.mp4'].fix);
+  assert.equal(g.members.filter((x) => x.action).length, 0, 'nothing to merge or trash');
+  // Merge and keep_selected refuse without asking the app to change anything.
+  const r = await svc.act(g.key, 'merge');
+  assert.deepEqual([r.done, r.refused], [[], []]);
+  const k = await svc.act(g.key, 'keep_selected', { keep: [m['old-orphan.web.mp4'].id] });
+  assert.equal(k.done.length, 0);
+  assert.equal(k.refused.length, 1, 'the clip\'s file is refused, not merged into the orphan');
+  assert.deepEqual(changes(ad), []);
+  assert.deepEqual(dx.opsRecent(), []);
+  assert.deepEqual(snapshot(tik), before);
+});
+
+test('without an answer from the app nothing is merged, and the copies are protected', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  const { tik, svc, scan } = ctx;
+  const body = 'unanswered twin';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  const ad = stubAdapter({ lookup: () => { throw new AdapterError('TikShortis is not reachable right now'); } });
+  adapters.set(tik, ad);
+  await scan();
+  const m = byName(exactGroup(svc, body));
+  assert.equal(m['two.mp4'].action, null);
+  assert.equal(m['two.mp4'].state, 'protected');
+  assert.match(m['two.mp4'].why, /has not said yet/);
+  const r = await svc.act(exactGroup(svc, body).key, 'merge');
+  assert.deepEqual(r.done, []);
+  assert.deepEqual(changes(ad), []);
+  // An answer that leaves a copy out is no answer for that copy.
+  adapters.set(tik, stubAdapter({ lookup: (rels) => new Map(rels.filter((x) => x === 'one.mp4').map((x) => [x, { path: x, role: 'video', refs: [{ type: 'clip', id: 1 }] }])) }));
+  svc.invalidate();
+  await svc.refreshAppRefs();
+  assert.equal(byName(exactGroup(svc, body))['two.mp4'].state, 'protected');
+});
+
+test('a merge asks the app again right before it runs and refuses a copy that lost its post', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  const { tik, svc, scan, dx } = ctx;
+  const body = 'post deleted meanwhile';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  let posts = ['one.mp4', 'two.mp4'];
+  const ad = stubAdapter({ lookup: (rels) => tikLookup(posts)(rels) });
+  adapters.set(tik, ad);
+  await scan();
+  const g = exactGroup(svc, body);
+  assert.equal(byName(g)['two.mp4'].state, 'merge');
+  // The plan rests on an answer up to REFS_TTL_MS old; the post goes meanwhile.
+  posts = ['one.mp4'];
+  const r = await svc.applyGroup(svc.findGroup(g.key), 'merge', {});
+  assert.equal(r.done.length, 0);
+  assert.match(r.refused[0].error, /No TikShortis post uses two\.mp4/);
+  assert.deepEqual(changes(ad), []);
+  assert.deepEqual(dx.opsRecent(), []);
+  // The fresh answer reached the plan.
+  assert.equal(byName(exactGroup(svc, body))['two.mp4'].state, 'orphan');
+});
+
+test('an app answer is dropped when the file changes', async (t) => {
+  const adapters = new Map();
+  const ctx = setup(t, { adapters });
+  const { tik, svc, scan } = ctx;
+  const body = 'answer per inode';
+  write(path.join(tik, 'one.mp4'), body, 1000);
+  write(path.join(tik, 'two.mp4'), body, 2000);
+  adapters.set(tik, stubAdapter({ lookup: tikLookup(['one.mp4']) }));
+  await scan();
+  assert.equal(byName(exactGroup(svc, body))['two.mp4'].state, 'orphan');
+  const two = svc.findGroup(`exact:${sha(body)}`).members.find((x) => x.name === 'two.mp4');
+  assert.equal(svc.appRefsFor(two).used, 0);
+  assert.equal(svc.appRefsFor({ ...two, ino: two.ino + 1 }), null, 'another inode');
+  assert.equal(svc.appRefsFor({ ...two, mtime_ms: two.mtime_ms + 1 }), null, 'rewritten in place');
+  const now = svc.now;
+  svc.now = () => now() + 11 * 60 * 1000;
+  assert.equal(svc.appRefsFor(two), null, 'too old');
+  svc.now = now;
 });
 
 test('an adapter that is not ready or refuses leaves the app copy and records nothing in app trash', async (t) => {
@@ -254,6 +366,7 @@ test('an adapter that is not ready or refuses leaves the app copy and records no
   const refusing = stubAdapter({ link: () => { throw new AdapterError('TikShortis refused', { fix: 'Check the app.' }); } });
   adapters.set(tik, refusing);
   svc.invalidate();
+  await svc.refreshAppRefs();
   m = byName(exactGroup(svc, body));
   assert.equal(m['two.mp4'].action, 'link');
   r = await svc.act(exactGroup(svc, body).key, 'merge');
@@ -800,6 +913,7 @@ test('references ask each app about its own copies only, and report a failing ap
   await scan();
   const g = exactGroup(svc, body);
   const m = byName(g);
+  tikAd.calls.length = 0;
   const refs = await svc.references(g.key);
   assert.equal(refs[m['g.mp4'].id], undefined, 'Grabbit\'s own copy is not an app question');
   assert.deepEqual(refs[m['t.mp4'].id].refs, [{ type: 'post', id: 5, label: 'A post' }]);
@@ -926,7 +1040,7 @@ test('the batch summary counts only copies that move to the trash; merges and ap
   assert.deepEqual(s.apps, ['Grabbit'], 'TikShortis is not named: nothing moves there');
   const r = await svc.batch({ keys: [g.key], action: 'trash_extras', dryRun: false, expect: { files: 1 } });
   assert.equal(r.files, 1);
-  assert.deepEqual(ad.calls, [], 'no app link as a side effect');
+  assert.deepEqual(changes(ad), [], 'no app link as a side effect');
   assert.ok(!fs.existsSync(path.join(own, 'g.mp4')));
   assert.ok(fs.existsSync(path.join(tik, 'two.mp4')));
 });

@@ -121,9 +121,15 @@ a.dm-stat:hover { border-color: var(--accent); }
 .dm-recbadge svg { fill: var(--ok); }
 .dm-why { margin: 2px 0; padding-left: 18px; font-size: 13px; color: #cfcde3; }
 .dm-reasons { color: #b9b6d3; }
-.dm-status { display: flex; gap: 4px; align-items: center; }
+.dm-status { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .dm-can { color: var(--ok); }
 .dm-cant { color: #b9b6d3; }
+.dm-state { display: inline-flex; gap: 4px; align-items: center; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; font-weight: 600; white-space: nowrap; }
+.dm-state-merge { color: var(--ok); }
+.dm-state-trash { color: var(--warn); }
+.dm-state-protected { color: #b9b6d3; }
+.dm-state-orphan { color: var(--bad); border-style: dashed; }
+.dm-statecount { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
 .dm-gactions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .dm-gactions .btn { display: inline-flex; align-items: center; gap: 4px; }
 .dm-refs { margin: 6px 0; display: grid; gap: 4px; }

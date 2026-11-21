@@ -52,6 +52,7 @@
       lock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3',
       merge: 'M6 4v6a6 6 0 0 0 6 6h6M18 12l4 4-4 4M6 20v-4',
       info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v6M12 7.5h.01',
+      orphan: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.8-.9 1.4v.8M12 17h.01',
       scan: 'M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M4 12h16',
       ai: 'M12 3v3M12 18v3M3 12h3M18 12h3M7 7h10v10H7zM10 10h4v4h-4z',
       expand: 'M6 9l6 6 6-6',
@@ -91,6 +92,15 @@
       partial: 'One video appears inside the other. A clip is its own video and is never a removable copy.',
     };
     const STATUS_LABEL = { open: 'Open', reviewed: 'Reviewed', keep_all: 'Keep all', ignored: 'Ignored', known: 'Known/OK' };
+    // What may happen to one copy (the server's member.state), with its own
+    // icon and words so the states never differ by colour alone.
+    const COPY_STATE = {
+      merge: { icon: 'merge', label: 'Merge references' },
+      trash: { icon: 'trash', label: 'Safe to Trash' },
+      protected: { icon: 'lock', label: 'Protected / In use' },
+      orphan: { icon: 'orphan', label: 'Orphan candidate - needs verification' },
+    };
+    const copyState = (m) => COPY_STATE[m.state] ? m.state : m.action === 'trash' ? 'trash' : m.action ? 'merge' : 'protected';
 
     // --- address state ---------------------------------------------------------
     function tabOf(r) {
@@ -550,9 +560,9 @@
               m.item ? h('div', { class: 'small' }, 'Library item: ', h('b', null, m.item.creator || '-'), m.item.title ? ` ${m.item.title}` : '') : null,
               m.matchWhy && m.matchWhy.length ? h('ul', { class: 'dm-why' }, m.matchWhy.map((w) => h('li', null, w))) : null,
               m.reasons && m.reasons.length ? h('div', { class: 'small dm-reasons' }, m.reasons.join(' - ')) : null,
-              h('div', { class: `small dm-status${m.action ? ' dm-can' : ' dm-cant'}` },
-                m.action ? ic(m.action === 'trash' ? 'trash' : 'merge', 12) : m.recommended ? ic('check', 12) : ic('lock', 12),
-                ` ${m.why || ''}`),
+              h('div', { class: 'small dm-status' },
+                h('span', { class: `dm-state dm-state-${copyState(m)}` }, ic(COPY_STATE[copyState(m)].icon, 12), ` ${COPY_STATE[copyState(m)].label}`),
+                h('span', { class: m.action ? 'dm-can' : 'dm-cant' }, m.why || '')),
               m.fix ? h('div', { class: 'small dm-fix' }, m.fix) : null));
         });
         const refsBox = h('div', { class: 'dm-refs' });
@@ -602,6 +612,11 @@
         fill(detail,
           g.explain && g.explain.summary ? h('p', { class: 'small dm-explain-line' }, ic('info', 14), ` ${g.explain.summary}`) : null,
           g.recommendation && g.recommendation.reasons.length ? h('p', { class: 'small' }, h('b', null, 'Why the recommendation: '), g.recommendation.reasons.join(', ')) : null,
+          h('p', { class: 'small dm-statecount', 'aria-label': 'What may happen to each copy' },
+            Object.keys(COPY_STATE).map((k) => {
+              const n = g.members.filter((m) => copyState(m) === k).length;
+              return n ? h('span', { class: `dm-state dm-state-${k}` }, ic(COPY_STATE[k].icon, 12), ` ${num(n)} ${COPY_STATE[k].label}`) : null;
+            })),
           h('ul', { class: 'dm-members' }, rows),
           showRefs ? h('button', { class: 'btn small ghost', type: 'button', onclick: async (e) => {
             const btn = e.currentTarget;

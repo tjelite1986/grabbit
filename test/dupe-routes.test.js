@@ -384,6 +384,9 @@ test('a group list counts only the answers of the fresh audience run it waited f
   const ref = ok.service.calls.find((c) => c.name === 'refreshAppAudience');
   assert.deepEqual(ref.args[0], { fresh: true });
   assert.deepEqual(ok.service.calls.find((c) => c.name === 'list').args[1], { audRun: 7 });
+  // Which posts use each app copy is asked before the list is built.
+  const names = ok.service.calls.map((c) => c.name);
+  assert.ok(names.indexOf('refreshAppRefs') > -1 && names.indexOf('refreshAppRefs') < names.indexOf('list'));
   const down = await mount(t, { service: stubService({ refreshAppAudience: async () => { throw new Error('down'); } }) });
   await down.get('/groups?tab=identical');
   assert.deepEqual(down.service.calls.find((c) => c.name === 'list').args[1], { audRun: 0 });
