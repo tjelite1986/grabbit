@@ -204,4 +204,5 @@ are kept on purpose; installed apps and push notifications still use them.
 | `documentation/open-decisions.md` | D1-D4 and other open owner decisions (not fixes) |
 | `documentation/music-library-rules.md` | Music and library rules (moved from `CLAUDE.md`) |
 | `documentation/claude-workflow.md` | Token-efficient working method |
+| `documentation/test-contracts.md` | Guard tests: what they protect, how to run them, known gaps |
 | `documentation/architecture.md`, `configuration.md`, `installation.md`, `user-guide.md` | Product docs |
