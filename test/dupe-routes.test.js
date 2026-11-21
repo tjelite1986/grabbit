@@ -292,7 +292,7 @@ test('server.js puts v2 behind the owner session and refuses cross-site requests
   const data = path.join(root, 'data');
   fs.mkdirSync(data);
   const port = await freePort();
-  const proc = spawn(process.execPath, ['server.js'], {
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH, PORT: String(port), DATA_DIR: data, DOWNLOAD_DIR: path.join(root, 'downloads'),

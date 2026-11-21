@@ -43,7 +43,7 @@ async function boot(roots) {
   fs.mkdirSync(env.DATA_DIR, { recursive: true });
   const port = await freePort();
   env.PORT = String(port);
-  const proc = spawn(process.execPath, ['server.js'], { cwd: path.join(__dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], { cwd: path.join(__dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = '';
   proc.stdout.on('data', (d) => (logs += d));
   proc.stderr.on('data', (d) => (logs += d));

@@ -156,7 +156,7 @@ test('routes: admin only, by entry id, inside the roots', async (t) => {
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   let logs = '';
-  const proc = spawn(process.execPath, ['server.js'], {
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH,

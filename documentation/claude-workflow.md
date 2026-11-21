@@ -60,6 +60,7 @@ One exact command per area (names are real files in `test/`):
 | Extractor naming | `node --test test/facebook-title-id.test.js test/source-tags-generic.test.js` |
 | Server contract | `node --test test/contract.test.js` |
 | Duplicate Manager | `node --test test/dupe-routes.test.js test/dupe-service.test.js` |
+| Guard tests (auth, URL, yt-dlp args, storage, jobs) | `node --test test/guard-*.test.js` (see `documentation/test-contracts.md`) |
 
 Run the full suite (`node --test test/`) once before handoff when the change
 touches shared code. Report failures verbatim, and say which tests were not run.

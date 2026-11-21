@@ -65,7 +65,7 @@ test.before(async () => {
 
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
-  proc = spawn(process.execPath, ['server.js'], {
+  proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH,

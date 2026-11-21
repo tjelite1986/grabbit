@@ -93,7 +93,7 @@ async function boot(name, extraEnv, files = {}) {
   fs.mkdirSync(data, { recursive: true });
   for (const [f, v] of Object.entries(files)) fs.writeFileSync(path.join(data, f), JSON.stringify(v));
   const port = await freePort();
-  const proc = spawn(process.execPath, ['server.js'], {
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
     cwd: path.join(__dirname, '..'),
     env: {
       PATH: process.env.PATH,

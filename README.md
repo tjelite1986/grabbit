@@ -543,9 +543,10 @@ npm test                            # node --test test/
 - `GRABBIT_AUTH_DISABLED=1` with no password opens the server to everyone who
   can reach port 3000. Use it only on a machine that is not on a shared
   network, or behind a firewall.
-- The test suite uses Node's built-in test runner. It has 50 test files that
+- The test suite uses Node's built-in test runner. It has 57 test files that
   cover the download contract, the gateways, audience separation and every
-  Duplicate Manager module.
+  Duplicate Manager module. The guard tests and how to run them are described
+  in [documentation/test-contracts.md](documentation/test-contracts.md).
 - There is no build step. The hub is plain JavaScript served from `public/`.
 - New site support is a file in `extractors/`. See
   [adding a new site](documentation/user-guide.md#adding-a-new-site).

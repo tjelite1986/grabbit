@@ -11,8 +11,15 @@ const inbox = require('../inbox');
 const NOW = Date.parse('2026-11-08T15:00:00Z');
 const MIN = 60 * 1000;
 
+// Every drop folder is removed when the test process ends.
+const drops = [];
+process.on('exit', () => {
+  for (const d of drops) fs.rmSync(d, { recursive: true, force: true });
+});
 function tmpDrop() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-inbox-'));
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-inbox-'));
+  drops.push(d);
+  return d;
 }
 function put(root, rel, content, ageMs) {
   const f = path.join(root, rel);
