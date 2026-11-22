@@ -32,4 +32,6 @@ function isRetryableError(err, msg) {
   return /HTTP (403|404|408|425|429|5\d\d)|not published|timeout|timed out|stalled|ECONNRESET|network|EAI_AGAIN/i.test(String(msg || ''));
 }
 
-module.exports = { isTransientDownloadError, RETRY_BACKOFF_MIN, retryDelayMs, isRetryableError };
+// RETRY_BACKOFF_MIN stays private: exporting the live array would let a caller
+// change every later retryDelayMs() result.
+module.exports = { isTransientDownloadError, retryDelayMs, isRetryableError };

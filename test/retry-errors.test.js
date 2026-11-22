@@ -5,7 +5,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {
-  isTransientDownloadError, RETRY_BACKOFF_MIN, retryDelayMs, isRetryableError,
+  isTransientDownloadError, retryDelayMs, isRetryableError,
 } = require('../retry-errors');
 
 // [message, isTransientDownloadError, isRetryableError(null, message)]
@@ -53,6 +53,6 @@ test('an explicit err.retryable flag wins over the message in both classifiers',
 });
 
 test('retryDelayMs walks the backoff table and repeats the last step', () => {
-  assert.deepStrictEqual(RETRY_BACKOFF_MIN, [20, 40, 60, 120, 180, 240, 360]);
-  assert.deepStrictEqual([0, 1, 6, 7, 50].map(retryDelayMs), [1200000, 2400000, 21600000, 21600000, 21600000]);
+  const minutes = [0, 1, 2, 3, 4, 5, 6, 7, 50].map((n) => retryDelayMs(n) / 60000);
+  assert.deepStrictEqual(minutes, [20, 40, 60, 120, 180, 240, 360, 360, 360]);
 });
