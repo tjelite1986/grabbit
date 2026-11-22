@@ -69,3 +69,9 @@ test('every thumbnail URL the hub and the classic page build carries v=2 (H34)',
   const classic = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
   assert.match(classic, /'\/api\/thumb\?url=' \+ encodeURIComponent\(s\) \+ '&v=2'/);
 });
+
+test('the hub reloads and redraws its tile pages when a classification changes (H99)', () => {
+  const hub = fs.readFileSync(path.join(PUBLIC, 'hub', 'hub.js'), 'utf8');
+  assert.match(hub, /if \(d\.type === 'audience'\) \{\n\s+load\(\['summary', 'history', 'media', 'mediaAdult'\]\)\.then\(\(\) => \{ if \(AUDIENCE_PAGES\.includes\(route\(\)\.id\)\) render\(false\); \}\);/);
+  assert.match(hub, /const AUDIENCE_PAGES = \['', 'queue', 'media', 'profiles'\];/);
+});

@@ -652,6 +652,7 @@
       button);
   }
 
+  let mediaAdultLoading = false;
   function viewMedia(params) {
     const kind = params.get('kind') || '';
     const aud = params.get('aud') || '';
@@ -663,8 +664,14 @@
     if (!adultView) {
       state.mediaAdult = null;
       state.mediaAdultMisses = null;
-    } else if (!state.mediaAdult) {
-      load(['mediaAdult']).then(scheduleRender);
+    } else if (!state.mediaAdult && !mediaAdultLoading) {
+      // Media is not a live page, so it is drawn again once the list is here.
+      mediaAdultLoading = true;
+      load(['mediaAdult']).then(() => {
+        mediaAdultLoading = false;
+        if (!state.mediaAdult) state.mediaAdult = [];
+        if (inAdultView()) render(false);
+      });
     }
     const misses = (adultView ? state.mediaAdultMisses : state.mediaMisses) || [];
     const items = mediaList(params);
