@@ -70,8 +70,31 @@ test('every thumbnail URL the hub and the classic page build carries v=2 (H34)',
   assert.match(classic, /'\/api\/thumb\?url=' \+ encodeURIComponent\(s\) \+ '&v=2'/);
 });
 
-test('the hub reloads and redraws its tile pages when a classification changes (H99)', () => {
+test('the hub reloads and redraws its tile pages when a classification changes (H99, B6)', () => {
   const hub = fs.readFileSync(path.join(PUBLIC, 'hub', 'hub.js'), 'utf8');
-  assert.match(hub, /if \(d\.type === 'audience'\) \{\n\s+load\(\['summary', 'history', 'media', 'mediaAdult'\]\)\.then\(\(\) => \{ if \(AUDIENCE_PAGES\.includes\(route\(\)\.id\)\) render\(false\); \}\);/);
-  assert.match(hub, /const AUDIENCE_PAGES = \['', 'queue', 'media', 'profiles'\];/);
+  const block = /if \(d\.type === 'audience'\) \{\n([\s\S]*?)\n\s+return;\n\s+\}/.exec(hub);
+  assert.ok(block, 'the audience event handler');
+  const body = block[1];
+  // Old pictures go first, then the lists, then a redraw from fresh lists.
+  const order = ['audienceGen++', 'dropHubPictures()', 'state.history = null', 'state.media = null', 'state.mediaAdult = null', 'render(false)', "load(['summary', 'history', 'media'])"];
+  let at = -1;
+  for (const step of order) {
+    const i = body.indexOf(step, at + 1);
+    assert.ok(i > at, `${step} in order`);
+    at = i;
+  }
+  assert.match(hub, /const AUDIENCE_PAGES = \['', 'queue', 'media', 'profiles', 'library'\];/);
+  // A list fetched under an older generation is never stored.
+  assert.match(hub, /\.then\(\(apply\) => \{ if \(apply && gen === audienceGen\) apply\(\); \}\)/);
+});
+
+test('the classic page downloads a hidden job only in the tab that started it (B5)', () => {
+  const classic = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
+  assert.match(classic, /j\.deliverable && !delivered\.has\(j\.id\) && \(dkey \|\| !j\.audienceHidden\)/);
+  assert.match(classic, /'\/file' \+ \(dkey \? '\?key=' \+ encodeURIComponent\(dkey\) : ''\)/);
+  // Every place that starts a device job keeps its key.
+  const starts = classic.split("fetchJson('/api/jobs/start?").length - 1;
+  const kept = classic.split('rememberDeliverKey(d);').length - 1;
+  assert.equal(starts, 3);
+  assert.equal(kept, 2, 'the two device-capable starts keep the key; the audio batch is device=0');
 });

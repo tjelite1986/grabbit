@@ -159,28 +159,53 @@
   const activeJobs = () => [...state.jobs.values()].filter((j) => ACTIVE.has(j.status)).sort((a, b) => a.createdAt - b.createdAt);
   const allJobs = () => [...state.jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
 
+  // Codex phase-0 B6: bumped on every classification change. A list that was
+  // asked for under an older generation is dropped when it arrives, so a slow
+  // answer from before the change never puts old tiles back.
+  let audienceGen = 0;
   async function load(what) {
+    const gen = audienceGen;
+    // Each task fetches, then hands back what to store; it is stored only if no
+    // classification changed in between.
     const tasks = {
-      summary: () => api('/api/hub/summary').then((d) => { state.summary = d; }),
-      health: () => api('/api/health').then((d) => { state.health = d; }),
-      config: () => api('/api/config').then((d) => { state.config = d; }),
-      history: () => api('/api/history').then((d) => { state.history = d.items || []; }),
-      media: () => api('/api/hub/media').then((d) => { state.media = d.items || []; state.mediaMisses = d.misses || []; }),
+      summary: () => api('/api/hub/summary').then((d) => () => { state.summary = d; }),
+      health: () => api('/api/health').then((d) => () => { state.health = d; }),
+      config: () => api('/api/config').then((d) => () => { state.config = d; }),
+      history: () => api('/api/history').then((d) => () => { state.history = d.items || []; }),
+      media: () => api('/api/hub/media').then((d) => () => { state.media = d.items || []; state.mediaMisses = d.misses || []; }),
       mediaAdult: () => (inAdultView()
-        ? api(adultParam('/api/hub/media')).then((d) => { state.mediaAdult = d.items || []; state.mediaAdultMisses = d.misses || []; })
-        : Promise.resolve()),
-      review: () => api('/api/hub/review').then((d) => { state.review = d; }),
-      inbox: () => api('/api/hub/inbox?limit=1').then((d) => { state.inbox = d; }),
-      jobs: () => api('/api/jobs').then((d) => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
+        ? api(adultParam('/api/hub/media')).then((d) => () => { state.mediaAdult = d.items || []; state.mediaAdultMisses = d.misses || []; })
+        : Promise.resolve(null)),
+      review: () => api('/api/hub/review').then((d) => () => { state.review = d; }),
+      inbox: () => api('/api/hub/inbox?limit=1').then((d) => () => { state.inbox = d; }),
+      jobs: () => api('/api/jobs').then((d) => () => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
     };
-    await Promise.all(what.map((k) => tasks[k]().catch((e) => { console.warn(`hub: ${k} failed`, e); })));
+    await Promise.all(what.map((k) => tasks[k]()
+      .then((apply) => { if (apply && gen === audienceGen) apply(); })
+      .catch((e) => { console.warn(`hub: ${k} failed`, e); })));
+  }
+  // Codex phase-0 B6: every hub picture and media file on the page lets go of
+  // its address at once, before anything is fetched again. Pages are drawn
+  // again from fresh lists; until those arrive they show "Loading".
+  const HUB_MEDIA_RE = /\/api\/(thumb\?|hub\/media\/)/;
+  function dropHubPictures() {
+    for (const el of document.querySelectorAll('img[src], video[src], source[src]')) {
+      if (!HUB_MEDIA_RE.test(el.getAttribute('src') || '')) continue;
+      if (el.tagName === 'VIDEO') el.pause();
+      el.removeAttribute('src');
+      if (el.tagName === 'VIDEO') el.load();
+    }
+    for (const el of document.querySelectorAll('[data-media-bg="1"], [style*="/api/thumb"]')) {
+      if (HUB_MEDIA_RE.test(el.style.backgroundImage || '')) el.style.backgroundImage = '';
+    }
   }
 
   // --- Live job stream -----------------------------------------------------
   let stream = null;
   let renderQueued = false;
-  // Pages that draw history tiles or job rows; module pages are left alone.
-  const AUDIENCE_PAGES = ['', 'queue', 'media', 'profiles'];
+  // Pages that draw history tiles, library rows or job rows; module pages are
+  // left alone.
+  const AUDIENCE_PAGES = ['', 'queue', 'media', 'profiles', 'library'];
   function connectStream() {
     if (stream) return;
     stream = new EventSource('/api/jobs/stream');
@@ -191,7 +216,17 @@
       // redrawn, so a tile or row drawn under the old audience is replaced,
       // its old picture address with it.
       if (d.type === 'audience') {
-        load(['summary', 'history', 'media', 'mediaAdult']).then(() => { if (AUDIENCE_PAGES.includes(route().id)) render(false); });
+        audienceGen++;
+        dropHubPictures();
+        state.summary = null;
+        state.history = null;
+        state.media = null;
+        state.mediaMisses = null;
+        state.mediaAdult = null;
+        state.mediaAdultMisses = null;
+        const onPage = () => AUDIENCE_PAGES.includes(route().id);
+        if (onPage()) render(false);
+        load(['summary', 'history', 'media']).then(() => { if (onPage()) render(false); });
         return;
       }
       if (d.type !== 'job' || !d.job) return;
@@ -667,9 +702,11 @@
     } else if (!state.mediaAdult && !mediaAdultLoading) {
       // Media is not a live page, so it is drawn again once the list is here.
       mediaAdultLoading = true;
+      const gen = audienceGen;
       load(['mediaAdult']).then(() => {
         mediaAdultLoading = false;
-        if (!state.mediaAdult) state.mediaAdult = [];
+        // An answer dropped for a newer classification is asked for again.
+        if (!state.mediaAdult && gen === audienceGen) state.mediaAdult = [];
         if (inAdultView()) render(false);
       });
     }
