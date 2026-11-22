@@ -3161,6 +3161,22 @@ function readProfiles() {
 function saveProfiles(store) {
   writeJsonAtomic(PROFILES_FILE, store);
   profilesCache = store;
+  scheduleAudienceChanged();
+}
+// Batches the re-send that follows a classification change (H97, H99). It
+// runs after the current request, never during module start-up.
+let audienceChangePending = false;
+function scheduleAudienceChanged() {
+  if (audienceChangePending) return;
+  audienceChangePending = true;
+  setImmediate(() => {
+    audienceChangePending = false;
+    try {
+      audienceChanged();
+    } catch (e) {
+      console.warn('jobs: re-sending after a classification change failed:', e.message);
+    }
+  });
 }
 function profileError(res, e) {
   if (e instanceof profiles.ProfileError) return res.status(e.status).json({ ok: false, error: e.message });
@@ -4272,6 +4288,7 @@ app.post('/api/hub/review/items', (req, res) => {
   if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
   try {
     const r = ITEM_STORE.classifyItems(b.ids, aud);
+    if (r.changed.length) scheduleAudienceChanged();
     console.log(`review: ${r.changed.length} item(s) classified ${aud} by hand, ${r.skipped.length} skipped`);
     res.json({ ok: true, changed: r.changed, skipped: r.skipped });
   } catch (e) {
@@ -5093,7 +5110,12 @@ app.get('/api/hub/media/:id/file', (req, res) => {
   res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
   if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+  // H98: a general file is revalidated on every use (ETag), so an entry
+  // reclassified 18+ stops at the gate above at once; an 18+ file is never
+  // stored. The hub's URLs carry `gen=2`, so nothing cached under the old
+  // `max-age=3600` rule is asked for again.
+  const cacheControl = fileAudience === 'general' ? 'private, no-cache' : 'private, no-store';
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': cacheControl } }, (err) => {
     if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
   });
 });
@@ -7292,7 +7314,7 @@ app.get('/api/download-all', async (req, res) => {
 // using the synchronous /api/download + /api/download-all over the docker
 // network, which has no such limit.
 const jobsMap = new Map();
-const jobSubs = new Set();
+const jobSubs = new Map(); // SSE response -> true for the 18+ view
 let jobSeq = 0;
 const JOB_KEEP_DONE = 60; // cap finished jobs retained in memory
 const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file this long
@@ -7305,16 +7327,92 @@ function publicJob(j) {
   const { finalPath, deliverTemp, params, watch, fromSchedule, savedPaths, ...pub } = j;
   return pub;
 }
-function snapshotJobs() {
-  return [...jobsMap.values()].map(publicJob).sort((a, b) => b.createdAt - a.createdAt);
+// H97: the job feeds follow the H4 audience gate. On a general view a job
+// whose item is 18+ or not classified general is sent without anything that
+// names it (creator, title, picture, file name, source); status and progress
+// stay, so the queue still counts it. The 18+ view (`audience=adult`) gets the
+// full job. The audience is worked out again on every send, and every job is
+// sent again when a classification changes (audienceChanged()).
+function jobClassChannel(j) {
+  if (j.dest === 'elite') return j.channel || null;
+  const folder = (j.params && j.params.folder) || j.folder;
+  if (j.dest === 'server' && typeof folder === 'string' && /^adults(\/|$)/.test(folder)) return 'server/adults';
+  return null;
+}
+function jobAudience(j) {
+  if (j.audience === 'adult') return 'adult';
+  let store;
+  try {
+    ({ store } = readProfilesReadOnly());
+  } catch {
+    return 'unknown';
+  }
+  const base = {
+    channel: jobClassChannel(j),
+    sourceUrl: j.sourceUrl || j.url || null,
+    site: j.site || null,
+    extractor: j.extractor || null,
+    filename: j.filename || null,
+    itemKey: itemKeyOf(j),
+  };
+  let aud = entryClassification({ ...base, creator: j.creator }, store).audience;
+  // A renamed creator never borrows another creator's general profile.
+  if (aud === 'general' && j.sourceCreator !== undefined && j.sourceCreator !== j.creator) {
+    aud = entryClassification({ ...base, creator: j.sourceCreator }, store).audience;
+  }
+  return aud;
+}
+const UNCLASSIFIED_REFUSAL_RE = / is a general app and the audience of .* is not classified/;
+function reducedJob(pub) {
+  const out = { ...pub };
+  for (const k of ['creator', 'sourceCreator', 'title', 'description', 'thumbnail', 'filename', 'sourceUrl', 'url', 'mediaId',
+    'dir', 'duplicate', 'message', 'route', 'savedTo']) {
+    if (k in out) out[k] = null;
+  }
+  // The hub offers "classify and retry" on an unclassified refusal; the
+  // sentence keeps that shape without the creator's name.
+  if (out.error) {
+    out.error = UNCLASSIFIED_REFUSAL_RE.test(out.error)
+      ? 'The app is a general app and the audience of this item is not classified.'
+      : 'The download failed.';
+  }
+  // `deliverable` stays: a save to the device the owner asked for still
+  // arrives, and the flag names nothing.
+  out.audienceHidden = true;
+  return out;
+}
+function viewOfJob(j, adultView) {
+  const pub = publicJob(j);
+  if (adultView || jobAudience(j) === 'general') return pub;
+  return reducedJob(pub);
+}
+function snapshotJobs(adultView = false) {
+  return [...jobsMap.values()].map((j) => viewOfJob(j, adultView)).sort((a, b) => b.createdAt - a.createdAt);
 }
 function emitJob(j) {
-  const line = `data: ${JSON.stringify({ type: 'job', job: publicJob(j) })}\n\n`;
-  for (const r of jobSubs) {
+  let full = null;
+  let general = null;
+  for (const [r, adultView] of jobSubs) {
+    let line;
+    if (adultView) line = full || (full = `data: ${JSON.stringify({ type: 'job', job: publicJob(j) })}\n\n`);
+    else line = general || (general = `data: ${JSON.stringify({ type: 'job', job: viewOfJob(j, false) })}\n\n`);
     try {
       r.write(line);
     } catch {
       /* subscriber gone; dropped on its close handler */
+    }
+  }
+}
+// A classification changed (a profile or an item): every job is sent again
+// in the form its audience now allows, and the hub hears that it should
+// reload what it shows (H99).
+function audienceChanged() {
+  for (const j of jobsMap.values()) emitJob(j);
+  for (const r of jobSubs.keys()) {
+    try {
+      r.write(`data: ${JSON.stringify({ type: 'audience' })}\n\n`);
+    } catch {
+      /* subscriber gone */
     }
   }
 }
@@ -8580,6 +8678,7 @@ app.post('/api/jobs/:id/classify-retry', (req, res) => {
   if (item.audience === 'adult') return res.status(409).json({ ok: false, error: 'This item is 18+ and is never sent to a general app' });
   try {
     const r = ITEM_STORE.classifyItems([item.id], 'general');
+    if (r.changed.length) scheduleAudienceChanged();
     if (!r.changed.length && !(r.skipped[0] && /already general/.test(r.skipped[0].reason))) {
       return res.status(409).json({ ok: false, error: (r.skipped[0] && r.skipped[0].reason) || 'The item could not be classified' });
     }
@@ -8635,7 +8734,7 @@ function scheduleJob(job, params) {
 }
 
 // GET /api/jobs -> snapshot of current jobs (newest first).
-app.get('/api/jobs', (_req, res) => res.json({ ok: true, jobs: snapshotJobs() }));
+app.get('/api/jobs', (req, res) => res.json({ ok: true, jobs: snapshotJobs(wantsAdultView(req)) }));
 // ---------------------------------------------------------------------------
 // Health: the one page that answers "is anything quietly broken?". Three of the
 // destinations below are NFS mounts from ubu-desk (the libraries moved off the
@@ -8965,8 +9064,9 @@ app.get('/api/jobs/stream', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.write('retry: 3000\n\n');
-  for (const j of snapshotJobs()) res.write(`data: ${JSON.stringify({ type: 'job', job: j })}\n\n`);
-  jobSubs.add(res);
+  const adultView = wantsAdultView(req);
+  for (const j of snapshotJobs(adultView)) res.write(`data: ${JSON.stringify({ type: 'job', job: j })}\n\n`);
+  jobSubs.set(res, adultView);
   const ka = setInterval(() => {
     try {
       res.write(': ka\n\n');

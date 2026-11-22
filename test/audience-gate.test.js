@@ -138,7 +138,7 @@ async function boot(t, { profileList = [], registry = null, breakItemStore = fal
     if (r.status !== 200) return { status: r.status, body: started };
     const id = started.jobId;
     for (let i = 0; i < 100; i++) {
-      const { jobs } = await (await fetch(`${base}/api/jobs`, { headers })).json();
+      const { jobs } = await (await fetch(`${base}/api/jobs?audience=adult`, { headers })).json();
       const j = jobs.find((x) => x.id === id);
       if (j && ['done', 'error', 'failed', 'cancelled'].includes(j.status)) return { status: 200, job: j };
       await new Promise((res) => setTimeout(res, 100));
@@ -720,4 +720,99 @@ test('review: a General-source suggestion is shown, and confirming it is recorde
   const { sources } = await json('/api/hub/sources');
   assert.deepEqual(sources.filter((x) => x.known).map((x) => `${x.id}:${x.specClass}:${x.class}`),
     ['tiktok:general:general', 'facebook:general:general', 'instagram:general:general', 'youtube:general:general', 'redgifs:review:adult', 'fikfap:review:review']);
+});
+
+// H97: the job feeds follow the H4 audience gate.
+function openStream(s, query = '') {
+  const ctrl = new AbortController();
+  let text = '';
+  const events = [];
+  const ready = fetch(`${s.base}/api/jobs/stream${query}`, { headers: s.headers, signal: ctrl.signal }).then(async (r) => {
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read().catch(() => ({ done: true }));
+      if (done) return;
+      text += dec.decode(value, { stream: true });
+      let i;
+      while ((i = text.indexOf('\n\n')) !== -1) {
+        const block = text.slice(0, i);
+        text = text.slice(i + 2);
+        const line = block.split('\n').find((l) => l.startsWith('data: '));
+        if (line) events.push(JSON.parse(line.slice(6)));
+      }
+    }
+  });
+  ready.catch(() => {});
+  const waitFor = async (pred, what) => {
+    for (let i = 0; i < 100; i++) {
+      const hit = events.find(pred);
+      if (hit) return hit;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`no stream event: ${what}\n${JSON.stringify(events).slice(0, 2000)}`);
+  };
+  return { events, waitFor, close: () => ctrl.abort() };
+}
+
+test('the job snapshot names a job only when its item is general, unless the 18+ view asks', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  const gen = await s.saveJob(s.fakeUrl('video', 'tiktok', 'Jane Doe', 'h97-g'), 'main');
+  assert.equal(gen.job.status, 'done', JSON.stringify(gen.job));
+  const unk = await s.saveJob(s.fakeUrl('video', 'tiktok', 'stranger', 'h97-u'), 'main');
+  assert.equal(unk.job.status, 'error');
+  const adult = await s.saveJob(s.fakeUrl('video', 'tiktok', 'Ada', 'h97-a'), '18plus');
+  assert.equal(adult.job.status, 'done');
+
+  const plain = await (await fetch(`${s.base}/api/jobs`, { headers: s.headers })).json();
+  const by = (list, id) => list.find((j) => j.id === id);
+  assert.equal(by(plain.jobs, gen.job.id).creator, 'Jane Doe');
+  assert.equal(by(plain.jobs, gen.job.id).audienceHidden, undefined);
+  for (const id of [unk.job.id, adult.job.id]) {
+    const j = by(plain.jobs, id);
+    assert.equal(j.audienceHidden, true);
+    for (const k of ['creator', 'title', 'thumbnail', 'filename', 'sourceUrl', 'url']) assert.equal(j[k] ?? null, null, k);
+  }
+  // Status and progress stay, so the queue still counts them.
+  assert.equal(by(plain.jobs, adult.job.id).status, 'done');
+  assert.equal(by(plain.jobs, adult.job.id).percent, 100);
+  const text = JSON.stringify(plain);
+  assert.equal(/stranger|Ada|h97-u|h97-a/.test(text), false, text);
+  // The unclassified refusal keeps the hub's "classify and retry" shape.
+  assert.match(by(plain.jobs, unk.job.id).error, / is a general app and the audience of .* is not classified/);
+
+  const full = await (await fetch(`${s.base}/api/jobs?audience=adult`, { headers: s.headers })).json();
+  assert.equal(by(full.jobs, unk.job.id).creator, 'stranger');
+  assert.equal(by(full.jobs, adult.job.id).creator, 'Ada');
+});
+
+test('the job stream reduces live updates, and re-sends a job reclassified 18+', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  const gen = await s.saveJob(s.fakeUrl('video', 'tiktok', 'Jane Doe', 'h97-s-g'), 'main');
+  assert.equal(gen.job.status, 'done', JSON.stringify(gen.job));
+  const general = openStream(s);
+  const adultView = openStream(s, '?audience=adult');
+  t.after(() => { general.close(); adultView.close(); });
+  // The snapshot: the general job in full.
+  await general.waitFor((e) => e.type === 'job' && e.job.id === gen.job.id && e.job.creator === 'Jane Doe', 'snapshot');
+
+  // A live 18+ download: every event on the general stream is reduced.
+  const live = await s.saveJob(s.fakeUrl('video', 'tiktok', 'Ada', 'h97-s-a'), '18plus');
+  await general.waitFor((e) => e.type === 'job' && e.job.id === live.job.id && e.job.status === 'done', 'live done');
+  const liveEvents = general.events.filter((e) => e.type === 'job' && e.job.id === live.job.id);
+  assert.ok(liveEvents.length >= 2);
+  for (const e of liveEvents) assert.equal(/Ada|h97-s-a/.test(JSON.stringify(e)), false, JSON.stringify(e));
+  await adultView.waitFor((e) => e.type === 'job' && e.job.id === live.job.id && e.job.creator === 'Ada', 'adult view live');
+
+  // The general item is classified 18+ by hand while the stream is open.
+  const row = s.items().rows.find((r) => String(r.key).includes('h97-s-g'));
+  assert.ok(row, JSON.stringify(s.items().rows));
+  const r = await fetch(`${s.base}/api/hub/review/items`, {
+    method: 'POST', headers: { ...s.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ audience: 'adult', ids: [row.id] }),
+  });
+  assert.equal(r.status, 200, await r.text());
+  await general.waitFor((e) => e.type === 'job' && e.job.id === gen.job.id && e.job.audienceHidden === true, 're-sent reduced');
+  await general.waitFor((e) => e.type === 'audience', 'audience event');
+  const snap = await (await fetch(`${s.base}/api/jobs`, { headers: s.headers })).json();
+  assert.equal(snap.jobs.find((j) => j.id === gen.job.id).creator, null);
 });

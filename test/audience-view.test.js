@@ -94,6 +94,17 @@ async function boot(t, { history = ENTRIES, registry = REGISTRY } = {}) {
 }
 
 const ids = (items) => items.map((it) => it.id).sort();
+// A conditional GET as a browser sends it (fetch() would add Cache-Control).
+function rawGet(url, headers) {
+  return new Promise((resolve, reject) => {
+    require('http').get(url, { headers }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => (body += d));
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    }).on('error', reject);
+  });
+}
 
 test('Media lists only general entries unless the 18+ view asks', async (t) => {
   const s = await boot(t);
@@ -168,4 +179,38 @@ test('a file name is general only when every registry row naming it is', async (
   const s = await boot(t, { registry });
   const sum = await s.json('/api/hub/summary');
   assert.equal(sum.body.files, 0);
+});
+
+test('media files: general revalidates, 18+ is never stored, and a reclassified entry stops at once (H98)', async (t) => {
+  const s = await boot(t);
+  const g = await s.get(`/api/hub/media/${GEN.id}/file?v=original&gen=2`);
+  assert.equal(g.status, 200);
+  assert.equal(g.headers.get('cache-control'), 'private, no-cache');
+  const etag = g.headers.get('etag');
+  assert.ok(etag, 'a general file carries an ETag');
+  await g.arrayBuffer();
+  // A warm copy revalidates cheaply.
+  const again = await rawGet(`${s.base}/api/hub/media/${GEN.id}/file?v=original&gen=2`, { Cookie: s.cookie, 'If-None-Match': etag });
+  assert.equal(again.status, 304);
+  const a = await s.get(`/api/hub/media/${ADULT.id}/file?v=original&gen=2&audience=adult`);
+  assert.equal(a.status, 200);
+  assert.equal(a.headers.get('cache-control'), 'private, no-store');
+  await a.arrayBuffer();
+
+  // The general entry's item is classified 18+ by hand: the same URL, with
+  // the browser's validator, gets no bytes and no 304.
+  const Database = require('better-sqlite3');
+  const db = new Database(path.join(s.data, 'items.db'), { readonly: true });
+  const row = db.prepare('SELECT id FROM items WHERE filename = ? OR key LIKE ?').get(GEN.filename, '%/1001');
+  db.close();
+  assert.ok(row, 'the registry import made an item for the general entry');
+  const r = await fetch(`${s.base}/api/hub/review/items`, {
+    method: 'POST',
+    headers: { Cookie: s.cookie, Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audience: 'adult', ids: [row.id] }),
+  });
+  assert.equal(r.status, 200, await r.text());
+  const after = await rawGet(`${s.base}/api/hub/media/${GEN.id}/file?v=original&gen=2`, { Cookie: s.cookie, 'If-None-Match': etag });
+  assert.equal(after.status, 404);
+  assert.equal(after.body.includes('bytes of'), false);
 });

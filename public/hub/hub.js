@@ -174,12 +174,21 @@
   // --- Live job stream -----------------------------------------------------
   let stream = null;
   let renderQueued = false;
+  // Pages that draw history tiles or job rows; module pages are left alone.
+  const AUDIENCE_PAGES = ['', 'queue', 'media', 'profiles'];
   function connectStream() {
     if (stream) return;
     stream = new EventSource('/api/jobs/stream');
     stream.onmessage = (ev) => {
       let d;
       try { d = JSON.parse(ev.data); } catch { return; }
+      // H99: a classification changed. What the hub shows is loaded again and
+      // redrawn, so a tile or row drawn under the old audience is replaced,
+      // its old picture address with it.
+      if (d.type === 'audience') {
+        load(['summary', 'history', 'media', 'mediaAdult']).then(() => { if (AUDIENCE_PAGES.includes(route().id)) render(false); });
+        return;
+      }
       if (d.type !== 'job' || !d.job) return;
       const prev = state.jobs.get(d.job.id);
       state.jobs.set(d.job.id, d.job);
@@ -454,7 +463,7 @@
     return h('div', { class: 'job' },
       src ? h('img', { class: 'thumb', src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: (e) => e.currentTarget.replaceWith(h('div', { class: 'thumb' })) }) : h('div', { class: 'thumb' }),
       h('div', { style: 'min-width:0' },
-        h('div', { class: 't' }, [j.creator, j.title].filter(Boolean).join(' - ') || 'Resolving link ...'),
+        h('div', { class: 't' }, j.audienceHidden ? '18+ or unclassified item' : [j.creator, j.title].filter(Boolean).join(' - ') || 'Resolving link ...'),
         h('div', { class: 's' }, status),
         ACTIVE.has(j.status) && pct !== null ? h('div', { class: 'bar' }, h('i', { style: `width:${pct}%` })) : null),
       acts);
@@ -1471,7 +1480,8 @@
     const sec = Math.round(s % 60);
     return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   };
-  const fileUrl = (id, v, download) => adultParam(`/api/hub/media/${encodeURIComponent(id)}/file?v=${v}${download ? '&download=1' : ''}`);
+  // gen=2: the cache generation of H98 (general files revalidate, 18+ files are never stored).
+  const fileUrl = (id, v, download) => adultParam(`/api/hub/media/${encodeURIComponent(id)}/file?v=${v}&gen=2${download ? '&download=1' : ''}`);
 
   function viewerNeighbours() {
     const r = route();

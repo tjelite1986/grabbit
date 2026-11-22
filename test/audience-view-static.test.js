@@ -42,3 +42,15 @@ test('the 18+ view is the Media page with the 18+ or Unclassified filter', () =>
   // The classic page never asks for the 18+ view.
   assert.equal(fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').includes('audience=adult'), false);
 });
+
+test('hub media file URLs carry the H98 cache generation', () => {
+  const text = fs.readFileSync(path.join(PUBLIC, 'hub', 'hub.js'), 'utf8');
+  assert.match(text, /const fileUrl = \(id, v, download\) => adultParam\(`\/api\/hub\/media\/\$\{encodeURIComponent\(id\)\}\/file\?v=\$\{v\}&gen=2/);
+});
+
+test('a reduced job is drawn as hidden, not as a link still resolving (H97)', () => {
+  const hub = fs.readFileSync(path.join(PUBLIC, 'hub', 'hub.js'), 'utf8');
+  assert.match(hub, /j\.audienceHidden \? '18\+ or unclassified item'/);
+  const classic = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
+  assert.match(classic, /j\.audienceHidden \? '18\+ or unclassified item'/);
+});

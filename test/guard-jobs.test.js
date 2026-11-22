@@ -25,7 +25,7 @@ const until = async (fn, what) => {
   }
   throw new Error(`timed out waiting for ${what}`);
 };
-const jobById = async (s, id) => (await s.call('/api/jobs')).body.jobs.find((j) => j.id === id);
+const jobById = async (s, id) => (await s.call('/api/jobs?audience=adult')).body.jobs.find((j) => j.id === id);
 const seedProfiles = (list) => (dataDir) => {
   const profiles = require('../profiles');
   let store = profiles.emptyStore();

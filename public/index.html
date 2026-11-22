@@ -3224,7 +3224,7 @@
         // Same narrowing as the history: a mode only shows its own jobs.
         const wantDest = mode === 'elite' ? 'elite' : mode === 'music' ? 'navidrome' : mode === 'audiobooks' ? 'audiobooks' : null;
         const jobs = [...jobMap.values()].filter((j) => !wantDest || j.dest === wantDest).map((j) => ({
-          id: j.id, title: j.title || j.filename || 'download', thumbnail: j.thumbnail,
+          id: j.id, title: j.audienceHidden ? '18+ or unclassified item' : j.title || j.filename || 'download', thumbnail: j.thumbnail,
           status: j.status, percent: j.percent, phase: j.phase, speed: j.speed, eta: j.eta,
           message: j.message, error: j.error, duration: j.duration, at: j.at, _t: j.createdAt || 0,
           canCancel: j.status === 'scheduled' || j.status === 'queued',

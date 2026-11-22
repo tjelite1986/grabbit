@@ -267,7 +267,7 @@ async function boot(t, opts = {}) {
     if (started.status !== 200) return { started };
     const id = started.body.jobId;
     for (let i = 0; i < 150; i++) {
-      const { body } = await call('/api/jobs');
+      const { body } = await call('/api/jobs?audience=adult');
       const j = body.jobs.find((x) => x.id === id);
       if (j && ['done', 'error', 'failed', 'cancelled'].includes(j.status)) return { started, job: j };
       await new Promise((r) => setTimeout(r, 100));
