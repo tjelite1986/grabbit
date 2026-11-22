@@ -771,8 +771,20 @@ function idKey(site, mediaId) {
   return site && mediaId ? `id:${site}:${mediaId}` : null;
 }
 
-function markDownloaded(sourceUrl, filename, site, mediaId, channel) {
+// `job` (optional) is the saved item: its picture's provenance is recorded
+// with the registry row here, on every save path, so it outlives the
+// 200-row history (H47, Codex phase-0 B2). `classChannel` is the channel the
+// audience reads (`server/adults` for an 18+ server save); it defaults to
+// `channel`.
+function markDownloaded(sourceUrl, filename, site, mediaId, channel, job = null, classChannel = undefined) {
   if (!sourceUrl) return;
+  if (job && job.thumbnail) {
+    noteThumb(job.thumbnail, {
+      kind: 'entry',
+      ref: `r:${mediaKey(sourceUrl)}`,
+      in: thumbIn({ ...job, sourceUrl }, classChannel === undefined ? channel || null : classChannel),
+    });
+  }
   const map = readDownloaded();
   const entry = { filename: filename || null, at: Date.now(), channel: channel || null };
   map[mediaKey(sourceUrl)] = entry;
@@ -1672,12 +1684,18 @@ function sendPush(payload) {
   }
 }
 
+// A notification is a general surface (a lock screen): an item not
+// classified general is named the way the reduced job feed names it (Codex
+// phase-0 B5).
 function notifyJobFinished(j) {
-  const name = j.title || j.filename || j.sourceUrl || 'download';
+  if (!pushEnabled || !pushSubs.length) return;
+  const hidden = jobAudience(j) !== 'general';
+  const shown = hidden ? reducedJob(publicJob(j)) : j;
+  const name = hidden ? '18+ or unclassified item' : j.title || j.filename || j.sourceUrl || 'download';
   sendPush(
     j.status === 'done'
       ? { title: 'Download complete', body: name, tag: 'job-' + j.id, url: '/classic/?tab=queue' }
-      : { title: 'Download failed', body: name + (j.error ? ' — ' + j.error : ''), tag: 'job-' + j.id, url: '/classic/?tab=queue' }
+      : { title: 'Download failed', body: name + (shown.error ? ' — ' + shown.error : ''), tag: 'job-' + j.id, url: '/classic/?tab=queue' }
   );
 }
 
@@ -2147,8 +2165,9 @@ app.get('/api/resolve', async (req, res) => {
     const job = await extractors.resolve(url);
     const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
     const isImage = job.mediaType === 'image';
-    // A resolve preview is shown to the view that asked for it (H34).
-    noteThumb(job.thumbnail, { kind: 'preview', aud: wantsAdultView(req) ? 'adult' : 'general' });
+    // A resolve preview is shown to the view that asked for it (H34), unless
+    // the item is classified 18+ (B1); the preview key still shows it here.
+    const thumbToken = notePreviewThumb(req, job, url);
     res.json({
       ok: true,
       extractor: job.extractor,
@@ -2156,6 +2175,7 @@ app.get('/api/resolve', async (req, res) => {
       title: job.title || null,
       tags: job.tags || [],
       thumbnail: job.thumbnail || null,
+      thumbToken,
       duration: durationKnown(job) ? Number(job.duration) : null,
       mediaType: isImage ? 'image' : 'video',
       // A lighter copy of the video the card can play in place as a moving
@@ -2267,6 +2287,14 @@ function thumbKey(url) {
 // The cached file for a URL, or null. The extension is part of the name (it
 // carries the content type), so the few candidates are probed directly rather
 // than listing the directory on every request.
+// A picture fetched from its site URL is cached as `u-<key>`. The prefix keeps
+// it apart from the plain `<key>` files of the cache before the provenance
+// index, so a file the upgrade could not set aside is never served (Codex
+// phase-0 B3).
+const urlCacheName = (key) => `u-${key}`;
+function cachedUrlThumb(key) {
+  return cachedThumb(urlCacheName(key));
+}
 function cachedThumb(key) {
   for (const ext of THUMB_EXTS) {
     const file = path.join(THUMB_DIR, `${key}.${ext}`);
@@ -2305,7 +2333,7 @@ function thumbIn(e, channel) {
   return thumbIndexLib.cleanIn({
     creator: e.creator, sourceCreator: e.sourceCreator, site: e.site, extractor: e.extractor,
     sourceUrl: e.sourceUrl || e.url, channel: channel === undefined ? e.channel : channel, filename: e.filename,
-    itemKey: e.itemKey,
+    itemKey: e.itemKey, audience: e.audience === 'adult' ? 'adult' : undefined,
   });
 }
 // readProfiles() counts the whole registry to sync it, too much for every
@@ -2340,15 +2368,37 @@ const THUMBS = new thumbIndexLib.ThumbIndex({
     return false;
   },
 });
-try {
-  const raw = readJsonState(THUMB_INDEX_FILE, null);
-  if (raw) THUMBS.load(raw);
-} catch (e) {
-  console.warn('thumbs: thumb-index.json could not be read:', e.message);
+// An index file that exists but cannot be read, or that parses to nothing
+// usable, is damage (Codex phase-0 B3): /api/thumb then serves nothing, the
+// file is never written over and the upgrade does not run, until the owner
+// restores it (or moves it aside for a fresh start) and restarts. A missing
+// file is a fresh install.
+let thumbIndexBroken = null;
+{
+  let exists = false;
+  try {
+    fs.statSync(THUMB_INDEX_FILE);
+    exists = true;
+  } catch (e) {
+    if (e.code !== 'ENOENT') thumbIndexBroken = e.message;
+  }
+  if (exists) {
+    try {
+      fs.readFileSync(THUMB_INDEX_FILE);
+      const raw = readJsonState(THUMB_INDEX_FILE, null);
+      if (!raw || !THUMBS.load(raw)) thumbIndexBroken = 'it did not parse to a usable index and no snapshot restored it';
+    } catch (e) {
+      thumbIndexBroken = e.message;
+    }
+  }
+  if (thumbIndexBroken) {
+    console.error(`thumbs: thumb-index.json could not be read (${thumbIndexBroken}). Thumbnails are held back until it is restored ` +
+      'from a snapshot (or moved aside for a fresh start) and Grabbit is restarted.');
+  }
 }
 let thumbIndexTimer = null;
 function saveThumbIndex(now = false) {
-  if (!THUMBS.dirty) return;
+  if (!THUMBS.dirty || thumbIndexBroken) return;
   const write = () => {
     thumbIndexTimer = null;
     try {
@@ -2389,9 +2439,37 @@ function noteHistoryThumb(e) {
 // The audience a key is served to: its strictest provenance, or null when no
 // provenance was ever recorded.
 function thumbPasses(key, adultView) {
+  if (thumbIndexBroken) return { ok: false, aud: null };
   const aud = THUMBS.audienceOf(key);
   if (aud === null) return { ok: false, aud: null };
   return { ok: passesAudience(aud, adultView), aud };
+}
+// Codex phase-0 B1: a resolve on a general view records its picture as a
+// "soft" preview with the item's own classification inputs, so a link to an
+// item classified 18+ never makes its picture general. The view that resolved
+// the link gets a preview key (`thumbToken`, `pt=` on /api/thumb) that opens
+// that one picture for it alone, never stored by the browser. The secret lives
+// as long as the process: a restart ends every preview key.
+const PREVIEW_SECRET = crypto.randomBytes(32);
+function previewToken(key) {
+  return crypto.createHmac('sha256', PREVIEW_SECRET).update(`thumb-preview\0${key}`).digest('hex').slice(0, 32);
+}
+function previewTokenOk(key, token) {
+  const t = String(token || '');
+  if (!/^[0-9a-f]{32}$/.test(t)) return false;
+  const want = Buffer.from(previewToken(key));
+  return crypto.timingSafeEqual(want, Buffer.from(t)) && THUMBS.provsOf(key).some((p) => p.kind === 'preview');
+}
+// Records a resolve result's picture for the view that asked, and returns the
+// preview key the response carries (null without a picture).
+function notePreviewThumb(req, item, url) {
+  const key = noteThumb(item.thumbnail, {
+    kind: 'preview',
+    aud: wantsAdultView(req) ? 'adult' : 'general',
+    in: thumbIn({ ...item, sourceUrl: item.sourceUrl || url }, null),
+    soft: true,
+  });
+  return key && !key.startsWith('f-') ? previewToken(key) : null;
 }
 
 // Files in THUMB_DIR: `<key>.<ext>` is a picture fetched from its site URL;
@@ -2417,11 +2495,14 @@ function writeThumbFile(name, buf, ext) {
     throw e;
   }
 }
-const THUMB_FILE_RE = /^(?:keep-([0-9a-f]{16})-)?([0-9a-f]{40}|f-[0-9a-f]{40})\.([a-z0-9]+)$/;
+// u-<key>, keep-<tag>-<key> or f-<id>; a bare <key> is from before the index.
+const THUMB_FILE_RE = /^(?:u-([0-9a-f]{40})|keep-([0-9a-f]{16})-([0-9a-f]{40})|(f-[0-9a-f]{40}))\.([a-z0-9]+)$/;
 function keptFileFor(key, ref) {
   return cachedThumb(`keep-${thumbIndexLib.refTag(ref)}-${key}`);
 }
 function pruneThumbs() {
+  // An index that could not be read knows no key: pruning would delete every picture.
+  if (thumbIndexBroken) return;
   thumbRefCtx = { history: new Set(readHistory().map((e) => e.id)), registry: readDownloaded() };
   try {
     THUMBS.prune();
@@ -2437,7 +2518,8 @@ function pruneThumbs() {
       if (!d.isFile() || d.name.endsWith('.part')) continue;
       const m = THUMB_FILE_RE.exec(d.name);
       if (!m) continue; // left for the owner; never served
-      const [, tag, key] = m;
+      const tag = m[2] || null;
+      const key = m[1] || m[3] || m[4];
       let drop = !THUMBS.has(key);
       if (!drop && tag) drop = !THUMBS.refsOf(key).some((ref) => thumbIndexLib.refTag(ref) === tag);
       if (drop) {
@@ -2530,11 +2612,11 @@ const thumbsWarming = new Set();
 function warmThumb(url) {
   if (!url || !/^https?:\/\//i.test(String(url)) || !validUrl(url)) return;
   const key = thumbKey(url);
-  if (!THUMBS.has(key) || thumbsWarming.has(key) || cachedThumb(key)) return;
+  if (!THUMBS.has(key) || thumbsWarming.has(key) || cachedUrlThumb(key)) return;
   thumbsWarming.add(key);
   fetchThumb(url)
     .then(({ buf, ext }) => {
-      writeThumbFile(key, buf, ext);
+      writeThumbFile(urlCacheName(key), buf, ext);
     })
     .catch(() => {
       /* the picture is gone or refused: the hub shows a placeholder */
@@ -2588,10 +2670,14 @@ app.get('/api/thumb', async (req, res) => {
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
   const key = thumbKey(url);
-  const gate = thumbPasses(key, adultView);
+  let gate = thumbPasses(key, adultView);
+  // The view that resolved the link may see its own preview (B1); anything
+  // but a general key then goes out as `no-store`.
+  const byPreview = !gate.ok && gate.aud !== null && req.query.pt !== undefined && previewTokenOk(key, req.query.pt);
+  if (byPreview) gate = { ok: true, aud: gate.aud };
   if (!gate.ok) return none();
   const refs = THUMBS.refsOf(key);
-  const hit = cachedThumb(key) || refs.map((ref) => keptFileFor(key, ref)).find(Boolean);
+  const hit = cachedUrlThumb(key) || refs.map((ref) => keptFileFor(key, ref)).find(Boolean);
   if (hit) return send(hit.file, hit.ext, gate.aud);
   const missAt = thumbMisses.get(key);
   if (missAt && Date.now() - missAt < THUMB_MISS_MS) return none('No picture (tried recently)');
@@ -2622,9 +2708,10 @@ app.get('/api/thumb', async (req, res) => {
     });
   }
   // The index may have changed while the picture was fetched.
-  const again = thumbPasses(key, adultView);
+  let again = thumbPasses(key, adultView);
+  if (!again.ok && byPreview && again.aud !== null) again = { ok: true, aud: again.aud };
   if (!again.ok) return none();
-  const name = madeFor ? `keep-${thumbIndexLib.refTag(madeFor)}-${key}` : key;
+  const name = madeFor ? `keep-${thumbIndexLib.refTag(madeFor)}-${key}` : urlCacheName(key);
   try {
     const saved = writeThumbFile(name, got.buf, got.ext);
     if (++thumbStores % 200 === 0) pruneThumbs();
@@ -2708,6 +2795,7 @@ function setHistoryThumb(id, from, to) {
 // whose file is gone keeps the placeholder.
 const LEGACY_LOCAL_THUMB_RE = /^\/api\/thumb\?id=(local-[0-9a-f]{40})$/;
 async function upgradeThumbs() {
+  if (thumbIndexBroken) return;
   const history = readHistory();
   let quarantined = 0;
   let mixed = 0;
@@ -2805,7 +2893,10 @@ app.get('/api/media', async (req, res) => {
       const v = upstream.headers.get(h);
       if (v) res.setHeader(h, v);
     }
-    res.setHeader('Cache-Control', 'private, max-age=3600');
+    // Never stored by the browser: this route does not know the clip's
+    // audience, and a general view must not find an 18+ preview in its cache
+    // (Codex phase-0 B1). The browser's in-page media buffer still serves seeks.
+    res.setHeader('Cache-Control', 'private, no-store');
     await pipeline(Readable.fromWeb(upstream.body), res);
   } catch (e) {
     // Stopping a preview aborts the response mid-stream, which lands here as a
@@ -5007,9 +5098,17 @@ function entryClassification(entry, store, memo = null, items = ITEM_STORE) {
     prior: row ? row.audience : null,
     priorByHand: Boolean(row && row.classified_by_hand),
   };
-  const mk = memo ? JSON.stringify(input) : null;
+  // A row whose creator was renamed is classified by both names, the way
+  // the delivery gate does (Codex phase-0 B4).
+  const renamed = entry.sourceCreator != null && entry.sourceCreator !== entry.creator ? String(entry.sourceCreator) : null;
+  if (entry.audience === 'adult') input.requested = 'adult';
+  const mk = memo ? JSON.stringify([input, renamed]) : null;
   if (memo && memo.has(mk)) return memo.get(mk);
-  const c = audience.classify(input, store, { keyOf: creatorKeyCached, index: profileIndexOf(store) });
+  let c = audience.classify(input, store, { keyOf: creatorKeyCached, index: profileIndexOf(store) });
+  if (renamed) {
+    const other = audience.classify({ ...input, creatorKey: renamed, handle: renamed }, store, { keyOf: creatorKeyCached, index: profileIndexOf(store) });
+    c = audience.stricter(c, other);
+  }
   if (memo) memo.set(mk, c);
   return c;
 }
@@ -7244,7 +7343,7 @@ app.get('/api/download', async (req, res) => {
       commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar);
       // Register the save so playlist views and "download new" recognise the
       // clip as fetched — the jobs/batch paths do this via finishJob.
-      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
+      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel, job);
       noteSourceMeta(job, outName, channel);
     }
 
@@ -7334,8 +7433,10 @@ app.get('/api/profile', async (req, res) => {
         },
       };
     });
-    const previewAud = wantsAdultView(req) ? 'adult' : 'general';
-    for (const it of items) noteThumb(it.thumbnail, { kind: 'preview', aud: previewAud });
+    for (const it of items) {
+      const token = it.thumbnail ? notePreviewThumb(req, it, it.sourceUrl) : null;
+      if (token) it.thumbToken = token;
+    }
     res.json({
       ok: true,
       isProfile: true,
@@ -7470,7 +7571,8 @@ app.get('/api/download-all', async (req, res) => {
       // The channel only means something for a shorts save (see finishJob) — a
       // server/photos save recorded under a channel makes a later shorts
       // download of the same clip look like a repeat and get skipped.
-      markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, dest === 'elite' ? channel : null);
+      markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, dest === 'elite' ? channel : null, job,
+        dest === 'elite' ? channel : dest === 'server' && /^adults(\/|$)/.test(String(folder || '')) ? 'server/adults' : null);
       noteSourceMeta(job, null, dest === 'elite' ? channel : null);
       send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'saved' });
     } catch (e) {
@@ -7517,7 +7619,8 @@ const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file 
 function publicJob(j) {
   // `watch` is watcher bookkeeping (playlist id + registry key), like params:
   // internal, and nothing the UI renders.
-  const { finalPath, deliverTemp, params, watch, fromSchedule, savedPaths, ...pub } = j;
+  // `deliverKey` goes only to the request that started the job (B5).
+  const { finalPath, deliverTemp, params, watch, fromSchedule, savedPaths, deliverKey, ...pub } = j;
   return pub;
 }
 // H97: the job feeds follow the H4 audience gate. On a general view a job
@@ -7569,8 +7672,9 @@ function reducedJob(pub) {
       ? 'The app is a general app and the audience of this item is not classified.'
       : 'The download failed.';
   }
-  // `deliverable` stays: a save to the device the owner asked for still
-  // arrives, and the flag names nothing.
+  // `deliverable` stays, and names nothing: the file itself is handed only to
+  // the 18+ view or to the tab that started the job, with its delivery key
+  // (Codex phase-0 B5).
   out.audienceHidden = true;
   return out;
 }
@@ -7649,10 +7753,9 @@ function finishJob(job, patch) {
   // The channel only means something for a shorts save; recording it for a
   // server/Navidrome save would make a later shorts download look like a repeat.
   if (job.saved && job.sourceUrl) {
-    markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null);
     // The registry row keeps the picture's provenance after the history row
     // has rolled over (H47).
-    if (job.thumbnail) noteThumb(job.thumbnail, { kind: 'entry', ref: `r:${mediaKey(job.sourceUrl)}`, in: thumbIn(job, jobClassChannel(job)) });
+    markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null, job, jobClassChannel(job));
     noteSourceMeta(job, job.filename, job.dest === 'elite' ? job.channel : null, SOURCE_META.get(job) || null);
   }
   if (job.watch) clearWatchFailure(job.watch.playlistId, job.watch.key);
@@ -7687,6 +7790,7 @@ function pruneJobs() {
 function recordJobHistory(meta, params, channelLabel, filename, imported) {
   recordHistory({
     creator: meta.creator || null,
+    ...(meta.sourceCreator !== undefined && meta.sourceCreator !== meta.creator ? { sourceCreator: meta.sourceCreator } : {}),
     title: meta.title || null,
     channel: channelLabel,
     filename,
@@ -7743,8 +7847,16 @@ function failJob(job, message, err) {
   }
   recordHistory({
     creator: job.creator || null,
+    ...(job.sourceCreator !== undefined && job.sourceCreator !== job.creator ? { sourceCreator: job.sourceCreator } : {}),
     title: job.title || null,
-    channel: job.dest === 'navidrome' ? `navidrome/${job.lib === 'kids' ? 'kids' : 'music'}` : job.dest || null,
+    // The channel a success would have recorded where it decides the
+    // audience (Codex phase-0 B4): a failed 18+ save stays 18+ in History.
+    channel: job.dest === 'navidrome'
+      ? `navidrome/${job.lib === 'kids' ? 'kids' : 'music'}`
+      : job.dest === 'elite' ? job.channel || 'main'
+      : jobClassChannel(job) || job.dest || null,
+    ...(job.site ? { site: job.site } : {}),
+    ...(job.audience === 'adult' ? { audience: 'adult' } : {}),
     filename: null,
     sourceUrl: job.sourceUrl || job.url || null,
     thumbnail: job.thumbnail || null,
@@ -7863,6 +7975,10 @@ async function runJob(job, params) {
   const mediaType = meta.mediaType === 'image' ? 'image' : 'video';
   setJob(job, {
     title: meta.title || null, creator: meta.creator || null, thumbnail: meta.thumbnail || null,
+    // The creator as the site named it, before an override (Codex phase-0 B4):
+    // the first event that names the job is classified by both names, so a
+    // rename never makes an 18+ creator's job general.
+    ...(meta.sourceCreator !== undefined ? { sourceCreator: meta.sourceCreator } : {}),
     mediaType, duration: durationKnown(meta) ? Number(meta.duration) : null,
     sourceUrl: meta.sourceUrl || params.url,
     // Site-native id, so finishJob can register the clip under a key that
@@ -8570,11 +8686,17 @@ function startJobFromQuery(query, who, via) {
   const at = parseAt(req.query.at);
   const job = newJob({ dest: params.dest, channel: params.channel, lib: params.navLib, device: params.device, clientId: who.id, target });
   job.params = params;
+  // A device copy is handed out with this key, which only the starting
+  // request learns (B5): another general tab sees the job reduced and cannot
+  // fetch its file.
+  if (params.device) job.deliverKey = crypto.randomBytes(16).toString('hex');
   if (at) {
     setJob(job, { status: 'scheduled', at });
     addScheduled({ id: job.id, at, params, dest: params.dest, channel: params.channel, device: params.device, clientId: who.id, target });
   }
-  return { status: 200, body: { ok: true, jobId: job.id, scheduled: !!at }, job, run: at ? null : () => scheduleJob(job, params) };
+  const body = { ok: true, jobId: job.id, scheduled: !!at };
+  if (job.deliverKey) body.deliverKey = job.deliverKey;
+  return { status: 200, body, job, run: at ? null : () => scheduleJob(job, params) };
 }
 
 // ---------------------------------------------------------------------------
@@ -8787,7 +8909,8 @@ async function attemptRetry(entry) {
     imported: entry.dest === 'elite',
     device: false,
   });
-  markDownloaded(job.sourceUrl || entry.url, null, job.site, job.mediaId, entry.dest === 'elite' ? entry.channel : null);
+  markDownloaded(job.sourceUrl || entry.url, null, job.site, job.mediaId, entry.dest === 'elite' ? entry.channel : null, job,
+    entry.dest === 'elite' ? entry.channel : entry.dest === 'server' && /^adults(\/|$)/.test(String(entry.folder || '')) ? 'server/adults' : null);
   noteSourceMeta(job, null, entry.dest === 'elite' ? entry.channel : null);
   return { skipped: false };
 }
@@ -9289,16 +9412,40 @@ app.get('/api/jobs/stream', (req, res) => {
 
 // GET /api/jobs/:id/file -> stream a finished job's file to the device. The file
 // is already on disk so bytes flow immediately (no gateway timeout).
-app.get('/api/jobs/:id/file', (req, res) => {
+// The file goes to the 18+ view, to the tab holding the job's delivery key,
+// or to anyone when the item is classified general (Codex phase-0 B5). The
+// file is opened before any header is sent, so a file that vanished answers
+// 422, never a 5xx.
+function deliverKeyOk(job, key) {
+  const k = String(key || '');
+  if (!job.deliverKey || !/^[0-9a-f]{32}$/.test(k)) return false;
+  return crypto.timingSafeEqual(Buffer.from(job.deliverKey), Buffer.from(k));
+}
+app.get('/api/jobs/:id/file', async (req, res) => {
   const job = jobsMap.get(req.params.id);
-  if (!job || job.status !== 'done' || !job.deliverable || !job.finalPath || !fs.existsSync(job.finalPath)) {
+  if (!job || job.status !== 'done' || !job.deliverable || !job.finalPath) {
     return res.status(404).send('Not available');
+  }
+  if (!wantsAdultView(req) && !deliverKeyOk(job, req.query.key) && jobAudience(job) !== 'general') {
+    return res.status(404).send('Not available');
+  }
+  let fh;
+  let size;
+  try {
+    fh = await fs.promises.open(job.finalPath, 'r');
+    const st = await fh.stat();
+    if (!st.isFile()) throw new Error('not a file');
+    size = st.size;
+  } catch (e) {
+    if (fh) await fh.close().catch(() => {});
+    return res.status(422).json({ ok: false, error: `The file is no longer available (${e.code || e.message}).` });
   }
   const name = job.filename || path.basename(job.finalPath);
   res.setHeader('Content-Disposition', contentDisposition(name));
   res.setHeader('Content-Type', job.mime || 'application/octet-stream');
-  res.setHeader('Content-Length', fs.statSync(job.finalPath).size);
-  pipeline(fs.createReadStream(job.finalPath), res)
+  res.setHeader('Content-Length', size);
+  res.setHeader('Cache-Control', 'private, no-store');
+  pipeline(fh.createReadStream(), res)
     .then(() => {
       if (job.deliverTemp) {
         fs.rm(job.finalPath, { force: true }, () => {});
@@ -9306,7 +9453,7 @@ app.get('/api/jobs/:id/file', (req, res) => {
       }
     })
     .catch(() => {
-      if (!res.headersSent) res.status(500).end();
+      if (!res.headersSent) res.status(422).end();
       else res.destroy();
     });
 });
@@ -9667,7 +9814,7 @@ async function downloadAudio(res, job, url, afmt, dest) {
         imported: false,
         device: false,
       });
-      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
+      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null, job);
       noteSourceMeta(job, outName, null);
       return res.json({ ok: true, saved: true, dest: 'server', dir: 'mp3', filename: outName });
     }
@@ -9738,7 +9885,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     };
     // Register a fresh library save (channel null: a server save must not make
     // a later shorts download look like a repeat) — matches finishJob.
-    if (!already) markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
+    if (!already) markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null, job, `server/${shelf}`);
     if (!already) noteSourceMeta(job, outName, null);
     if (!device) {
       recordHistory({ ...histEntry, device: false });
@@ -10070,12 +10217,12 @@ async function posterFor(job, videoPath) {
   if (job && job.thumbnail && /^https?:\/\//i.test(job.thumbnail)) {
     try {
       const key = thumbKey(job.thumbnail);
-      const hit = cachedThumb(key);
+      const hit = cachedUrlThumb(key);
       if (hit) return { buf: fs.readFileSync(hit.file), ext: hit.ext };
       const got = await fetchThumb(job.thumbnail);
       // Keep it for the UI too — a card is about to ask for the same picture.
       try {
-        fs.writeFileSync(path.join(THUMB_DIR, `${key}.${got.ext}`), got.buf);
+        writeThumbFile(urlCacheName(key), got.buf, got.ext);
       } catch {
         /* an unwritable cache costs nothing here */
       }

@@ -99,3 +99,47 @@ test('a key keeps its entry provenances when previews pile up', () => {
   assert.equal(ix.audienceOf(KEY), 'adult');
   assert.deepEqual(ix.refsOf(KEY), ['r:x']);
 });
+
+// Codex phase-0 B2: one 18+ reference followed by many general ones must not
+// push the 18+ verdict out of the row.
+test('an 18+ provenance survives any number of general ones (B2)', () => {
+  const ix = new ti.ThumbIndex({ classify });
+  ix.add(KEY, { kind: 'entry', ref: 'h:adult', in: { creator: 'Ada' } });
+  for (let i = 0; i < 60; i++) ix.add(KEY, { kind: 'entry', ref: `h:g${i}`, in: { creator: 'Jane' } });
+  assert.equal(ix.audienceOf(KEY), 'adult');
+  const jx = new ti.ThumbIndex({ classify });
+  jx.add(KEY, { kind: 'job', ref: 'j:adult', in: { creator: 'Ada' } });
+  for (let i = 0; i < 60; i++) jx.add(KEY, { kind: 'job', ref: `j:g${i}`, in: { creator: 'Jane' } });
+  assert.equal(jx.audienceOf(KEY), 'adult', 'an 18+ job picture is never the one dropped');
+  assert.ok(jx.provsOf(KEY).length <= 25, 'general job pictures still give way');
+  const px = new ti.ThumbIndex({ classify });
+  px.add(KEY, { kind: 'preview', aud: 'adult' });
+  for (let i = 0; i < 60; i++) px.add(KEY, { kind: 'preview', aud: 'general', in: { creator: 'Jane', sourceUrl: `u${i}` }, soft: true });
+  assert.equal(px.audienceOf(KEY), 'adult');
+});
+
+// Codex phase-0 B1: a preview made on a general view still loads for an
+// unclassified item, but an item classified 18+ makes the key 18+, also
+// when it turns 18+ after the resolve.
+test('a soft preview keeps the view audience unless the item is 18+ (B1)', () => {
+  const live = { Jane: 'general', Ada: 'adult' };
+  const ix = new ti.ThumbIndex({ classify: (i) => live[i.creator] || 'unknown' });
+  const k1 = ti.keyOfUrl('https://cdn.example.com/1.jpg');
+  const k2 = ti.keyOfUrl('https://cdn.example.com/2.jpg');
+  const k3 = ti.keyOfUrl('https://cdn.example.com/3.jpg');
+  ix.add(k1, { kind: 'preview', aud: 'general', in: { creator: 'Stranger' }, soft: true });
+  ix.add(k2, { kind: 'preview', aud: 'general', in: { creator: 'Ada' }, soft: true });
+  ix.add(k3, { kind: 'preview', aud: 'general', in: { creator: 'Jane' }, soft: true });
+  assert.equal(ix.audienceOf(k1), 'general');
+  assert.equal(ix.audienceOf(k2), 'adult');
+  assert.equal(ix.audienceOf(k3), 'general');
+  live.Stranger = 'adult';
+  assert.equal(ix.audienceOf(k1), 'adult', 'a later 18+ classification is followed');
+  // soft only means something with both a view audience and inputs.
+  const back = new ti.ThumbIndex({ classify: (i) => live[i.creator] || 'unknown' });
+  back.load(JSON.parse(JSON.stringify(ix.toJSON())));
+  assert.equal(back.audienceOf(k2), 'adult');
+  assert.equal(back.provsOf(k1)[0].soft, true);
+  back.add(k3, { kind: 'entry', ref: 'h:1', in: { creator: 'Nobody' }, soft: true });
+  assert.equal(back.audienceOf(k3), 'unknown', 'an entry is never soft');
+});

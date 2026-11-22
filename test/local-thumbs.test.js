@@ -50,7 +50,7 @@ function pictureServer(t) {
 
 // `general` names creators the owner classified general by hand; `adult`
 // names 18+ ones. Everyone else is unclassified.
-async function boot(t, { history = [], thumbs = {}, files = {}, general = ['someone'], adult = [], index = null } = {}) {
+async function boot(t, { history = [], thumbs = {}, files = {}, general = ['someone'], adult = [], index = null, unreadableIndex = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-local-thumbs-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const data = path.join(root, 'data');
@@ -64,6 +64,8 @@ async function boot(t, { history = [], thumbs = {}, files = {}, general = ['some
   for (const name of adult) store = profiles.create(store, { name, audience: 'adult' }, NOW).store;
   fs.writeFileSync(path.join(data, 'profiles.json'), JSON.stringify(store));
   if (index) fs.writeFileSync(path.join(data, 'thumb-index.json'), JSON.stringify(index));
+  // A directory where the file should be: every read fails (EISDIR).
+  if (unreadableIndex) fs.mkdirSync(path.join(data, 'thumb-index.json'));
   for (const [name, buf] of Object.entries(thumbs)) fs.writeFileSync(path.join(data, 'thumbs', name), buf);
   for (const [name, buf] of Object.entries(files)) {
     // 'folder/name' files a clip in a creator folder under main/, else in _import.
@@ -346,4 +348,47 @@ test('a frame of an 18+ or unclassified entry is refused on a general view (H57,
   const stray = frameOf('h:stray');
   fs.writeFileSync(path.join(s.thumbsDir, `${stray}.jpg`), JPEG());
   assert.equal((await s.byId(stray, '&audience=adult')).status, 404);
+});
+
+// Codex phase-0 B3: a picture file from before the index that the upgrade
+// could not set aside is never served; the URL cache has its own names.
+test('a pre-index cache file left in place is never served (B3)', async (t) => {
+  const pics = await pictureServer(t);
+  const url = pics.url('b3-general.jpg');
+  const s = await boot(t, {
+    history: [entry(81, 'b3.mp4', { thumbnail: url })],
+    // Already migrated: the plain <key>.jpg stands for a file the move missed.
+    index: { version: ti.VERSION, migratedAt: NOW, keys: {} },
+    thumbs: { [`${key(url)}.jpg`]: Buffer.from('OLD BYTES FROM BEFORE THE INDEX') },
+  });
+  let r;
+  for (let i = 0; i < 50; i++) {
+    r = await s.raw(`/api/thumb?url=${encodeURIComponent(url)}&v=2`);
+    if (r.status === 200) break;
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  assert.equal(r.status, 200);
+  assert.equal(r.body.toString(), 'picture /b3-general.jpg', 'fetched again, not the old file');
+  assert.ok(fs.existsSync(path.join(s.thumbsDir, `${key(url)}.jpg`)), 'the old file is left for the owner');
+  assert.ok(fs.existsSync(path.join(s.thumbsDir, `u-${key(url)}.jpg`)));
+});
+
+// Codex phase-0 B3: an index that exists but cannot be read holds every
+// picture back, and is neither rebuilt from history nor written over.
+test('an unreadable index serves nothing and is left alone (B3)', async (t) => {
+  const pics = await pictureServer(t);
+  const url = pics.url('b3-broken.jpg');
+  const s = await boot(t, {
+    history: [entry(82, 'b3b.mp4', { thumbnail: url })],
+    thumbs: { [`u-${key(url)}.jpg`]: Buffer.from('cached') },
+    unreadableIndex: true,
+  });
+  assert.match(s.logs(), /thumb-index\.json could not be read/);
+  await new Promise((res) => setTimeout(res, 1500));
+  const r = await s.thumb(url);
+  assert.equal(r.status, 404);
+  assert.equal(pics.hits.length, 0, 'nothing fetched');
+  assert.ok(fs.statSync(path.join(s.data, 'thumb-index.json')).isDirectory(), 'not written over');
+  assert.ok(fs.existsSync(path.join(s.thumbsDir, `u-${key(url)}.jpg`)), 'no picture pruned');
+  assert.equal(fs.readdirSync(s.thumbsDir).some((n) => n.startsWith('quarantine-')), false, 'no upgrade ran');
 });

@@ -17,6 +17,9 @@
 //         source URL, ...), classified again on every check, so a later
 //         reclassification is followed at once (H42, H94)
 //   aud   a fixed audience, for a preview: the view the resolve was made in
+//   soft  a preview's `in` only tightens: an item classified 18+ makes the
+//         key 18+, an unclassified one keeps the view's audience (so a link
+//         pasted on a general view still shows its picture, H15)
 // The served audience is the strictest provenance: any 18+ or unknown one
 // makes the key 18+ (H42). Insertion order does not matter.
 //
@@ -30,9 +33,12 @@ const KINDS = ['entry', 'local', 'job', 'preview'];
 const AUDS = ['general', 'adult', 'unknown'];
 // Unreferenced keys kept at most (H34); referenced keys are never evicted (H42).
 const MAX_UNREFERENCED = 20000;
-// Provenances per key; previews and jobs give way first.
+// Provenances per key beyond which previews and job pictures that are general
+// right now give way, oldest first. Entry and frame provenances, and any
+// provenance that is 18+ or unknown right now, are never dropped: dropping one
+// could only make the key less strict (H42).
 const MAX_PROVS = 24;
-const IN_FIELDS = ['creator', 'sourceCreator', 'site', 'extractor', 'sourceUrl', 'channel', 'filename', 'itemKey'];
+const IN_FIELDS = ['creator', 'sourceCreator', 'site', 'extractor', 'sourceUrl', 'channel', 'filename', 'itemKey', 'audience'];
 
 const KEY_RE = /^(?:[0-9a-f]{40}|f-[0-9a-f]{40})$/;
 const FRAME_ID_RE = /^f-[0-9a-f]{40}$/;
@@ -100,6 +106,7 @@ class ThumbIndex {
     if (typeof p.ref === 'string' && p.ref) out.ref = p.ref.slice(0, 2100);
     if (p.in) out.in = cleanIn(p.in);
     if (AUDS.includes(p.aud)) out.aud = p.aud;
+    if (p.soft === true && out.in && out.aud) out.soft = true;
     if (!out.in && !out.aud) out.aud = 'unknown';
     return out;
   }
@@ -112,7 +119,10 @@ class ThumbIndex {
     if (!p) return false;
     let row = this.keys.get(key);
     if (!row) this.keys.set(key, (row = { provs: [], at: 0 }));
-    const same = (q) => q.kind === p.kind && (p.ref ? q.ref === p.ref : !q.ref && q.aud === p.aud);
+    // A preview is one per view audience and item: two items sharing a picture
+    // keep two previews, so one cannot overwrite the other's 18+ verdict.
+    const same = (q) =>
+      q.kind === p.kind && (p.ref ? q.ref === p.ref : !q.ref && q.aud === p.aud && JSON.stringify(q.in || null) === JSON.stringify(p.in || null));
     const i = row.provs.findIndex(same);
     if (i >= 0) {
       const old = row.provs[i];
@@ -124,11 +134,15 @@ class ThumbIndex {
     } else {
       row.provs.push(p);
       if (row.provs.length > MAX_PROVS) {
-        // Drop the oldest preview or job first; entry provenances stay.
-        const order = row.provs
-          .map((q, idx) => ({ q, idx }))
-          .sort((a, b) => (a.q.kind === 'preview' || a.q.kind === 'job' ? 0 : 1) - (b.q.kind === 'preview' || b.q.kind === 'job' ? 0 : 1) || a.q.at - b.q.at);
-        row.provs.splice(order[0].idx, 1);
+        // Only a preview or job picture that is general right now may go;
+        // without one the row grows past the cap rather than lose a verdict.
+        let drop = -1;
+        row.provs.forEach((q, idx) => {
+          if (q === p || (q.kind !== 'preview' && q.kind !== 'job')) return;
+          if (this.audienceOfProv(q) !== 'general') return;
+          if (drop < 0 || q.at < row.provs[drop].at) drop = idx;
+        });
+        if (drop >= 0) row.provs.splice(drop, 1);
       }
     }
     row.at = Math.max(row.at, p.at);
@@ -154,7 +168,9 @@ class ThumbIndex {
       } catch {
         c = 'unknown';
       }
-      a = a ? stricter(a, c) : AUDS.includes(c) ? c : 'unknown';
+      if (!AUDS.includes(c)) c = 'unknown';
+      if (p.soft && a) a = c === 'adult' ? 'adult' : a;
+      else a = a ? stricter(a, c) : c;
     }
     return a || 'unknown';
   }

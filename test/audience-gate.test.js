@@ -846,3 +846,136 @@ test('thumbnails: a resolve preview loads, a job picture follows the job\'s audi
   assert.equal(again.thumbnail, adult.job.thumbnail);
   assert.equal((await thumbOf(again.thumbnail)).status, 404);
 });
+
+// Codex phase-0 B1: a link to an item classified 18+, resolved on a general
+// view, does not make its picture general. The view that resolved it sees it
+// through its preview key, never stored; /api/media is never stored either.
+test('a resolve preview of an 18+ item stays 18+, except for its own preview key (B1)', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Ada', audience: 'adult' }] });
+  const thumbOf = (url, q = '') => fetch(`${s.base}/api/thumb?url=${encodeURIComponent(url)}&v=2${q}`, { headers: s.headers });
+  const pv = await (await fetch(`${s.base}/api/resolve?url=${encodeURIComponent(`${s.fakeUrl('video', 'tiktok', 'Ada', 'b1')}?thumb=1`)}`, { headers: s.headers })).json();
+  assert.ok(pv.thumbnail && pv.thumbToken, JSON.stringify(pv));
+  assert.equal((await thumbOf(pv.thumbnail)).status, 404, 'the general view gets no picture of an 18+ item');
+  assert.equal((await thumbOf(pv.thumbnail, '&pt=0123456789abcdef0123456789abcdef')).status, 404, 'a wrong key opens nothing');
+  const own = await thumbOf(pv.thumbnail, `&pt=${pv.thumbToken}`);
+  assert.equal(own.status, 200, 'the resolving view sees its own preview');
+  assert.equal(own.headers.get('cache-control'), 'private, no-store');
+  assert.equal((await thumbOf(pv.thumbnail, '&audience=adult')).status, 200);
+  // An 18+ site makes the item 18+ whoever the creator is.
+  const site = await (await fetch(`${s.base}/api/resolve?url=${encodeURIComponent(`${s.fakeUrl('video', 'redgifs.com', 'nobody', 'b1s')}?thumb=1`)}`, { headers: s.headers })).json();
+  assert.equal((await thumbOf(site.thumbnail)).status, 404);
+  // A key from another preview does not open this one.
+  assert.equal((await thumbOf(site.thumbnail, `&pt=${pv.thumbToken}`)).status, 404);
+  // An unclassified creator's preview still loads on the general view (H15).
+  const unk = await (await fetch(`${s.base}/api/resolve?url=${encodeURIComponent(`${s.fakeUrl('video', 'tiktok', 'stranger', 'b1u')}?thumb=1`)}`, { headers: s.headers })).json();
+  const u = await thumbOf(unk.thumbnail);
+  assert.equal(u.status, 200);
+  assert.equal(u.headers.get('cache-control'), 'private, no-cache');
+  // The preview clip proxy never lets the browser store a clip.
+  const media = await fetch(`${s.base}/api/media?url=${encodeURIComponent(`${new URL(pv.thumbnail).origin}/media/b1/clip.mp4`)}`, { headers: s.headers });
+  assert.equal(media.status, 200);
+  assert.equal(media.headers.get('cache-control'), 'private, no-store');
+  await media.arrayBuffer();
+});
+
+// Codex phase-0 B2: the synchronous save route records the registry row's
+// picture provenance too, not only finishJob.
+test('every save path records the registry provenance of its picture (B2)', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Ada', audience: 'adult' }] });
+  const r = await s.save(`${s.fakeUrl('video', 'tiktok', 'Ada', 'b2')}?thumb=1`, '18plus');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  await new Promise((res) => setTimeout(res, 1500));
+  const index = JSON.parse(fs.readFileSync(path.join(s.dataDir, 'thumb-index.json'), 'utf8'));
+  const provs = Object.values(index.keys).flatMap((k) => k.provs);
+  const reg = provs.find((p) => p.kind === 'entry' && String(p.ref).startsWith('r:'));
+  assert.ok(reg, JSON.stringify(index));
+  assert.equal(reg.in.channel, '18plus');
+});
+
+// Codex phase-0 B4: a renamed creator does not open an 18+ creator's job to
+// the general feed, from its first event on; a failed 18+ save stays 18+ in
+// History.
+test('a creator override never makes an 18+ job general; a failed 18+ save stays 18+ (B4)', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }, { name: 'Ada', audience: 'adult' }] });
+  const general = openStream(s);
+  t.after(() => general.close());
+  await new Promise((res) => setTimeout(res, 200));
+  const renamed = await s.saveJob(s.fakeUrl('video', 'tiktok', 'Ada', 'b4-rename'), 'main', { creator: 'Jane Doe' });
+  assert.equal(renamed.job.status, 'error', 'the gate refuses it for the general app');
+  await general.waitFor((e) => e.type === 'job' && e.job.id === renamed.job.id && e.job.status === 'error', 'renamed end');
+  for (const e of general.events.filter((x) => x.type === 'job' && x.job.id === renamed.job.id)) {
+    assert.equal(/b4-rename|Ada|Jane Doe/.test(JSON.stringify(e)), false, JSON.stringify(e));
+  }
+  const full = await (await fetch(`${s.base}/api/jobs?audience=adult`, { headers: s.headers })).json();
+  assert.equal(full.jobs.find((j) => j.id === renamed.job.id).sourceCreator, 'Ada');
+
+  // An image sent to the 18+ app is refused; its History row keeps the channel.
+  const img = await s.saveJob(s.fakeUrl('image', 'tiktok', 'Jane Doe', 'b4-img'), '18plus');
+  assert.equal(img.job.status, 'error');
+  const plainHistory = JSON.stringify(await (await fetch(`${s.base}/api/history`, { headers: s.headers })).json());
+  assert.equal(plainHistory.includes('b4-img'), false, plainHistory);
+  assert.equal(plainHistory.includes('b4-rename'), false, plainHistory);
+  const adultHistory = JSON.stringify(await (await fetch(`${s.base}/api/history?audience=adult`, { headers: s.headers })).json());
+  assert.ok(adultHistory.includes('b4-img'));
+  assert.ok(adultHistory.includes('b4-rename'));
+  const rows = JSON.parse(fs.readFileSync(path.join(s.dataDir, 'history.json'), 'utf8'));
+  assert.equal(rows.find((r) => String(r.sourceUrl).includes('b4-img')).channel, '18plus');
+});
+
+// Codex phase-0 B5: a device copy of an 18+ job goes to the 18+ view or to
+// the request that started the job, never to another general tab.
+test('a device copy of an 18+ job needs the starting tab\'s key or the 18+ view (B5)', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Ada', audience: 'adult' }, { name: 'Jane Doe', audience: 'general' }] });
+  const start = async (creator, id) => {
+    const q = new URLSearchParams({ url: s.fakeUrl('video', 'tiktok', creator, id), dest: 'elite', channel: creator === 'Ada' ? '18plus' : 'main', device: '1' });
+    const started = await (await fetch(`${s.base}/api/jobs/start?${q}`, { headers: s.headers })).json();
+    for (let i = 0; i < 100; i++) {
+      const { jobs } = await (await fetch(`${s.base}/api/jobs?audience=adult`, { headers: s.headers })).json();
+      const j = jobs.find((x) => x.id === started.jobId);
+      if (j && ['done', 'error'].includes(j.status)) return { started, job: j };
+      await new Promise((res) => setTimeout(res, 100));
+    }
+    throw new Error('job did not finish');
+  };
+  const a = await start('Ada', 'b5-a');
+  assert.equal(a.job.status, 'done', JSON.stringify(a.job));
+  assert.equal(a.job.deliverable, true);
+  assert.match(a.started.deliverKey, /^[0-9a-f]{32}$/);
+  assert.equal(a.job.deliverKey, undefined, 'the key is never in the job feed');
+  const file = (id, q = '') => fetch(`${s.base}/api/jobs/${id}/file${q}`, { headers: s.headers });
+  const other = await file(a.job.id);
+  assert.equal(other.status, 404, 'another general tab gets nothing');
+  await other.arrayBuffer();
+  const wrong = await file(a.job.id, '?key=0123456789abcdef0123456789abcdef');
+  assert.equal(wrong.status, 404);
+  await wrong.arrayBuffer();
+  const own = await file(a.job.id, `?key=${a.started.deliverKey}`);
+  assert.equal(own.status, 200);
+  assert.equal(own.headers.get('cache-control'), 'private, no-store');
+  assert.ok((await own.arrayBuffer()).byteLength > 0);
+
+  const g = await start('Jane Doe', 'b5-g');
+  assert.equal(g.job.status, 'done', JSON.stringify(g.job));
+  const gf = await file(g.job.id);
+  assert.equal(gf.status, 200, 'a general job\'s copy still reaches any tab');
+  await gf.arrayBuffer();
+  // The copy vanished before the transfer: 422, never a 5xx.
+  const g2 = await start('Jane Doe', 'b5-gone');
+  assert.equal(g2.job.status, 'done');
+  const roots = [s.apps.tik];
+  let removed = 0;
+  for (const root of roots) {
+    let names = [];
+    try { names = fs.readdirSync(root, { recursive: true }); } catch { continue; }
+    for (const f of names) {
+      if (String(f).includes('b5-gone') && fs.statSync(path.join(root, f)).isFile()) {
+        fs.rmSync(path.join(root, f));
+        removed++;
+      }
+    }
+  }
+  assert.ok(removed > 0, 'found the device copy');
+  const gone = await file(g2.job.id);
+  assert.equal(gone.status, 422);
+  assert.match((await gone.json()).error, /no longer available/);
+});

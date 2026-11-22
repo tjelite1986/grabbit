@@ -1374,9 +1374,22 @@
       // nothing. Non-http values (there are none today) pass through untouched.
       // v=2: the thumbnail cache generation of the provenance index, so nothing
       // the browser cached under the old 7-day rule is asked for again.
+      // A link resolved here comes with a preview key for its own picture
+      // (`thumbToken`): the picture of an item classified 18+ is held back from
+      // every general view, but the person who pasted the link still sees it.
+      const thumbTokens = new Map();
+      function rememberThumbTokens(d) {
+        if (!d || typeof d !== 'object') return d;
+        for (const it of [d, ...(Array.isArray(d.items) ? d.items : [])]) {
+          if (it && typeof it.thumbnail === 'string' && typeof it.thumbToken === 'string') thumbTokens.set(it.thumbnail, it.thumbToken);
+        }
+        if (thumbTokens.size > 2000) thumbTokens.delete(thumbTokens.keys().next().value);
+        return d;
+      }
       const thumbSrc = (u) => {
         const s = String(u || '');
-        if (/^https?:\/\//i.test(s)) return '/api/thumb?url=' + encodeURIComponent(s) + '&v=2';
+        const pt = thumbTokens.get(s);
+        if (/^https?:\/\//i.test(s)) return '/api/thumb?url=' + encodeURIComponent(s) + '&v=2' + (pt ? '&pt=' + encodeURIComponent(pt) : '');
         return /^\/api\/thumb\?id=f-[0-9a-f]{40}$/.test(s) ? s + '&v=2' : s;
       };
       // Already in a Navidrome library as the same song (artist + title), even
@@ -1393,7 +1406,7 @@
       // running on the server regardless, so we say so.
       async function fetchJson(url, opts) {
         const r = await fetch(url, opts);
-        if ((r.headers.get('content-type') || '').includes('application/json')) return r.json();
+        if ((r.headers.get('content-type') || '').includes('application/json')) return rememberThumbTokens(await r.json());
         let body = '';
         try { body = (await r.text()).trim(); } catch {}
         if ([502, 503, 504, 524].includes(r.status)) {
@@ -1703,7 +1716,7 @@
           // Profile (multi-clip) first.
           try {
             const pr = await fetch('/api/profile?url=' + encodeURIComponent(url));
-            const pd = await pr.json();
+            const pd = rememberThumbTokens(await pr.json());
             if (pd.ok && pd.isProfile) { renderProfile(pd); return; }
           } catch { /* fall through */ }
 
@@ -3187,6 +3200,19 @@
         delivered.add(id);
         try { localStorage.setItem(DELIVERED_KEY, JSON.stringify([...delivered].slice(-200))); } catch {}
       }
+      // The delivery key of each device job this tab started. The server
+      // hands an 18+ or unclassified job's file only to the tab holding its
+      // key; another tab sees the job reduced and never downloads it.
+      const DELIVER_KEYS = 'grabbit.deliverKeys.v1';
+      const deliverKeys = new Map((() => {
+        try { return Object.entries(JSON.parse(sessionStorage.getItem(DELIVER_KEYS)) || {}); } catch { return []; }
+      })());
+      function rememberDeliverKey(d) {
+        if (!d || !d.jobId || typeof d.deliverKey !== 'string') return;
+        deliverKeys.set(d.jobId, d.deliverKey);
+        while (deliverKeys.size > 100) deliverKeys.delete(deliverKeys.keys().next().value);
+        try { sessionStorage.setItem(DELIVER_KEYS, JSON.stringify(Object.fromEntries(deliverKeys))); } catch {}
+      }
       let queueRows = [];            // batch rows {id,title,thumbnail,status,meta,_t}
 
       $('qtabs').addEventListener('click', (e) => {
@@ -3310,11 +3336,13 @@
           if (d.type !== 'job' || !d.job) return;
           const j = d.job;
           jobMap.set(j.id, j);
-          // Auto-deliver to the device once a device-bound job is ready.
-          if (j.status === 'done' && j.device && j.deliverable && !delivered.has(j.id)) {
+          // Auto-deliver to the device once a device-bound job is ready. A
+          // reduced (18+ or unclassified) job only in the tab that started it.
+          const dkey = deliverKeys.get(j.id);
+          if (j.status === 'done' && j.device && j.deliverable && !delivered.has(j.id) && (dkey || !j.audienceHidden)) {
             rememberDelivered(j.id);
             const a = document.createElement('a');
-            a.href = '/api/jobs/' + encodeURIComponent(j.id) + '/file';
+            a.href = '/api/jobs/' + encodeURIComponent(j.id) + '/file' + (dkey ? '?key=' + encodeURIComponent(dkey) : '');
             a.download = '';
             document.body.appendChild(a); a.click(); a.remove();
           }
@@ -3341,6 +3369,7 @@
         try {
           const d = await fetchJson('/api/jobs/start?' + query.toString());
           if (!d.ok) throw new Error(d.error || 'Could not start download');
+          rememberDeliverKey(d);
           // The link is queued — clear the search field for the next paste.
           // (currentUrl stays, so more downloads from the same card still work.)
           urlInput.value = '';
@@ -3360,7 +3389,7 @@
           p.set('url', u);
           try {
             const d = await fetchJson('/api/jobs/start?' + p.toString());
-            if (d.ok) { started++; scheduled = scheduled || !!d.scheduled; }
+            if (d.ok) { rememberDeliverKey(d); started++; scheduled = scheduled || !!d.scheduled; }
             else lastError = d.error || null;
           } catch (err) { lastError = err.message; }
         }
