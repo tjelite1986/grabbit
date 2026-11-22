@@ -1707,6 +1707,7 @@ const REVALIDATE = new Set([
   'links.js',
   'sheets.js',
   'feed-player.js',
+  'feed-player.css',
   // Grabbit 3.0 native TikShortis pages (public/hub/tik/).
   'tik.js',
   'tik.css',

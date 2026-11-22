@@ -23,6 +23,7 @@ const SHELL = [
   '/hub/shared/links.js',
   '/hub/shared/sheets.js',
   '/hub/shared/feed-player.js',
+  '/hub/shared/feed-player.css',
   '/hub/tik/tik.js',
   '/hub/tik/tik.css',
   '/hub/social/social.js',

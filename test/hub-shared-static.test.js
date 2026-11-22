@@ -11,6 +11,7 @@ const path = require('node:path');
 const PUB = path.join(__dirname, '..', 'public');
 const read = (rel) => fs.readFileSync(path.join(PUB, rel), 'utf8');
 const SHARED = fs.readdirSync(path.join(PUB, 'hub/shared')).filter((f) => f.endsWith('.js')).map((f) => `hub/shared/${f}`);
+const SHARED_CSS = fs.readdirSync(path.join(PUB, 'hub/shared')).filter((f) => f.endsWith('.css')).map((f) => `hub/shared/${f}`);
 // Comments may name a product; the code may not. These files use line
 // comments only (a block-comment strip would eat strings such as '*/*').
 const code = (src) => src.replace(/^\s*\/\/.*$/gm, '');
@@ -31,7 +32,7 @@ test('the shared files are in the service worker shell and revalidated', () => {
   const sw = read('sw.js');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const reval = server.slice(server.indexOf('const REVALIDATE = new Set(['), server.indexOf(']);', server.indexOf('const REVALIDATE')));
-  for (const f of SHARED) {
+  for (const f of [...SHARED, ...SHARED_CSS]) {
     assert.match(sw, new RegExp(`'/${f.replace(/[./]/g, '\\$&')}'`), `${f} in SHELL`);
     assert.match(reval, new RegExp(`'${path.basename(f).replace('.', '\\.')}'`), `${f} in REVALIDATE`);
   }
@@ -113,4 +114,24 @@ test('history (m6): only a player that pushed its own entry goes back; no a.tile
   assert.doesNotMatch(src, /a\.tile/);
   assert.match(src, /if \(opts\.ownHistory\) \{\s*history\.pushState\(/);
   assert.match(src, /if \(pushed\) history\.back\(\);/);
+});
+
+// Adshortis phase 2, slice C: the feed and sheet CSS moved to shared/feed-player.css.
+test('the player and sheet CSS is shared, loaded before tik.css, and gone from tik.css', () => {
+  assert.ok(SHARED_CSS.includes('hub/shared/feed-player.css'));
+  const html = read('hub/index.html');
+  const shared = html.indexOf('<link rel="stylesheet" href="/hub/shared/feed-player.css" />');
+  const tik = html.indexOf('<link rel="stylesheet" href="/hub/tik/tik.css" />');
+  assert.ok(shared > 0 && shared < tik, 'feed-player.css loads before tik.css');
+  const noComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '');
+  const tikCss = noComments(read('hub/tik/tik.css'));
+  const selectors = [...tikCss.matchAll(/([^{}]+)\{/g)].map((m) => m[1]);
+  for (const s of selectors) {
+    assert.doesNotMatch(s, /\.(tf(?![\w-])|tf-[\w-]+|tik-sheet[\w-]*|tik-scrim|tik-x)/, `tik.css still styles ${s.trim()}`);
+  }
+  const sharedCss = noComments(read('hub/shared/feed-player.css'));
+  // The variables the shared rules read are defined there too.
+  assert.match(sharedCss, /--like:/);
+  assert.match(sharedCss, /--tik-left:/);
+  assert.doesNotMatch(sharedCss, /url\(/, 'no product asset paths');
 });

@@ -10,7 +10,9 @@ const path = require('node:path');
 
 const PUB = path.join(__dirname, '..', 'public');
 const read = (rel) => fs.readFileSync(path.join(PUB, rel), 'utf8');
-const css = read('hub/tik/tik.css');
+// Adshortis phase 2: the feed and sheet rules moved to public/hub/shared/
+// feed-player.css (loaded before tik.css); the checks read both, shared first.
+const css = read('hub/shared/feed-player.css') + read('hub/tik/tik.css');
 const js = read('hub/tik/tik.js');
 // Adshortis phase 2: the sheet stack moved to public/hub/shared/.
 const sheetsJs = read('hub/shared/sheets.js');
@@ -46,7 +48,7 @@ test('no rules for the old 9:16 player box', () => {
   assert.doesNotMatch(js, /['"`\s]tf-player\b/);
 });
 
-test('tik.css: .tf-side is absolute and no pointer:coarse rule resets it', () => {
+test('feed CSS: .tf-side is absolute and no pointer:coarse rule resets it', () => {
   // A touch rule once set every .tf-cbtn to position: relative, which put
   // .tf-side in the flow under the feed; a tap scrolled the feed 47 px up.
   const base = rules(cssCode).find((r) => r.selectors.includes('.tf-side'));
@@ -61,7 +63,7 @@ test('tik.css: .tf-side is absolute and no pointer:coarse rule resets it', () =>
   }
 });
 
-test('tik.css: the .tf-video rule uses object-fit: contain', () => {
+test('feed CSS: the .tf-video rule uses object-fit: contain', () => {
   const video = rules(cssCode).find((r) => r.selectors.includes('.tf-video'));
   assert.ok(video, '.tf-video has a rule');
   assert.match(video.body, /object-fit:\s*contain/);
