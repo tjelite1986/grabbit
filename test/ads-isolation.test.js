@@ -27,6 +27,9 @@ function filesUnder(dir, exts) {
 test('S5: no general page or module references /api/ads or grabbit.ads.*', () => {
   const general = [
     ...filesUnder('public/hub/tik', ['.js', '.html']),
+    // Adshortis phase 2: the shared player and helpers serve both modules,
+    // so they name neither product's API nor its keys.
+    ...filesUnder('public/hub/shared', ['.js']),
     ...filesUnder('public/hub/social', ['.js', '.html']),
     ...filesUnder('public/hub/dupes', ['.js', '.html']),
     'public/index.html',

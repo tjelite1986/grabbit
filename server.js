@@ -1706,6 +1706,7 @@ const REVALIDATE = new Set([
   // Helpers shared by the native modules (public/hub/shared/).
   'links.js',
   'sheets.js',
+  'feed-player.js',
   // Grabbit 3.0 native TikShortis pages (public/hub/tik/).
   'tik.js',
   'tik.css',

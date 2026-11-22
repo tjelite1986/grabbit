@@ -58,3 +58,59 @@ test('Escape on an open sheet closes only that sheet (stopImmediatePropagation)'
   const src = code(read('hub/shared/sheets.js'));
   assert.match(src, /e\.key === 'Escape' && stack\.length\) \{ e\.preventDefault\(\); e\.stopImmediatePropagation\(\);/);
 });
+
+// Adshortis phase 2, slice B: the feed player moved to shared/feed-player.js.
+const player = () => code(read('hub/shared/feed-player.js'));
+
+test('tik.js runs its feed on the shared player and keeps no copy of the core', () => {
+  const js = code(read('hub/tik/tik.js'));
+  assert.match(js, /window\.GrabbitShared\.feedPlayer\(\{/);
+  assert.doesNotMatch(js, /function (setImmersive|toggleFullscreen|attachGestures|attachTimeline|setActive|onKey)\b/);
+  assert.doesNotMatch(js, /const onKey\b/);
+  // The unguarded dialog test (tik.js:1625 before) is gone, not copied.
+  assert.doesNotMatch(js, /\[role=dialog\]\[aria-modal=true\]/);
+});
+
+test('the key guard (m4): sheets of every module and foreign dialogs, never the player root', () => {
+  const src = player();
+  assert.match(src, /const ROOT_ATTR = 'data-feed-player';/);
+  assert.match(src, /const SHEET_MARKERS = '\.tik-sheet, \.sg-sheet-panel, \.dm-overlay';/);
+  assert.match(src, /querySelectorAll\('\[role=dialog\]\[aria-modal=true\]'\)/);
+  assert.match(src, /!d\.closest\(`\[\$\{ROOT_ATTR\}\]`\)/);
+  assert.doesNotMatch(src, /\.viewer\b/, 'hub viewers carry .viewer, so it is not the exclusion');
+  // The root carries the marker, and onKey goes through the one guard.
+  assert.match(src, /\[ROOT_ATTR\]: ''/);
+  assert.match(src, /if \(keyBlocked\(e, SH\.count\(\)\)\) return;/);
+  // Escape: an open selector first, then the immersive view, never after a sheet took it.
+  assert.match(src, /if \(F\.fullscreen && !e\.defaultPrevented && !SH\.count\(\)/);
+});
+
+test('the core owns the immersive view under the class the hub reads', () => {
+  const src = player();
+  assert.match(src, /function setImmersive\(on\)/);
+  assert.match(src, /document\.body\.classList\.toggle\('tik-immersive', on\);/);
+  assert.match(src, /if \(on\) opts\.closeMenu\(\);/);
+  assert.match(src, /window\.dispatchEvent\(new Event\('grabbit:side'\)\);/);
+  assert.match(read('hub/hub.js'), /tik-immersive/, 'hub.js still reads the class');
+});
+
+test('leave() tears the player down: every listener the core adds is removed', () => {
+  const src = player();
+  const adds = [...src.matchAll(/(document|window)\.addEventListener\('([\w:-]+)', (\w+)(, true)?\)/g)].map((m) => m.slice(1, 5).join('|'));
+  assert.ok(adds.length >= 8, `found ${adds.length} listeners`);
+  for (const a of adds) {
+    const [target, type, fn, capture] = a.split('|');
+    const removal = `${target}.removeEventListener('${type}', ${fn}${capture || ''})`;
+    assert.ok(src.includes(removal), `missing ${removal}`);
+  }
+  for (const o of ['activeObserver', 'edgeObserver', 'resizeObserver']) assert.match(src, new RegExp(`${o}\\.disconnect\\(\\)`));
+  assert.match(src, /SH\.whenClosed\.delete\(onSheetsClosed\)/);
+  assert.match(src, /document\.body\.classList\.remove\('tik-feed', 'tik-immersive'\)/);
+});
+
+test('history (m6): only a player that pushed its own entry goes back; no a.tile hook', () => {
+  const src = player();
+  assert.doesNotMatch(src, /a\.tile/);
+  assert.match(src, /if \(opts\.ownHistory\) \{\s*history\.pushState\(/);
+  assert.match(src, /if \(pushed\) history\.back\(\);/);
+});
