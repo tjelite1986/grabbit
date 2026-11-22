@@ -266,10 +266,11 @@
     { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed() || tikIsNative(), view: viewTikshortisPage, subnav: () => (tikIsNative() ? tikNative.subnav(route()) : null) },
     // Grabbit 3.0 phase 2 (public/hub/social/), from EGRAM_MODE. General only.
     { id: 'social', label: 'Social & Photos', icon: 'social', ownData: true, show: () => socialOn(), view: viewSocialPage, subnav: () => (socialOn() ? socialNative.subnav(route()) : null) },
-    // Grabbit 3.0 (H28, H39, H53): from the effective ADSHORTIS_MODE. The old
-    // folder page when the server mounts it; otherwise, in native or embed, a
-    // placeholder with the standalone app's link when there is one.
-    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => adsFolderPage() || adsMode() === 'native' || !!adsStandalone(), view: viewAdshortisPage },
+    // Grabbit 3.0 (H28, H39, H53): from the effective ADSHORTIS_MODE. The entry
+    // shows in native, or when the server mounts the old folder page. In embed
+    // the standalone app gets its own plain link next to it (buildNav). A
+    // #/adshortis bookmark without a page draws "not available here".
+    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => adsFolderPage() || adsMode() === 'native', view: viewAdshortisPage },
     // Listed only when the server has the 18+ film library mounted.
     { id: 'adflix', label: 'Adflix 18+', icon: 'media', ownData: true, show: () => !!(state.config && state.config.adflixLibrary), view: viewAdflix },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
@@ -301,6 +302,8 @@
           p.planned ? h('span', { class: 'tag' }, 'planned') : null),
         // A module's own sections, listed under it while it is open.
         p.subnav ? h('div', { class: 'nav-sub', 'data-sub': p.id, hidden: true }) : null,
+        // H53: in embed, a plain link to the standalone Adshortis (updateNav).
+        p.id === 'adshortis' ? h('a', { 'data-ads-link': '1', href: '#', target: '_blank', rel: 'noopener noreferrer', hidden: true }, icon('video'), h('span', null, 'Adshortis 18+ ↗')) : null,
       ]).flat().filter(Boolean)
     );
   }
@@ -318,6 +321,12 @@
         b.textContent = n;
         b.hidden = !n;
       }
+    }
+    const adsLink = document.querySelector('#nav > a[data-ads-link]');
+    if (adsLink) {
+      const url = adsMode() === 'embed' ? adsStandalone() : null;
+      adsLink.hidden = !url;
+      if (url) adsLink.href = url;
     }
     for (const box of document.querySelectorAll('#nav .nav-sub')) {
       const p = PAGES.find((x) => x.id === box.dataset.sub);
@@ -1233,7 +1242,8 @@
   // #/adshortis* decides on the effective mode (H28): the folder page only when
   // the server mounts it, so viewAdshortis never calls unmounted routes.
   function viewAdshortisPage(params) {
-    if (!state.config) return [h('p', { class: 'empty' }, 'Loading ...')];
+    // Redrawn by settle() once the config is in.
+    if (!state.config) return [h('p', { class: 'empty', 'data-ads-wait': '1' }, 'Loading ...')];
     if (adsFolderPage()) return viewAdshortis(params);
     const link = adsStandalone();
     return [
@@ -3480,6 +3490,8 @@
     if (route().id === 'tikshortis' && !document.querySelector('.tik-frame, .tik-root')) render(false);
     else if (route().id === 'tikshortis') updateNav();
     else if (route().id === 'social' && !document.querySelector('.sg-root')) render(false);
+    // The Adshortis page drawn before the config knew the mode.
+    else if (route().id === 'adshortis' && document.querySelector('[data-ads-wait]')) render(false);
     else if (route().ownData) updateNav();
     else render(false);
   }

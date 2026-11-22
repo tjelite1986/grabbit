@@ -1232,8 +1232,19 @@ function writePlaylists(list) {
 }
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+// Before anything can answer: every /api response, including the gate's 401
+// and a parser's 400, carries the cache generation (H62), and every /api/ads
+// response the gateway's answer headers.
+app.use(cacheGeneration);
+app.use((req, res, next) => {
+  if (adsGateway.isMountPath(req.path)) adsGateway.baseHeaders(res);
+  next();
+});
+// /api/ads reads its own body, bounded, after its own checks.
+const urlencodedParser = express.urlencoded({ extended: false });
+const jsonParser = express.json();
+app.use((req, res, next) => (adsGateway.isMountPath(req.path) ? next() : urlencodedParser(req, res, next)));
+app.use((req, res, next) => (adsGateway.isMountPath(req.path) ? next() : jsonParser(req, res, next)));
 
 // Behind a proxy the socket peer is the proxy, so req.ip carries the same value
 // for every visitor unless Express is told which hops to skip. The login
@@ -1554,10 +1565,15 @@ app.post('/login', async (req, res) => {
   });
   // Native Adshortis: a fresh per-login id, issued only here and only for the
   // shared password (H2). It replaces any id this browser held before.
+  // A failed state write costs the Adshortis id, never the sign-in itself.
   if (ok && ADS_GATEWAY) {
-    const prev = adsGateway.readCookie(req, adsGateway.LOGIN_COOKIE);
-    if (prev) ADS_LINKS.dropLogin(prev);
-    res.append('Set-Cookie', adsGateway.loginCookie(ADS_LINKS.issueLogin(), ADS_LOGIN_DAYS));
+    try {
+      const prev = adsGateway.readCookie(req, adsGateway.LOGIN_COOKIE);
+      if (prev) ADS_LINKS.dropLogin(prev);
+      res.append('Set-Cookie', adsGateway.loginCookie(ADS_LINKS.issueLogin(), ADS_LOGIN_DAYS));
+    } catch (e) {
+      console.error(`[ads] could not issue a login id: ${e.code || e.message}`);
+    }
   }
   res.redirect('/');
 });
@@ -1565,15 +1581,25 @@ app.post('/login', async (req, res) => {
 app.post('/logout', (req, res) => {
   res.clearCookie(AUTH_COOKIE);
   // Native Adshortis: the login id and its seal record go first (that alone
-  // ends the link), then the upstream session, best effort (G2).
+  // ends the link), then the upstream session, best effort (G2). Only for the
+  // owner's own page over https: this route sits before the auth gate, and a
+  // sibling site's form or a signed-out browser must not reach the link.
   const adsLogin = adsGateway.readCookie(req, adsGateway.LOGIN_COOKIE);
-  if (adsLogin) {
-    const cur = ADS_GATEWAY ? ADS_GATEWAY.sealOf(req, adsLogin) : null;
-    ADS_LINKS.dropLogin(adsLogin);
+  req.principal = principalOf(req);
+  const adsRevoke = !ADS_GATEWAY || ADS_GATEWAY.mayRevoke(req);
+  if (adsLogin && ADS_GATEWAY && adsRevoke) {
+    const cur = ADS_GATEWAY.sealOf(req, adsLogin);
+    try {
+      ADS_LINKS.dropLogin(adsLogin);
+    } catch (e) {
+      console.error(`[ads] could not drop a login id: ${e.code || e.message}`);
+    }
     if (cur) ADS_GATEWAY.upstreamLogout(req, cur.t);
   }
-  res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LOGIN_COOKIE));
-  res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LINK_COOKIE));
+  if (adsRevoke) {
+    res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LOGIN_COOKIE));
+    res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LINK_COOKIE));
+  }
   // Grabbit 3.0: the linked TikShortis session goes with the Grabbit one, so the
   // next sign-in in this browser does not inherit it. (The hub ends it upstream
   // first; this clears it even when that call did not get through.)
@@ -1595,6 +1621,17 @@ const PUBLIC_ASSETS = new Set([
   '/manifest.webmanifest',
   '/sw.js',
 ]);
+
+// Retired in native mode (D3, H1, H19): the folder routes answer 404 and tell
+// the browser to drop what it cached from them (H62, H92), signed in or not,
+// so a browser whose session ended still gets the header.
+if (ADSHORTIS_MODE === 'native') {
+  app.all(['/api/hub/adshortis', '/api/hub/adshortis/*'], (_req, res) => {
+    res.setHeader('Clear-Site-Data', '"cache"');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(404).json({ ok: false, error: 'Not available' });
+  });
+}
 
 // Gate everything below for external, unauthenticated requests. API calls get a
 // 401 JSON; page/asset requests are redirected to the login form.
@@ -1634,8 +1671,9 @@ app.use((req, res, next) => {
 // is missing or stale carries Clear-Site-Data: "cache" and the current
 // generation. The generation changes with the effective Adshortis mode, so a
 // browser drops bytes it was given under the previous mode. The cookie holds no
-// secret.
-app.use((req, res, next) => {
+// secret. Installed first thing after the app is created (see there), so it
+// also covers answers given before the auth gate.
+function cacheGeneration(req, res, next) {
   if (!req.path.toLowerCase().startsWith('/api/')) return next();
   if (parseCookies(req.headers.cookie)[CACHE_GEN_COOKIE] !== String(CACHE_GEN)) {
     res.setHeader('Clear-Site-Data', '"cache"');
@@ -1645,7 +1683,7 @@ app.use((req, res, next) => {
     );
   }
   next();
-});
+}
 
 // The app shell, the service worker, the manifest and the icons must always be
 // revalidated. Express sends no Cache-Control of its own, so Cloudflare falls
@@ -5578,15 +5616,8 @@ const ADS_FOLDER_PAGE = ADS_FOLDER_FLAG && ADSHORTIS_MODE !== 'native' && !!ADS_
 if (ADS_FOLDER_FLAG && ADSHORTIS_MODE === 'native') {
   console.warn('[grabbit] ADSHORTIS_FOLDER_PAGE=1 is ignored in native Adshortis mode; the folder page stays off.');
 }
-if (ADSHORTIS_MODE === 'native') {
-  // A retired route answers 404 and tells the browser to drop what it cached
-  // from it (H62, H92).
-  app.all(['/api/hub/adshortis', '/api/hub/adshortis/*'], (_req, res) => {
-    res.setHeader('Clear-Site-Data', '"cache"');
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.status(404).json({ ok: false, error: 'Not available' });
-  });
-}
+// (In native mode the retired folder routes answer before the auth gate; see
+// "Retired in native mode" above the gate.)
 
 // GET /api/hub/adshortis -> every clip, newest first. The page filters and
 // shuffles in the browser, so this is one compact list.

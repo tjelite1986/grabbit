@@ -35,6 +35,16 @@ const LOGIN_COOKIE = '__Host-grabbit_login';
 const UPSTREAM_COOKIE = 'as_session';
 const LINK_DAYS = 30;
 const MOUNT = '/api/ads';
+const BODY_LIMIT = 16 * 1024;
+// The upstream session token (base64url) and user id as Adshortis issues them.
+const TOKEN_RE = /^[A-Za-z0-9_-]{1,256}$/;
+const validUserId = (v) => (Number.isSafeInteger(v) && v > 0) || (typeof v === 'string' && /^[0-9]{1,15}$/.test(v));
+// The server skips its global body parsers for these paths (the gateway reads
+// its own body after its checks) and gives early refusals the answer headers.
+const isMountPath = (p) => {
+  const l = String(p || '').toLowerCase();
+  return l === MOUNT || l.startsWith(`${MOUNT}/`);
+};
 
 // --- Settings ------------------------------------------------------------------
 
@@ -90,6 +100,35 @@ function baseHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
 }
+// The request body as JSON, read only after the caller passed every check.
+// Bounded; a body something else already parsed is used as is. Rejects with
+// { status } for a wrong type, an oversized or an unparsable body.
+function readBody(req, limit = BODY_LIMIT) {
+  if (req._body) return Promise.resolve(req.body);
+  return new Promise((resolve, reject) => {
+    if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+      reject({ status: 415 });
+      req.resume();
+      return;
+    }
+    const chunks = [];
+    let n = 0;
+    let done = false;
+    req.on('data', (c) => {
+      if (done) return;
+      n += c.length;
+      if (n > limit) { done = true; reject({ status: 413 }); req.resume(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (done) return;
+      done = true;
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject({ status: 400 }); }
+    });
+    req.on('error', () => { if (!done) { done = true; reject({ status: 400 }); } });
+  });
+}
+
 function answer(res, status, body) {
   if (res.headersSent) { res.destroy(); return; }
   baseHeaders(res);
@@ -196,6 +235,16 @@ function createGateway({
     return o === own;
   }
 
+  // POST /logout runs before the auth gate and outside this mount. It may end
+  // an Adshortis link only for the owner's own page over https, by the same
+  // rules as a write here (G2); anything else keeps its hands off the link.
+  function mayRevoke(req) {
+    if (!isOwner(req) || !isSecure(req)) return false;
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return false;
+    return req.headers.origin === own;
+  }
+
   const sealOf = (req, loginId) => links.open(loginId, readCookie(req, LINK_COOKIE));
 
   async function handle(req, res) {
@@ -232,26 +281,44 @@ function createGateway({
   async function link(req, res, loginId) {
     const nl = matrix.sessionPreflight('POST', `${MOUNT}/session`, loginId || '');
     if (nl) return answer(res, nl.status, { ...nl.body });
-    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return fail(res, e && e.status ? e.status : 400, 'User name and password are required');
+    }
+    const username = typeof body?.username === 'string' ? body.username.trim() : '';
+    const password = typeof body?.password === 'string' ? body.password : '';
     if (!username || !password || username.length > 100 || password.length > 1024) return fail(res, 400, 'User name and password are required');
+    // The link as it is now: the commit below happens only if no unlink or
+    // other link landed while upstream was answering.
+    const rev = links.revOf(loginId);
     const previous = sealOf(req, loginId);
     let r;
     try {
       r = await upstream(req, { method: 'POST', path: '/api/login', body: JSON.stringify({ username, password }) });
     } catch (e) {
-      log.warn(`[ads] S1 upstream unreachable (${e.code || 'error'})`);
+      log.warn('[ads] S1 upstream unreachable');
       return fail(res, 424, 'Adshortis is not reachable right now');
     }
-    const d = await readJson(r).catch(() => null);
-    const token = [].concat(r.headers['set-cookie'] || []).map((c) => new RegExp(`^${UPSTREAM_COOKIE}=([^;]+)`).exec(c)).find(Boolean);
-    if (r.statusCode !== 200 || !token) {
-      if (r.statusCode >= 500 || r.statusCode === 200) return fail(res, 424, 'Adshortis is not reachable right now');
-      if (r.statusCode === 429 && r.headers['retry-after']) res.setHeader('Retry-After', String(r.headers['retry-after']).slice(0, 16));
-      const msg = d && typeof d.error === 'string' ? d.error.slice(0, 200) : 'Adshortis refused the sign-in';
-      return fail(res, r.statusCode, msg);
+    const d = await readJson(r).catch(() => undefined);
+    const json = d !== null && typeof d === 'object' && !Array.isArray(d);
+    const m = [].concat(r.headers['set-cookie'] || []).map((c) => new RegExp(`^${UPSTREAM_COOKIE}=([^;]*)`).exec(c)).find(Boolean);
+    const t = m && TOKEN_RE.test(m[1]) ? m[1] : null;
+    if (r.statusCode !== 200) {
+      // A JSON refusal keeps its status (401 wrong password, 429 throttled);
+      // a redirect, a 5xx or a body that is not a JSON object is 424.
+      if (r.statusCode >= 400 && r.statusCode < 500 && json) {
+        if (r.statusCode === 429 && r.headers['retry-after']) res.setHeader('Retry-After', String(r.headers['retry-after']).slice(0, 16));
+        return fail(res, r.statusCode, typeof d.error === 'string' ? d.error.slice(0, 200) : 'Adshortis refused the sign-in');
+      }
+      if (t) upstreamLogout(req, t);
+      return fail(res, 424, 'Adshortis is not reachable right now');
     }
-    const t = token[1];
+    if (!json || d.ok !== true || !t) {
+      if (t) upstreamLogout(req, t);
+      return fail(res, 424, 'Adshortis sent an unexpected answer');
+    }
     // Who signed in (H17): /api/login answers only { ok: true }.
     let user = null;
     try {
@@ -259,12 +326,23 @@ function createGateway({
       if (me.statusCode === 200) user = matrix.projectSession(await readJson(me).catch(() => null), phase);
       else me.resume();
     } catch { /* user stays null */ }
-    if (!user) {
+    if (!user || !validUserId(user.id)) {
       upstreamLogout(req, t);
       return fail(res, 424, 'Adshortis sent an unexpected answer');
     }
     user.avatar = rewriteMediaUrl(user.avatar);
-    const sealed = links.seal(loginId, { t, u: user.id });
+    let sealed;
+    try {
+      sealed = links.seal(loginId, { t, u: user.id }, rev);
+    } catch {
+      upstreamLogout(req, t);
+      log.error('[ads] S1 could not store the link');
+      return fail(res, 424, 'The link could not be saved');
+    }
+    if (sealed === false) {
+      upstreamLogout(req, t);
+      return fail(res, 409, 'The link changed while signing in; try again');
+    }
     if (!sealed) {
       upstreamLogout(req, t);
       return answer(res, matrix.NL_RESPONSE.status, { ...matrix.NL_RESPONSE.body });
@@ -290,17 +368,25 @@ function createGateway({
     try {
       r = await upstream(req, { method: 'GET', path: '/api/me', token: cur.t });
     } catch (e) {
-      log.warn(`[ads] S2 upstream unreachable (${e.code || 'error'})`);
+      log.warn('[ads] S2 upstream unreachable');
       return fail(res, 424, 'Adshortis is not reachable right now');
     }
     if (r.statusCode === 401) {
       r.resume();
-      links.clearSeal(loginId);
+      // Only the link this request read ends. If a newer link replaced it
+      // meanwhile, that one and its cookie stay.
+      if (links.clearSeal(loginId, readCookie(req, LINK_COOKIE)) === 'changed') {
+        return fail(res, 409, 'The link changed; try again');
+      }
       res.append('Set-Cookie', clearCookie(LINK_COOKIE));
       return answer(res, 200, { ok: true, linked: false, expired: true });
     }
     if (r.statusCode !== 200) {
-      r.resume();
+      // Other JSON 4xx keep their status (GW-ANSWER); the rest is 424.
+      const d = await readJson(r).catch(() => undefined);
+      if (r.statusCode >= 400 && r.statusCode < 500 && d !== null && typeof d === 'object' && !Array.isArray(d)) {
+        return fail(res, r.statusCode, typeof d.error === 'string' ? d.error.slice(0, 200) : 'Adshortis refused the request');
+      }
       return fail(res, 424, 'Adshortis is not reachable right now');
     }
     const user = matrix.projectSession(await readJson(r).catch(() => null), phase);
@@ -319,7 +405,7 @@ function createGateway({
     return answer(res, 200, { ok: true, linked: false });
   }
 
-  return { origin, handle, upstreamLogout, sealOf };
+  return { origin, handle, upstreamLogout, sealOf, mayRevoke };
 }
 
 module.exports = {
@@ -331,6 +417,8 @@ module.exports = {
   parseHttpsOrigin,
   readCookie,
   isSecure,
+  isMountPath,
+  baseHeaders,
   linkCookie,
   loginCookie,
   clearCookie,

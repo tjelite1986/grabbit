@@ -30,7 +30,10 @@ function writeJsonAtomic(file, value, mode) {
 
 // --- Fake Adshortis ------------------------------------------------------------------
 const ME = { id: 7, username: 'member', display_name: 'Member', role: 'user', permissions: ['upload'], avatar: '/m/avatar/user/7', ai: { on: true }, nav_tabs: ['x'], prefs: { a: 1 }, extra: 'nope' };
-const up = { seen: [], login: 'ok', me: 'ok', logout: 'ok', tokens: 0 };
+// up.hold = { url, wait, arrived, reply? }: the next request to `url` calls
+// arrived(), then waits for `wait` before it is answered (by reply(send) when
+// given), so a test can put another request in between.
+const up = { seen: [], login: 'ok', me: 'ok', logout: 'ok', tokens: 0, hold: null };
 const upstream = http.createServer((req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
@@ -40,7 +43,25 @@ const upstream = http.createServer((req, res) => {
       res.writeHead(status, { 'content-type': 'application/json', ...extra });
       res.end(JSON.stringify(obj));
     };
+    if (up.hold && up.hold.url === req.url) {
+      const h = up.hold;
+      up.hold = null;
+      h.arrived();
+      return h.wait.then(() => (h.reply ? h.reply(send) : answerUp(req, res, send)));
+    }
+    answerUp(req, res, send);
+  });
+});
+function answerUp(req, res, send) {
+  {
     if (req.url === '/api/login') {
+      const minted = () => `as_session=tok${++up.tokens}; Path=/; HttpOnly`;
+      if (up.login === 'html200') { res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': minted() }); return res.end('<html>'); }
+      if (up.login === 'empty200') return send(200, {}, { 'set-cookie': minted() });
+      if (up.login === 'badtoken') return send(200, { ok: true }, { 'set-cookie': 'as_session=a b; Path=/' });
+      if (up.login === '302') { res.writeHead(302, { location: 'https://evil.example/' }); return res.end(); }
+      if (up.login === '403') return send(403, { error: 'Account disabled' });
+      if (up.login === '400html') { res.writeHead(400, { 'content-type': 'text/html' }); return res.end('<html>'); }
       if (up.login === '429') return send(429, { error: 'Too many attempts' }, { 'retry-after': '600' });
       if (up.login === '401') return send(401, { error: 'Wrong user name or password' });
       if (up.login === '500') return send(500, { error: 'boom' });
@@ -52,6 +73,8 @@ const upstream = http.createServer((req, res) => {
       if (up.me === '401') return send(401, { error: 'Unauthorized' });
       if (up.me === 'array') return send(200, [1, 2]);
       if (up.me === 'html') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<html>'); }
+      if (up.me === 'emptyobj') return send(200, {});
+      if (up.me === '403') return send(403, { error: 'Forbidden' });
       return send(200, ME);
     }
     if (req.url === '/api/logout') {
@@ -60,8 +83,18 @@ const upstream = http.createServer((req, res) => {
       return send(200, { ok: true });
     }
     send(404, { error: 'Not found' });
-  });
-});
+  }
+}
+// Hold the next upstream request to `url`; returns { reached, release }.
+function holdUpstream(url, reply) {
+  let release;
+  let arrived;
+  const wait = new Promise((r) => { release = r; });
+  const reached = new Promise((r) => { arrived = r; });
+  up.hold = { url, wait, arrived, reply };
+  return { reached, release };
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- Grabbit side: an express app with the gateway mounted like server.js ---------------
 let base;
@@ -73,7 +106,7 @@ const apps = [];
 function mount(phase = '1') {
   const app = express();
   app.set('trust proxy', 'loopback');
-  app.use(express.json());
+  // No body parser: as in server.js, /api/ads reads its own body.
   // Stand-in for the auth gate: the test says who the caller is.
   app.use((req, _res, next) => {
     req.principal = req.headers['x-test-principal'] || 'owner';
@@ -108,7 +141,7 @@ test.after(() => {
 });
 
 // A browser request from Grabbit's own page over https.
-function call(p, { method = 'GET', login, seal, cookie, headers = {}, body, browser = true, at = base } = {}) {
+function call(p, { method = 'GET', login, seal, cookie, headers = {}, body, raw, browser = true, at = base } = {}) {
   const h = { 'x-forwarded-proto': 'https', ...headers };
   if (browser) {
     h['sec-fetch-site'] = 'same-origin';
@@ -119,9 +152,11 @@ function call(p, { method = 'GET', login, seal, cookie, headers = {}, body, brow
   if (seal) jar.push(`${gw.LINK_COOKIE}=${seal}`);
   if (cookie) jar.push(cookie);
   if (jar.length) h.cookie = jar.join('; ');
-  if (body !== undefined) h['content-type'] = 'application/json';
+  if (body !== undefined || raw !== undefined) h['content-type'] = 'application/json';
+  for (const [k, v] of Object.entries(headers)) h[k] = v;
   for (const [k, v] of Object.entries(h)) if (v === null) delete h[k];
-  return fetch(`${at}${p}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' }).then(async (r) => {
+  const payload = raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body);
+  return fetch(`${at}${p}`, { method, headers: h, body: payload, redirect: 'manual' }).then(async (r) => {
     const text = await r.text();
     let json = null;
     try { json = JSON.parse(text); } catch { /* not json */ }
@@ -133,7 +168,7 @@ const sealFrom = (r) => {
   return c ? c.split(';')[0].slice(gw.LINK_COOKIE.length + 1) : null;
 };
 const upCount = () => up.seen.length;
-const reset = () => { up.login = 'ok'; up.me = 'ok'; up.logout = 'ok'; };
+const reset = () => { up.login = 'ok'; up.me = 'ok'; up.logout = 'ok'; up.hold = null; };
 
 async function linked() {
   reset();
@@ -421,6 +456,160 @@ test('S3: the record is cleared before the upstream call is made', async () => {
     upstream.on('request', handler);
   }
   assert.equal(openAtLogout, null, 'the seal no longer opened when upstream logout ran');
+});
+
+// --- Codex phase-1 review: races, strict answers, the body ------------------------------------------------
+
+test('race: an unlink while a link is in flight wins; the late link is refused and its session ended', async () => {
+  reset();
+  const login = links.issueLogin();
+  const held = holdUpstream('/api/login');
+  const pending = call('/api/ads/session', { method: 'POST', login, body: { username: USERNAME, password: PASSWORD } });
+  await held.reached;
+  const d = await call('/api/ads/session', { method: 'DELETE', login });
+  assert.equal(d.status, 200);
+  const mark = upCount();
+  held.release();
+  const r = await pending;
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.equal(sealFrom(r), null, 'no link cookie');
+  await sleep(50);
+  const ended = up.seen.slice(mark).filter((c) => c.url === '/api/logout');
+  assert.deepEqual(ended.map((c) => c.headers.cookie), [`as_session=tok${up.tokens}`], 'the minted session is ended');
+  assert.equal(links.open(login, 'x'), null);
+  assert.equal((await call('/api/ads/session', { login })).body.linked, false);
+});
+
+test('race: two links in flight; only the first to finish commits', async () => {
+  reset();
+  const login = links.issueLogin();
+  const held = holdUpstream('/api/login');
+  const slow = call('/api/ads/session', { method: 'POST', login, body: { username: USERNAME, password: PASSWORD } });
+  await held.reached;
+  const fast = await call('/api/ads/session', { method: 'POST', login, body: { username: USERNAME, password: PASSWORD } });
+  assert.equal(fast.status, 200);
+  held.release();
+  const late = await slow;
+  assert.equal(late.status, 409);
+  assert.equal((await call('/api/ads/session', { login, seal: sealFrom(fast) })).body.linked, true, 'the committed link stays');
+});
+
+test('race: a status check whose upstream 401 arrives after a re-link leaves the new link and its cookie alone', async () => {
+  const a = await linked();
+  const held = holdUpstream('/api/me', (send) => send(401, { error: 'Unauthorized' }));
+  const stale = call('/api/ads/session', { login: a.login, seal: a.seal });
+  await held.reached;
+  const relink = await call('/api/ads/session', { method: 'POST', login: a.login, seal: a.seal, body: { username: USERNAME, password: PASSWORD } });
+  assert.equal(relink.status, 200);
+  const fresh = sealFrom(relink);
+  held.release();
+  const r = await stale;
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.equal(r.setCookie.some((c) => c.startsWith(`${gw.LINK_COOKIE}=`)), false, 'the browser cookie is not cleared');
+  assert.equal((await call('/api/ads/session', { login: a.login, seal: fresh })).body.linked, true);
+  // The same 401 without a re-link in between still unlinks.
+  const held2 = holdUpstream('/api/me', (send) => send(401, { error: 'Unauthorized' }));
+  const gone = call('/api/ads/session', { login: a.login, seal: fresh });
+  await held2.reached;
+  held2.release();
+  assert.deepEqual((await gone).body, { ok: true, linked: false, expired: true });
+});
+
+test('S1 strict: only a 200 JSON { ok: true } with a well-formed token and a real user id links; else 424 or the JSON 4xx', async () => {
+  const login = links.issueLogin();
+  const post = () => call('/api/ads/session', { method: 'POST', login, body: { username: USERNAME, password: PASSWORD } });
+  for (const [mode, me, want, minted] of [
+    ['html200', 'ok', 424, true],
+    ['empty200', 'ok', 424, true],
+    ['badtoken', 'ok', 424, false],
+    ['302', 'ok', 424, false],
+    ['400html', 'ok', 424, false],
+    ['403', 'ok', 403, false],
+    ['ok', 'emptyobj', 424, true],
+  ]) {
+    reset();
+    up.login = mode;
+    up.me = me;
+    const t0 = up.tokens;
+    const mark = upCount();
+    const r = await post();
+    assert.equal(r.status, want, `${mode}/${me}`);
+    assert.equal(sealFrom(r), null, `${mode}/${me}: no link`);
+    assert.equal(r.headers.get('location'), null, `${mode}: no redirect passes`);
+    await sleep(30);
+    const ended = up.seen.slice(mark).filter((c) => c.url === '/api/logout').map((c) => c.headers.cookie);
+    assert.deepEqual(ended, minted ? [`as_session=tok${t0 + 1}`] : [], `${mode}/${me}: minted session ended`);
+  }
+  reset();
+  assert.equal((await call('/api/ads/session', { login })).body.linked, false);
+});
+
+test('S2: a JSON 4xx other than 401 keeps its status and the link', async () => {
+  const { login, seal } = await linked();
+  up.me = '403';
+  const r = await call('/api/ads/session', { login, seal });
+  assert.equal(r.status, 403);
+  assert.equal(r.setCookie.some((c) => c.startsWith(`${gw.LINK_COOKIE}=`)), false);
+  reset();
+  assert.equal((await call('/api/ads/session', { login, seal })).body.linked, true);
+});
+
+test('body: read after the checks; malformed, wrong type and oversized bodies get a JSON answer and nothing goes upstream', async () => {
+  reset();
+  const login = links.issueLogin();
+  const before = upCount();
+  // Without a login id the NL answer comes first, whatever the body.
+  const nl = await call('/api/ads/session', { method: 'POST', raw: '{nope' });
+  assert.equal(nl.status, 409);
+  // Not the owner: 403 before the body is looked at.
+  assert.equal((await call('/api/ads/session', { method: 'POST', login, raw: '{nope', headers: { 'x-test-principal': 'internal' } })).status, 403);
+  for (const [name, opts, want] of [
+    ['malformed', { raw: '{nope' }, 400],
+    ['form body', { raw: 'username=a&password=b', headers: { 'content-type': 'application/x-www-form-urlencoded' } }, 415],
+    ['oversized', { raw: JSON.stringify({ username: 'a', password: 'x'.repeat(20000) }) }, 413],
+    ['json null', { raw: 'null' }, 400],
+  ]) {
+    const r = await call('/api/ads/session', { method: 'POST', login, ...opts });
+    assert.equal(r.status, want, name);
+    assert.equal(r.body && r.body.ok, false, `${name}: JSON answer`);
+    assert.equal(r.headers.get('cache-control'), 'private, no-store', name);
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff', name);
+  }
+  assert.equal(upCount(), before);
+});
+
+test('links: a failed write changes nothing; a damaged fingerprint does not stop boot; a loaded key is narrowed to 0600', () => {
+  const dir = path.join(root, 'fail');
+  let failing = false;
+  const flaky = (file, value, mode) => {
+    if (failing) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    writeJsonAtomic(file, value, mode);
+  };
+  const s = createLinkStore({ dir, writeJsonAtomic: flaky, log });
+  const id = s.issueLogin();
+  const sealed = s.seal(id, { t: 'x', u: 1 });
+  failing = true;
+  assert.throws(() => s.issueLogin(), /disk full/);
+  assert.throws(() => s.dropLogin(id), /disk full/);
+  assert.equal(s.loginValid(id), true, 'a failed drop keeps the record in memory, as on disk');
+  assert.throws(() => s.clearSeal(id), /disk full/);
+  assert.deepEqual(s.open(id, sealed), { t: 'x', u: 1 }, 'a failed unlink does not claim success');
+  assert.throws(() => s.seal(id, { t: 'y', u: 1 }), /disk full/);
+  assert.deepEqual(s.open(id, sealed), { t: 'x', u: 1 });
+  failing = false;
+  const again = createLinkStore({ dir, writeJsonAtomic, log });
+  assert.deepEqual(again.open(id, sealed), { t: 'x', u: 1 }, 'disk and memory agree');
+  // A fingerprint of the right length in characters but not in bytes.
+  const modeFile = path.join(dir, 'ads-mode.json');
+  for (const auth of [{ salt: '0'.repeat(32), hash: 'é'.repeat(64) }, { salt: 'zz', hash: '0'.repeat(64) }, { salt: 5, hash: null }]) {
+    fs.writeFileSync(modeFile, JSON.stringify({ v: 1, mode: 'native', gen: 1, auth }));
+    const b = createLinkStore({ dir, writeJsonAtomic, log }).bootCheck({ mode: 'native', password: 'p', secret: '' });
+    assert.match(b.reason, /password or secret changed/);
+  }
+  const keyFile = path.join(dir, 'ads-seal-key.json');
+  fs.chmodSync(keyFile, 0o644);
+  createLinkStore({ dir, writeJsonAtomic, log }).sealKey();
+  assert.equal(fs.statSync(keyFile).mode & 0o777, 0o600);
 });
 
 // --- S12: the log --------------------------------------------------------------------------------------------

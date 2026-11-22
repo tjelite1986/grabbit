@@ -184,9 +184,29 @@ test('S1 NL over HTTP: grabbit_auth without a login id -> 409, zero upstream cal
   assert.equal(lg.headers['x-forwarded-for'], '127.0.0.1');
   assert.equal(lg.headers.cookie, undefined);
 
-  // Grabbit logout: login id and seal record dropped, upstream logout, both cookies cleared.
+  // POST /logout sits before the auth gate. A sibling site's form (same-site,
+  // foreign Origin) and a browser with only the two Adshortis cookies must not
+  // touch the link: no upstream call, record kept, Adshortis cookies kept.
+  const form = (cookies, extra) => ({ Cookie: cookies.join('; '), 'X-Forwarded-Proto': 'https', 'Content-Type': 'application/x-www-form-urlencoded', ...extra });
+  for (const [why, headers] of [
+    ['sibling site', form([s.headers.Cookie, login, seal], { Origin: 'https://other.example.com', 'Sec-Fetch-Site': 'same-site' })],
+    ['no grabbit_auth', form([login, seal], { Origin: OWN, 'Sec-Fetch-Site': 'same-origin' })],
+    ['no Origin', form([s.headers.Cookie, login, seal], {})],
+    ['plain http', { ...form([s.headers.Cookie, login, seal], { Origin: OWN, 'Sec-Fetch-Site': 'same-origin' }), 'X-Forwarded-Proto': 'http' }],
+  ]) {
+    const m0 = seen.length;
+    const r = await fetch(`${s.base}/logout`, { method: 'POST', headers, redirect: 'manual' });
+    assert.equal(r.status, 302, why);
+    assert.equal(r.headers.getSetCookie().some((c) => c.startsWith(`${LOGIN}=`) || c.startsWith(`${LINK}=`)), false, `${why}: Adshortis cookies kept`);
+    await new Promise((res) => setTimeout(res, 50));
+    assert.equal(seen.slice(m0).some((x) => x.url === '/api/logout'), false, `${why}: no upstream logout`);
+    assert.equal((await s.call('/api/ads/session', { headers: browser(s, [login, seal]) })).body.linked, true, `${why}: link kept`);
+  }
+
+  // Grabbit logout from its own page: login id and seal record dropped,
+  // upstream logout, both cookies cleared.
   const mark = seen.length;
-  const out = await fetch(`${s.base}/logout`, { method: 'POST', headers: { Cookie: [s.headers.Cookie, login, seal].join('; ') }, redirect: 'manual' });
+  const out = await fetch(`${s.base}/logout`, { method: 'POST', headers: form([s.headers.Cookie, login, seal], { Origin: OWN, 'Sec-Fetch-Site': 'same-origin' }), redirect: 'manual' });
   assert.equal(out.status, 302);
   const cleared = out.headers.getSetCookie();
   for (const n of [LOGIN, LINK]) assert.ok(cleared.some((c) => c.startsWith(`${n}=;`) && /Max-Age=0/.test(c)), n);
@@ -286,4 +306,40 @@ test('folder page (H1, H19, H46, H53): only with the flag, never in native; priv
       }
     });
   }
+});
+
+test('early answers (Codex phase 1): retired routes, the gate and a bad body all carry the cache generation and answer JSON', async (t) => {
+  const s = await boot(t, { env: nativeEnv(), apps: false });
+  const anon = { Accept: 'application/json', 'X-Forwarded-Proto': 'https' };
+  // A signed-out browser still learns that the retired folder routes are gone.
+  for (const p of ['/api/hub/adshortis', '/api/hub/adshortis/file?id=a/b.web.mp4&v=video', '/API/hub/Adshortis']) {
+    const r = await s.call(p, { headers: anon });
+    assert.equal(r.status, 404, p);
+    assert.equal(r.headers.get('clear-site-data'), '"cache"', p);
+  }
+  // The gate's own 401 carries the generation too.
+  const gate = await s.call('/api/config', { headers: anon });
+  assert.equal(gate.status, 401);
+  assert.equal(gate.headers.get('clear-site-data'), '"cache"');
+  assert.ok(cookieOf(gate.headers.getSetCookie(), 'grabbit_cache_gen'));
+  // (Upper-case /API/... without a session still redirects to /login; that is
+  // pinned in guard-http.test.js and left as it is.)
+  // A malformed body to /api/ads: signed out -> the gate's 401 with the
+  // gateway's headers; signed in without a login id -> the NL answer; with one
+  // -> a JSON 400. Never a parser page, never upstream.
+  const before = seen.length;
+  const bad = { method: 'POST', body: '{nope' };
+  const out = await s.call('/api/ads/session', { ...bad, headers: { ...anon, 'Content-Type': 'application/json' } });
+  assert.equal(out.status, 401);
+  assert.deepEqual(out.body, { ok: false, error: 'Unauthorized' });
+  assert.equal(out.headers.get('cache-control'), 'private, no-store');
+  assert.equal(out.headers.get('x-content-type-options'), 'nosniff');
+  const nl = await s.call('/api/ads/session', { ...bad, headers: browser(s, [], true) });
+  assert.equal(nl.status, 409);
+  const { login } = await freshLogin(s);
+  const r = await s.call('/API/ADS/session', { ...bad, headers: browser(s, [login], true) });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.ok, false);
+  assert.equal(r.headers.get('cache-control'), 'private, no-store');
+  assert.equal(seen.length, before);
 });

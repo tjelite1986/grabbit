@@ -70,6 +70,8 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
     const d = readOwn(keyFile, log);
     const hex = d && typeof d.key === 'string' && /^[0-9a-f]{64}$/.test(d.key) ? d.key : null;
     if (hex) {
+      // A key file restored or copied with a wider mode is narrowed again.
+      try { fs.chmodSync(keyFile, 0o600); } catch { /* best effort on odd filesystems */ }
       key = Buffer.from(hex, 'hex');
       return key;
     }
@@ -82,7 +84,10 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
   }
 
   // --- Login records ------------------------------------------------------------
-  let logins = null; // Map sha256(loginId) -> { exp, seal }
+  let logins = null; // Map sha256(loginId) -> { exp, seal, rev }
+  // rev counts link changes of a login id in this process (not stored). A link
+  // that started before an unlink or another link commits only if rev is still
+  // the one it read, so a slow upstream answer cannot undo a later change.
   function load() {
     if (logins) return logins;
     logins = new Map();
@@ -90,7 +95,7 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
     const rows = d && d.logins && typeof d.logins === 'object' ? d.logins : {};
     for (const [h, r] of Object.entries(rows)) {
       if (!/^[0-9a-f]{64}$/.test(h) || !r || typeof r.exp !== 'number') continue;
-      logins.set(h, { exp: r.exp, seal: typeof r.seal === 'string' && /^[0-9a-f]{64}$/.test(r.seal) ? r.seal : null });
+      logins.set(h, { exp: r.exp, seal: typeof r.seal === 'string' && /^[0-9a-f]{64}$/.test(r.seal) ? r.seal : null, rev: 0 });
     }
     return logins;
   }
@@ -98,7 +103,24 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
     const t = now();
     for (const [h, r] of logins) if (r.exp <= t) logins.delete(h);
     while (logins.size > MAX_LOGINS) logins.delete(logins.keys().next().value);
-    writeJsonAtomic(loginsFile, { v: 1, logins: Object.fromEntries(logins) }, 0o600);
+    const rows = {};
+    for (const [h, r] of logins) rows[h] = { exp: r.exp, seal: r.seal };
+    writeJsonAtomic(loginsFile, { v: 1, logins: rows }, 0o600);
+  }
+  // Change the records and write them, or change nothing: when the write
+  // fails the memory goes back to what is on disk and the error is thrown, so
+  // a revocation never answers success while the file still holds the record.
+  function commit(mutate) {
+    load();
+    const before = new Map([...logins].map(([h, r]) => [h, { ...r }]));
+    const out = mutate();
+    try {
+      save();
+    } catch (e) {
+      logins = before;
+      throw e;
+    }
+    return out;
   }
   function recordOf(loginId) {
     if (typeof loginId !== 'string' || !ID_RE.test(loginId)) return null;
@@ -111,32 +133,41 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
   // A fresh login id for a password sign-in. Returns the id (the cookie value).
   function issueLogin() {
     const id = crypto.randomBytes(32).toString('base64url');
-    load().set(sha256(id), { exp: now() + LOGIN_MS, seal: null });
-    save();
+    commit(() => logins.set(sha256(id), { exp: now() + LOGIN_MS, seal: null, rev: 0 }));
     return id;
   }
   const loginValid = (loginId) => !!recordOf(loginId);
   function dropLogin(loginId) {
     if (typeof loginId !== 'string' || !ID_RE.test(loginId)) return false;
-    const had = load().delete(sha256(loginId));
-    if (had) save();
-    return had;
+    if (!load().has(sha256(loginId))) return false;
+    return commit(() => logins.delete(sha256(loginId)));
   }
+  // The link revision of a login id, or null when it has no valid record.
+  const revOf = (loginId) => {
+    const r = recordOf(loginId);
+    return r ? r.rev || 0 : null;
+  };
 
   // --- Seals ----------------------------------------------------------------------
   // data: { t: upstream session token, u: upstream user id }. Replaces any
-  // earlier seal of this login id (re-link). Returns the cookie value or null
-  // when the login id is not valid.
-  function seal(loginId, data) {
+  // earlier seal of this login id (re-link). Returns the cookie value, null
+  // when the login id is not valid, or false when expectRev is given and the
+  // link changed since it was read (revOf).
+  function seal(loginId, data, expectRev) {
     const r = recordOf(loginId);
     if (!r) return null;
+    if (expectRev !== undefined && (r.rev || 0) !== expectRev) return false;
     const iv = crypto.randomBytes(12);
     const c = crypto.createCipheriv('aes-256-gcm', sealKey(), iv);
     c.setAAD(Buffer.from(AAD_PREFIX + loginId, 'utf8'));
     const body = Buffer.concat([c.update(JSON.stringify({ t: String(data.t), u: data.u ?? null }), 'utf8'), c.final()]);
     const sealed = Buffer.concat([iv, c.getAuthTag(), body]).toString('base64url');
-    r.seal = sha256(sealed);
-    save();
+    const h = sha256(loginId);
+    commit(() => {
+      const cur = logins.get(h);
+      cur.seal = sha256(sealed);
+      cur.rev = (cur.rev || 0) + 1;
+    });
     return sealed;
   }
   // -> { t, u } or null. Null for: no or expired login record, a seal that is
@@ -158,12 +189,20 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
       return null;
     }
   }
-  function clearSeal(loginId) {
+  // Ends the link of a login id. With `expect` (the seal the caller saw) it
+  // ends only that link: 'changed' when a newer link replaced it, which is
+  // left alone. -> 'cleared' | 'none' (no link or no record) | 'changed'.
+  // Every call without a newer link bumps rev, so a link still in flight from
+  // before an unlink cannot commit afterwards.
+  function clearSeal(loginId, expect) {
     const r = recordOf(loginId);
-    if (!r || !r.seal) return false;
-    r.seal = null;
-    save();
-    return true;
+    if (!r) return 'none';
+    if (expect !== undefined && r.seal && r.seal !== sha256(String(expect || ''))) return 'changed';
+    r.rev = (r.rev || 0) + 1;
+    if (!r.seal) return 'none';
+    const h = sha256(loginId);
+    commit(() => { logins.get(h).seal = null; });
+    return 'cleared';
   }
 
   // --- Boot check -------------------------------------------------------------------
@@ -174,7 +213,9 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
     const prev = readOwn(modeFile, log) || {};
     const fpOk = (() => {
       const a = prev.auth;
-      if (!a || typeof a.salt !== 'string' || typeof a.hash !== 'string') return false;
+      // Hex of the lengths written below, so a damaged file cannot make the
+      // compare throw at boot.
+      if (!a || typeof a.salt !== 'string' || !/^[0-9a-f]{32}$/.test(a.salt) || typeof a.hash !== 'string' || !/^[0-9a-f]{64}$/.test(a.hash)) return false;
       const h = crypto.scryptSync(`${password || ''}\u0000${secret || ''}`, Buffer.from(a.salt, 'hex'), 32).toString('hex');
       return h.length === a.hash.length && crypto.timingSafeEqual(Buffer.from(h), Buffer.from(a.hash));
     })();
@@ -187,8 +228,7 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
     let dropped = 0;
     if (reasons.length) {
       dropped = load().size;
-      logins.clear();
-      save();
+      commit(() => logins.clear());
     }
     let auth = prev.auth;
     if (!fpOk) {
@@ -199,7 +239,7 @@ function createLinkStore({ dir, writeJsonAtomic, log = console, now = () => Date
     return { gen, dropped, reason: reasons.join('; ') || null };
   }
 
-  return { issueLogin, loginValid, dropLogin, seal, open, clearSeal, bootCheck, sealKey, files: { keyFile, loginsFile, modeFile } };
+  return { issueLogin, loginValid, dropLogin, revOf, seal, open, clearSeal, bootCheck, sealKey, files: { keyFile, loginsFile, modeFile } };
 }
 
 module.exports = { createLinkStore, LOGIN_DAYS, KEY_FILE, LOGINS_FILE, MODE_FILE, sha256 };
