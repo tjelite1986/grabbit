@@ -107,7 +107,7 @@ retention and prevention. These variables are server-side switches:
 | `ELITE_POSTS_IMPORT_DIR` | unset | Overrides `<ELITE_POSTS_ROOT>/_import` whenever the Elitogram import is inactive: `POSTS_TO_EGRAM` is off, or it is `1` without `EGRAM_IMPORT_DIR` (Grabbit then logs a warning). |
 | `DROP_FORMAT_MAIN`, `DROP_FORMAT_18PLUS` | `legacy` | How clips dropped into the main and 18+ shorts channels are named. `legacy` is `<creator>_-_<title>.mp4` (`.web.mp4` for a web-optimised copy) with a `.md` caption; `brackets` is `<title> [@<creator>] [id=<media id>].mp4` with a `.json` sidecar, and leaves out the `[id=…]` part when the item has no usable media id. |
 | `ADSHORTIS_LIBRARY`, `ADFLIX_LIBRARY` | unset | Mount points. When set, the hub lists the Adshortis 18+ and Adflix 18+ library viewers. |
-| `ADSHORTIS_LIBRARY_DIR`, `PLATFORM_LIBRARY_DIR` | unset | Extra folders for the duplicate scan. |
+| `ADSHORTIS_LIBRARY_DIR`, `PLATFORM_LIBRARY_DIR` | unset | `PLATFORM_LIBRARY_DIR` is an extra folder for the duplicate scan. Neither the 18+ app's library (`ADSHORTIS_LIBRARY_DIR`) nor its import folder (`ELITE_ROOT`) is ever scanned; files an older version recorded there are set aside at startup. |
 
 ## Notifications
 

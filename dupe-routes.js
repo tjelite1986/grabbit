@@ -20,7 +20,7 @@ const KEY_RE = /^(exact:[0-9a-f]{64}|photo:[1-9][0-9]{0,12}|video:[1-9][0-9]{0,1
 const TRASH_ID_RE = /^[ga][1-9][0-9]{0,15}$/;
 const GROUP_ACTIONS = ['keep', 'keep_both', 'keep_selected', 'trash_extras', 'mark_known', 'ignore', 'reopen', 'merge', 'hold'];
 
-function createRouter({ service, scanner, analyzer, models, trash, actorOf, kindOfName, thumbDir, media }) {
+function createRouter({ service, scanner, analyzer, models, trash, actorOf, kindOfName, thumbDir, media, retiredRoot = () => false }) {
   const r = express.Router();
   const who = (req) => (actorOf ? actorOf(req) : null) || 'owner';
 
@@ -113,7 +113,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     try {
       if (!/^g[1-9][0-9]{0,15}$/.test(req.params.id) || !trash) return notFound();
       const t = trash.store.trashGet(Number(req.params.id.slice(1)));
-      if (!t || t.restored_at || t.purged_at) return notFound();
+      if (!t || t.restored_at || t.purged_at || retiredRoot(t.root)) return notFound();
       const f = trash.trashedFile(t);
       if (!f || !['video', 'image', 'audio'].includes(kindOfName(t.rel))) return notFound();
       res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
@@ -149,7 +149,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     try {
       if (!/^[1-9][0-9]{0,15}$/.test(req.params.id) || !thumbDir) return notFound();
       const row = service.store.dupeFile(Number(req.params.id));
-      if (!row || !row.sha256) return notFound();
+      if (!row || !row.sha256 || retiredRoot(row.root)) return notFound();
       const kind = kindOfName(row.rel);
       if (!['video', 'image'].includes(kind)) return notFound();
       // An 18+ (or not yet verified) copy is previewed only on request of a

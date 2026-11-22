@@ -3225,16 +3225,24 @@ const DUPE_ROOT_CANDIDATES = [
   { path: NAVIDROME_KIDS_DIR, label: 'Kids music library', owner: 'grabbit', app: 'Navidrome' },
   { path: AUDIOBOOKS_DIR, label: 'Audiobooks', owner: 'grabbit' },
   { path: TIKSHORTIS_ROOT, label: 'TikShortis', owner: 'app', app: 'TikShortis' },
-  { path: ELITE_ROOT, label: '18+ app import', owner: 'app', app: 'Adshortis', adult: true, import: true, importFor: ADSHORTIS_LIBRARY_DIR },
   { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform', import: true, importFor: PLATFORM_LIBRARY_DIR },
   { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts', import: true },
   { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram', import: true, importFor: EGRAM_LIBRARY_DIR },
-  { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
   // egram holds general and 18+ posts side by side: its copies count as 18+
   // until egram itself reports every post using them as general.
   { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram', mixedAudience: true },
   { path: PLATFORM_LIBRARY_DIR, label: 'Platform library', owner: 'app', app: 'Platform' },
 ];
+// D12: the 18+ app's import folder (ELITE_ROOT) and its library are not
+// Duplicate Manager roots in any mode, and no flag brings them back. Rows an
+// earlier scan recorded under them are marked gone at boot, their cached
+// previews are deleted, and every preview route refuses them per request.
+const DUPE_RETIRED_ROOTS = [ELITE_ROOT, ADSHORTIS_LIBRARY_DIR].filter(Boolean).map((p) => path.resolve(p));
+function isRetiredDupeRoot(p) {
+  if (!p) return false;
+  const abs = path.resolve(String(p));
+  return DUPE_RETIRED_ROOTS.some((r) => abs === r || abs.startsWith(r + path.sep));
+}
 // An import folder's copy may go only when its app's library has the bytes.
 // importFor is null when that library is not mounted here.
 const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
@@ -3303,6 +3311,31 @@ if (DUPE_TRASH) {
   };
   setTimeout(purge, 60 * 1000).unref();
   setInterval(purge, 60 * 60 * 1000).unref();
+}
+// D12, once per boot: forget what an earlier scan saw under the retired roots.
+if (ITEM_STORE && ITEM_STORE.raw && ITEM_STORE.filesGoneBefore && DUPE_RETIRED_ROOTS.length) {
+  try {
+    const db = ITEM_STORE.raw;
+    const roots = db.prepare('SELECT DISTINCT root FROM file_hashes WHERE gone_at IS NULL').pluck().all().filter(isRetiredDupeRoot);
+    let rows = 0;
+    let thumbs = 0;
+    const thumbDir = path.join(DATA_DIR, 'dupe-thumbs');
+    for (const root of roots) {
+      for (const sha of db.prepare('SELECT DISTINCT sha256 FROM file_hashes WHERE root = ? AND sha256 IS NOT NULL').pluck().all(root)) {
+        if (!/^[0-9a-f]{64}$/.test(sha)) continue;
+        try {
+          fs.unlinkSync(path.join(thumbDir, sha.slice(0, 2), `${sha}.jpg`));
+          thumbs++;
+        } catch {
+          /* never made */
+        }
+      }
+      rows += ITEM_STORE.filesGoneBefore(root, Number.MAX_SAFE_INTEGER);
+    }
+    if (rows || thumbs) console.log(`dupes: the 18+ app's folders are no longer scanned; ${rows} recorded files set aside, ${thumbs} cached previews deleted`);
+  } catch (e) {
+    console.error(`dupes: setting aside the 18+ app's recorded files failed (${e.message})`);
+  }
 }
 let DUPE_SCANNER = null;
 if (ITEM_STORE && ITEM_STORE.fileSeen && String(process.env.DUPES_SCAN || '').toLowerCase() !== 'off') {
@@ -4344,6 +4377,7 @@ if (DUPE_SERVICE) {
     service: DUPE_SERVICE, scanner: DUPE_SCANNER, analyzer: DUPE_ANALYZER, models: DUPE_MODELS, trash: DUPE_TRASH,
     actorOf, kindOfName: (n) => mediaViewer.kindOfName(n),
     thumbDir: path.join(DATA_DIR, 'dupe-thumbs'), media: require('./dupe-media'),
+    retiredRoot: isRetiredDupeRoot,
   }));
 } else {
   app.use('/api/hub/dupes/v2', (req, res) => res.status(409).json({ ok: false, error: 'The Duplicate Manager needs the item store; see the server log.' }));
