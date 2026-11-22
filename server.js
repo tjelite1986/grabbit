@@ -53,6 +53,7 @@ const { foldName, plainName, titleClose } = require('./name-match');
 const { splitArtists, splitList, splitGenres, addEntity, joinEntityRuns } = require('./name-lists');
 const { musicNorm, artistParts, titleCandidates, namedIn } = require('./music-match');
 const { cleanRuleStr, rulePatternError, ruleTextMatch } = require('./rule-patterns');
+const { isTransientDownloadError, retryDelayMs, isRetryableError } = require('./retry-errors');
 const sourceMeta = require('./source-meta');
 const smartRouting = require('./smart-routing');
 const itemMeta = require('./item-meta');
@@ -7336,21 +7337,6 @@ function failJob(job, message, err) {
   // finishJob means the JOB_KEEP_DONE cap never applies to a failing workload.
   pruneJobs();
 }
-
-// Some failures are the server saying "not right now" rather than "no":
-// YouTube's signed media URLs are short-lived and its rate limiter answers 403
-// (and 429) when several jobs run at once. Those deserve another attempt; a
-// deleted video or an unsupported site does not.
-function isTransientDownloadError(e) {
-  // The direct-file path classifies the upstream status itself (err.retryable);
-  // its message never matches the pattern below, so a 404 on a not-yet-encoded
-  // CDN file used to fail at once under text that promised a retry.
-  if (e && e.retryable === true) return true;
-  if (e && e.retryable === false) return false;
-  return /HTTP Error (403|408|429|5\d\d)|Forbidden|Too Many Requests|timed? ?out|Connection reset|Temporary failure|stalled|EAI_AGAIN|ECONNRESET|ETIMEDOUT/i.test(
-    String((e && e.message) || e || '')
-  );
-}
 const DOWNLOAD_ATTEMPTS = 3;
 const RETRY_BASE_MS = 5000;
 
@@ -8320,7 +8306,6 @@ setInterval(() => {
 const RETRY_FILE = path.join(DATA_DIR, 'retry-queue.json');
 const RETRY_MAX_ATTEMPTS = 12;
 const RETRY_MAX_AGE_MS = 72 * 60 * 60 * 1000; // give a slow upstream up to 3 days
-const RETRY_BACKOFF_MIN = [20, 40, 60, 120, 180, 240, 360]; // minutes; last repeats
 
 function readRetryQueue() {
   const list = readJsonState(RETRY_FILE, []);
@@ -8331,16 +8316,6 @@ function writeRetryQueue(list) {
   catch (e) { console.warn('retry-queue write failed:', e.message); }
 }
 const { retryKey, savedFilename, alreadyDownloaded } = require('./retry-queue');
-function retryDelayMs(attempts) {
-  return RETRY_BACKOFF_MIN[Math.min(attempts, RETRY_BACKOFF_MIN.length - 1)] * 60 * 1000;
-}
-function isRetryableError(err, msg) {
-  if (err && err.retryable === true) return true;
-  if (err && err.retryable === false) return false;
-  // 'stalled' is the stall guard's own wording (a dead-but-open TCP connection):
-  // the textbook "try again later", and it used to match neither classifier.
-  return /HTTP (403|404|408|425|429|5\d\d)|not published|timeout|timed out|stalled|ECONNRESET|network|EAI_AGAIN/i.test(String(msg || ''));
-}
 function enqueueRetry(entry) {
   if (!validUrl(entry.url)) return null;
   const list = readRetryQueue();
