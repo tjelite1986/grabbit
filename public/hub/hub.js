@@ -266,8 +266,10 @@
     { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed() || tikIsNative(), view: viewTikshortisPage, subnav: () => (tikIsNative() ? tikNative.subnav(route()) : null) },
     // Grabbit 3.0 phase 2 (public/hub/social/), from EGRAM_MODE. General only.
     { id: 'social', label: 'Social & Photos', icon: 'social', ownData: true, show: () => socialOn(), view: viewSocialPage, subnav: () => (socialOn() ? socialNative.subnav(route()) : null) },
-    // Listed only when the server has the 18+ app's library mounted.
-    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
+    // Grabbit 3.0 (H28, H39, H53): from the effective ADSHORTIS_MODE. The old
+    // folder page when the server mounts it; otherwise, in native or embed, a
+    // placeholder with the standalone app's link when there is one.
+    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => adsFolderPage() || adsMode() === 'native' || !!adsStandalone(), view: viewAdshortisPage },
     // Listed only when the server has the 18+ film library mounted.
     { id: 'adflix', label: 'Adflix 18+', icon: 'media', ownData: true, show: () => !!(state.config && state.config.adflixLibrary), view: viewAdflix },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
@@ -1218,7 +1220,28 @@
   // Media page. Clicking a clip opens the same vertical feed, over the page's
   // current filter and order.
   const ADS_PAGE = 120;
-  const adsFileUrl = (id, v, download) => `/api/hub/adshortis/file?id=${encodeURIComponent(id)}&v=${v === 'poster' ? 'poster' : 'video'}${download ? '&download=1' : ''}`;
+  // r=2: a new address for every folder file, so nothing a browser cached under
+  // the old max-age=3600 is reused (H46, H54).
+  const adsFileUrl = (id, v, download) => `/api/hub/adshortis/file?id=${encodeURIComponent(id)}&v=${v === 'poster' ? 'poster' : 'video'}&r=2${download ? '&download=1' : ''}`;
+  const adsMode = () => (state.config && state.config.adshortisMode) || 'off';
+  const adsFolderPage = () => !!(state.config && state.config.adshortisLibrary);
+  // The standalone app's address, https only (the server sends an origin).
+  const adsStandalone = () => {
+    const v = state.config && state.config.adshortisEmbed;
+    return typeof v === 'string' && /^https:\/\/[a-z0-9.\-[\]:]+\/$/i.test(v) ? v : null;
+  };
+  // #/adshortis* decides on the effective mode (H28): the folder page only when
+  // the server mounts it, so viewAdshortis never calls unmounted routes.
+  function viewAdshortisPage(params) {
+    if (!state.config) return [h('p', { class: 'empty' }, 'Loading ...')];
+    if (adsFolderPage()) return viewAdshortis(params);
+    const link = adsStandalone();
+    return [
+      h('h1', null, 'Adshortis ', h('span', { class: 'chip adult' }, '18+')),
+      h('p', { class: 'lead' }, 'Adshortis is not available here.'),
+      link ? h('p', null, h('a', { class: 'btn', href: link, target: '_blank', rel: 'noopener noreferrer' }, 'Open Adshortis')) : null,
+    ];
+  }
   let adsLoading = null;
   function loadAds(fresh) {
     if (adsLoading) return adsLoading;
@@ -1302,7 +1325,7 @@
         creator ? h('a', { class: 'chip', href: withParams({ creator: '' }), title: 'Show every creator' }, `Creator: ${creator} x`) : null,
         q ? h('a', { class: 'chip', href: withParams({ q: '' }), title: 'Clear the search' }, `Search: ${q} x`) : null),
       state.adsError
-        ? h('p', { class: 'err' }, state.adsError)
+        ? h('p', { class: 'err' }, `The Adshortis folder page did not load (${state.adsError}). It may have been switched off; reload the page.`)
         : !state.ads
           ? h('p', { class: 'empty' }, 'Loading ...')
           : !items.length
@@ -3409,7 +3432,8 @@
   const logoutForm = document.querySelector('form.logout');
   // Social & Photos' Elitogram session ends the same way.
   if (logoutForm) logoutForm.addEventListener('submit', (e) => {
-    if ((!tikIsNative() && !socialOn()) || logoutForm.dataset.tikDone) return;
+    const adsNative = adsMode() === 'native';
+    if ((!tikIsNative() && !socialOn() && !adsNative) || logoutForm.dataset.tikDone) return;
     e.preventDefault();
     logoutForm.dataset.tikDone = '1';
     const ctl = new AbortController();
@@ -3417,6 +3441,9 @@
     const ends = [];
     if (tikIsNative()) ends.push(fetch('/api/tik/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
     if (socialOn()) ends.push(fetch('/api/egram/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
+    // Native Adshortis: /logout drops the link too; this also ends the upstream
+    // session while the browser still holds the cookie (FS m1).
+    if (adsNative) ends.push(fetch('/api/ads/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
     Promise.all(ends).finally(() => { clearTimeout(timer); logoutForm.submit(); });
   });
 

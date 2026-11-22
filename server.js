@@ -31,6 +31,8 @@ const libraryLib = require('./library');
 const tikshortisEmbed = require('./tikshortis-embed');
 const tikGateway = require('./tikshortis-gateway');
 const egramGateway = require('./egram-gateway');
+const adsGateway = require('./adshortis-gateway');
+const { createLinkStore: createAdsLinkStore, LOGIN_DAYS: ADS_LOGIN_DAYS } = require('./ads-links');
 const modules = require('./modules');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
@@ -534,12 +536,17 @@ const STATE_FILES = [
   'profiles.json',
   'inbox-settings.json',
   'thumb-index.json',
+  // Native Adshortis: the key that seals linked sessions. Its login records
+  // (ads-logins.json) are left out on purpose: a restored copy would bring
+  // revoked links back (see ads-links.js).
+  'ads-seal-key.json',
 ];
 
-function writeJsonAtomic(file, value) {
+// `mode` (optional) is the file mode for a new file, e.g. 0o600 for a key.
+function writeJsonAtomic(file, value, mode) {
   const tmp = `${file}.tmp-${process.pid}`;
   try {
-    const fd = fs.openSync(tmp, 'w');
+    const fd = mode === undefined ? fs.openSync(tmp, 'w') : fs.openSync(tmp, 'w', mode);
     try {
       fs.writeFileSync(fd, JSON.stringify(value));
       // rename(2) orders the directory entry, not the data behind it. Without
@@ -1378,6 +1385,54 @@ function isCrossSite(req) {
   return !expected || actual !== expected;
 }
 
+// --- Grabbit 3.0: native Adshortis (adshortis-gateway.js, ads-links.js) --------
+// ADSHORTIS_MODE=native draws the 18+ module in the hub over Adshortis' API,
+// through /api/ads/*. It needs Adshortis' LAN address (ADSHORTIS_API_URL), the
+// public origin Adshortis checks writes against (ADSHORTIS_APP_ORIGIN), this
+// hub's own public https origin (GRABBIT_PUBLIC_ORIGIN, compared exactly on
+// every write) and Grabbit's own sign-in. Missing any: embed (a plain link to
+// ADSHORTIS_EMBED_URL) or off. See modules.js adshortisMode().
+const ADSHORTIS_API = adsGateway.parseOrigin(process.env.ADSHORTIS_API_URL);
+const ADSHORTIS_APP_ORIGIN = adsGateway.parseOrigin(process.env.ADSHORTIS_APP_ORIGIN);
+const GRABBIT_PUBLIC_ORIGIN = adsGateway.parseHttpsOrigin(process.env.GRABBIT_PUBLIC_ORIGIN);
+const ADSHORTIS_EMBED = adsGateway.parseHttpsOrigin(process.env.ADSHORTIS_EMBED_URL);
+for (const [name, ok] of [
+  ['ADSHORTIS_API_URL', ADSHORTIS_API],
+  ['ADSHORTIS_APP_ORIGIN', ADSHORTIS_APP_ORIGIN],
+  ['GRABBIT_PUBLIC_ORIGIN', GRABBIT_PUBLIC_ORIGIN],
+  ['ADSHORTIS_EMBED_URL', ADSHORTIS_EMBED],
+]) {
+  if (process.env[name] && !ok) console.warn(`[grabbit] ${name} is not a valid origin; it is ignored.`);
+}
+const { mode: ADSHORTIS_MODE, warnings: ADS_MODE_WARNINGS } = modules.adshortisMode(process.env, {
+  apiOrigin: ADSHORTIS_API,
+  appOrigin: ADSHORTIS_APP_ORIGIN,
+  publicOrigin: GRABBIT_PUBLIC_ORIGIN,
+  embed: ADSHORTIS_EMBED,
+  authOn: !!GRABBIT_PASSWORD && !AUTH_DISABLED,
+});
+for (const w of ADS_MODE_WARNINGS) console.warn(`[grabbit] ${w}`);
+const ADS_LINKS = createAdsLinkStore({ dir: DATA_DIR, writeJsonAtomic });
+// A changed mode or Grabbit password drops every Adshortis link (H2), and a
+// changed mode bumps the cache generation (H62).
+const ADS_BOOT = ADS_LINKS.bootCheck({ mode: ADSHORTIS_MODE, password: GRABBIT_PASSWORD, secret: process.env.GRABBIT_SECRET || '' });
+if (ADS_BOOT.dropped) console.log(`[grabbit] Adshortis: dropped ${ADS_BOOT.dropped} link record(s) (${ADS_BOOT.reason}).`);
+const CACHE_GEN = ADS_BOOT.gen;
+const CACHE_GEN_COOKIE = 'grabbit_cache_gen';
+const ADS_GATEWAY =
+  ADSHORTIS_MODE === 'native'
+    ? adsGateway.createGateway({
+        apiUrl: ADSHORTIS_API,
+        appOrigin: ADSHORTIS_APP_ORIGIN,
+        publicOrigin: GRABBIT_PUBLIC_ORIGIN,
+        links: ADS_LINKS,
+        // Only the owner's browser session: never the internal token, never an
+        // app client (the gate already keeps those off /api/ads).
+        isOwner: (req) => req.principal === gda.LEGACY_SHARED,
+        clientIp: (req) => req.ip || '',
+      })
+    : null;
+
 function loginPage(error) {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1497,11 +1552,28 @@ app.post('/login', async (req, res) => {
     secure: true,
     maxAge: 30 * 24 * 3600 * 1000,
   });
+  // Native Adshortis: a fresh per-login id, issued only here and only for the
+  // shared password (H2). It replaces any id this browser held before.
+  if (ok && ADS_GATEWAY) {
+    const prev = adsGateway.readCookie(req, adsGateway.LOGIN_COOKIE);
+    if (prev) ADS_LINKS.dropLogin(prev);
+    res.append('Set-Cookie', adsGateway.loginCookie(ADS_LINKS.issueLogin(), ADS_LOGIN_DAYS));
+  }
   res.redirect('/');
 });
 
-app.post('/logout', (_req, res) => {
+app.post('/logout', (req, res) => {
   res.clearCookie(AUTH_COOKIE);
+  // Native Adshortis: the login id and its seal record go first (that alone
+  // ends the link), then the upstream session, best effort (G2).
+  const adsLogin = adsGateway.readCookie(req, adsGateway.LOGIN_COOKIE);
+  if (adsLogin) {
+    const cur = ADS_GATEWAY ? ADS_GATEWAY.sealOf(req, adsLogin) : null;
+    ADS_LINKS.dropLogin(adsLogin);
+    if (cur) ADS_GATEWAY.upstreamLogout(req, cur.t);
+  }
+  res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LOGIN_COOKIE));
+  res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LINK_COOKIE));
   // Grabbit 3.0: the linked TikShortis session goes with the Grabbit one, so the
   // next sign-in in this browser does not inherit it. (The hub ends it upstream
   // first; this clears it even when that call did not get through.)
@@ -1558,6 +1630,23 @@ app.use((req, res, next) => {
   return res.redirect('/login');
 });
 
+// Cache generation (H62): an /api response to a browser whose generation cookie
+// is missing or stale carries Clear-Site-Data: "cache" and the current
+// generation. The generation changes with the effective Adshortis mode, so a
+// browser drops bytes it was given under the previous mode. The cookie holds no
+// secret.
+app.use((req, res, next) => {
+  if (!req.path.toLowerCase().startsWith('/api/')) return next();
+  if (parseCookies(req.headers.cookie)[CACHE_GEN_COOKIE] !== String(CACHE_GEN)) {
+    res.setHeader('Clear-Site-Data', '"cache"');
+    res.append(
+      'Set-Cookie',
+      `${CACHE_GEN_COOKIE}=${CACHE_GEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${adsGateway.isSecure(req) ? '; Secure' : ''}`
+    );
+  }
+  next();
+});
+
 // The app shell, the service worker, the manifest and the icons must always be
 // revalidated. Express sends no Cache-Control of its own, so Cloudflare falls
 // back to its default browser TTL of 4 hours — a new icon or a new build then
@@ -1593,8 +1682,18 @@ const queryOf = (req) => {
   const i = req.originalUrl.indexOf('?');
   return i < 0 ? '' : req.originalUrl.slice(i);
 };
+// The hub's shell carries the build it was served by (H85), so a page can tell
+// when the server under it has changed. No sha (not a release build): no meta.
+const BUILD_SHA = releaseSha();
+const BUILD_META = BUILD_SHA ? `<meta name="grabbit-build" content="${BUILD_SHA}">` : '';
 const sendShell = (res, file) => {
   res.setHeader('Cache-Control', 'no-cache');
+  if (file === 'hub/index.html' && BUILD_META) {
+    return fs.readFile(path.join(PUBLIC_DIR, file), 'utf8', (err, html) => {
+      if (err) return res.sendFile(path.join(PUBLIC_DIR, file), { cacheControl: false });
+      res.type('html').send(html.replace('<head>', `<head>\n    ${BUILD_META}`));
+    });
+  }
   res.sendFile(path.join(PUBLIC_DIR, file), { cacheControl: false });
 };
 app.get('/', (req, res) => {
@@ -2921,7 +3020,9 @@ app.get('/api/config', (_req, res) =>
       .filter((ch) => !!CHANNEL_ROOTS[ch])
       .map((ch) => ({ channel: ch, app: CHANNEL_LIBRARY[ch], audience: ch === '18plus' ? 'adult' : 'general' })),
     adultBlocked: ADULT_BLOCKED,
-    adshortisLibrary: !!ADS_LIBRARY,
+    // The old Adshortis folder page: mounted only with ADSHORTIS_FOLDER_PAGE=1,
+    // outside native mode (H1, H19).
+    adshortisLibrary: ADS_FOLDER_PAGE,
     adflixLibrary: !!ADFLIX_LIBRARY,
     // Grabbit 2.2: the TikShortis app shown in a hub frame. Null = off, and
     // null whenever TIKSHORTIS_MODE picked another mode.
@@ -2929,7 +3030,14 @@ app.get('/api/config', (_req, res) =>
     // Grabbit 3.0: native | embed | off (see modules.js), and the module list
     // the hub draws its navigation from.
     tikshortisMode: TIKSHORTIS_MODE,
-    modules: modules.modulesFor({ tikMode: TIKSHORTIS_MODE, egramMode: EGRAM_MODE }),
+    // Grabbit 3.0 native Adshortis: the effective mode, and the standalone app's
+    // address for the plain link (never an iframe), null when there is none.
+    adshortisMode: ADSHORTIS_MODE,
+    adshortisEmbed: ADSHORTIS_MODE !== 'off' && ADSHORTIS_EMBED ? `${ADSHORTIS_EMBED}/` : null,
+    // The release this server runs (40 hex) or null; null turns the hub's
+    // build check off.
+    build: BUILD_SHA,
+    modules: modules.modulesFor({ tikMode: TIKSHORTIS_MODE, egramMode: EGRAM_MODE, adsMode: ADSHORTIS_MODE }),
   })
 );
 
@@ -3278,6 +3386,23 @@ if (EGRAM_MODE === 'native') {
   console.log(`[grabbit] Social & Photos: native, Elitogram API at ${EGRAM_API}`);
 } else {
   console.log(`[grabbit] Social & Photos: ${EGRAM_MODE}`);
+}
+
+// --- Grabbit 3.0: native Adshortis gateway (/api/ads/*) ------------------------------
+// Mounted only in effective native mode; otherwise /api/ads does not exist.
+// Below the auth gate, so a signed-out caller already got 401 and an app client
+// 403; the gateway refuses everything that is not the owner's browser session.
+if (ADS_GATEWAY) {
+  app.use(adsGateway.MOUNT, (req, res) => {
+    ADS_GATEWAY.handle(req, res).catch(() => {
+      console.warn('[ads] gateway error');
+      if (!res.headersSent) res.status(424).set('Cache-Control', 'private, no-store').json({ ok: false, error: 'Adshortis is not reachable right now' });
+      else res.destroy();
+    });
+  });
+  console.log('[grabbit] Adshortis: native');
+} else {
+  console.log(`[grabbit] Adshortis: ${ADSHORTIS_MODE}`);
 }
 
 // --- Grabbit 2.0 hub ----------------------------------------------------------
@@ -5444,10 +5569,28 @@ app.get('/api/hub/media/:id/file', (req, res) => {
 // Adshortis page and these routes answer 404. Grabbit only reads here; the app
 // owns the folder. See adshortis-library.js for what is listed and served.
 const ADS_LIBRARY = process.env.ADSHORTIS_LIBRARY ? adshortisLibrary.createLibrary(process.env.ADSHORTIS_LIBRARY) : null;
+// Grabbit 3.0 retires the folder page (D3, H1, H19): it serves files by folder
+// path and bypasses Adshortis' own visibility rules. It is mounted only when
+// ADSHORTIS_FOLDER_PAGE=1 is set AND the effective Adshortis mode is off or
+// embed; in native mode it is never mounted, whatever the flag says.
+const ADS_FOLDER_FLAG = process.env.ADSHORTIS_FOLDER_PAGE === '1';
+const ADS_FOLDER_PAGE = ADS_FOLDER_FLAG && ADSHORTIS_MODE !== 'native' && !!ADS_LIBRARY;
+if (ADS_FOLDER_FLAG && ADSHORTIS_MODE === 'native') {
+  console.warn('[grabbit] ADSHORTIS_FOLDER_PAGE=1 is ignored in native Adshortis mode; the folder page stays off.');
+}
+if (ADSHORTIS_MODE === 'native') {
+  // A retired route answers 404 and tells the browser to drop what it cached
+  // from it (H62, H92).
+  app.all(['/api/hub/adshortis', '/api/hub/adshortis/*'], (_req, res) => {
+    res.setHeader('Clear-Site-Data', '"cache"');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(404).json({ ok: false, error: 'Not available' });
+  });
+}
 
 // GET /api/hub/adshortis -> every clip, newest first. The page filters and
 // shuffles in the browser, so this is one compact list.
-app.get('/api/hub/adshortis', (req, res) => {
+if (ADS_FOLDER_PAGE) app.get('/api/hub/adshortis', (req, res) => {
   if (!ADS_LIBRARY) return res.status(404).json({ ok: false, error: 'The Adshortis library is not configured' });
   const items = ADS_LIBRARY.list({ fresh: req.query.fresh === '1' }).map((i) => ({
     id: i.id,
@@ -5462,15 +5605,16 @@ app.get('/api/hub/adshortis', (req, res) => {
 });
 
 // GET /api/hub/adshortis/file?id=<folder>/<file>&v=video|poster[&download=1]
-// -> the clip or its poster, with Range support for seeking.
-app.get('/api/hub/adshortis/file', (req, res) => {
+// -> the clip or its poster, with Range support for seeking. private, no-store
+// (H46): nothing from the folder page outlives a mode change in a browser cache.
+if (ADS_FOLDER_PAGE) app.get('/api/hub/adshortis/file', (req, res) => {
   const v = req.query.v === 'poster' ? 'poster' : req.query.v === 'video' || !req.query.v ? 'video' : null;
   const file = ADS_LIBRARY && v ? ADS_LIBRARY.resolve(String(req.query.id || ''), v) : null;
   if (!file) return res.status(404).json({ ok: false, error: 'Not available' });
   res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
   if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, no-store' } }, (err) => {
     if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
   });
 });

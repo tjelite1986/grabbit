@@ -77,6 +77,36 @@ Elitogram is a separate application:
 | `EGRAM_IMPORT_DIR` | unset | Elitogram's import folder, used with `POSTS_TO_EGRAM=1`. |
 | `EGRAM_LIBRARY_DIR` | unset | Elitogram's media folder, scanned read-only by the duplicate manager. Needed for the Elitogram duplicate adapter. |
 
+## Adshortis (18+)
+
+Adshortis is a separate application. Grabbit 3.0 is moving it into the hub as
+a native 18+ module, behind its own gateway at `/api/ads/*`. In this release
+the gateway only links and unlinks an Adshortis account (`/api/ads/session`);
+the module's pages come later. Each person links their own Adshortis account
+in their own browser, after a fresh sign-in to Grabbit with the main password.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ADSHORTIS_MODE` | `off` | `native` mounts the gateway. `embed` shows a plain link that opens the standalone app in a new tab (never a frame). `off` hides it. Unset or unknown means `off`. A mode whose settings are missing falls back (`native` -> `embed` -> `off`) and logs why. Every change needs the container recreated, not just restarted. |
+| `ADSHORTIS_API_URL` | empty | Adshortis' LAN address, an origin such as `http://adshortis:3000`. Needed for `native`. |
+| `ADSHORTIS_APP_ORIGIN` | empty | The public origin Adshortis checks writes against (its own `APP_ORIGIN`), such as `https://ads.example.com`. Needed for `native`. |
+| `GRABBIT_PUBLIC_ORIGIN` | empty | This hub's own public `https://` origin, such as `https://grabbit.example.com`. Every write to `/api/ads` must carry exactly this `Origin`. Needed for `native`. |
+| `ADSHORTIS_EMBED_URL` | empty | The standalone app's `https://` origin, used for the plain link in `embed` mode (and as the fallback link in `native`). |
+| `ADSHORTIS_UPLOAD_MAX_MB` | - | Reserved for the module's upload page (a later release). Not read yet. |
+| `ADSHORTIS_FOLDER_PAGE` | off | `1` keeps the old folder page (`#/adshortis`, read from `ADSHORTIS_LIBRARY`) in `off` and `embed` mode. It is never mounted in `native` mode, whatever this says. |
+
+`native` also needs Grabbit's own sign-in (`GRABBIT_PASSWORD` set, not
+`GRABBIT_AUTH_DISABLED=1`) and HTTPS through a proxy listed in
+`GRABBIT_TRUST_PROXY`, because both link cookies are `__Host-` cookies. List the
+Grabbit container in Adshortis' `TRUSTED_PROXIES`: the gateway sends the
+viewer's address in `X-Forwarded-For`, and Adshortis throttles sign-ins on it.
+
+What Grabbit keeps in `DATA_DIR`: `ads-seal-key.json` (the key that seals the
+linked session, in the daily snapshots), `ads-logins.json` (one record per
+browser sign-in, as a hash; never snapshotted, so a restore cannot bring a
+revoked link back) and `ads-mode.json` (the mode and cache generation). A
+changed mode, password or `GRABBIT_SECRET` ends every link at the next start.
+
 ## Smart Duplicate Manager
 
 Most duplicate settings are made in the hub under **Duplicates → Settings**:
@@ -106,7 +136,7 @@ retention and prevention. These variables are server-side switches:
 | `ELITE_POSTS_ROOT` | unset | Legacy photo posts destination. Posts go to `<ELITE_POSTS_ROOT>/_import`. |
 | `ELITE_POSTS_IMPORT_DIR` | unset | Overrides `<ELITE_POSTS_ROOT>/_import` whenever the Elitogram import is inactive: `POSTS_TO_EGRAM` is off, or it is `1` without `EGRAM_IMPORT_DIR` (Grabbit then logs a warning). |
 | `DROP_FORMAT_MAIN`, `DROP_FORMAT_18PLUS` | `legacy` | How clips dropped into the main and 18+ shorts channels are named. `legacy` is `<creator>_-_<title>.mp4` (`.web.mp4` for a web-optimised copy) with a `.md` caption; `brackets` is `<title> [@<creator>] [id=<media id>].mp4` with a `.json` sidecar, and leaves out the `[id=…]` part when the item has no usable media id. |
-| `ADSHORTIS_LIBRARY`, `ADFLIX_LIBRARY` | unset | Mount points. When set, the hub lists the Adshortis 18+ and Adflix 18+ library viewers. |
+| `ADSHORTIS_LIBRARY`, `ADFLIX_LIBRARY` | unset | Mount points. When set, the hub lists the Adflix 18+ library viewer; the Adshortis folder page also needs `ADSHORTIS_FOLDER_PAGE=1` (see Adshortis above). |
 | `ADSHORTIS_LIBRARY_DIR`, `PLATFORM_LIBRARY_DIR` | unset | `PLATFORM_LIBRARY_DIR` is an extra folder for the duplicate scan. Neither the 18+ app's library (`ADSHORTIS_LIBRARY_DIR`) nor its import folder (`ELITE_ROOT`) is ever scanned; files an older version recorded there are set aside at startup. |
 
 ## Notifications
