@@ -3015,8 +3015,8 @@ const HUB_APP_LINKS = hub.parseAppLinks(process.env.HUB_APP_LINKS);
 // Read-only numbers for the hub dashboard (public/hub/), counted from the
 // downloaded registry by hub.js. Nothing here is estimated: a count the
 // registry cannot answer is left out rather than guessed.
-app.get('/api/hub/summary', async (_req, res) => {
-  const summary = hub.summarize(readDownloaded());
+app.get('/api/hub/summary', async (req, res) => {
+  const summary = hub.summarize(registryForView(readDownloaded(), wantsAdultView(req), readProfileStoreQuietly()));
   let storage = null;
   try {
     const fsx = await fs.promises.statfs(DOWNLOAD_DIR);
@@ -3036,7 +3036,8 @@ app.get('/api/hub/summary', async (_req, res) => {
 
 // GET /api/hub/creators?q=&limit= -> creators seen in file names, most files first.
 app.get('/api/hub/creators', (req, res) => {
-  res.json({ ok: true, ...hub.creatorList(readDownloaded(), { q: req.query.q, limit: Number(req.query.limit) || 200 }) });
+  const registry = registryForView(readDownloaded(), wantsAdultView(req), readProfileStoreQuietly());
+  res.json({ ok: true, ...hub.creatorList(registry, { q: req.query.q, limit: Number(req.query.limit) || 200 }) });
 });
 
 // --- Grabbit 2.0 profiles -------------------------------------------------------
@@ -4737,33 +4738,43 @@ function siteOfUrl(u) {
 // name or source URL), the creator's profile, and the place it was saved. A
 // save into the 18+ app or the adults shelf makes it 18+; nothing here can
 // make an item general that the owner did not classify general.
-function mediaAudience(entry, store) {
-  const names = [entry.filename, `${mediaViewer.stemOf(entry.filename)}.mp4`];
+// `memo` (optional, per request) reuses a classification for identical inputs,
+// so a registry of thousands of rows costs one classify per distinct creator.
+// `items` (optional) is an ITEM_STORE.audienceIndex() read once for many rows.
+function entryClassification(entry, store, memo = null, items = ITEM_STORE) {
+  const names = entry.filename ? [...new Set([entry.filename, `${mediaViewer.stemOf(entry.filename)}.mp4`])] : [];
   let row = null;
-  if (ITEM_STORE) {
+  if (items) {
     try {
-      row = (entry.sourceUrl && ITEM_STORE.get(mediaKey(entry.sourceUrl))) || null;
-      for (const n of names) row = row || ITEM_STORE.getByFilename(n);
+      row = (entry.itemKey && items.get(entry.itemKey)) || (!entry.itemKey && entry.sourceUrl && items.get(mediaKey(entry.sourceUrl))) || null;
+      for (const n of names) row = row || items.getByFilename(n);
     } catch {
       row = null;
     }
   }
   const ch = String(entry.channel || '');
   const savedAdult = ch === '18plus' || ch === 'server/adults' || ch.startsWith('server/adults/');
-  const c = audience.classify(
-    {
-      creatorKey: entry.creator,
-      handle: entry.creator,
-      site: siteOfUrl(entry.sourceUrl),
-      extractor: entry.extractor,
-      sourceUrl: entry.sourceUrl,
-      requested: savedAdult ? 'adult' : null,
-      prior: row ? row.audience : null,
-      priorByHand: Boolean(row && row.classified_by_hand),
-    },
-    store,
-    { keyOf: creatorKey }
-  );
+  // classify() reads the source URL only to see whether it names an 18+ site,
+  // so only an 18+ URL is passed on; that keeps the memo key free of per-item
+  // URLs.
+  const input = {
+    creatorKey: entry.creator,
+    handle: entry.creator,
+    site: entry.site || siteOfUrl(entry.sourceUrl),
+    extractor: entry.extractor,
+    sourceUrl: entry.sourceUrl && audience.isAdultSite(entry.sourceUrl) ? entry.sourceUrl : null,
+    requested: savedAdult ? 'adult' : null,
+    prior: row ? row.audience : null,
+    priorByHand: Boolean(row && row.classified_by_hand),
+  };
+  const mk = memo ? JSON.stringify(input) : null;
+  if (memo && memo.has(mk)) return memo.get(mk);
+  const c = audience.classify(input, store, { keyOf: creatorKeyCached, index: profileIndexOf(store) });
+  if (memo) memo.set(mk, c);
+  return c;
+}
+function mediaAudience(entry, store) {
+  const c = entryClassification(entry, store);
   // The creator's profile, for the "open profile" link, whatever its status.
   let profileId = c.profileId;
   if (!profileId && store && entry.creator) {
@@ -4775,6 +4786,81 @@ function mediaAudience(entry, store) {
     if (m.length) profileId = m[0].profile.id;
   }
   return { audience: c.audience, reasons: c.reasons, profileId: profileId || null };
+}
+// creatorKey() is pure and classify() runs it over every profile name for each
+// creator, so the gate's bulk paths reuse earlier answers.
+const creatorKeyMemo = new Map();
+function creatorKeyCached(name) {
+  const k = String(name);
+  let v = creatorKeyMemo.get(k);
+  if (v === undefined) {
+    if (creatorKeyMemo.size >= 50000) creatorKeyMemo.clear();
+    v = creatorKey(name);
+    creatorKeyMemo.set(k, v);
+  }
+  return v;
+}
+// One profile index per store object; a saved store is a new object.
+const profileIndexes = new WeakMap();
+function profileIndexOf(store) {
+  if (!store || typeof store !== 'object') return null;
+  let ix = profileIndexes.get(store);
+  if (!ix) profileIndexes.set(store, (ix = audience.indexProfiles(store, creatorKeyCached)));
+  return ix;
+}
+// H4 (audience gate on Grabbit's own surfaces): an entry that is 18+ or not
+// classified general reaches a list, a count, a detail or a file only when the
+// request asks for the 18+ view with `audience=adult`. Only the hub's 18+ view
+// sends it. Everything else answers as if the entry did not exist.
+function wantsAdultView(req) {
+  return String((req && req.query && req.query.audience) || '') === 'adult';
+}
+function passesAudience(aud, adultView) {
+  return adultView || aud === 'general';
+}
+// The downloaded registry with only the rows this view may count. A file name
+// is general only when every row that names it is; a row without a file name
+// is classified from its key alone.
+function registryForView(registry, adultView, store) {
+  if (adultView) return registry;
+  const memo = new Map();
+  const hostAdult = new Map();
+  let items = null;
+  try {
+    items = ITEM_STORE ? ITEM_STORE.audienceIndex() : null;
+  } catch {
+    items = null;
+  }
+  const byName = new Map();
+  const rows = Object.entries(registry || {});
+  const audOf = (key, entry) => {
+    const filename = entry && typeof entry.filename === 'string' ? entry.filename : null;
+    const host = key.startsWith('id:') || key.startsWith('yt:') ? null : key.split('/')[0];
+    let adultHost = host ? hostAdult.get(host) : false;
+    if (adultHost === undefined) hostAdult.set(host, (adultHost = audience.isAdultSite(`https://${host}/`)));
+    return entryClassification({
+      filename,
+      channel: entry && entry.channel,
+      creator: hub.creatorOf(filename),
+      site: hub.siteOf(key),
+      sourceUrl: adultHost ? urlFromKey(key) : null,
+      itemKey: key,
+    }, store, memo, items).audience;
+  };
+  const verdict = new Map();
+  for (const [key, entry] of rows) {
+    const a = audOf(key, entry);
+    verdict.set(key, a);
+    const name = entry && entry.filename;
+    if (name && a !== 'general') byName.set(name, false);
+    else if (name && !byName.has(name)) byName.set(name, true);
+  }
+  const out = {};
+  for (const [key, entry] of rows) {
+    const name = entry && entry.filename;
+    if (name ? byName.get(name) : verdict.get(key) === 'general') out[key] = entry;
+  }
+  return out;
 }
 function readProfileStoreQuietly() {
   try {
@@ -4831,16 +4917,19 @@ function probeMedia(file, st) {
 // newest entry with one, out of the last ten), each with where its item stands
 // now. The history line keeps the error of the moment it failed; a later hand
 // classification only shows up here.
-app.get('/api/hub/media', (_req, res) => {
+app.get('/api/hub/media', (req, res) => {
   const store = readProfileStoreQuietly();
+  const adultView = wantsAdultView(req);
   const history = readHistory();
   const items = history
     .filter((e) => mediaViewer.isPlainName(e.filename))
-    .map((e) => mediaListItem(e, store));
+    .map((e) => mediaListItem(e, store))
+    .filter((it) => passesAudience(it.audience, adultView));
   const recent = history.slice(0, 10);
   const lastFile = recent.findIndex((e) => e.filename);
   const misses = (lastFile === -1 ? recent : recent.slice(0, lastFile))
     .filter((e) => !e.filename)
+    .filter((e) => passesAudience(entryClassification(e, store).audience, adultView))
     .map((e) => ({
       id: e.id,
       time: e.time || null,
@@ -4910,6 +4999,7 @@ app.get('/api/hub/media/:id', async (req, res) => {
   const store = readProfileStoreQuietly();
   const item = mediaListItem(e, store);
   const a = mediaAudience(e, store);
+  if (!passesAudience(a.audience, wantsAdultView(req))) return res.status(404).json({ ok: false, error: 'No such media entry' });
   const found = mediaViewer.findVariants(e.filename, mediaDirsOf(e), MEDIA_ROOTS);
   const variants = [];
   for (const v of ['original', 'web']) {
@@ -4956,6 +5046,8 @@ app.get('/api/hub/media/:id/file', (req, res) => {
   const e = mediaEntry(req.params.id);
   const v = String(req.query.v || 'original');
   if (!e || !mediaViewer.VARIANTS.includes(v)) return res.status(404).json({ ok: false, error: 'Not available' });
+  const fileAudience = entryClassification(e, readProfileStoreQuietly()).audience;
+  if (!passesAudience(fileAudience, wantsAdultView(req))) return res.status(404).json({ ok: false, error: 'Not available' });
   const found = mediaViewer.findVariants(e.filename, mediaDirsOf(e), MEDIA_ROOTS);
   const file = found && found[v];
   // Media only: a name the history log got from a site could end in .html or
@@ -6339,8 +6431,13 @@ app.post('/api/playlists/delete', (req, res) => {
 });
 
 // GET /api/history -> recent downloads, newest first.
-app.get('/api/history', (_req, res) => {
-  res.json({ ok: true, items: readHistory().slice(0, 100) });
+app.get('/api/history', (req, res) => {
+  const adultView = wantsAdultView(req);
+  const store = adultView ? null : readProfileStoreQuietly();
+  const items = adultView
+    ? readHistory().slice(0, 100)
+    : readHistory().filter((e) => passesAudience(entryClassification(e, store).audience, false)).slice(0, 100);
+  res.json({ ok: true, items });
 });
 
 // GET /api/music?q=&lib=main|kids&limit=&offset= -> the music log (every track

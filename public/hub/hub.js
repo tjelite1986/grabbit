@@ -87,10 +87,20 @@
   // A picture Grabbit took itself (a video frame) is already a local /api/thumb?id= path.
   const thumbSrc = (u) => {
     const s = String(u || '');
-    if (/^https?:\/\//i.test(s)) return '/api/thumb?url=' + encodeURIComponent(s);
-    if (/^\/api\/thumb\?id=local-[0-9a-f]{40}$/.test(s)) return s;
+    if (/^https?:\/\//i.test(s)) return adultParam('/api/thumb?url=' + encodeURIComponent(s));
+    if (/^\/api\/thumb\?id=local-[0-9a-f]{40}$/.test(s)) return adultParam(s);
     return null;
   };
+  // H4: the Media page's 18+ and Unclassified views are the hub's 18+ view, the
+  // only place that asks the server for entries not classified general. The
+  // view is opened on purpose each visit; its list is dropped on leaving it.
+  const ADULT_AUDS = ['adult', 'unknown'];
+  const inAdultView = () => {
+    const r = route();
+    return r.id === 'media' && ADULT_AUDS.includes(r.params.get('aud') || '');
+  };
+  const adultParam = (url) => (inAdultView() ? `${url}${url.includes('?') ? '&' : '?'}audience=adult` : url);
+  const mediaSource = () => (inAdultView() ? state.mediaAdult : state.media);
   // Signed CDN links expire; a picture that can no longer be fetched gives way
   // to the empty placeholder instead of a broken-image icon.
   const dropBrokenImg = (e) => {
@@ -132,6 +142,8 @@
     history: null,
     media: null,
     mediaMisses: null,
+    mediaAdult: null,
+    mediaAdultMisses: null,
     jobs: new Map(),
     review: null,
     inbox: null,
@@ -149,6 +161,9 @@
       config: () => api('/api/config').then((d) => { state.config = d; }),
       history: () => api('/api/history').then((d) => { state.history = d.items || []; }),
       media: () => api('/api/hub/media').then((d) => { state.media = d.items || []; state.mediaMisses = d.misses || []; }),
+      mediaAdult: () => (inAdultView()
+        ? api(adultParam('/api/hub/media')).then((d) => { state.mediaAdult = d.items || []; state.mediaAdultMisses = d.misses || []; })
+        : Promise.resolve()),
       review: () => api('/api/hub/review').then((d) => { state.review = d; }),
       inbox: () => api('/api/hub/inbox?limit=1').then((d) => { state.inbox = d; }),
       jobs: () => api('/api/jobs').then((d) => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
@@ -169,7 +184,7 @@
       const prev = state.jobs.get(d.job.id);
       state.jobs.set(d.job.id, d.job);
       // A finished download changes the counts and the recent list.
-      if (d.job.status === 'done' && prev && prev.status !== 'done') load(['summary', 'history', 'media']).then(scheduleRender);
+      if (d.job.status === 'done' && prev && prev.status !== 'done') load(['summary', 'history', 'media', 'mediaAdult']).then(scheduleRender);
       scheduleRender();
     };
     // A closed stream (container restart) never reopens by itself.
@@ -592,7 +607,7 @@
     const aud = params.get('aud') || '';
     const q = (params.get('q') || '').toLowerCase();
     const profile = Number(params.get('profile')) || 0;
-    return (state.media || [])
+    return (mediaSource() || [])
       .filter((it) => !profile || it.profileId === profile)
       .filter((it) => !kind || it.kind === kind)
       .filter((it) => !aud || it.audience === aud)
@@ -630,7 +645,14 @@
     // History entries without a file are refused or failed attempts, not media.
     // They stay out of the grid, but the newest ones are named above it so the
     // latest download never just goes missing.
-    const misses = state.mediaMisses || [];
+    const adultView = ADULT_AUDS.includes(aud);
+    if (!adultView) {
+      state.mediaAdult = null;
+      state.mediaAdultMisses = null;
+    } else if (!state.mediaAdult) {
+      load(['mediaAdult']).then(scheduleRender);
+    }
+    const misses = (adultView ? state.mediaAdultMisses : state.mediaMisses) || [];
     const items = mediaList(params);
     const query = new URLSearchParams(params);
     query.delete('open');
@@ -646,7 +668,7 @@
       'aria-label': 'Audience',
       onchange: (e) => { location.hash = withParam('aud', e.currentTarget.value); },
     },
-    [['', 'All audiences'], ['general', 'General'], ['adult', '18+'], ['unknown', 'Unclassified']]
+    [['', 'General'], ['adult', '18+'], ['unknown', 'Unclassified']]
       .map(([v, label]) => h('option', { value: v, selected: v === aud }, label)));
     return [
       h('h1', null, 'Media'),
@@ -662,7 +684,7 @@
               missState(it)))))
         : null,
       !items.length
-        ? h('p', { class: 'empty' }, state.media ? 'Nothing matches.' : 'Loading ...')
+        ? h('p', { class: 'empty' }, mediaSource() ? 'Nothing matches.' : 'Loading ...')
         : aud
           ? h('div', { class: 'media-grid' }, items.map((it) => tile(it, query)))
           : h('div', { class: 'media-sections' }, MEDIA_GROUPS.map(([g, label]) => {
@@ -1449,7 +1471,7 @@
     const sec = Math.round(s % 60);
     return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   };
-  const fileUrl = (id, v, download) => `/api/hub/media/${encodeURIComponent(id)}/file?v=${v}${download ? '&download=1' : ''}`;
+  const fileUrl = (id, v, download) => adultParam(`/api/hub/media/${encodeURIComponent(id)}/file?v=${v}${download ? '&download=1' : ''}`);
 
   function viewerNeighbours() {
     const r = route();
@@ -1495,7 +1517,7 @@
     if (r.id === 'adshortis' && !state.ads) return;
     // A video opens the vertical feed; pictures and audio the plain viewer.
     // Every Adshortis clip is a video.
-    const listed = r.id === 'media' ? (state.media || []).find((it) => it.id === id) : null;
+    const listed = r.id === 'media' ? (mediaSource() || []).find((it) => it.id === id) : null;
     const mode = r.id === 'adshortis' || (listed && listed.kind === 'video') ? 'feed' : 'plain';
     const source = FEED_SOURCES[r.id];
     if (viewer.el && viewer.mode === 'feed' && mode === 'feed' && feed.src === source && feed.slides.has(id)) {
@@ -1528,7 +1550,7 @@
     }
     drawViewer();
     const seq = ++viewer.seq;
-    api(`/api/hub/media/${encodeURIComponent(id)}`)
+    api(adultParam(`/api/hub/media/${encodeURIComponent(id)}`))
       .then((d) => {
         if (seq !== viewer.seq) return;
         viewer.detail = d.item;
@@ -1553,7 +1575,7 @@
   function drawViewer() {
     const el = viewer.el;
     if (!el) return;
-    const fromList = (state.media || []).find((it) => it.id === viewer.id) || null;
+    const fromList = (mediaSource() || []).find((it) => it.id === viewer.id) || null;
     const d = viewer.detail;
     const it = (d && !d.error ? d : null) || fromList || {};
     const nb = viewerNeighbours();
@@ -1761,9 +1783,9 @@
       page: 'media',
       list: (id) => {
         const list = viewerNeighbours().list.filter((it) => it.kind === 'video');
-        return list.some((it) => it.id === id) ? list : (state.media || []).filter((it) => it.id === id);
+        return list.some((it) => it.id === id) ? list : (mediaSource() || []).filter((it) => it.id === id);
       },
-      detail: (id) => api(`/api/hub/media/${encodeURIComponent(id)}`).then((d) => d.item),
+      detail: (id) => api(adultParam(`/api/hub/media/${encodeURIComponent(id)}`)).then((d) => d.item),
       fileUrl,
       poster: (it) => thumbSrc(it.thumbnail),
       creatorHref: (it) => (it.profileId ? `#/profiles?id=${it.profileId}` : it.creator ? `#/profiles?q=${encodeURIComponent(it.creator)}` : null),

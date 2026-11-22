@@ -262,3 +262,40 @@ test('reddclips is never general by itself: no creator, a listing, or an alias o
   const s = profiles.classifyProfiles(reg.store, [reg.store.profiles[0].id], 'general', NOW).store;
   assert.equal(classify({ creatorKey: 'someuser', site: 'reddclips.com' }, s).audience, 'general');
 });
+
+test('indexProfiles narrows matchProfiles and classify without changing an answer', () => {
+  const { safeCreator } = require('../name-safety');
+  const profiles = require('../profiles');
+  let store = profiles.emptyStore();
+  const names = ['Jane Doe', 'jane doe', 'Ada', 'Twin', 'Twin', 'Bob', 'Zed'];
+  const auds = ['general', 'adult'];
+  names.forEach((name, i) => {
+    store = profiles.create(store, {
+      name,
+      audience: auds[i % 2],
+      accounts: i % 2 ? [{ platform: i % 4 ? 'tiktok' : 'instagram', handle: name.toLowerCase() }] : [],
+    }, 1).store;
+  });
+  // Registry-synced profiles carry aliases and no manual name.
+  store = profiles.sync(store, new Map([['Ada', { name: 'Ada', lastAt: 1 }], ['Ghost', { name: 'Ghost', lastAt: 2 }]]), 3).store;
+  const index = audience.indexProfiles(store, safeCreator);
+  const creators = ['Jane Doe', 'jane doe', 'Ada', 'Twin', 'Ghost', 'Bob', 'nobody', '', 'unknown'];
+  for (const c of creators) {
+    for (const site of ['tiktok.com', 'instagram.com', 'redgifs.com', null]) {
+      for (const prior of [null, 'general', 'adult']) {
+        const input = { creatorKey: c, handle: c, site, prior, priorByHand: prior === 'general' };
+        assert.deepEqual(
+          audience.classify(input, store, { keyOf: safeCreator, index }),
+          audience.classify(input, store, { keyOf: safeCreator }),
+          JSON.stringify(input)
+        );
+      }
+    }
+  }
+  // An index built for another store is ignored, not trusted.
+  const other = audience.indexProfiles(profiles.emptyStore(), safeCreator);
+  assert.deepEqual(
+    audience.matchProfiles(store, { creatorKey: 'ada', handle: 'ada', platform: 'tiktok' }, safeCreator, other),
+    audience.matchProfiles(store, { creatorKey: 'ada', handle: 'ada', platform: 'tiktok' }, safeCreator)
+  );
+});

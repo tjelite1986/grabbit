@@ -16,7 +16,7 @@ const { boot, filesUnder } = require('./helpers/guard-server');
 
 const LANDSCAPE = '?w=1920&h=1080';
 const PORTRAIT = '?w=1080&h=1920';
-const historyFor = async (s, url) => (await s.call('/api/history')).body.items.filter((h) => h.sourceUrl === url);
+const historyFor = async (s, url) => (await s.call('/api/history?audience=adult')).body.items.filter((h) => h.sourceUrl === url);
 const media = (dir) => filesUnder(dir).filter((f) => /\.(mp4|jpg)$/.test(f));
 const until = async (fn, what) => {
   for (let i = 0; i < 200; i++) {
