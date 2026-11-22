@@ -54,6 +54,7 @@ const { splitArtists, splitList, splitGenres, addEntity, joinEntityRuns } = requ
 const { musicNorm, artistParts, titleCandidates, namedIn } = require('./music-match');
 const { cleanRuleStr, rulePatternError, ruleTextMatch } = require('./rule-patterns');
 const { isTransientDownloadError, retryDelayMs, isRetryableError } = require('./retry-errors');
+const { durationKnown, fmtClock, contentDisposition, safeExt, imageMime } = require('./media-format');
 const sourceMeta = require('./source-meta');
 const smartRouting = require('./smart-routing');
 const itemMeta = require('./item-meta');
@@ -433,16 +434,8 @@ const SHORTS_MAX_DURATION = (() => {
   const n = parseInt(process.env.SHORTS_MAX_DURATION, 10);
   return Number.isFinite(n) && n >= 0 ? n : 600;
 })();
-function durationKnown(job) {
-  return Number.isFinite(Number(job && job.duration));
-}
 function tooLongForShorts(job) {
   return SHORTS_MAX_DURATION > 0 && durationKnown(job) && Number(job.duration) > SHORTS_MAX_DURATION;
-}
-function fmtClock(sec) {
-  const s = Math.max(0, Math.round(Number(sec) || 0));
-  const m = Math.floor(s / 60);
-  return m + ':' + String(s % 60).padStart(2, '0');
 }
 function shortsTooLongError(job) {
   return `This video is ${fmtClock(job.duration)} long — too long for shorts (max ${fmtClock(SHORTS_MAX_DURATION)}). Save it to the server library instead.`;
@@ -2065,13 +2058,6 @@ function tagAudio(src, tags) {
       reject(new Error(tagDependencyError(err) || last || 'tagging failed'));
     });
   });
-}
-
-// Content-Disposition value safe for non-ASCII names (RFC 6266): an ASCII
-// fallback plus a UTF-8 filename* so ÅÄÖ etc. survive the download.
-function contentDisposition(filename) {
-  const ascii = filename.replace(/[^\x20-\x7E]/g, '_') || 'download';
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 // Build the caption shown in elite-v2: original text + hashtags + source link.
@@ -9367,18 +9353,6 @@ function serverHas(folder, creator, stem) {
 // other destination saves them in the plain photos library (extension
 // preserved). Used for mixed albums like erome, where the videos go to shorts
 // and the pictures to posts.
-
-function safeExt(ext, fallback) {
-  const e = String(ext || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  return e || fallback;
-}
-
-function imageMime(ext) {
-  return ext === 'png' ? 'image/png'
-    : ext === 'webp' ? 'image/webp'
-    : ext === 'gif' ? 'image/gif'
-    : 'image/jpeg';
-}
 
 // Already in the photos library (any extension)?
 function photoHas(stem) {
