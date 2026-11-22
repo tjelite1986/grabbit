@@ -38,6 +38,8 @@ extractors.resolve = async (url) => {
   if (u.searchParams.get('w')) job.width = Number(u.searchParams.get('w'));
   if (u.searchParams.get('h')) job.height = Number(u.searchParams.get('h'));
   if (u.searchParams.get('dur')) job.duration = Number(u.searchParams.get('dur'));
+  // ?thumb=1 gives the item a site picture on the loopback server.
+  if (u.searchParams.get('thumb') === '1') job.thumbnail = `${BASE}/thumbs/${encodeURIComponent(id)}.jpg`;
   return job;
 };
 extractors.isProfile = () => false;

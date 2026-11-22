@@ -816,3 +816,33 @@ test('the job stream reduces live updates, and re-sends a job reclassified 18+',
   const snap = await (await fetch(`${s.base}/api/jobs`, { headers: s.headers })).json();
   assert.equal(snap.jobs.find((j) => j.id === gen.job.id).creator, null);
 });
+
+// H34: a resolve preview is shown to the view that resolved it; a job's own
+// picture follows the job's audience.
+test('thumbnails: a resolve preview loads, a job picture follows the job\'s audience', async (t) => {
+  const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
+  const thumbOf = (url, q = '') => fetch(`${s.base}/api/thumb?url=${encodeURIComponent(url)}&v=2${q}`, { headers: s.headers });
+
+  const preview = await (await fetch(`${s.base}/api/resolve?url=${encodeURIComponent(s.fakeUrl('video', 'tiktok', 'stranger', 'pv1') + '?thumb=1')}`, { headers: s.headers })).json();
+  assert.ok(preview.thumbnail, JSON.stringify(preview));
+  const p = await thumbOf(preview.thumbnail);
+  assert.equal(p.status, 200, 'a preview resolved on a general view loads there');
+  assert.equal(p.headers.get('cache-control'), 'private, no-cache');
+
+  const gen = await s.saveJob(`${s.fakeUrl('video', 'tiktok', 'Jane Doe', 'jt-g')}?thumb=1`, 'main');
+  assert.equal(gen.job.status, 'done');
+  assert.equal((await thumbOf(gen.job.thumbnail)).status, 200);
+
+  const adult = await s.saveJob(`${s.fakeUrl('video', 'tiktok', 'Ada', 'jt-a')}?thumb=1`, '18plus');
+  assert.equal(adult.job.status, 'done');
+  assert.ok(adult.job.thumbnail);
+  assert.equal((await thumbOf(adult.job.thumbnail)).status, 404);
+  const a2 = await thumbOf(adult.job.thumbnail, '&audience=adult');
+  assert.equal(a2.status, 200);
+  assert.equal(a2.headers.get('cache-control'), 'private, no-store');
+  // The same picture resolved again on a general view stays held back: the
+  // strictest provenance wins (H42).
+  const again = await (await fetch(`${s.base}/api/resolve?url=${encodeURIComponent(`${s.fakeUrl('video', 'tiktok', 'Ada', 'jt-a')}?thumb=1`)}`, { headers: s.headers })).json();
+  assert.equal(again.thumbnail, adult.job.thumbnail);
+  assert.equal((await thumbOf(again.thumbnail)).status, 404);
+});

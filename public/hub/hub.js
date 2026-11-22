@@ -85,18 +85,23 @@
   }
   // Site thumbnails go through Grabbit's proxy: their CDNs refuse a foreign Referer.
   // A picture Grabbit took itself (a video frame) is already a local /api/thumb?id= path.
+  // v=2: the thumbnail cache generation of the provenance index (H34), so a
+  // picture the browser cached under the old 7-day rule is never asked for.
+  // Legacy `local-` frames are never served any more and draw the placeholder.
   const thumbSrc = (u) => {
     const s = String(u || '');
-    if (/^https?:\/\//i.test(s)) return adultParam('/api/thumb?url=' + encodeURIComponent(s));
-    if (/^\/api\/thumb\?id=local-[0-9a-f]{40}$/.test(s)) return adultParam(s);
+    if (/^https?:\/\//i.test(s)) return adultParam('/api/thumb?url=' + encodeURIComponent(s) + '&v=2');
+    if (/^\/api\/thumb\?id=f-[0-9a-f]{40}$/.test(s)) return adultParam(`${s}&v=2`);
     return null;
   };
   // H4: the Media page's 18+ and Unclassified views are the hub's 18+ view, the
   // only place that asks the server for entries not classified general. The
   // view is opened on purpose each visit; its list is dropped on leaving it.
   const ADULT_AUDS = ['adult', 'unknown'];
+  // The Library's 18+ scope, opened on purpose each visit, is an 18+ view too.
   const inAdultView = () => {
     const r = route();
+    if (r.id === 'library') return r.params.get('scope') === 'adult' && libUi.adultOk;
     return r.id === 'media' && ADULT_AUDS.includes(r.params.get('aud') || '');
   };
   const adultParam = (url) => (inAdultView() ? `${url}${url.includes('?') ? '&' : '?'}audience=adult` : url);

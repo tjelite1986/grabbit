@@ -1372,8 +1372,13 @@
       // straight from the site leaves a grey card. The proxy sends the Referer
       // the CDN wants and caches the picture, so a re-opened profile costs
       // nothing. Non-http values (there are none today) pass through untouched.
-      const thumbSrc = (u) =>
-        /^https?:\/\//i.test(String(u || '')) ? '/api/thumb?url=' + encodeURIComponent(u) : String(u || '');
+      // v=2: the thumbnail cache generation of the provenance index, so nothing
+      // the browser cached under the old 7-day rule is asked for again.
+      const thumbSrc = (u) => {
+        const s = String(u || '');
+        if (/^https?:\/\//i.test(s)) return '/api/thumb?url=' + encodeURIComponent(s) + '&v=2';
+        return /^\/api\/thumb\?id=f-[0-9a-f]{40}$/.test(s) ? s + '&v=2' : s;
+      };
       // Already in a Navidrome library as the same song (artist + title), even
       // though it came from another upload. A title-only ("weak") match is only
       // shown as a warning — never used to skip a download.

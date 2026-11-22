@@ -43,6 +43,7 @@ them.
 | `gda-clients.json` | `gda.js` (registry read/write), `gda-admin.js` (CLI) | Per-app API clients (sensitive) |
 | `profiles.json` | `profiles.js`, `server.js` | Creator profiles |
 | `inbox-settings.json` | `server.js`, `inbox.js` | Inbox settings |
+| `thumb-index.json` | `thumb-index.js`, `server.js` | Thumbnail provenance: which entries, jobs, items or previews each cached picture belongs to. `/api/thumb` serves or fetches only an indexed picture, to a view its strictest provenance allows. |
 
 ## Other stores (not in `STATE_FILES`)
 
@@ -52,7 +53,7 @@ them.
 | `dupes.db` | `dupe-store.js` | SQLite for the Duplicate Manager |
 | `dupe-trash/` | `dupe-trash.js` | Duplicates set aside, restorable |
 | `dupe-thumbs/` | `dupe-routes.js` | Regenerable thumbnail cache |
-| `thumbs/`, `covers/` | `server.js` | Regenerable caches |
+| `thumbs/`, `covers/` | `server.js` | Regenerable caches. In `thumbs/`, `<sha1>.<ext>` is a picture fetched from its site URL, `keep-<tag>-<sha1>.<ext>` one made again from an entry's own file, and `f-<sha1>.<ext>` a frame Grabbit took for one entry. The first start with `thumb-index.json` moved every older file into `thumbs/quarantine-<stamp>/`; those files are never served and can be deleted by hand. |
 | `models/` | `dupe-ai.js` | Optional AI model files |
 | `routing.jsonl` (+ `.1`) | `server.js` (`logRoutingDecision()`) | Smart Routing log. Best effort (a write failure is only a warning). Holds source URLs and creator names: **treat as sensitive**. A logged decision can lack a history row (open decision D4). |
 | `server.log` (+ `.1`) | `server.js` | Server log |

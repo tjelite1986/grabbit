@@ -23,6 +23,7 @@ const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = req
 const gda = require('./gda');
 const platformDrop = require('./platform-drop');
 const hub = require('./hub');
+const thumbIndexLib = require('./thumb-index');
 const profiles = require('./profiles');
 const audience = require('./audience');
 const itemStore = require('./item-store');
@@ -532,6 +533,7 @@ const STATE_FILES = [
   'gda-clients.json',
   'profiles.json',
   'inbox-settings.json',
+  'thumb-index.json',
 ];
 
 function writeJsonAtomic(file, value) {
@@ -699,7 +701,8 @@ function recordHistory(entry) {
     const id = `${Date.now()}-${historySeq++}`;
     list.unshift({ id, time: Date.now(), ...entry });
     writeJsonAtomic(HISTORY_FILE, list.slice(0, HISTORY_MAX));
-    warmThumb(entry && entry.thumbnail, { keep: true });
+    noteHistoryThumb(list[0]);
+    warmThumb(entry && entry.thumbnail);
   } catch (e) {
     console.warn('history write failed:', e.message);
   }
@@ -2144,6 +2147,8 @@ app.get('/api/resolve', async (req, res) => {
     const job = await extractors.resolve(url);
     const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
     const isImage = job.mediaType === 'image';
+    // A resolve preview is shown to the view that asked for it (H34).
+    noteThumb(job.thumbnail, { kind: 'preview', aud: wantsAdultView(req) ? 'adult' : 'general' });
     res.json({
       ok: true,
       extractor: job.extractor,
@@ -2283,26 +2288,117 @@ function thumbReferer(url) {
 
 // Keep the cache from growing without bound. Runs on boot and every 200 stores
 // — a directory listing per picture would cost more than the pictures do.
-const THUMB_KEEP_PREFIX = 'keep-';
 // A picture that neither the site nor a local file could give is not asked for
 // again for this long, so a page of dead links does not hit the sites on every view.
 const THUMB_MISS_MS = 6 * 3600 * 1000;
 const THUMB_MISS_MAX = 5000;
 const thumbMisses = new Map();
 
-// The cache keys of the site pictures the history still shows.
-function historyThumbKeys() {
-  const keys = new Set();
-  for (const e of readHistory()) {
-    if (e && /^https?:\/\//i.test(String(e.thumbnail || ''))) keys.add(thumbKey(e.thumbnail));
+// --- Thumbnail provenance index (H34, H42, H47, H57, H69, H83, H94) ---------
+// /api/thumb serves or fetches a picture only for a key thumb-index.json
+// knows, and only to a view the key's strictest provenance allows (see
+// thumb-index.js). Grabbit records a provenance wherever it learns or hands out
+// a picture: a history row, a registry row, a library item, a job, a resolve.
+const THUMB_INDEX_FILE = path.join(DATA_DIR, 'thumb-index.json');
+// Classification inputs of a history row, a job or a library item.
+function thumbIn(e, channel) {
+  return thumbIndexLib.cleanIn({
+    creator: e.creator, sourceCreator: e.sourceCreator, site: e.site, extractor: e.extractor,
+    sourceUrl: e.sourceUrl || e.url, channel: channel === undefined ? e.channel : channel, filename: e.filename,
+    itemKey: e.itemKey,
+  });
+}
+// readProfiles() counts the whole registry to sync it, too much for every
+// picture on a page: a full read at most every few seconds, the cached store
+// in between (a store that cannot be read gives null, so nothing is general).
+let thumbStoreReadAt = 0;
+function thumbProfileStore() {
+  if (Date.now() - thumbStoreReadAt > 5000) {
+    thumbStoreReadAt = Date.now();
+    return readProfileStoreQuietly();
   }
-  return keys;
+  try {
+    return readProfilesReadOnly().store;
+  } catch {
+    return null;
+  }
+}
+// What "still referenced" means during one prune: a history row, a registry
+// key, an item or a live job. Built once per prune, never per key.
+let thumbRefCtx = null;
+const THUMBS = new thumbIndexLib.ThumbIndex({
+  classify: (input) => entryClassification(input, thumbProfileStore()).audience,
+  referenced: (ref) => {
+    const c = thumbRefCtx;
+    if (!c) return true;
+    const kind = ref.slice(0, 2);
+    const rest = ref.slice(2);
+    if (kind === 'h:') return c.history.has(rest);
+    if (kind === 'r:') return Object.hasOwn(c.registry, rest);
+    if (kind === 'i:') return !!(ITEM_STORE && ITEM_STORE.get(rest));
+    if (kind === 'j:') return jobsMap.has(rest);
+    return false;
+  },
+});
+try {
+  const raw = readJsonState(THUMB_INDEX_FILE, null);
+  if (raw) THUMBS.load(raw);
+} catch (e) {
+  console.warn('thumbs: thumb-index.json could not be read:', e.message);
+}
+let thumbIndexTimer = null;
+function saveThumbIndex(now = false) {
+  if (!THUMBS.dirty) return;
+  const write = () => {
+    thumbIndexTimer = null;
+    try {
+      writeJsonAtomic(THUMB_INDEX_FILE, THUMBS.toJSON());
+      THUMBS.dirty = false;
+    } catch (e) {
+      console.warn('thumbs: thumb-index.json write failed:', e.message);
+    }
+  };
+  if (now) {
+    clearTimeout(thumbIndexTimer);
+    return write();
+  }
+  if (!thumbIndexTimer) {
+    thumbIndexTimer = setTimeout(write, 1000);
+    if (thumbIndexTimer.unref) thumbIndexTimer.unref();
+  }
+}
+process.on('exit', () => saveThumbIndex(true));
+// The index key of a picture address: a site URL or Grabbit's own frame id.
+function thumbKeyOf(thumbnail) {
+  const s = String(thumbnail || '');
+  if (/^https?:\/\//i.test(s)) return validUrl(s) ? thumbKey(s) : null;
+  const m = /^\/api\/thumb\?id=(f-[0-9a-f]{40})$/.exec(s);
+  return m ? m[1] : null;
+}
+function noteThumb(thumbnail, prov) {
+  const key = thumbKeyOf(thumbnail);
+  if (!key) return null;
+  if (key.startsWith('f-') && prov.kind === 'entry') prov = { ...prov, kind: 'local' };
+  THUMBS.add(key, prov);
+  saveThumbIndex();
+  return key;
+}
+function noteHistoryThumb(e) {
+  if (e && e.thumbnail && e.id) noteThumb(e.thumbnail, { kind: 'entry', ref: `h:${e.id}`, in: thumbIn(e) });
+}
+// The audience a key is served to: its strictest provenance, or null when no
+// provenance was ever recorded.
+function thumbPasses(key, adultView) {
+  const aud = THUMBS.audienceOf(key);
+  if (aud === null) return { ok: false, aud: null };
+  return { ok: passesAudience(aud, adultView), aud };
 }
 
-function keptThumb(key) {
-  return cachedThumb(THUMB_KEEP_PREFIX + key);
-}
-
+// Files in THUMB_DIR: `<key>.<ext>` is a picture fetched from its site URL;
+// `keep-<refTag>-<key>.<ext>` one made again from an entry's own file when the
+// site link died (H47); `f-<40 hex>.<ext>` a frame Grabbit took for one entry.
+// Anything else at the top level predates the index and was moved to a
+// quarantine folder by the upgrade. A file whose key the index dropped goes.
 // Atomic write of one picture into THUMB_DIR as <name>.<ext>, via a per-call
 // temp name: two cards can ask for the same picture at once.
 function writeThumbFile(name, buf, ext) {
@@ -2321,53 +2417,57 @@ function writeThumbFile(name, buf, ext) {
     throw e;
   }
 }
-
-// Three kinds of file share THUMB_DIR. `local-<sha1>` pictures Grabbit made
-// itself (video frames) are the only copy and are never pruned. `keep-<key>`
-// is a history entry's own picture, kept while an entry in the history still
-// uses it and removed once none does. Everything else is the plain cache of
-// site pictures, capped at THUMB_MAX_FILES, oldest first.
+const THUMB_FILE_RE = /^(?:keep-([0-9a-f]{16})-)?([0-9a-f]{40}|f-[0-9a-f]{40})\.([a-z0-9]+)$/;
+function keptFileFor(key, ref) {
+  return cachedThumb(`keep-${thumbIndexLib.refTag(ref)}-${key}`);
+}
 function pruneThumbs() {
-  let all;
+  thumbRefCtx = { history: new Set(readHistory().map((e) => e.id)), registry: readDownloaded() };
   try {
-    all = fs.readdirSync(THUMB_DIR);
-  } catch {
-    return;
-  }
-  const inUse = historyThumbKeys();
-  // An unreadable or empty history must not read as "no entry uses any of them".
-  const dropOrphans = inUse.size > 0;
-  const names = [];
-  for (const name of all) {
-    if (name.startsWith('local-') || name.endsWith('.part')) continue;
-    if (name.startsWith(THUMB_KEEP_PREFIX)) {
-      if (dropOrphans && !inUse.has(name.slice(THUMB_KEEP_PREFIX.length).split('.')[0])) {
+    THUMBS.prune();
+    saveThumbIndex();
+    let all;
+    try {
+      all = fs.readdirSync(THUMB_DIR, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const plain = [];
+    for (const d of all) {
+      if (!d.isFile() || d.name.endsWith('.part')) continue;
+      const m = THUMB_FILE_RE.exec(d.name);
+      if (!m) continue; // left for the owner; never served
+      const [, tag, key] = m;
+      let drop = !THUMBS.has(key);
+      if (!drop && tag) drop = !THUMBS.refsOf(key).some((ref) => thumbIndexLib.refTag(ref) === tag);
+      if (drop) {
         try {
-          fs.unlinkSync(path.join(THUMB_DIR, name));
+          fs.unlinkSync(path.join(THUMB_DIR, d.name));
         } catch {
           /* already gone */
         }
+      } else if (!tag && !key.startsWith('f-') && !THUMBS.isReferenced(key)) plain.push(d.name);
+    }
+    // Pictures only previews point at are plain cache, capped oldest first.
+    if (plain.length <= THUMB_MAX_FILES) return;
+    const files = [];
+    for (const name of plain) {
+      try {
+        files.push({ name, at: fs.statSync(path.join(THUMB_DIR, name)).mtimeMs });
+      } catch {
+        /* vanished between the listing and the stat */
       }
-      continue;
     }
-    names.push(name);
-  }
-  if (names.length <= THUMB_MAX_FILES) return;
-  const files = [];
-  for (const name of names) {
-    try {
-      files.push({ name, at: fs.statSync(path.join(THUMB_DIR, name)).mtimeMs });
-    } catch {
-      /* vanished between the listing and the stat */
+    files.sort((a, b) => a.at - b.at);
+    for (const f of files.slice(0, files.length - Math.floor(THUMB_MAX_FILES * 0.8))) {
+      try {
+        fs.unlinkSync(path.join(THUMB_DIR, f.name));
+      } catch {
+        /* already gone */
+      }
     }
-  }
-  files.sort((a, b) => a.at - b.at);
-  for (const f of files.slice(0, files.length - Math.floor(THUMB_MAX_FILES * 0.8))) {
-    try {
-      fs.unlinkSync(path.join(THUMB_DIR, f.name));
-    } catch {
-      /* already gone */
-    }
+  } finally {
+    thumbRefCtx = null;
   }
 }
 
@@ -2424,28 +2524,17 @@ async function fetchThumb(url) {
 
 // Fetch a site thumbnail into the cache while its link still works. CDN links
 // are signed and expire within hours, so a picture nobody looked at on the day
-// of the download could never be shown later. Best effort, in the background.
-// With `keep` (a new history entry) it is stored as that entry's own copy,
-// which the cache prune leaves alone while the entry is in the history.
+// of the download could never be shown later. Best effort, in the background,
+// and only for a key the index knows (the caller records it first).
 const thumbsWarming = new Set();
-function warmThumb(url, { keep = false } = {}) {
+function warmThumb(url) {
   if (!url || !/^https?:\/\//i.test(String(url)) || !validUrl(url)) return;
   const key = thumbKey(url);
-  if (thumbsWarming.has(key) || keptThumb(key)) return;
-  const hit = cachedThumb(key);
-  if (hit) {
-    if (!keep) return;
-    try {
-      fs.copyFileSync(hit.file, path.join(THUMB_DIR, `${THUMB_KEEP_PREFIX}${key}.${hit.ext}`));
-    } catch {
-      /* the cache copy still serves it */
-    }
-    return;
-  }
+  if (!THUMBS.has(key) || thumbsWarming.has(key) || cachedThumb(key)) return;
   thumbsWarming.add(key);
   fetchThumb(url)
     .then(({ buf, ext }) => {
-      writeThumbFile(keep ? THUMB_KEEP_PREFIX + key : key, buf, ext);
+      writeThumbFile(key, buf, ext);
     })
     .catch(() => {
       /* the picture is gone or refused: the hub shows a placeholder */
@@ -2453,58 +2542,76 @@ function warmThumb(url, { keep = false } = {}) {
     .finally(() => thumbsWarming.delete(key));
 }
 
-// Store a picture grabbit produced itself (a frame from a video). It has no
-// source URL to key on, so the bytes are the key; the id is what a history
-// entry points at.
-function storeLocalThumb(buf, ext) {
-  const id = 'local-' + crypto.createHash('sha1').update(buf).digest('hex');
+// Store a frame Grabbit took for one entry. Its id names the entry and the
+// bytes (H47, H69), so a byte-identical frame of another entry is another
+// file; the index records the entry the frame belongs to.
+function storeFrame(ref, input, buf, ext) {
+  const id = thumbIndexLib.frameId(ref, buf);
   const file = path.join(THUMB_DIR, `${id}.${THUMB_EXTS.includes(ext) ? ext : 'jpg'}`);
   try {
-    if (!fs.existsSync(file)) fs.writeFileSync(file, buf);
-    return id;
+    if (!fs.existsSync(file)) writeThumbFile(id, buf, THUMB_EXTS.includes(ext) ? ext : 'jpg');
   } catch (e) {
     console.warn('thumb cache write failed:', e.message);
     return null;
   }
+  THUMBS.add(id, { kind: 'local', ref, in: input });
+  saveThumbIndex();
+  return id;
 }
 
-// GET /api/thumb?url=... -> the picture, cached.
+// GET /api/thumb?url=...|id=f-...[&audience=adult][&v=2] -> the picture.
+// Only an indexed key is served or fetched, and only to a view its strictest
+// provenance allows; anything else is 404 (no outbound request). A general
+// picture is revalidated on every use (ETag), so a key that turns 18+ stops
+// at once; an 18+ picture is never stored by the browser (H42, H60).
 app.get('/api/thumb', async (req, res) => {
-  // A thumbnail names one immutable picture, so a hit needs no revalidation —
-  // but the cache is per-session-holder, so keep it out of shared caches.
-  const send = (file, ext) => {
-    res.setHeader('Cache-Control', 'private, max-age=604800');
+  const adultView = wantsAdultView(req);
+  const none = (why = 'No such thumbnail') => res.status(404).json({ ok: false, error: why });
+  const headersFor = (aud) => ({ 'Cache-Control': aud === 'general' ? 'private, no-cache' : 'private, no-store' });
+  const send = (file, ext, aud) => {
     res.type(imageMime(ext));
-    res.sendFile(file);
+    res.sendFile(file, { cacheControl: false, headers: headersFor(aud) }, (err) => {
+      if (err && !res.headersSent) none();
+    });
   };
-  // A picture grabbit produced itself has no source URL to fetch — it is only
-  // ever served from the cache, by its id. The shape is checked before the id
-  // reaches path.join: it names a file inside the cache directory.
   const id = String(req.query.id || '');
   if (id) {
-    if (!/^local-[0-9a-f]{40}$/.test(id)) return res.status(400).json({ ok: false, error: 'Invalid id' });
+    // A legacy `local-` frame has no provenance anyone can prove (H83).
+    if (thumbIndexLib.LEGACY_LOCAL_RE.test(id)) return none();
+    if (!thumbIndexLib.FRAME_ID_RE.test(id)) return res.status(400).json({ ok: false, error: 'Invalid id' });
+    const gate = thumbPasses(id, adultView);
+    if (!gate.ok) return none();
     const local = cachedThumb(id);
-    if (!local) return res.status(404).json({ ok: false, error: 'No such thumbnail' });
-    return send(local.file, local.ext);
+    if (!local) return none();
+    return send(local.file, local.ext, gate.aud);
   }
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
   const key = thumbKey(url);
-  const hit = keptThumb(key) || cachedThumb(key);
-  if (hit) return send(hit.file, hit.ext);
+  const gate = thumbPasses(key, adultView);
+  if (!gate.ok) return none();
+  const refs = THUMBS.refsOf(key);
+  const hit = cachedThumb(key) || refs.map((ref) => keptFileFor(key, ref)).find(Boolean);
+  if (hit) return send(hit.file, hit.ext, gate.aud);
   const missAt = thumbMisses.get(key);
-  if (missAt && Date.now() - missAt < THUMB_MISS_MS) {
-    return res.status(404).json({ ok: false, error: 'No picture (tried recently)' });
-  }
+  if (missAt && Date.now() - missAt < THUMB_MISS_MS) return none('No picture (tried recently)');
   let got = null;
   let failure = null;
+  let madeFor = null;
   try {
     got = await fetchThumb(url);
   } catch (e) {
     failure = e;
     // The site's link has expired or the picture is gone: make it again from
-    // the downloaded file, when Grabbit still finds one for this entry.
-    got = await thumbFromLocalFile(url).catch(() => null);
+    // the downloaded file of an entry this key belongs to (H42: only an entry
+    // the gate above already passed, never "the first row with this URL").
+    for (const ref of refs) {
+      got = await thumbFromEntry(ref).catch(() => null);
+      if (got) {
+        madeFor = ref;
+        break;
+      }
+    }
   }
   if (!got) {
     if (thumbMisses.size >= THUMB_MISS_MAX) thumbMisses.delete(thumbMisses.keys().next().value);
@@ -2514,16 +2621,18 @@ app.get('/api/thumb', async (req, res) => {
       error: String((failure && failure.message) || failure || 'No picture'),
     });
   }
-  // A picture a history entry shows is that entry's own copy, not cache.
-  const name = failure || historyThumbKeys().has(key) ? THUMB_KEEP_PREFIX + key : key;
+  // The index may have changed while the picture was fetched.
+  const again = thumbPasses(key, adultView);
+  if (!again.ok) return none();
+  const name = madeFor ? `keep-${thumbIndexLib.refTag(madeFor)}-${key}` : key;
   try {
     const saved = writeThumbFile(name, got.buf, got.ext);
     if (++thumbStores % 200 === 0) pruneThumbs();
-    send(saved.file, saved.ext);
+    send(saved.file, saved.ext, again.aud);
   } catch (e) {
     // An unwritable cache must not cost the user the picture.
     console.warn('thumb cache write failed:', e.message);
-    res.setHeader('Cache-Control', 'private, max-age=604800');
+    res.set(headersFor(again.aud));
     res.type(imageMime(got.ext)).send(got.buf);
   }
 });
@@ -2554,9 +2663,16 @@ async function withLocalThumbSlot(fn) {
   }
 }
 
-async function thumbFromLocalFile(url) {
-  const entry = readHistory().find((e) => e && e.thumbnail === url && e.filename);
-  if (!entry) return null;
+// A picture made again from one history entry's own library file: the poster
+// beside a video, the image itself, or a frame from the video. The folders
+// come from the entry's channel and must lie inside a media root. Only a row
+// still in the history can be traced to its file; anything else keeps the
+// placeholder (H96).
+async function thumbFromEntry(ref) {
+  if (!String(ref).startsWith('h:')) return null;
+  const id = String(ref).slice(2);
+  const entry = readHistory().find((e) => e && e.id === id && e.filename);
+  if (!entry || !mediaViewer.isPlainName(entry.filename)) return null;
   const found = mediaViewer.findVariants(entry.filename, mediaDirsOf(entry), MEDIA_ROOTS);
   if (!found) return null;
   if (found.poster) {
@@ -2573,26 +2689,93 @@ async function thumbFromLocalFile(url) {
   return buf ? { buf, ext: 'jpg' } : null;
 }
 
-// Once at boot: the history's pictures still in the plain cache become the
-// entries' own copies before the cache prune can take them.
-function keepHistoryThumbs() {
-  for (const key of historyThumbKeys()) {
-    if (keptThumb(key)) continue;
-    const hit = cachedThumb(key);
-    if (!hit) continue;
+// Points one history row at a new picture, if it still shows the old one.
+function setHistoryThumb(id, from, to) {
+  const list = readHistory();
+  const row = list.find((e) => e.id === id);
+  if (!row || row.thumbnail !== from) return false;
+  row.thumbnail = to;
+  writeJsonAtomic(HISTORY_FILE, list);
+  return true;
+}
+
+// At boot, after start-up: the index learns every history row's picture. The
+// first boot with the index (the H4 release) also moves every picture file
+// from before it into thumbs/quarantine-<stamp>/ (kept, never served: the
+// URL cache is refetchable, `keep-` and `local-` copies have no provable
+// owner, H47, H83), and makes each history row's legacy `local-` frame again
+// from that row's own library file under a per-entry id (H83, H94). A row
+// whose file is gone keeps the placeholder.
+const LEGACY_LOCAL_THUMB_RE = /^\/api\/thumb\?id=(local-[0-9a-f]{40})$/;
+async function upgradeThumbs() {
+  const history = readHistory();
+  let quarantined = 0;
+  let mixed = 0;
+  const firstRun = !THUMBS.migratedAt;
+  if (firstRun) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const qdir = path.join(THUMB_DIR, `quarantine-${stamp}`);
+    let names = [];
     try {
-      fs.copyFileSync(hit.file, path.join(THUMB_DIR, `${THUMB_KEEP_PREFIX}${key}.${hit.ext}`));
+      names = fs.readdirSync(THUMB_DIR, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name);
     } catch {
-      /* the cache copy still serves it */
+      /* no cache yet */
     }
+    for (const name of names) {
+      if (name.endsWith('.part')) continue;
+      try {
+        fs.mkdirSync(qdir, { recursive: true });
+        fs.renameSync(path.join(THUMB_DIR, name), path.join(qdir, name));
+        quarantined++;
+      } catch (e) {
+        console.warn(`thumbs: could not set aside ${name}: ${e.message}`);
+      }
+    }
+    // H69: legacy frames that entries of different audiences pointed at.
+    const byId = new Map();
+    // Read only: start-up never writes profiles.json.
+    let store = null;
+    try {
+      ({ store } = readProfilesReadOnly());
+    } catch {
+      store = null;
+    }
+    for (const e of history) {
+      const m = LEGACY_LOCAL_THUMB_RE.exec(String(e.thumbnail || ''));
+      if (!m) continue;
+      if (!byId.has(m[1])) byId.set(m[1], new Set());
+      byId.get(m[1]).add(entryClassification(e, store).audience === 'general' ? 'general' : 'adult');
+    }
+    mixed = [...byId.values()].filter((set) => set.size > 1).length;
   }
-}
-try {
-  keepHistoryThumbs();
+  for (const e of history) noteHistoryThumb(e);
+  THUMBS.migratedAt = THUMBS.migratedAt || Date.now();
+  THUMBS.dirty = true;
+  saveThumbIndex(true);
+  if (firstRun) {
+    console.log(`thumbs: upgrade to the provenance index: ${quarantined} earlier picture files set aside in quarantine, ` +
+      `${mixed} legacy frame ids were shared by general and 18+ or unclassified entries`);
+  }
+  // Legacy frames still named by history rows, every boot until they are made again.
+  const legacy = history.filter((e) => LEGACY_LOCAL_THUMB_RE.test(String(e.thumbnail || '')));
+  let made = 0;
+  let placeholder = 0;
+  for (const e of legacy) {
+    const got = await thumbFromEntry(`h:${e.id}`).catch(() => null);
+    const id = got ? storeFrame(`h:${e.id}`, thumbIn(e), got.buf, got.ext) : null;
+    if (id && setHistoryThumb(e.id, e.thumbnail, `/api/thumb?id=${id}`)) {
+      noteHistoryThumb({ ...e, thumbnail: `/api/thumb?id=${id}` });
+      made++;
+    } else placeholder++;
+  }
+  if (legacy.length) console.log(`thumbs: ${made} legacy frames made again from their entries' files, ${placeholder} entries keep the placeholder`);
   pruneThumbs();
-} catch (e) {
-  console.warn('thumbs: keeping the history pictures failed:', e.message);
 }
+// After start-up: classification needs the item store, the profiles and the
+// job list, which are set up further down this file.
+setImmediate(() => {
+  upgradeThumbs().catch((e) => console.warn('thumbs: the index upgrade failed:', e.message));
+});
 
 app.get('/api/media', async (req, res) => {
   const url = req.query.url;
@@ -4345,6 +4528,12 @@ function withHistory(out) {
     if (!it.thumb && /^https?:\/\//i.test(e.thumbnail || '')) it.thumb = e.thumbnail;
     if (mediaViewer.isPlainName(e.filename)) it.historyId = e.id;
   }
+  // The item itself is the provenance of the picture it is listed with.
+  for (const it of out.items) {
+    if (it.thumb && it.key) {
+      noteThumb(it.thumb, { kind: 'entry', ref: `i:${it.key}`, in: { itemKey: it.key, creator: it.creator, site: it.site, sourceUrl: it.sourceUrl, filename: it.filename } });
+    }
+  }
   return out;
 }
 app.get('/api/library/items', libraryRoute((lib, req) => withHistory(lib.listItems({
@@ -5315,6 +5504,8 @@ app.get('/api/search', (req, res) => {
             : null) || (e.id ? `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg` : null),
       })).filter((r) => r.url);
       sent = true;
+      const previewAud = wantsAdultView(req) ? 'adult' : 'general';
+      for (const r of results) noteThumb(r.thumbnail, { kind: 'preview', aud: previewAud });
       res.json({ ok: true, results });
     } catch {
       fail(err.trim().split('\n').pop() || 'Search failed');
@@ -7143,6 +7334,8 @@ app.get('/api/profile', async (req, res) => {
         },
       };
     });
+    const previewAud = wantsAdultView(req) ? 'adult' : 'general';
+    for (const it of items) noteThumb(it.thumbnail, { kind: 'preview', aud: previewAud });
     res.json({
       ok: true,
       isProfile: true,
@@ -7389,7 +7582,18 @@ function viewOfJob(j, adultView) {
 function snapshotJobs(adultView = false) {
   return [...jobsMap.values()].map((j) => viewOfJob(j, adultView)).sort((a, b) => b.createdAt - a.createdAt);
 }
+// A job's own picture is recorded once per change of what classifies it.
+const jobThumbNoted = new WeakMap();
+function noteJobThumb(j) {
+  if (!j.thumbnail) return;
+  const input = thumbIn(j, jobClassChannel(j));
+  const sig = `${j.thumbnail}\0${JSON.stringify(input)}`;
+  if (jobThumbNoted.get(j) === sig) return;
+  jobThumbNoted.set(j, sig);
+  noteThumb(j.thumbnail, { kind: 'job', ref: `j:${j.id}`, in: input });
+}
 function emitJob(j) {
+  noteJobThumb(j);
   let full = null;
   let general = null;
   for (const [r, adultView] of jobSubs) {
@@ -7446,6 +7650,9 @@ function finishJob(job, patch) {
   // server/Navidrome save would make a later shorts download look like a repeat.
   if (job.saved && job.sourceUrl) {
     markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null);
+    // The registry row keeps the picture's provenance after the history row
+    // has rolled over (H47).
+    if (job.thumbnail) noteThumb(job.thumbnail, { kind: 'entry', ref: `r:${mediaKey(job.sourceUrl)}`, in: thumbIn(job, jobClassChannel(job)) });
     noteSourceMeta(job, job.filename, job.dest === 'elite' ? job.channel : null, SOURCE_META.get(job) || null);
   }
   if (job.watch) clearWatchFailure(job.watch.playlistId, job.watch.key);
@@ -7839,7 +8046,7 @@ async function produceServerVideo(job, meta, params, onProgress) {
     // sidecar picture and the history thumbnail still apply. Setting it on meta
     // is what puts a generated frame on the queue row and in the history for a
     // site that handed over no thumbnail of its own.
-    const posterUrl = await attachPoster(meta, libPath, { embed: !(advanced && params.embedThumb) });
+    const posterUrl = await attachPoster(meta, libPath, { embed: !(advanced && params.embedThumb), channel: `server/${shelf}` });
     if (posterUrl && !meta.thumbnail) meta.thumbnail = posterUrl;
     recordJobHistory(meta, params, `server/${shelf}`, outName, false);
     finishJob(job, {
@@ -9517,7 +9724,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     await embedMetadata(tmpPath, finalPath, job, false);
     // Only a real library save gets a poster: with `already`, finalPath is a
     // throwaway temp for the device copy and the library file has one already.
-    const histThumb = already ? job.thumbnail || null : await attachPoster(job, finalPath);
+    const histThumb = already ? job.thumbnail || null : await attachPoster(job, finalPath, { channel: `server/${shelf}` });
 
     const histEntry = {
       creator: job.creator || null,
@@ -9929,7 +10136,11 @@ async function attachPoster(job, libPath, opts = {}) {
       console.warn('poster sidecar failed:', e.message);
     }
     if (fromSite) return fromSite;
-    const id = storeLocalThumb(poster.buf, poster.ext);
+    // The frame belongs to this download's registry entry (H47); the history
+    // row that names it records itself too.
+    const src = job.sourceUrl || job.url;
+    const ref = src ? `r:${mediaKey(src)}` : `j:${job.id || 'none'}`;
+    const id = storeFrame(ref, thumbIn(job, opts.channel === undefined ? jobClassChannel(job) : opts.channel), poster.buf, poster.ext);
     return id ? `/api/thumb?id=${id}` : null;
   } catch (e) {
     console.warn('poster failed:', e.message);

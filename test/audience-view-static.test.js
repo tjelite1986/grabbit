@@ -35,10 +35,16 @@ test('audience=adult is built only by the hub\'s 18+ view helper', () => {
   assert.match(line, /const adultParam = \(url\) => \(inAdultView\(\) \?/);
 });
 
-test('the 18+ view is the Media page with the 18+ or Unclassified filter', () => {
+test('the 18+ view is the Media page with the 18+ or Unclassified filter, or the Library\'s opened 18+ scope', () => {
   const text = fs.readFileSync(path.join(PUBLIC, 'hub', 'hub.js'), 'utf8');
   assert.match(text, /const ADULT_AUDS = \['adult', 'unknown'\];/);
-  assert.match(text, /return r\.id === 'media' && ADULT_AUDS\.includes\(r\.params\.get\('aud'\) \|\| ''\);/);
+  const body = /const inAdultView = \(\) => \{\n([\s\S]*?)\n {2}\};/.exec(text);
+  assert.ok(body, 'inAdultView is defined');
+  assert.deepEqual(body[1].split('\n').map((l) => l.trim()), [
+    'const r = route();',
+    "if (r.id === 'library') return r.params.get('scope') === 'adult' && libUi.adultOk;",
+    "return r.id === 'media' && ADULT_AUDS.includes(r.params.get('aud') || '');",
+  ]);
   // The classic page never asks for the 18+ view.
   assert.equal(fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').includes('audience=adult'), false);
 });
@@ -53,4 +59,13 @@ test('a reduced job is drawn as hidden, not as a link still resolving (H97)', ()
   assert.match(hub, /j\.audienceHidden \? '18\+ or unclassified item'/);
   const classic = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
   assert.match(classic, /j\.audienceHidden \? '18\+ or unclassified item'/);
+});
+
+test('every thumbnail URL the hub and the classic page build carries v=2 (H34)', () => {
+  const hub = fs.readFileSync(path.join(PUBLIC, 'hub', 'hub.js'), 'utf8');
+  assert.match(hub, /adultParam\('\/api\/thumb\?url=' \+ encodeURIComponent\(s\) \+ '&v=2'\)/);
+  assert.match(hub, /adultParam\(`\$\{s\}&v=2`\)/);
+  assert.equal(/thumb\?id=local-/.test(hub), false, 'the hub never builds a legacy frame URL');
+  const classic = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
+  assert.match(classic, /'\/api\/thumb\?url=' \+ encodeURIComponent\(s\) \+ '&v=2'/);
 });

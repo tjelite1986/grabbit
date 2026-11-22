@@ -46,6 +46,7 @@ these concepts (see `START-HERE.md`).
 | Instagram inbox | `inbox.js` | `inbox.test.js`, `inbox-e2e.test.js` |
 | Libraries for other apps | `adshortis-library.js`, `adflix-library.js`, `library.js` | `adshortis-library.test.js`, `adflix-library.test.js`, `library.test.js`, `library-downgrade.test.js` |
 | Media viewer | `media-viewer.js` | `media-viewer.test.js`, `local-thumbs.test.js` |
+| Audience gate on Grabbit's own surfaces (Media, history, dashboard, jobs, thumbnails) | `server.js` (`wantsAdultView`, `registryForView`, `viewOfJob`), `thumb-index.js` | `audience-view.test.js`, `audience-view-static.test.js`, `local-thumbs.test.js`, `thumb-index.test.js`, `audience-gate.test.js` |
 
 ## Duplicate Manager
 
