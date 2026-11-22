@@ -118,7 +118,7 @@ test('/api/config in native mode', async () => {
   assert.equal(c.tikshortisEmbed, null);
   const tik = c.modules.find((m) => m.id === 'tikshortis');
   assert.deepEqual(tik, { id: 'tikshortis', label: 'TikShortis', phase: 1, audience: 'general', group: 'watch', enabled: true, mode: 'native' });
-  assert.ok(c.modules.filter((m) => m.id !== 'tikshortis' && m.id !== 'social').every((m) => m.enabled === false && m.planned === true));
+  assert.ok(c.modules.filter((m) => !['tikshortis', 'social', 'adshortis'].includes(m.id)).every((m) => m.enabled === false && m.planned === true));
   assert.deepEqual(c.modules.find((m) => m.id === 'social'), { id: 'social', label: 'Social & Photos', phase: 3, audience: 'general', group: 'social', enabled: false, mode: 'off' });
   assert.match(native.logs(), /TikShortis: native, API at http:\/\/127\.0\.0\.1:/);
 });

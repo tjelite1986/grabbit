@@ -27,10 +27,10 @@ const MODULES = [
   { id: 'tikshortis', label: 'TikShortis', phase: 1, audience: 'general', group: 'watch' },
   { id: 'videos', label: 'Videos', phase: 2, audience: 'general', group: 'watch', planned: true },
   { id: 'social', label: 'Social & Photos', phase: 3, audience: 'general', group: 'social' },
-  // Adshortis keeps its existing library page (hub #/adshortis) unchanged in
-  // phase 1; phase 4 turns it into a module. It is listed for the audience
-  // rules only.
-  { id: 'adshortis', label: 'Adshortis', phase: 4, audience: 'adult', group: 'adult', planned: true },
+  // Adshortis (the 18+ app): native | embed | off, see adshortisMode(). The
+  // native views arrive in a later step; until then the module reports its
+  // mode so the hub can place the 18+ entry or the standalone link.
+  { id: 'adshortis', label: 'Adshortis', phase: 4, audience: 'adult', group: 'adult' },
   { id: 'adult-media', label: 'Adult videos & photos', phase: 5, audience: 'adult', group: 'adult', planned: true },
   { id: 'movies-music', label: 'Movies & music', phase: 6, audience: 'general', group: 'watch', planned: true },
   { id: 'home', label: 'Home', phase: 7, audience: 'general', group: 'home', planned: true },
@@ -90,17 +90,57 @@ function egramMode(env, { apiOrigin }) {
   return { mode: 'native', warnings };
 }
 
+// Adshortis has three modes, chosen by ADSHORTIS_MODE (Grabbit 3.0 native
+// Adshortis, plan part 1 section 2.1):
+//   native  the hub's own 18+ pages over Adshortis' API, through Grabbit's
+//           gateway (/api/ads/*). Needs ADSHORTIS_API_URL, ADSHORTIS_APP_ORIGIN,
+//           GRABBIT_PUBLIC_ORIGIN and Grabbit's own sign-in switched on.
+//   embed   a plain link that opens the standalone app in a new tab (never an
+//           iframe). Needs ADSHORTIS_EMBED_URL.
+//   off     nothing. Unset or unknown means off.
+// Like TikShortis, a mode whose settings are missing only ever falls back to a
+// safer one (native -> embed -> off) and says why in the log.
+const ADS_MODES = ['native', 'embed', 'off'];
+
+function adshortisMode(env, { apiOrigin, appOrigin, publicOrigin, embed, authOn }) {
+  const raw = String(env.ADSHORTIS_MODE || '').trim().toLowerCase();
+  const warnings = [];
+  const fallback = embed ? 'embed' : 'off';
+  let wanted = raw || 'off';
+  if (!ADS_MODES.includes(wanted)) {
+    warnings.push(`ADSHORTIS_MODE=${raw} is not one of ${ADS_MODES.join(', ')}; Adshortis is off.`);
+    wanted = 'off';
+  }
+  if (wanted === 'native') {
+    const missing = [];
+    if (!apiOrigin) missing.push('a valid ADSHORTIS_API_URL');
+    if (!appOrigin) missing.push('a valid ADSHORTIS_APP_ORIGIN');
+    if (!publicOrigin) missing.push('an https GRABBIT_PUBLIC_ORIGIN');
+    if (!authOn) missing.push("Grabbit's sign-in (GRABBIT_PASSWORD set, auth not disabled)");
+    if (missing.length) {
+      warnings.push(`ADSHORTIS_MODE=native needs ${missing.join(', ')}; using ${fallback}.`);
+      wanted = fallback;
+    }
+  }
+  if (wanted === 'embed' && !embed) {
+    warnings.push('ADSHORTIS_MODE=embed needs a valid https ADSHORTIS_EMBED_URL; Adshortis is off.');
+    wanted = 'off';
+  }
+  return { mode: wanted, warnings };
+}
+
 // What the hub receives in /api/config.modules: only what it needs to draw the
 // navigation. Planned modules are listed as planned (no routes, never shown as
 // a link) so the client can be written against the final shape.
-function modulesFor({ tikMode, egramMode: socialMode = 'off' }) {
+function modulesFor({ tikMode, egramMode: socialMode = 'off', adsMode = 'off' }) {
   return MODULES.map((m) => {
     const out = { id: m.id, label: m.label, phase: m.phase, audience: m.audience, group: m.group };
     if (m.planned) return { ...out, enabled: false, planned: true };
     if (m.id === 'tikshortis') return { ...out, enabled: tikMode !== 'off', mode: tikMode };
     if (m.id === 'social') return { ...out, enabled: socialMode === 'native', mode: socialMode };
+    if (m.id === 'adshortis') return { ...out, enabled: adsMode !== 'off', mode: adsMode };
     return { ...out, enabled: false };
   });
 }
 
-module.exports = { MODULES, AUDIENCES, TIK_MODES, EGRAM_MODES, tikshortisMode, egramMode, modulesFor };
+module.exports = { MODULES, AUDIENCES, TIK_MODES, EGRAM_MODES, ADS_MODES, tikshortisMode, egramMode, adshortisMode, modulesFor };

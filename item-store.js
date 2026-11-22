@@ -534,6 +534,18 @@ function wrap(db, migrationBackup) {
     getById: (id) => st.byId.get(Number(id)) || null,
     // The newest row saved under this file name (the media viewer's lookup).
     getByFilename: (name) => st.byFilename.get(String(name)) || null,
+    // Every item's audience by key and by file name, in one read, for a caller
+    // that classifies thousands of registry rows at once. A file name names
+    // its newest item, like getByFilename().
+    audienceIndex() {
+      const byKey = new Map();
+      const byFilename = new Map();
+      for (const r of db.prepare('SELECT key, filename, audience, classified_by_hand FROM items ORDER BY id').all()) {
+        byKey.set(r.key, r);
+        if (r.filename) byFilename.set(r.filename, r);
+      }
+      return { get: (key) => byKey.get(String(key)) || null, getByFilename: (name) => byFilename.get(String(name)) || null };
+    },
     // The newest row saved from this source URL (a no-file history entry's lookup).
     getBySourceUrl: (url) => st.bySourceUrl.get(String(url)) || null,
     upsert,

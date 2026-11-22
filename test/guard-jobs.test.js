@@ -16,7 +16,7 @@ const { boot, filesUnder } = require('./helpers/guard-server');
 
 const LANDSCAPE = '?w=1920&h=1080';
 const PORTRAIT = '?w=1080&h=1920';
-const historyFor = async (s, url) => (await s.call('/api/history')).body.items.filter((h) => h.sourceUrl === url);
+const historyFor = async (s, url) => (await s.call('/api/history?audience=adult')).body.items.filter((h) => h.sourceUrl === url);
 const media = (dir) => filesUnder(dir).filter((f) => /\.(mp4|jpg)$/.test(f));
 const until = async (fn, what) => {
   for (let i = 0; i < 200; i++) {
@@ -25,7 +25,7 @@ const until = async (fn, what) => {
   }
   throw new Error(`timed out waiting for ${what}`);
 };
-const jobById = async (s, id) => (await s.call('/api/jobs')).body.jobs.find((j) => j.id === id);
+const jobById = async (s, id) => (await s.call('/api/jobs?audience=adult')).body.jobs.find((j) => j.id === id);
 const seedProfiles = (list) => (dataDir) => {
   const profiles = require('../profiles');
   let store = profiles.emptyStore();

@@ -85,12 +85,27 @@
   }
   // Site thumbnails go through Grabbit's proxy: their CDNs refuse a foreign Referer.
   // A picture Grabbit took itself (a video frame) is already a local /api/thumb?id= path.
+  // v=2: the thumbnail cache generation of the provenance index (H34), so a
+  // picture the browser cached under the old 7-day rule is never asked for.
+  // Legacy `local-` frames are never served any more and draw the placeholder.
   const thumbSrc = (u) => {
     const s = String(u || '');
-    if (/^https?:\/\//i.test(s)) return '/api/thumb?url=' + encodeURIComponent(s);
-    if (/^\/api\/thumb\?id=local-[0-9a-f]{40}$/.test(s)) return s;
+    if (/^https?:\/\//i.test(s)) return adultParam('/api/thumb?url=' + encodeURIComponent(s) + '&v=2');
+    if (/^\/api\/thumb\?id=f-[0-9a-f]{40}$/.test(s)) return adultParam(`${s}&v=2`);
     return null;
   };
+  // H4: the Media page's 18+ and Unclassified views are the hub's 18+ view, the
+  // only place that asks the server for entries not classified general. The
+  // view is opened on purpose each visit; its list is dropped on leaving it.
+  const ADULT_AUDS = ['adult', 'unknown'];
+  // The Library's 18+ scope, opened on purpose each visit, is an 18+ view too.
+  const inAdultView = () => {
+    const r = route();
+    if (r.id === 'library') return r.params.get('scope') === 'adult' && libUi.adultOk;
+    return r.id === 'media' && ADULT_AUDS.includes(r.params.get('aud') || '');
+  };
+  const adultParam = (url) => (inAdultView() ? `${url}${url.includes('?') ? '&' : '?'}audience=adult` : url);
+  const mediaSource = () => (inAdultView() ? state.mediaAdult : state.media);
   // Signed CDN links expire; a picture that can no longer be fetched gives way
   // to the empty placeholder instead of a broken-image icon.
   const dropBrokenImg = (e) => {
@@ -132,6 +147,8 @@
     history: null,
     media: null,
     mediaMisses: null,
+    mediaAdult: null,
+    mediaAdultMisses: null,
     jobs: new Map(),
     review: null,
     inbox: null,
@@ -142,34 +159,81 @@
   const activeJobs = () => [...state.jobs.values()].filter((j) => ACTIVE.has(j.status)).sort((a, b) => a.createdAt - b.createdAt);
   const allJobs = () => [...state.jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
 
+  // Codex phase-0 B6: bumped on every classification change. A list that was
+  // asked for under an older generation is dropped when it arrives, so a slow
+  // answer from before the change never puts old tiles back.
+  let audienceGen = 0;
   async function load(what) {
+    const gen = audienceGen;
+    // Each task fetches, then hands back what to store; it is stored only if no
+    // classification changed in between.
     const tasks = {
-      summary: () => api('/api/hub/summary').then((d) => { state.summary = d; }),
-      health: () => api('/api/health').then((d) => { state.health = d; }),
-      config: () => api('/api/config').then((d) => { state.config = d; }),
-      history: () => api('/api/history').then((d) => { state.history = d.items || []; }),
-      media: () => api('/api/hub/media').then((d) => { state.media = d.items || []; state.mediaMisses = d.misses || []; }),
-      review: () => api('/api/hub/review').then((d) => { state.review = d; }),
-      inbox: () => api('/api/hub/inbox?limit=1').then((d) => { state.inbox = d; }),
-      jobs: () => api('/api/jobs').then((d) => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
+      summary: () => api('/api/hub/summary').then((d) => () => { state.summary = d; }),
+      health: () => api('/api/health').then((d) => () => { state.health = d; }),
+      config: () => api('/api/config').then((d) => () => { state.config = d; }),
+      history: () => api('/api/history').then((d) => () => { state.history = d.items || []; }),
+      media: () => api('/api/hub/media').then((d) => () => { state.media = d.items || []; state.mediaMisses = d.misses || []; }),
+      mediaAdult: () => (inAdultView()
+        ? api(adultParam('/api/hub/media')).then((d) => () => { state.mediaAdult = d.items || []; state.mediaAdultMisses = d.misses || []; })
+        : Promise.resolve(null)),
+      review: () => api('/api/hub/review').then((d) => () => { state.review = d; }),
+      inbox: () => api('/api/hub/inbox?limit=1').then((d) => () => { state.inbox = d; }),
+      jobs: () => api('/api/jobs').then((d) => () => { state.jobs = new Map((d.jobs || []).map((j) => [j.id, j])); }),
     };
-    await Promise.all(what.map((k) => tasks[k]().catch((e) => { console.warn(`hub: ${k} failed`, e); })));
+    await Promise.all(what.map((k) => tasks[k]()
+      .then((apply) => { if (apply && gen === audienceGen) apply(); })
+      .catch((e) => { console.warn(`hub: ${k} failed`, e); })));
+  }
+  // Codex phase-0 B6: every hub picture and media file on the page lets go of
+  // its address at once, before anything is fetched again. Pages are drawn
+  // again from fresh lists; until those arrive they show "Loading".
+  const HUB_MEDIA_RE = /\/api\/(thumb\?|hub\/media\/)/;
+  function dropHubPictures() {
+    for (const el of document.querySelectorAll('img[src], video[src], source[src]')) {
+      if (!HUB_MEDIA_RE.test(el.getAttribute('src') || '')) continue;
+      if (el.tagName === 'VIDEO') el.pause();
+      el.removeAttribute('src');
+      if (el.tagName === 'VIDEO') el.load();
+    }
+    for (const el of document.querySelectorAll('[data-media-bg="1"], [style*="/api/thumb"]')) {
+      if (HUB_MEDIA_RE.test(el.style.backgroundImage || '')) el.style.backgroundImage = '';
+    }
   }
 
   // --- Live job stream -----------------------------------------------------
   let stream = null;
   let renderQueued = false;
+  // Pages that draw history tiles, library rows or job rows; module pages are
+  // left alone.
+  const AUDIENCE_PAGES = ['', 'queue', 'media', 'profiles', 'library'];
   function connectStream() {
     if (stream) return;
     stream = new EventSource('/api/jobs/stream');
     stream.onmessage = (ev) => {
       let d;
       try { d = JSON.parse(ev.data); } catch { return; }
+      // H99: a classification changed. What the hub shows is loaded again and
+      // redrawn, so a tile or row drawn under the old audience is replaced,
+      // its old picture address with it.
+      if (d.type === 'audience') {
+        audienceGen++;
+        dropHubPictures();
+        state.summary = null;
+        state.history = null;
+        state.media = null;
+        state.mediaMisses = null;
+        state.mediaAdult = null;
+        state.mediaAdultMisses = null;
+        const onPage = () => AUDIENCE_PAGES.includes(route().id);
+        if (onPage()) render(false);
+        load(['summary', 'history', 'media']).then(() => { if (onPage()) render(false); });
+        return;
+      }
       if (d.type !== 'job' || !d.job) return;
       const prev = state.jobs.get(d.job.id);
       state.jobs.set(d.job.id, d.job);
       // A finished download changes the counts and the recent list.
-      if (d.job.status === 'done' && prev && prev.status !== 'done') load(['summary', 'history', 'media']).then(scheduleRender);
+      if (d.job.status === 'done' && prev && prev.status !== 'done') load(['summary', 'history', 'media', 'mediaAdult']).then(scheduleRender);
       scheduleRender();
     };
     // A closed stream (container restart) never reopens by itself.
@@ -202,8 +266,11 @@
     { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed() || tikIsNative(), view: viewTikshortisPage, subnav: () => (tikIsNative() ? tikNative.subnav(route()) : null) },
     // Grabbit 3.0 phase 2 (public/hub/social/), from EGRAM_MODE. General only.
     { id: 'social', label: 'Social & Photos', icon: 'social', ownData: true, show: () => socialOn(), view: viewSocialPage, subnav: () => (socialOn() ? socialNative.subnav(route()) : null) },
-    // Listed only when the server has the 18+ app's library mounted.
-    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => !!(state.config && state.config.adshortisLibrary), view: viewAdshortis },
+    // Grabbit 3.0 (H28, H39, H53): from the effective ADSHORTIS_MODE. The entry
+    // shows in native, or when the server mounts the old folder page. In embed
+    // the standalone app gets its own plain link next to it (buildNav). A
+    // #/adshortis bookmark without a page draws "not available here".
+    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => adsFolderPage() || adsMode() === 'native', view: viewAdshortisPage },
     // Listed only when the server has the 18+ film library mounted.
     { id: 'adflix', label: 'Adflix 18+', icon: 'media', ownData: true, show: () => !!(state.config && state.config.adflixLibrary), view: viewAdflix },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
@@ -235,6 +302,8 @@
           p.planned ? h('span', { class: 'tag' }, 'planned') : null),
         // A module's own sections, listed under it while it is open.
         p.subnav ? h('div', { class: 'nav-sub', 'data-sub': p.id, hidden: true }) : null,
+        // H53: in embed, a plain link to the standalone Adshortis (updateNav).
+        p.id === 'adshortis' ? h('a', { 'data-ads-link': '1', href: '#', target: '_blank', rel: 'noopener noreferrer', hidden: true }, icon('video'), h('span', null, 'Adshortis 18+ ↗')) : null,
       ]).flat().filter(Boolean)
     );
   }
@@ -252,6 +321,12 @@
         b.textContent = n;
         b.hidden = !n;
       }
+    }
+    const adsLink = document.querySelector('#nav > a[data-ads-link]');
+    if (adsLink) {
+      const url = adsMode() === 'embed' ? adsStandalone() : null;
+      adsLink.hidden = !url;
+      if (url) adsLink.href = url;
     }
     for (const box of document.querySelectorAll('#nav .nav-sub')) {
       const p = PAGES.find((x) => x.id === box.dataset.sub);
@@ -439,7 +514,7 @@
     return h('div', { class: 'job' },
       src ? h('img', { class: 'thumb', src, alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: (e) => e.currentTarget.replaceWith(h('div', { class: 'thumb' })) }) : h('div', { class: 'thumb' }),
       h('div', { style: 'min-width:0' },
-        h('div', { class: 't' }, [j.creator, j.title].filter(Boolean).join(' - ') || 'Resolving link ...'),
+        h('div', { class: 't' }, j.audienceHidden ? '18+ or unclassified item' : [j.creator, j.title].filter(Boolean).join(' - ') || 'Resolving link ...'),
         h('div', { class: 's' }, status),
         ACTIVE.has(j.status) && pct !== null ? h('div', { class: 'bar' }, h('i', { style: `width:${pct}%` })) : null),
       acts);
@@ -592,7 +667,7 @@
     const aud = params.get('aud') || '';
     const q = (params.get('q') || '').toLowerCase();
     const profile = Number(params.get('profile')) || 0;
-    return (state.media || [])
+    return (mediaSource() || [])
       .filter((it) => !profile || it.profileId === profile)
       .filter((it) => !kind || it.kind === kind)
       .filter((it) => !aud || it.audience === aud)
@@ -623,6 +698,7 @@
       button);
   }
 
+  let mediaAdultLoading = false;
   function viewMedia(params) {
     const kind = params.get('kind') || '';
     const aud = params.get('aud') || '';
@@ -630,7 +706,22 @@
     // History entries without a file are refused or failed attempts, not media.
     // They stay out of the grid, but the newest ones are named above it so the
     // latest download never just goes missing.
-    const misses = state.mediaMisses || [];
+    const adultView = ADULT_AUDS.includes(aud);
+    if (!adultView) {
+      state.mediaAdult = null;
+      state.mediaAdultMisses = null;
+    } else if (!state.mediaAdult && !mediaAdultLoading) {
+      // Media is not a live page, so it is drawn again once the list is here.
+      mediaAdultLoading = true;
+      const gen = audienceGen;
+      load(['mediaAdult']).then(() => {
+        mediaAdultLoading = false;
+        // An answer dropped for a newer classification is asked for again.
+        if (!state.mediaAdult && gen === audienceGen) state.mediaAdult = [];
+        if (inAdultView()) render(false);
+      });
+    }
+    const misses = (adultView ? state.mediaAdultMisses : state.mediaMisses) || [];
     const items = mediaList(params);
     const query = new URLSearchParams(params);
     query.delete('open');
@@ -646,7 +737,7 @@
       'aria-label': 'Audience',
       onchange: (e) => { location.hash = withParam('aud', e.currentTarget.value); },
     },
-    [['', 'All audiences'], ['general', 'General'], ['adult', '18+'], ['unknown', 'Unclassified']]
+    [['', 'General'], ['adult', '18+'], ['unknown', 'Unclassified']]
       .map(([v, label]) => h('option', { value: v, selected: v === aud }, label)));
     return [
       h('h1', null, 'Media'),
@@ -662,7 +753,7 @@
               missState(it)))))
         : null,
       !items.length
-        ? h('p', { class: 'empty' }, state.media ? 'Nothing matches.' : 'Loading ...')
+        ? h('p', { class: 'empty' }, mediaSource() ? 'Nothing matches.' : 'Loading ...')
         : aud
           ? h('div', { class: 'media-grid' }, items.map((it) => tile(it, query)))
           : h('div', { class: 'media-sections' }, MEDIA_GROUPS.map(([g, label]) => {
@@ -1138,7 +1229,29 @@
   // Media page. Clicking a clip opens the same vertical feed, over the page's
   // current filter and order.
   const ADS_PAGE = 120;
-  const adsFileUrl = (id, v, download) => `/api/hub/adshortis/file?id=${encodeURIComponent(id)}&v=${v === 'poster' ? 'poster' : 'video'}${download ? '&download=1' : ''}`;
+  // r=2: a new address for every folder file, so nothing a browser cached under
+  // the old max-age=3600 is reused (H46, H54).
+  const adsFileUrl = (id, v, download) => `/api/hub/adshortis/file?id=${encodeURIComponent(id)}&v=${v === 'poster' ? 'poster' : 'video'}&r=2${download ? '&download=1' : ''}`;
+  const adsMode = () => (state.config && state.config.adshortisMode) || 'off';
+  const adsFolderPage = () => !!(state.config && state.config.adshortisLibrary);
+  // The standalone app's address, https only (the server sends an origin).
+  const adsStandalone = () => {
+    const v = state.config && state.config.adshortisEmbed;
+    return typeof v === 'string' && /^https:\/\/[a-z0-9.\-[\]:]+\/$/i.test(v) ? v : null;
+  };
+  // #/adshortis* decides on the effective mode (H28): the folder page only when
+  // the server mounts it, so viewAdshortis never calls unmounted routes.
+  function viewAdshortisPage(params) {
+    // Redrawn by settle() once the config is in.
+    if (!state.config) return [h('p', { class: 'empty', 'data-ads-wait': '1' }, 'Loading ...')];
+    if (adsFolderPage()) return viewAdshortis(params);
+    const link = adsStandalone();
+    return [
+      h('h1', null, 'Adshortis ', h('span', { class: 'chip adult' }, '18+')),
+      h('p', { class: 'lead' }, 'Adshortis is not available here.'),
+      link ? h('p', null, h('a', { class: 'btn', href: link, target: '_blank', rel: 'noopener noreferrer' }, 'Open Adshortis')) : null,
+    ];
+  }
   let adsLoading = null;
   function loadAds(fresh) {
     if (adsLoading) return adsLoading;
@@ -1222,7 +1335,7 @@
         creator ? h('a', { class: 'chip', href: withParams({ creator: '' }), title: 'Show every creator' }, `Creator: ${creator} x`) : null,
         q ? h('a', { class: 'chip', href: withParams({ q: '' }), title: 'Clear the search' }, `Search: ${q} x`) : null),
       state.adsError
-        ? h('p', { class: 'err' }, state.adsError)
+        ? h('p', { class: 'err' }, `The Adshortis folder page did not load (${state.adsError}). It may have been switched off; reload the page.`)
         : !state.ads
           ? h('p', { class: 'empty' }, 'Loading ...')
           : !items.length
@@ -1449,7 +1562,8 @@
     const sec = Math.round(s % 60);
     return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   };
-  const fileUrl = (id, v, download) => `/api/hub/media/${encodeURIComponent(id)}/file?v=${v}${download ? '&download=1' : ''}`;
+  // gen=2: the cache generation of H98 (general files revalidate, 18+ files are never stored).
+  const fileUrl = (id, v, download) => adultParam(`/api/hub/media/${encodeURIComponent(id)}/file?v=${v}&gen=2${download ? '&download=1' : ''}`);
 
   function viewerNeighbours() {
     const r = route();
@@ -1495,7 +1609,7 @@
     if (r.id === 'adshortis' && !state.ads) return;
     // A video opens the vertical feed; pictures and audio the plain viewer.
     // Every Adshortis clip is a video.
-    const listed = r.id === 'media' ? (state.media || []).find((it) => it.id === id) : null;
+    const listed = r.id === 'media' ? (mediaSource() || []).find((it) => it.id === id) : null;
     const mode = r.id === 'adshortis' || (listed && listed.kind === 'video') ? 'feed' : 'plain';
     const source = FEED_SOURCES[r.id];
     if (viewer.el && viewer.mode === 'feed' && mode === 'feed' && feed.src === source && feed.slides.has(id)) {
@@ -1528,7 +1642,7 @@
     }
     drawViewer();
     const seq = ++viewer.seq;
-    api(`/api/hub/media/${encodeURIComponent(id)}`)
+    api(adultParam(`/api/hub/media/${encodeURIComponent(id)}`))
       .then((d) => {
         if (seq !== viewer.seq) return;
         viewer.detail = d.item;
@@ -1553,7 +1667,7 @@
   function drawViewer() {
     const el = viewer.el;
     if (!el) return;
-    const fromList = (state.media || []).find((it) => it.id === viewer.id) || null;
+    const fromList = (mediaSource() || []).find((it) => it.id === viewer.id) || null;
     const d = viewer.detail;
     const it = (d && !d.error ? d : null) || fromList || {};
     const nb = viewerNeighbours();
@@ -1761,9 +1875,9 @@
       page: 'media',
       list: (id) => {
         const list = viewerNeighbours().list.filter((it) => it.kind === 'video');
-        return list.some((it) => it.id === id) ? list : (state.media || []).filter((it) => it.id === id);
+        return list.some((it) => it.id === id) ? list : (mediaSource() || []).filter((it) => it.id === id);
       },
-      detail: (id) => api(`/api/hub/media/${encodeURIComponent(id)}`).then((d) => d.item),
+      detail: (id) => api(adultParam(`/api/hub/media/${encodeURIComponent(id)}`)).then((d) => d.item),
       fileUrl,
       poster: (it) => thumbSrc(it.thumbnail),
       creatorHref: (it) => (it.profileId ? `#/profiles?id=${it.profileId}` : it.creator ? `#/profiles?q=${encodeURIComponent(it.creator)}` : null),
@@ -3328,7 +3442,8 @@
   const logoutForm = document.querySelector('form.logout');
   // Social & Photos' Elitogram session ends the same way.
   if (logoutForm) logoutForm.addEventListener('submit', (e) => {
-    if ((!tikIsNative() && !socialOn()) || logoutForm.dataset.tikDone) return;
+    const adsNative = adsMode() === 'native';
+    if ((!tikIsNative() && !socialOn() && !adsNative) || logoutForm.dataset.tikDone) return;
     e.preventDefault();
     logoutForm.dataset.tikDone = '1';
     const ctl = new AbortController();
@@ -3336,6 +3451,9 @@
     const ends = [];
     if (tikIsNative()) ends.push(fetch('/api/tik/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
     if (socialOn()) ends.push(fetch('/api/egram/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
+    // Native Adshortis: /logout drops the link too; this also ends the upstream
+    // session while the browser still holds the cookie (FS m1).
+    if (adsNative) ends.push(fetch('/api/ads/session', { method: 'DELETE', credentials: 'same-origin', signal: ctl.signal }).catch(() => {}));
     Promise.all(ends).finally(() => { clearTimeout(timer); logoutForm.submit(); });
   });
 
@@ -3372,6 +3490,8 @@
     if (route().id === 'tikshortis' && !document.querySelector('.tik-frame, .tik-root')) render(false);
     else if (route().id === 'tikshortis') updateNav();
     else if (route().id === 'social' && !document.querySelector('.sg-root')) render(false);
+    // The Adshortis page drawn before the config knew the mode.
+    else if (route().id === 'adshortis' && document.querySelector('[data-ads-wait]')) render(false);
     else if (route().ownData) updateNav();
     else render(false);
   }

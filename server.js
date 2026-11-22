@@ -23,6 +23,7 @@ const { isRecoverableYoutubeError, isMusicPremiumLock, findFreeAlternate } = req
 const gda = require('./gda');
 const platformDrop = require('./platform-drop');
 const hub = require('./hub');
+const thumbIndexLib = require('./thumb-index');
 const profiles = require('./profiles');
 const audience = require('./audience');
 const itemStore = require('./item-store');
@@ -30,6 +31,8 @@ const libraryLib = require('./library');
 const tikshortisEmbed = require('./tikshortis-embed');
 const tikGateway = require('./tikshortis-gateway');
 const egramGateway = require('./egram-gateway');
+const adsGateway = require('./adshortis-gateway');
+const { createLinkStore: createAdsLinkStore, LOGIN_DAYS: ADS_LOGIN_DAYS } = require('./ads-links');
 const modules = require('./modules');
 const inbox = require('./inbox');
 const mediaViewer = require('./media-viewer');
@@ -532,12 +535,18 @@ const STATE_FILES = [
   'gda-clients.json',
   'profiles.json',
   'inbox-settings.json',
+  'thumb-index.json',
+  // Native Adshortis: the key that seals linked sessions. Its login records
+  // (ads-logins.json) are left out on purpose: a restored copy would bring
+  // revoked links back (see ads-links.js).
+  'ads-seal-key.json',
 ];
 
-function writeJsonAtomic(file, value) {
+// `mode` (optional) is the file mode for a new file, e.g. 0o600 for a key.
+function writeJsonAtomic(file, value, mode) {
   const tmp = `${file}.tmp-${process.pid}`;
   try {
-    const fd = fs.openSync(tmp, 'w');
+    const fd = mode === undefined ? fs.openSync(tmp, 'w') : fs.openSync(tmp, 'w', mode);
     try {
       fs.writeFileSync(fd, JSON.stringify(value));
       // rename(2) orders the directory entry, not the data behind it. Without
@@ -699,7 +708,8 @@ function recordHistory(entry) {
     const id = `${Date.now()}-${historySeq++}`;
     list.unshift({ id, time: Date.now(), ...entry });
     writeJsonAtomic(HISTORY_FILE, list.slice(0, HISTORY_MAX));
-    warmThumb(entry && entry.thumbnail, { keep: true });
+    noteHistoryThumb(list[0]);
+    warmThumb(entry && entry.thumbnail);
   } catch (e) {
     console.warn('history write failed:', e.message);
   }
@@ -768,8 +778,20 @@ function idKey(site, mediaId) {
   return site && mediaId ? `id:${site}:${mediaId}` : null;
 }
 
-function markDownloaded(sourceUrl, filename, site, mediaId, channel) {
+// `job` (optional) is the saved item: its picture's provenance is recorded
+// with the registry row here, on every save path, so it outlives the
+// 200-row history (H47, Codex phase-0 B2). `classChannel` is the channel the
+// audience reads (`server/adults` for an 18+ server save); it defaults to
+// `channel`.
+function markDownloaded(sourceUrl, filename, site, mediaId, channel, job = null, classChannel = undefined) {
   if (!sourceUrl) return;
+  if (job && job.thumbnail) {
+    noteThumb(job.thumbnail, {
+      kind: 'entry',
+      ref: `r:${mediaKey(sourceUrl)}`,
+      in: thumbIn({ ...job, sourceUrl }, classChannel === undefined ? channel || null : classChannel),
+    });
+  }
   const map = readDownloaded();
   const entry = { filename: filename || null, at: Date.now(), channel: channel || null };
   map[mediaKey(sourceUrl)] = entry;
@@ -1210,8 +1232,19 @@ function writePlaylists(list) {
 }
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+// Before anything can answer: every /api response, including the gate's 401
+// and a parser's 400, carries the cache generation (H62), and every /api/ads
+// response the gateway's answer headers.
+app.use(cacheGeneration);
+app.use((req, res, next) => {
+  if (adsGateway.isMountPath(req.path)) adsGateway.baseHeaders(res);
+  next();
+});
+// /api/ads reads its own body, bounded, after its own checks.
+const urlencodedParser = express.urlencoded({ extended: false });
+const jsonParser = express.json();
+app.use((req, res, next) => (adsGateway.isMountPath(req.path) ? next() : urlencodedParser(req, res, next)));
+app.use((req, res, next) => (adsGateway.isMountPath(req.path) ? next() : jsonParser(req, res, next)));
 
 // Behind a proxy the socket peer is the proxy, so req.ip carries the same value
 // for every visitor unless Express is told which hops to skip. The login
@@ -1363,6 +1396,54 @@ function isCrossSite(req) {
   return !expected || actual !== expected;
 }
 
+// --- Grabbit 3.0: native Adshortis (adshortis-gateway.js, ads-links.js) --------
+// ADSHORTIS_MODE=native draws the 18+ module in the hub over Adshortis' API,
+// through /api/ads/*. It needs Adshortis' LAN address (ADSHORTIS_API_URL), the
+// public origin Adshortis checks writes against (ADSHORTIS_APP_ORIGIN), this
+// hub's own public https origin (GRABBIT_PUBLIC_ORIGIN, compared exactly on
+// every write) and Grabbit's own sign-in. Missing any: embed (a plain link to
+// ADSHORTIS_EMBED_URL) or off. See modules.js adshortisMode().
+const ADSHORTIS_API = adsGateway.parseOrigin(process.env.ADSHORTIS_API_URL);
+const ADSHORTIS_APP_ORIGIN = adsGateway.parseOrigin(process.env.ADSHORTIS_APP_ORIGIN);
+const GRABBIT_PUBLIC_ORIGIN = adsGateway.parseHttpsOrigin(process.env.GRABBIT_PUBLIC_ORIGIN);
+const ADSHORTIS_EMBED = adsGateway.parseHttpsOrigin(process.env.ADSHORTIS_EMBED_URL);
+for (const [name, ok] of [
+  ['ADSHORTIS_API_URL', ADSHORTIS_API],
+  ['ADSHORTIS_APP_ORIGIN', ADSHORTIS_APP_ORIGIN],
+  ['GRABBIT_PUBLIC_ORIGIN', GRABBIT_PUBLIC_ORIGIN],
+  ['ADSHORTIS_EMBED_URL', ADSHORTIS_EMBED],
+]) {
+  if (process.env[name] && !ok) console.warn(`[grabbit] ${name} is not a valid origin; it is ignored.`);
+}
+const { mode: ADSHORTIS_MODE, warnings: ADS_MODE_WARNINGS } = modules.adshortisMode(process.env, {
+  apiOrigin: ADSHORTIS_API,
+  appOrigin: ADSHORTIS_APP_ORIGIN,
+  publicOrigin: GRABBIT_PUBLIC_ORIGIN,
+  embed: ADSHORTIS_EMBED,
+  authOn: !!GRABBIT_PASSWORD && !AUTH_DISABLED,
+});
+for (const w of ADS_MODE_WARNINGS) console.warn(`[grabbit] ${w}`);
+const ADS_LINKS = createAdsLinkStore({ dir: DATA_DIR, writeJsonAtomic });
+// A changed mode or Grabbit password drops every Adshortis link (H2), and a
+// changed mode bumps the cache generation (H62).
+const ADS_BOOT = ADS_LINKS.bootCheck({ mode: ADSHORTIS_MODE, password: GRABBIT_PASSWORD, secret: process.env.GRABBIT_SECRET || '' });
+if (ADS_BOOT.dropped) console.log(`[grabbit] Adshortis: dropped ${ADS_BOOT.dropped} link record(s) (${ADS_BOOT.reason}).`);
+const CACHE_GEN = ADS_BOOT.gen;
+const CACHE_GEN_COOKIE = 'grabbit_cache_gen';
+const ADS_GATEWAY =
+  ADSHORTIS_MODE === 'native'
+    ? adsGateway.createGateway({
+        apiUrl: ADSHORTIS_API,
+        appOrigin: ADSHORTIS_APP_ORIGIN,
+        publicOrigin: GRABBIT_PUBLIC_ORIGIN,
+        links: ADS_LINKS,
+        // Only the owner's browser session: never the internal token, never an
+        // app client (the gate already keeps those off /api/ads).
+        isOwner: (req) => req.principal === gda.LEGACY_SHARED,
+        clientIp: (req) => req.ip || '',
+      })
+    : null;
+
 function loginPage(error) {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1482,11 +1563,43 @@ app.post('/login', async (req, res) => {
     secure: true,
     maxAge: 30 * 24 * 3600 * 1000,
   });
+  // Native Adshortis: a fresh per-login id, issued only here and only for the
+  // shared password (H2). It replaces any id this browser held before.
+  // A failed state write costs the Adshortis id, never the sign-in itself.
+  if (ok && ADS_GATEWAY) {
+    try {
+      const prev = adsGateway.readCookie(req, adsGateway.LOGIN_COOKIE);
+      if (prev) ADS_LINKS.dropLogin(prev);
+      res.append('Set-Cookie', adsGateway.loginCookie(ADS_LINKS.issueLogin(), ADS_LOGIN_DAYS));
+    } catch (e) {
+      console.error(`[ads] could not issue a login id: ${e.code || e.message}`);
+    }
+  }
   res.redirect('/');
 });
 
-app.post('/logout', (_req, res) => {
+app.post('/logout', (req, res) => {
   res.clearCookie(AUTH_COOKIE);
+  // Native Adshortis: the login id and its seal record go first (that alone
+  // ends the link), then the upstream session, best effort (G2). Only for the
+  // owner's own page over https: this route sits before the auth gate, and a
+  // sibling site's form or a signed-out browser must not reach the link.
+  const adsLogin = adsGateway.readCookie(req, adsGateway.LOGIN_COOKIE);
+  req.principal = principalOf(req);
+  const adsRevoke = !ADS_GATEWAY || ADS_GATEWAY.mayRevoke(req);
+  if (adsLogin && ADS_GATEWAY && adsRevoke) {
+    const cur = ADS_GATEWAY.sealOf(req, adsLogin);
+    try {
+      ADS_LINKS.dropLogin(adsLogin);
+    } catch (e) {
+      console.error(`[ads] could not drop a login id: ${e.code || e.message}`);
+    }
+    if (cur) ADS_GATEWAY.upstreamLogout(req, cur.t);
+  }
+  if (adsRevoke) {
+    res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LOGIN_COOKIE));
+    res.append('Set-Cookie', adsGateway.clearCookie(adsGateway.LINK_COOKIE));
+  }
   // Grabbit 3.0: the linked TikShortis session goes with the Grabbit one, so the
   // next sign-in in this browser does not inherit it. (The hub ends it upstream
   // first; this clears it even when that call did not get through.)
@@ -1508,6 +1621,17 @@ const PUBLIC_ASSETS = new Set([
   '/manifest.webmanifest',
   '/sw.js',
 ]);
+
+// Retired in native mode (D3, H1, H19): the folder routes answer 404 and tell
+// the browser to drop what it cached from them (H62, H92), signed in or not,
+// so a browser whose session ended still gets the header.
+if (ADSHORTIS_MODE === 'native') {
+  app.all(['/api/hub/adshortis', '/api/hub/adshortis/*'], (_req, res) => {
+    res.setHeader('Clear-Site-Data', '"cache"');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(404).json({ ok: false, error: 'Not available' });
+  });
+}
 
 // Gate everything below for external, unauthenticated requests. API calls get a
 // 401 JSON; page/asset requests are redirected to the login form.
@@ -1542,6 +1666,24 @@ app.use((req, res, next) => {
   }
   return res.redirect('/login');
 });
+
+// Cache generation (H62): an /api response to a browser whose generation cookie
+// is missing or stale carries Clear-Site-Data: "cache" and the current
+// generation. The generation changes with the effective Adshortis mode, so a
+// browser drops bytes it was given under the previous mode. The cookie holds no
+// secret. Installed first thing after the app is created (see there), so it
+// also covers answers given before the auth gate.
+function cacheGeneration(req, res, next) {
+  if (!req.path.toLowerCase().startsWith('/api/')) return next();
+  if (parseCookies(req.headers.cookie)[CACHE_GEN_COOKIE] !== String(CACHE_GEN)) {
+    res.setHeader('Clear-Site-Data', '"cache"');
+    res.append(
+      'Set-Cookie',
+      `${CACHE_GEN_COOKIE}=${CACHE_GEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${adsGateway.isSecure(req) ? '; Secure' : ''}`
+    );
+  }
+  next();
+}
 
 // The app shell, the service worker, the manifest and the icons must always be
 // revalidated. Express sends no Cache-Control of its own, so Cloudflare falls
@@ -1578,8 +1720,18 @@ const queryOf = (req) => {
   const i = req.originalUrl.indexOf('?');
   return i < 0 ? '' : req.originalUrl.slice(i);
 };
+// The hub's shell carries the build it was served by (H85), so a page can tell
+// when the server under it has changed. No sha (not a release build): no meta.
+const BUILD_SHA = releaseSha();
+const BUILD_META = BUILD_SHA ? `<meta name="grabbit-build" content="${BUILD_SHA}">` : '';
 const sendShell = (res, file) => {
   res.setHeader('Cache-Control', 'no-cache');
+  if (file === 'hub/index.html' && BUILD_META) {
+    return fs.readFile(path.join(PUBLIC_DIR, file), 'utf8', (err, html) => {
+      if (err) return res.sendFile(path.join(PUBLIC_DIR, file), { cacheControl: false });
+      res.type('html').send(html.replace('<head>', `<head>\n    ${BUILD_META}`));
+    });
+  }
   res.sendFile(path.join(PUBLIC_DIR, file), { cacheControl: false });
 };
 app.get('/', (req, res) => {
@@ -1669,12 +1821,18 @@ function sendPush(payload) {
   }
 }
 
+// A notification is a general surface (a lock screen): an item not
+// classified general is named the way the reduced job feed names it (Codex
+// phase-0 B5).
 function notifyJobFinished(j) {
-  const name = j.title || j.filename || j.sourceUrl || 'download';
+  if (!pushEnabled || !pushSubs.length) return;
+  const hidden = jobAudience(j) !== 'general';
+  const shown = hidden ? reducedJob(publicJob(j)) : j;
+  const name = hidden ? '18+ or unclassified item' : j.title || j.filename || j.sourceUrl || 'download';
   sendPush(
     j.status === 'done'
       ? { title: 'Download complete', body: name, tag: 'job-' + j.id, url: '/classic/?tab=queue' }
-      : { title: 'Download failed', body: name + (j.error ? ' — ' + j.error : ''), tag: 'job-' + j.id, url: '/classic/?tab=queue' }
+      : { title: 'Download failed', body: name + (shown.error ? ' — ' + shown.error : ''), tag: 'job-' + j.id, url: '/classic/?tab=queue' }
   );
 }
 
@@ -2144,6 +2302,9 @@ app.get('/api/resolve', async (req, res) => {
     const job = await extractors.resolve(url);
     const stem = `${safeCreator(job.creator)}_-_${safeTitle(job.title)}`;
     const isImage = job.mediaType === 'image';
+    // A resolve preview is shown to the view that asked for it (H34), unless
+    // the item is classified 18+ (B1); the preview key still shows it here.
+    const thumbToken = notePreviewThumb(req, job, url);
     res.json({
       ok: true,
       extractor: job.extractor,
@@ -2151,6 +2312,7 @@ app.get('/api/resolve', async (req, res) => {
       title: job.title || null,
       tags: job.tags || [],
       thumbnail: job.thumbnail || null,
+      thumbToken,
       duration: durationKnown(job) ? Number(job.duration) : null,
       mediaType: isImage ? 'image' : 'video',
       // A lighter copy of the video the card can play in place as a moving
@@ -2262,6 +2424,14 @@ function thumbKey(url) {
 // The cached file for a URL, or null. The extension is part of the name (it
 // carries the content type), so the few candidates are probed directly rather
 // than listing the directory on every request.
+// A picture fetched from its site URL is cached as `u-<key>`. The prefix keeps
+// it apart from the plain `<key>` files of the cache before the provenance
+// index, so a file the upgrade could not set aside is never served (Codex
+// phase-0 B3).
+const urlCacheName = (key) => `u-${key}`;
+function cachedUrlThumb(key) {
+  return cachedThumb(urlCacheName(key));
+}
 function cachedThumb(key) {
   for (const ext of THUMB_EXTS) {
     const file = path.join(THUMB_DIR, `${key}.${ext}`);
@@ -2283,26 +2453,167 @@ function thumbReferer(url) {
 
 // Keep the cache from growing without bound. Runs on boot and every 200 stores
 // — a directory listing per picture would cost more than the pictures do.
-const THUMB_KEEP_PREFIX = 'keep-';
 // A picture that neither the site nor a local file could give is not asked for
 // again for this long, so a page of dead links does not hit the sites on every view.
 const THUMB_MISS_MS = 6 * 3600 * 1000;
 const THUMB_MISS_MAX = 5000;
 const thumbMisses = new Map();
 
-// The cache keys of the site pictures the history still shows.
-function historyThumbKeys() {
-  const keys = new Set();
-  for (const e of readHistory()) {
-    if (e && /^https?:\/\//i.test(String(e.thumbnail || ''))) keys.add(thumbKey(e.thumbnail));
+// --- Thumbnail provenance index (H34, H42, H47, H57, H69, H83, H94) ---------
+// /api/thumb serves or fetches a picture only for a key thumb-index.json
+// knows, and only to a view the key's strictest provenance allows (see
+// thumb-index.js). Grabbit records a provenance wherever it learns or hands out
+// a picture: a history row, a registry row, a library item, a job, a resolve.
+const THUMB_INDEX_FILE = path.join(DATA_DIR, 'thumb-index.json');
+// Classification inputs of a history row, a job or a library item.
+function thumbIn(e, channel) {
+  return thumbIndexLib.cleanIn({
+    creator: e.creator, sourceCreator: e.sourceCreator, site: e.site, extractor: e.extractor,
+    sourceUrl: e.sourceUrl || e.url, channel: channel === undefined ? e.channel : channel, filename: e.filename,
+    itemKey: e.itemKey, audience: e.audience === 'adult' ? 'adult' : undefined,
+  });
+}
+// readProfiles() counts the whole registry to sync it, too much for every
+// picture on a page: a full read at most every few seconds, the cached store
+// in between (a store that cannot be read gives null, so nothing is general).
+let thumbStoreReadAt = 0;
+function thumbProfileStore() {
+  if (Date.now() - thumbStoreReadAt > 5000) {
+    thumbStoreReadAt = Date.now();
+    return readProfileStoreQuietly();
   }
-  return keys;
+  try {
+    return readProfilesReadOnly().store;
+  } catch {
+    return null;
+  }
+}
+// What "still referenced" means during one prune: a history row, a registry
+// key, an item or a live job. Built once per prune, never per key.
+let thumbRefCtx = null;
+const THUMBS = new thumbIndexLib.ThumbIndex({
+  classify: (input) => entryClassification(input, thumbProfileStore()).audience,
+  referenced: (ref) => {
+    const c = thumbRefCtx;
+    if (!c) return true;
+    const kind = ref.slice(0, 2);
+    const rest = ref.slice(2);
+    if (kind === 'h:') return c.history.has(rest);
+    if (kind === 'r:') return Object.hasOwn(c.registry, rest);
+    if (kind === 'i:') return !!(ITEM_STORE && ITEM_STORE.get(rest));
+    if (kind === 'j:') return jobsMap.has(rest);
+    return false;
+  },
+});
+// An index file that exists but cannot be read, or that parses to nothing
+// usable, is damage (Codex phase-0 B3): /api/thumb then serves nothing, the
+// file is never written over and the upgrade does not run, until the owner
+// restores it (or moves it aside for a fresh start) and restarts. A missing
+// file is a fresh install.
+let thumbIndexBroken = null;
+{
+  let exists = false;
+  try {
+    fs.statSync(THUMB_INDEX_FILE);
+    exists = true;
+  } catch (e) {
+    if (e.code !== 'ENOENT') thumbIndexBroken = e.message;
+  }
+  if (exists) {
+    try {
+      fs.readFileSync(THUMB_INDEX_FILE);
+      const raw = readJsonState(THUMB_INDEX_FILE, null);
+      if (!raw || !THUMBS.load(raw)) thumbIndexBroken = 'it did not parse to a usable index and no snapshot restored it';
+    } catch (e) {
+      thumbIndexBroken = e.message;
+    }
+  }
+  if (thumbIndexBroken) {
+    console.error(`thumbs: thumb-index.json could not be read (${thumbIndexBroken}). Thumbnails are held back until it is restored ` +
+      'from a snapshot (or moved aside for a fresh start) and Grabbit is restarted.');
+  }
+}
+let thumbIndexTimer = null;
+function saveThumbIndex(now = false) {
+  if (!THUMBS.dirty || thumbIndexBroken) return;
+  const write = () => {
+    thumbIndexTimer = null;
+    try {
+      writeJsonAtomic(THUMB_INDEX_FILE, THUMBS.toJSON());
+      THUMBS.dirty = false;
+    } catch (e) {
+      console.warn('thumbs: thumb-index.json write failed:', e.message);
+    }
+  };
+  if (now) {
+    clearTimeout(thumbIndexTimer);
+    return write();
+  }
+  if (!thumbIndexTimer) {
+    thumbIndexTimer = setTimeout(write, 1000);
+    if (thumbIndexTimer.unref) thumbIndexTimer.unref();
+  }
+}
+process.on('exit', () => saveThumbIndex(true));
+// The index key of a picture address: a site URL or Grabbit's own frame id.
+function thumbKeyOf(thumbnail) {
+  const s = String(thumbnail || '');
+  if (/^https?:\/\//i.test(s)) return validUrl(s) ? thumbKey(s) : null;
+  const m = /^\/api\/thumb\?id=(f-[0-9a-f]{40})$/.exec(s);
+  return m ? m[1] : null;
+}
+function noteThumb(thumbnail, prov) {
+  const key = thumbKeyOf(thumbnail);
+  if (!key) return null;
+  if (key.startsWith('f-') && prov.kind === 'entry') prov = { ...prov, kind: 'local' };
+  THUMBS.add(key, prov);
+  saveThumbIndex();
+  return key;
+}
+function noteHistoryThumb(e) {
+  if (e && e.thumbnail && e.id) noteThumb(e.thumbnail, { kind: 'entry', ref: `h:${e.id}`, in: thumbIn(e) });
+}
+// The audience a key is served to: its strictest provenance, or null when no
+// provenance was ever recorded.
+function thumbPasses(key, adultView) {
+  if (thumbIndexBroken) return { ok: false, aud: null };
+  const aud = THUMBS.audienceOf(key);
+  if (aud === null) return { ok: false, aud: null };
+  return { ok: passesAudience(aud, adultView), aud };
+}
+// Codex phase-0 B1: a resolve on a general view records its picture as a
+// "soft" preview with the item's own classification inputs, so a link to an
+// item classified 18+ never makes its picture general. The view that resolved
+// the link gets a preview key (`thumbToken`, `pt=` on /api/thumb) that opens
+// that one picture for it alone, never stored by the browser. The secret lives
+// as long as the process: a restart ends every preview key.
+const PREVIEW_SECRET = crypto.randomBytes(32);
+function previewToken(key) {
+  return crypto.createHmac('sha256', PREVIEW_SECRET).update(`thumb-preview\0${key}`).digest('hex').slice(0, 32);
+}
+function previewTokenOk(key, token) {
+  const t = String(token || '');
+  if (!/^[0-9a-f]{32}$/.test(t)) return false;
+  const want = Buffer.from(previewToken(key));
+  return crypto.timingSafeEqual(want, Buffer.from(t)) && THUMBS.provsOf(key).some((p) => p.kind === 'preview');
+}
+// Records a resolve result's picture for the view that asked, and returns the
+// preview key the response carries (null without a picture).
+function notePreviewThumb(req, item, url) {
+  const key = noteThumb(item.thumbnail, {
+    kind: 'preview',
+    aud: wantsAdultView(req) ? 'adult' : 'general',
+    in: thumbIn({ ...item, sourceUrl: item.sourceUrl || url }, null),
+    soft: true,
+  });
+  return key && !key.startsWith('f-') ? previewToken(key) : null;
 }
 
-function keptThumb(key) {
-  return cachedThumb(THUMB_KEEP_PREFIX + key);
-}
-
+// Files in THUMB_DIR: `<key>.<ext>` is a picture fetched from its site URL;
+// `keep-<refTag>-<key>.<ext>` one made again from an entry's own file when the
+// site link died (H47); `f-<40 hex>.<ext>` a frame Grabbit took for one entry.
+// Anything else at the top level predates the index and was moved to a
+// quarantine folder by the upgrade. A file whose key the index dropped goes.
 // Atomic write of one picture into THUMB_DIR as <name>.<ext>, via a per-call
 // temp name: two cards can ask for the same picture at once.
 function writeThumbFile(name, buf, ext) {
@@ -2321,53 +2632,61 @@ function writeThumbFile(name, buf, ext) {
     throw e;
   }
 }
-
-// Three kinds of file share THUMB_DIR. `local-<sha1>` pictures Grabbit made
-// itself (video frames) are the only copy and are never pruned. `keep-<key>`
-// is a history entry's own picture, kept while an entry in the history still
-// uses it and removed once none does. Everything else is the plain cache of
-// site pictures, capped at THUMB_MAX_FILES, oldest first.
+// u-<key>, keep-<tag>-<key> or f-<id>; a bare <key> is from before the index.
+const THUMB_FILE_RE = /^(?:u-([0-9a-f]{40})|keep-([0-9a-f]{16})-([0-9a-f]{40})|(f-[0-9a-f]{40}))\.([a-z0-9]+)$/;
+function keptFileFor(key, ref) {
+  return cachedThumb(`keep-${thumbIndexLib.refTag(ref)}-${key}`);
+}
 function pruneThumbs() {
-  let all;
+  // An index that could not be read knows no key: pruning would delete every picture.
+  if (thumbIndexBroken) return;
+  thumbRefCtx = { history: new Set(readHistory().map((e) => e.id)), registry: readDownloaded() };
   try {
-    all = fs.readdirSync(THUMB_DIR);
-  } catch {
-    return;
-  }
-  const inUse = historyThumbKeys();
-  // An unreadable or empty history must not read as "no entry uses any of them".
-  const dropOrphans = inUse.size > 0;
-  const names = [];
-  for (const name of all) {
-    if (name.startsWith('local-') || name.endsWith('.part')) continue;
-    if (name.startsWith(THUMB_KEEP_PREFIX)) {
-      if (dropOrphans && !inUse.has(name.slice(THUMB_KEEP_PREFIX.length).split('.')[0])) {
+    THUMBS.prune();
+    saveThumbIndex();
+    let all;
+    try {
+      all = fs.readdirSync(THUMB_DIR, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const plain = [];
+    for (const d of all) {
+      if (!d.isFile() || d.name.endsWith('.part')) continue;
+      const m = THUMB_FILE_RE.exec(d.name);
+      if (!m) continue; // left for the owner; never served
+      const tag = m[2] || null;
+      const key = m[1] || m[3] || m[4];
+      let drop = !THUMBS.has(key);
+      if (!drop && tag) drop = !THUMBS.refsOf(key).some((ref) => thumbIndexLib.refTag(ref) === tag);
+      if (drop) {
         try {
-          fs.unlinkSync(path.join(THUMB_DIR, name));
+          fs.unlinkSync(path.join(THUMB_DIR, d.name));
         } catch {
           /* already gone */
         }
+      } else if (!tag && !key.startsWith('f-') && !THUMBS.isReferenced(key)) plain.push(d.name);
+    }
+    // Pictures only previews point at are plain cache, capped oldest first.
+    if (plain.length <= THUMB_MAX_FILES) return;
+    const files = [];
+    for (const name of plain) {
+      try {
+        files.push({ name, at: fs.statSync(path.join(THUMB_DIR, name)).mtimeMs });
+      } catch {
+        /* vanished between the listing and the stat */
       }
-      continue;
     }
-    names.push(name);
-  }
-  if (names.length <= THUMB_MAX_FILES) return;
-  const files = [];
-  for (const name of names) {
-    try {
-      files.push({ name, at: fs.statSync(path.join(THUMB_DIR, name)).mtimeMs });
-    } catch {
-      /* vanished between the listing and the stat */
+    files.sort((a, b) => a.at - b.at);
+    for (const f of files.slice(0, files.length - Math.floor(THUMB_MAX_FILES * 0.8))) {
+      try {
+        fs.unlinkSync(path.join(THUMB_DIR, f.name));
+      } catch {
+        /* already gone */
+      }
     }
-  }
-  files.sort((a, b) => a.at - b.at);
-  for (const f of files.slice(0, files.length - Math.floor(THUMB_MAX_FILES * 0.8))) {
-    try {
-      fs.unlinkSync(path.join(THUMB_DIR, f.name));
-    } catch {
-      /* already gone */
-    }
+  } finally {
+    thumbRefCtx = null;
   }
 }
 
@@ -2424,28 +2743,17 @@ async function fetchThumb(url) {
 
 // Fetch a site thumbnail into the cache while its link still works. CDN links
 // are signed and expire within hours, so a picture nobody looked at on the day
-// of the download could never be shown later. Best effort, in the background.
-// With `keep` (a new history entry) it is stored as that entry's own copy,
-// which the cache prune leaves alone while the entry is in the history.
+// of the download could never be shown later. Best effort, in the background,
+// and only for a key the index knows (the caller records it first).
 const thumbsWarming = new Set();
-function warmThumb(url, { keep = false } = {}) {
+function warmThumb(url) {
   if (!url || !/^https?:\/\//i.test(String(url)) || !validUrl(url)) return;
   const key = thumbKey(url);
-  if (thumbsWarming.has(key) || keptThumb(key)) return;
-  const hit = cachedThumb(key);
-  if (hit) {
-    if (!keep) return;
-    try {
-      fs.copyFileSync(hit.file, path.join(THUMB_DIR, `${THUMB_KEEP_PREFIX}${key}.${hit.ext}`));
-    } catch {
-      /* the cache copy still serves it */
-    }
-    return;
-  }
+  if (!THUMBS.has(key) || thumbsWarming.has(key) || cachedUrlThumb(key)) return;
   thumbsWarming.add(key);
   fetchThumb(url)
     .then(({ buf, ext }) => {
-      writeThumbFile(keep ? THUMB_KEEP_PREFIX + key : key, buf, ext);
+      writeThumbFile(urlCacheName(key), buf, ext);
     })
     .catch(() => {
       /* the picture is gone or refused: the hub shows a placeholder */
@@ -2453,58 +2761,80 @@ function warmThumb(url, { keep = false } = {}) {
     .finally(() => thumbsWarming.delete(key));
 }
 
-// Store a picture grabbit produced itself (a frame from a video). It has no
-// source URL to key on, so the bytes are the key; the id is what a history
-// entry points at.
-function storeLocalThumb(buf, ext) {
-  const id = 'local-' + crypto.createHash('sha1').update(buf).digest('hex');
+// Store a frame Grabbit took for one entry. Its id names the entry and the
+// bytes (H47, H69), so a byte-identical frame of another entry is another
+// file; the index records the entry the frame belongs to.
+function storeFrame(ref, input, buf, ext) {
+  const id = thumbIndexLib.frameId(ref, buf);
   const file = path.join(THUMB_DIR, `${id}.${THUMB_EXTS.includes(ext) ? ext : 'jpg'}`);
   try {
-    if (!fs.existsSync(file)) fs.writeFileSync(file, buf);
-    return id;
+    if (!fs.existsSync(file)) writeThumbFile(id, buf, THUMB_EXTS.includes(ext) ? ext : 'jpg');
   } catch (e) {
     console.warn('thumb cache write failed:', e.message);
     return null;
   }
+  THUMBS.add(id, { kind: 'local', ref, in: input });
+  saveThumbIndex();
+  return id;
 }
 
-// GET /api/thumb?url=... -> the picture, cached.
+// GET /api/thumb?url=...|id=f-...[&audience=adult][&v=2] -> the picture.
+// Only an indexed key is served or fetched, and only to a view its strictest
+// provenance allows; anything else is 404 (no outbound request). A general
+// picture is revalidated on every use (ETag), so a key that turns 18+ stops
+// at once; an 18+ picture is never stored by the browser (H42, H60).
 app.get('/api/thumb', async (req, res) => {
-  // A thumbnail names one immutable picture, so a hit needs no revalidation —
-  // but the cache is per-session-holder, so keep it out of shared caches.
-  const send = (file, ext) => {
-    res.setHeader('Cache-Control', 'private, max-age=604800');
+  const adultView = wantsAdultView(req);
+  const none = (why = 'No such thumbnail') => res.status(404).json({ ok: false, error: why });
+  const headersFor = (aud) => ({ 'Cache-Control': aud === 'general' ? 'private, no-cache' : 'private, no-store' });
+  const send = (file, ext, aud) => {
     res.type(imageMime(ext));
-    res.sendFile(file);
+    res.sendFile(file, { cacheControl: false, headers: headersFor(aud) }, (err) => {
+      if (err && !res.headersSent) none();
+    });
   };
-  // A picture grabbit produced itself has no source URL to fetch — it is only
-  // ever served from the cache, by its id. The shape is checked before the id
-  // reaches path.join: it names a file inside the cache directory.
   const id = String(req.query.id || '');
   if (id) {
-    if (!/^local-[0-9a-f]{40}$/.test(id)) return res.status(400).json({ ok: false, error: 'Invalid id' });
+    // A legacy `local-` frame has no provenance anyone can prove (H83).
+    if (thumbIndexLib.LEGACY_LOCAL_RE.test(id)) return none();
+    if (!thumbIndexLib.FRAME_ID_RE.test(id)) return res.status(400).json({ ok: false, error: 'Invalid id' });
+    const gate = thumbPasses(id, adultView);
+    if (!gate.ok) return none();
     const local = cachedThumb(id);
-    if (!local) return res.status(404).json({ ok: false, error: 'No such thumbnail' });
-    return send(local.file, local.ext);
+    if (!local) return none();
+    return send(local.file, local.ext, gate.aud);
   }
   const url = req.query.url;
   if (!validUrl(url)) return res.status(400).json({ ok: false, error: 'Invalid URL' });
   const key = thumbKey(url);
-  const hit = keptThumb(key) || cachedThumb(key);
-  if (hit) return send(hit.file, hit.ext);
+  let gate = thumbPasses(key, adultView);
+  // The view that resolved the link may see its own preview (B1); anything
+  // but a general key then goes out as `no-store`.
+  const byPreview = !gate.ok && gate.aud !== null && req.query.pt !== undefined && previewTokenOk(key, req.query.pt);
+  if (byPreview) gate = { ok: true, aud: gate.aud };
+  if (!gate.ok) return none();
+  const refs = THUMBS.refsOf(key);
+  const hit = cachedUrlThumb(key) || refs.map((ref) => keptFileFor(key, ref)).find(Boolean);
+  if (hit) return send(hit.file, hit.ext, gate.aud);
   const missAt = thumbMisses.get(key);
-  if (missAt && Date.now() - missAt < THUMB_MISS_MS) {
-    return res.status(404).json({ ok: false, error: 'No picture (tried recently)' });
-  }
+  if (missAt && Date.now() - missAt < THUMB_MISS_MS) return none('No picture (tried recently)');
   let got = null;
   let failure = null;
+  let madeFor = null;
   try {
     got = await fetchThumb(url);
   } catch (e) {
     failure = e;
     // The site's link has expired or the picture is gone: make it again from
-    // the downloaded file, when Grabbit still finds one for this entry.
-    got = await thumbFromLocalFile(url).catch(() => null);
+    // the downloaded file of an entry this key belongs to (H42: only an entry
+    // the gate above already passed, never "the first row with this URL").
+    for (const ref of refs) {
+      got = await thumbFromEntry(ref).catch(() => null);
+      if (got) {
+        madeFor = ref;
+        break;
+      }
+    }
   }
   if (!got) {
     if (thumbMisses.size >= THUMB_MISS_MAX) thumbMisses.delete(thumbMisses.keys().next().value);
@@ -2514,16 +2844,19 @@ app.get('/api/thumb', async (req, res) => {
       error: String((failure && failure.message) || failure || 'No picture'),
     });
   }
-  // A picture a history entry shows is that entry's own copy, not cache.
-  const name = failure || historyThumbKeys().has(key) ? THUMB_KEEP_PREFIX + key : key;
+  // The index may have changed while the picture was fetched.
+  let again = thumbPasses(key, adultView);
+  if (!again.ok && byPreview && again.aud !== null) again = { ok: true, aud: again.aud };
+  if (!again.ok) return none();
+  const name = madeFor ? `keep-${thumbIndexLib.refTag(madeFor)}-${key}` : urlCacheName(key);
   try {
     const saved = writeThumbFile(name, got.buf, got.ext);
     if (++thumbStores % 200 === 0) pruneThumbs();
-    send(saved.file, saved.ext);
+    send(saved.file, saved.ext, again.aud);
   } catch (e) {
     // An unwritable cache must not cost the user the picture.
     console.warn('thumb cache write failed:', e.message);
-    res.setHeader('Cache-Control', 'private, max-age=604800');
+    res.set(headersFor(again.aud));
     res.type(imageMime(got.ext)).send(got.buf);
   }
 });
@@ -2554,9 +2887,16 @@ async function withLocalThumbSlot(fn) {
   }
 }
 
-async function thumbFromLocalFile(url) {
-  const entry = readHistory().find((e) => e && e.thumbnail === url && e.filename);
-  if (!entry) return null;
+// A picture made again from one history entry's own library file: the poster
+// beside a video, the image itself, or a frame from the video. The folders
+// come from the entry's channel and must lie inside a media root. Only a row
+// still in the history can be traced to its file; anything else keeps the
+// placeholder (H96).
+async function thumbFromEntry(ref) {
+  if (!String(ref).startsWith('h:')) return null;
+  const id = String(ref).slice(2);
+  const entry = readHistory().find((e) => e && e.id === id && e.filename);
+  if (!entry || !mediaViewer.isPlainName(entry.filename)) return null;
   const found = mediaViewer.findVariants(entry.filename, mediaDirsOf(entry), MEDIA_ROOTS);
   if (!found) return null;
   if (found.poster) {
@@ -2573,26 +2913,94 @@ async function thumbFromLocalFile(url) {
   return buf ? { buf, ext: 'jpg' } : null;
 }
 
-// Once at boot: the history's pictures still in the plain cache become the
-// entries' own copies before the cache prune can take them.
-function keepHistoryThumbs() {
-  for (const key of historyThumbKeys()) {
-    if (keptThumb(key)) continue;
-    const hit = cachedThumb(key);
-    if (!hit) continue;
+// Points one history row at a new picture, if it still shows the old one.
+function setHistoryThumb(id, from, to) {
+  const list = readHistory();
+  const row = list.find((e) => e.id === id);
+  if (!row || row.thumbnail !== from) return false;
+  row.thumbnail = to;
+  writeJsonAtomic(HISTORY_FILE, list);
+  return true;
+}
+
+// At boot, after start-up: the index learns every history row's picture. The
+// first boot with the index (the H4 release) also moves every picture file
+// from before it into thumbs/quarantine-<stamp>/ (kept, never served: the
+// URL cache is refetchable, `keep-` and `local-` copies have no provable
+// owner, H47, H83), and makes each history row's legacy `local-` frame again
+// from that row's own library file under a per-entry id (H83, H94). A row
+// whose file is gone keeps the placeholder.
+const LEGACY_LOCAL_THUMB_RE = /^\/api\/thumb\?id=(local-[0-9a-f]{40})$/;
+async function upgradeThumbs() {
+  if (thumbIndexBroken) return;
+  const history = readHistory();
+  let quarantined = 0;
+  let mixed = 0;
+  const firstRun = !THUMBS.migratedAt;
+  if (firstRun) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const qdir = path.join(THUMB_DIR, `quarantine-${stamp}`);
+    let names = [];
     try {
-      fs.copyFileSync(hit.file, path.join(THUMB_DIR, `${THUMB_KEEP_PREFIX}${key}.${hit.ext}`));
+      names = fs.readdirSync(THUMB_DIR, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name);
     } catch {
-      /* the cache copy still serves it */
+      /* no cache yet */
     }
+    for (const name of names) {
+      if (name.endsWith('.part')) continue;
+      try {
+        fs.mkdirSync(qdir, { recursive: true });
+        fs.renameSync(path.join(THUMB_DIR, name), path.join(qdir, name));
+        quarantined++;
+      } catch (e) {
+        console.warn(`thumbs: could not set aside ${name}: ${e.message}`);
+      }
+    }
+    // H69: legacy frames that entries of different audiences pointed at.
+    const byId = new Map();
+    // Read only: start-up never writes profiles.json.
+    let store = null;
+    try {
+      ({ store } = readProfilesReadOnly());
+    } catch {
+      store = null;
+    }
+    for (const e of history) {
+      const m = LEGACY_LOCAL_THUMB_RE.exec(String(e.thumbnail || ''));
+      if (!m) continue;
+      if (!byId.has(m[1])) byId.set(m[1], new Set());
+      byId.get(m[1]).add(entryClassification(e, store).audience === 'general' ? 'general' : 'adult');
+    }
+    mixed = [...byId.values()].filter((set) => set.size > 1).length;
   }
-}
-try {
-  keepHistoryThumbs();
+  for (const e of history) noteHistoryThumb(e);
+  THUMBS.migratedAt = THUMBS.migratedAt || Date.now();
+  THUMBS.dirty = true;
+  saveThumbIndex(true);
+  if (firstRun) {
+    console.log(`thumbs: upgrade to the provenance index: ${quarantined} earlier picture files set aside in quarantine, ` +
+      `${mixed} legacy frame ids were shared by general and 18+ or unclassified entries`);
+  }
+  // Legacy frames still named by history rows, every boot until they are made again.
+  const legacy = history.filter((e) => LEGACY_LOCAL_THUMB_RE.test(String(e.thumbnail || '')));
+  let made = 0;
+  let placeholder = 0;
+  for (const e of legacy) {
+    const got = await thumbFromEntry(`h:${e.id}`).catch(() => null);
+    const id = got ? storeFrame(`h:${e.id}`, thumbIn(e), got.buf, got.ext) : null;
+    if (id && setHistoryThumb(e.id, e.thumbnail, `/api/thumb?id=${id}`)) {
+      noteHistoryThumb({ ...e, thumbnail: `/api/thumb?id=${id}` });
+      made++;
+    } else placeholder++;
+  }
+  if (legacy.length) console.log(`thumbs: ${made} legacy frames made again from their entries' files, ${placeholder} entries keep the placeholder`);
   pruneThumbs();
-} catch (e) {
-  console.warn('thumbs: keeping the history pictures failed:', e.message);
 }
+// After start-up: classification needs the item store, the profiles and the
+// job list, which are set up further down this file.
+setImmediate(() => {
+  upgradeThumbs().catch((e) => console.warn('thumbs: the index upgrade failed:', e.message));
+});
 
 app.get('/api/media', async (req, res) => {
   const url = req.query.url;
@@ -2622,7 +3030,10 @@ app.get('/api/media', async (req, res) => {
       const v = upstream.headers.get(h);
       if (v) res.setHeader(h, v);
     }
-    res.setHeader('Cache-Control', 'private, max-age=3600');
+    // Never stored by the browser: this route does not know the clip's
+    // audience, and a general view must not find an 18+ preview in its cache
+    // (Codex phase-0 B1). The browser's in-page media buffer still serves seeks.
+    res.setHeader('Cache-Control', 'private, no-store');
     await pipeline(Readable.fromWeb(upstream.body), res);
   } catch (e) {
     // Stopping a preview aborts the response mid-stream, which lands here as a
@@ -2647,7 +3058,9 @@ app.get('/api/config', (_req, res) =>
       .filter((ch) => !!CHANNEL_ROOTS[ch])
       .map((ch) => ({ channel: ch, app: CHANNEL_LIBRARY[ch], audience: ch === '18plus' ? 'adult' : 'general' })),
     adultBlocked: ADULT_BLOCKED,
-    adshortisLibrary: !!ADS_LIBRARY,
+    // The old Adshortis folder page: mounted only with ADSHORTIS_FOLDER_PAGE=1,
+    // outside native mode (H1, H19).
+    adshortisLibrary: ADS_FOLDER_PAGE,
     adflixLibrary: !!ADFLIX_LIBRARY,
     // Grabbit 2.2: the TikShortis app shown in a hub frame. Null = off, and
     // null whenever TIKSHORTIS_MODE picked another mode.
@@ -2655,7 +3068,14 @@ app.get('/api/config', (_req, res) =>
     // Grabbit 3.0: native | embed | off (see modules.js), and the module list
     // the hub draws its navigation from.
     tikshortisMode: TIKSHORTIS_MODE,
-    modules: modules.modulesFor({ tikMode: TIKSHORTIS_MODE, egramMode: EGRAM_MODE }),
+    // Grabbit 3.0 native Adshortis: the effective mode, and the standalone app's
+    // address for the plain link (never an iframe), null when there is none.
+    adshortisMode: ADSHORTIS_MODE,
+    adshortisEmbed: ADSHORTIS_MODE !== 'off' && ADSHORTIS_EMBED ? `${ADSHORTIS_EMBED}/` : null,
+    // The release this server runs (40 hex) or null; null turns the hub's
+    // build check off.
+    build: BUILD_SHA,
+    modules: modules.modulesFor({ tikMode: TIKSHORTIS_MODE, egramMode: EGRAM_MODE, adsMode: ADSHORTIS_MODE }),
   })
 );
 
@@ -3006,6 +3426,23 @@ if (EGRAM_MODE === 'native') {
   console.log(`[grabbit] Social & Photos: ${EGRAM_MODE}`);
 }
 
+// --- Grabbit 3.0: native Adshortis gateway (/api/ads/*) ------------------------------
+// Mounted only in effective native mode; otherwise /api/ads does not exist.
+// Below the auth gate, so a signed-out caller already got 401 and an app client
+// 403; the gateway refuses everything that is not the owner's browser session.
+if (ADS_GATEWAY) {
+  app.use(adsGateway.MOUNT, (req, res) => {
+    ADS_GATEWAY.handle(req, res).catch(() => {
+      console.warn('[ads] gateway error');
+      if (!res.headersSent) res.status(424).set('Cache-Control', 'private, no-store').json({ ok: false, error: 'Adshortis is not reachable right now' });
+      else res.destroy();
+    });
+  });
+  console.log('[grabbit] Adshortis: native');
+} else {
+  console.log(`[grabbit] Adshortis: ${ADSHORTIS_MODE}`);
+}
+
 // --- Grabbit 2.0 hub ----------------------------------------------------------
 // HUB_BRAND: the line under the logo. HUB_APP_LINKS: the sidebar's app list,
 // `Name|https://url,Name|https://url`. Both are deploy settings, not code, so
@@ -3015,8 +3452,8 @@ const HUB_APP_LINKS = hub.parseAppLinks(process.env.HUB_APP_LINKS);
 // Read-only numbers for the hub dashboard (public/hub/), counted from the
 // downloaded registry by hub.js. Nothing here is estimated: a count the
 // registry cannot answer is left out rather than guessed.
-app.get('/api/hub/summary', async (_req, res) => {
-  const summary = hub.summarize(readDownloaded());
+app.get('/api/hub/summary', async (req, res) => {
+  const summary = hub.summarize(registryForView(readDownloaded(), wantsAdultView(req), readProfileStoreQuietly()));
   let storage = null;
   try {
     const fsx = await fs.promises.statfs(DOWNLOAD_DIR);
@@ -3036,7 +3473,8 @@ app.get('/api/hub/summary', async (_req, res) => {
 
 // GET /api/hub/creators?q=&limit= -> creators seen in file names, most files first.
 app.get('/api/hub/creators', (req, res) => {
-  res.json({ ok: true, ...hub.creatorList(readDownloaded(), { q: req.query.q, limit: Number(req.query.limit) || 200 }) });
+  const registry = registryForView(readDownloaded(), wantsAdultView(req), readProfileStoreQuietly());
+  res.json({ ok: true, ...hub.creatorList(registry, { q: req.query.q, limit: Number(req.query.limit) || 200 }) });
 });
 
 // --- Grabbit 2.0 profiles -------------------------------------------------------
@@ -3160,6 +3598,22 @@ function readProfiles() {
 function saveProfiles(store) {
   writeJsonAtomic(PROFILES_FILE, store);
   profilesCache = store;
+  scheduleAudienceChanged();
+}
+// Batches the re-send that follows a classification change (H97, H99). It
+// runs after the current request, never during module start-up.
+let audienceChangePending = false;
+function scheduleAudienceChanged() {
+  if (audienceChangePending) return;
+  audienceChangePending = true;
+  setImmediate(() => {
+    audienceChangePending = false;
+    try {
+      audienceChanged();
+    } catch (e) {
+      console.warn('jobs: re-sending after a classification change failed:', e.message);
+    }
+  });
 }
 function profileError(res, e) {
   if (e instanceof profiles.ProfileError) return res.status(e.status).json({ ok: false, error: e.message });
@@ -3224,19 +3678,43 @@ const DUPE_ROOT_CANDIDATES = [
   { path: NAVIDROME_KIDS_DIR, label: 'Kids music library', owner: 'grabbit', app: 'Navidrome' },
   { path: AUDIOBOOKS_DIR, label: 'Audiobooks', owner: 'grabbit' },
   { path: TIKSHORTIS_ROOT, label: 'TikShortis', owner: 'app', app: 'TikShortis' },
-  { path: ELITE_ROOT, label: '18+ app import', owner: 'app', app: 'Adshortis', adult: true, import: true, importFor: ADSHORTIS_LIBRARY_DIR },
   { path: PLATFORM_IMPORT_ROOT, label: 'Platform import', owner: 'app', app: 'Platform', import: true, importFor: PLATFORM_LIBRARY_DIR },
   { path: POSTS_ROOT, label: 'Posts import', owner: 'app', app: 'Posts', import: true },
   { path: EGRAM_IMPORT_DIR, label: 'egram import', owner: 'app', app: 'egram', import: true, importFor: EGRAM_LIBRARY_DIR },
-  { path: ADSHORTIS_LIBRARY_DIR, label: 'Adshortis library', owner: 'app', app: 'Adshortis', adult: true },
   // egram holds general and 18+ posts side by side: its copies count as 18+
   // until egram itself reports every post using them as general.
   { path: EGRAM_LIBRARY_DIR, label: 'egram library', owner: 'app', app: 'egram', mixedAudience: true },
   { path: PLATFORM_LIBRARY_DIR, label: 'Platform library', owner: 'app', app: 'Platform' },
 ];
+// D12: the 18+ app's import folder (ELITE_ROOT) and its library are not
+// Duplicate Manager roots in any mode, and no flag brings them back. Rows an
+// earlier scan recorded under them are marked gone at boot, their cached
+// previews are deleted, and every preview route refuses them per request.
+const DUPE_RETIRED_ROOTS = [ELITE_ROOT, ADSHORTIS_LIBRARY_DIR].filter(Boolean).map((p) => path.resolve(p));
+const realPathOrNull = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+};
+// Codex phase-0 B7: a retired folder may also sit inside another scan root, so
+// every check takes the file's whole path (root + rel), lexically and as
+// resolved on disk (a symlink is followed).
+function isRetiredDupeRoot(p, rel = '') {
+  if (!p) return false;
+  const abs = path.resolve(String(p), String(rel || ''));
+  const under = (x, r) => x === r || x.startsWith(r + path.sep);
+  if (DUPE_RETIRED_ROOTS.some((r) => under(abs, r))) return true;
+  const real = realPathOrNull(abs);
+  if (!real) return false;
+  return DUPE_RETIRED_ROOTS.some((r) => under(real, r) || under(real, realPathOrNull(r) || r));
+}
 // An import folder's copy may go only when its app's library has the bytes.
 // importFor is null when that library is not mounted here.
-const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
+// The retired 18+ folders are never entered, also when they sit inside
+// another root (Codex phase-0 B7).
+const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR, ...DUPE_RETIRED_ROOTS]);
 const dupeRootOf = (p) => DUPE_ROOT_CANDIDATES.find((r) => r.path && r.path === p) || null;
 // Smart Duplicate Manager 2.0 state: dupes.db, attached to items.db's
 // connection (dupe-store.js). items.db itself keeps schema 6, so 3.0.3 can
@@ -3302,6 +3780,44 @@ if (DUPE_TRASH) {
   };
   setTimeout(purge, 60 * 1000).unref();
   setInterval(purge, 60 * 60 * 1000).unref();
+}
+// D12, once per boot: forget what an earlier scan saw under the retired roots.
+if (ITEM_STORE && ITEM_STORE.raw && ITEM_STORE.filesGoneBefore && DUPE_RETIRED_ROOTS.length) {
+  try {
+    const db = ITEM_STORE.raw;
+    const all = db.prepare('SELECT DISTINCT root FROM file_hashes WHERE gone_at IS NULL').pluck().all();
+    const roots = all.filter((r) => isRetiredDupeRoot(r));
+    let rows = 0;
+    let thumbs = 0;
+    const thumbDir = path.join(DATA_DIR, 'dupe-thumbs');
+    const dropThumb = (sha) => {
+      if (!/^[0-9a-f]{64}$/.test(String(sha))) return;
+      try {
+        fs.unlinkSync(path.join(thumbDir, sha.slice(0, 2), `${sha}.jpg`));
+        thumbs++;
+      } catch {
+        /* never made */
+      }
+    };
+    for (const root of roots) {
+      for (const sha of db.prepare('SELECT DISTINCT sha256 FROM file_hashes WHERE root = ? AND sha256 IS NOT NULL').pluck().all(root)) dropThumb(sha);
+      rows += ITEM_STORE.filesGoneBefore(root, Number.MAX_SAFE_INTEGER);
+    }
+    // A retired folder inside another root (B7): its files under that root.
+    const goneOne = db.prepare('UPDATE file_hashes SET gone_at = ? WHERE id = ? AND gone_at IS NULL');
+    for (const root of all.filter((r) => !roots.includes(r))) {
+      const nested = DUPE_RETIRED_ROOTS.filter((r) => r.startsWith(path.resolve(root) + path.sep));
+      if (!nested.length) continue;
+      for (const f of db.prepare('SELECT id, rel, sha256 FROM file_hashes WHERE root = ? AND gone_at IS NULL').all(root)) {
+        if (!isRetiredDupeRoot(root, f.rel)) continue;
+        dropThumb(f.sha256);
+        rows += goneOne.run(Date.now(), f.id).changes;
+      }
+    }
+    if (rows || thumbs) console.log(`dupes: the 18+ app's folders are no longer scanned; ${rows} recorded files set aside, ${thumbs} cached previews deleted`);
+  } catch (e) {
+    console.error(`dupes: setting aside the 18+ app's recorded files failed (${e.message})`);
+  }
 }
 let DUPE_SCANNER = null;
 if (ITEM_STORE && ITEM_STORE.fileSeen && String(process.env.DUPES_SCAN || '').toLowerCase() !== 'off') {
@@ -4238,6 +4754,7 @@ app.post('/api/hub/review/items', (req, res) => {
   if (!ITEM_STORE) return res.status(503).json({ ok: false, error: `The item store is unavailable (${ITEM_STORE_ERROR || 'not opened'}).` });
   try {
     const r = ITEM_STORE.classifyItems(b.ids, aud);
+    if (r.changed.length) scheduleAudienceChanged();
     console.log(`review: ${r.changed.length} item(s) classified ${aud} by hand, ${r.skipped.length} skipped`);
     res.json({ ok: true, changed: r.changed, skipped: r.skipped });
   } catch (e) {
@@ -4294,6 +4811,12 @@ function withHistory(out) {
     if (!it.thumb && /^https?:\/\//i.test(e.thumbnail || '')) it.thumb = e.thumbnail;
     if (mediaViewer.isPlainName(e.filename)) it.historyId = e.id;
   }
+  // The item itself is the provenance of the picture it is listed with.
+  for (const it of out.items) {
+    if (it.thumb && it.key) {
+      noteThumb(it.thumb, { kind: 'entry', ref: `i:${it.key}`, in: { itemKey: it.key, creator: it.creator, site: it.site, sourceUrl: it.sourceUrl, filename: it.filename } });
+    }
+  }
   return out;
 }
 app.get('/api/library/items', libraryRoute((lib, req) => withHistory(lib.listItems({
@@ -4343,6 +4866,7 @@ if (DUPE_SERVICE) {
     service: DUPE_SERVICE, scanner: DUPE_SCANNER, analyzer: DUPE_ANALYZER, models: DUPE_MODELS, trash: DUPE_TRASH,
     actorOf, kindOfName: (n) => mediaViewer.kindOfName(n),
     thumbDir: path.join(DATA_DIR, 'dupe-thumbs'), media: require('./dupe-media'),
+    retiredRoot: isRetiredDupeRoot,
   }));
 } else {
   app.use('/api/hub/dupes/v2', (req, res) => res.status(409).json({ ok: false, error: 'The Duplicate Manager needs the item store; see the server log.' }));
@@ -4392,6 +4916,7 @@ app.get('/api/hub/dupes/file/:id', (req, res) => {
   try {
     const row = store.hashedFile(req.params.id);
     if (!row || !DUPE_ROOT_CANDIDATES.some((r) => r.path && r.path === row.root)) return notFound();
+    if (isRetiredDupeRoot(row.root, row.rel)) return notFound();
     const abs = path.resolve(row.root, row.rel);
     if (!abs.startsWith(path.resolve(row.root) + path.sep)) return notFound();
     const kind = mediaViewer.kindOfName(abs);
@@ -4737,33 +5262,51 @@ function siteOfUrl(u) {
 // name or source URL), the creator's profile, and the place it was saved. A
 // save into the 18+ app or the adults shelf makes it 18+; nothing here can
 // make an item general that the owner did not classify general.
-function mediaAudience(entry, store) {
-  const names = [entry.filename, `${mediaViewer.stemOf(entry.filename)}.mp4`];
+// `memo` (optional, per request) reuses a classification for identical inputs,
+// so a registry of thousands of rows costs one classify per distinct creator.
+// `items` (optional) is an ITEM_STORE.audienceIndex() read once for many rows.
+function entryClassification(entry, store, memo = null, items = ITEM_STORE) {
+  const names = entry.filename ? [...new Set([entry.filename, `${mediaViewer.stemOf(entry.filename)}.mp4`])] : [];
   let row = null;
-  if (ITEM_STORE) {
+  if (items) {
     try {
-      row = (entry.sourceUrl && ITEM_STORE.get(mediaKey(entry.sourceUrl))) || null;
-      for (const n of names) row = row || ITEM_STORE.getByFilename(n);
+      row = (entry.itemKey && items.get(entry.itemKey)) || (!entry.itemKey && entry.sourceUrl && items.get(mediaKey(entry.sourceUrl))) || null;
+      for (const n of names) row = row || items.getByFilename(n);
     } catch {
       row = null;
     }
   }
   const ch = String(entry.channel || '');
   const savedAdult = ch === '18plus' || ch === 'server/adults' || ch.startsWith('server/adults/');
-  const c = audience.classify(
-    {
-      creatorKey: entry.creator,
-      handle: entry.creator,
-      site: siteOfUrl(entry.sourceUrl),
-      extractor: entry.extractor,
-      sourceUrl: entry.sourceUrl,
-      requested: savedAdult ? 'adult' : null,
-      prior: row ? row.audience : null,
-      priorByHand: Boolean(row && row.classified_by_hand),
-    },
-    store,
-    { keyOf: creatorKey }
-  );
+  // classify() reads the source URL only to see whether it names an 18+ site,
+  // so only an 18+ URL is passed on; that keeps the memo key free of per-item
+  // URLs.
+  const input = {
+    creatorKey: entry.creator,
+    handle: entry.creator,
+    site: entry.site || siteOfUrl(entry.sourceUrl),
+    extractor: entry.extractor,
+    sourceUrl: entry.sourceUrl && audience.isAdultSite(entry.sourceUrl) ? entry.sourceUrl : null,
+    requested: savedAdult ? 'adult' : null,
+    prior: row ? row.audience : null,
+    priorByHand: Boolean(row && row.classified_by_hand),
+  };
+  // A row whose creator was renamed is classified by both names, the way
+  // the delivery gate does (Codex phase-0 B4).
+  const renamed = entry.sourceCreator != null && entry.sourceCreator !== entry.creator ? String(entry.sourceCreator) : null;
+  if (entry.audience === 'adult') input.requested = 'adult';
+  const mk = memo ? JSON.stringify([input, renamed]) : null;
+  if (memo && memo.has(mk)) return memo.get(mk);
+  let c = audience.classify(input, store, { keyOf: creatorKeyCached, index: profileIndexOf(store) });
+  if (renamed) {
+    const other = audience.classify({ ...input, creatorKey: renamed, handle: renamed }, store, { keyOf: creatorKeyCached, index: profileIndexOf(store) });
+    c = audience.stricter(c, other);
+  }
+  if (memo) memo.set(mk, c);
+  return c;
+}
+function mediaAudience(entry, store) {
+  const c = entryClassification(entry, store);
   // The creator's profile, for the "open profile" link, whatever its status.
   let profileId = c.profileId;
   if (!profileId && store && entry.creator) {
@@ -4775,6 +5318,81 @@ function mediaAudience(entry, store) {
     if (m.length) profileId = m[0].profile.id;
   }
   return { audience: c.audience, reasons: c.reasons, profileId: profileId || null };
+}
+// creatorKey() is pure and classify() runs it over every profile name for each
+// creator, so the gate's bulk paths reuse earlier answers.
+const creatorKeyMemo = new Map();
+function creatorKeyCached(name) {
+  const k = String(name);
+  let v = creatorKeyMemo.get(k);
+  if (v === undefined) {
+    if (creatorKeyMemo.size >= 50000) creatorKeyMemo.clear();
+    v = creatorKey(name);
+    creatorKeyMemo.set(k, v);
+  }
+  return v;
+}
+// One profile index per store object; a saved store is a new object.
+const profileIndexes = new WeakMap();
+function profileIndexOf(store) {
+  if (!store || typeof store !== 'object') return null;
+  let ix = profileIndexes.get(store);
+  if (!ix) profileIndexes.set(store, (ix = audience.indexProfiles(store, creatorKeyCached)));
+  return ix;
+}
+// H4 (audience gate on Grabbit's own surfaces): an entry that is 18+ or not
+// classified general reaches a list, a count, a detail or a file only when the
+// request asks for the 18+ view with `audience=adult`. Only the hub's 18+ view
+// sends it. Everything else answers as if the entry did not exist.
+function wantsAdultView(req) {
+  return String((req && req.query && req.query.audience) || '') === 'adult';
+}
+function passesAudience(aud, adultView) {
+  return adultView || aud === 'general';
+}
+// The downloaded registry with only the rows this view may count. A file name
+// is general only when every row that names it is; a row without a file name
+// is classified from its key alone.
+function registryForView(registry, adultView, store) {
+  if (adultView) return registry;
+  const memo = new Map();
+  const hostAdult = new Map();
+  let items = null;
+  try {
+    items = ITEM_STORE ? ITEM_STORE.audienceIndex() : null;
+  } catch {
+    items = null;
+  }
+  const byName = new Map();
+  const rows = Object.entries(registry || {});
+  const audOf = (key, entry) => {
+    const filename = entry && typeof entry.filename === 'string' ? entry.filename : null;
+    const host = key.startsWith('id:') || key.startsWith('yt:') ? null : key.split('/')[0];
+    let adultHost = host ? hostAdult.get(host) : false;
+    if (adultHost === undefined) hostAdult.set(host, (adultHost = audience.isAdultSite(`https://${host}/`)));
+    return entryClassification({
+      filename,
+      channel: entry && entry.channel,
+      creator: hub.creatorOf(filename),
+      site: hub.siteOf(key),
+      sourceUrl: adultHost ? urlFromKey(key) : null,
+      itemKey: key,
+    }, store, memo, items).audience;
+  };
+  const verdict = new Map();
+  for (const [key, entry] of rows) {
+    const a = audOf(key, entry);
+    verdict.set(key, a);
+    const name = entry && entry.filename;
+    if (name && a !== 'general') byName.set(name, false);
+    else if (name && !byName.has(name)) byName.set(name, true);
+  }
+  const out = {};
+  for (const [key, entry] of rows) {
+    const name = entry && entry.filename;
+    if (name ? byName.get(name) : verdict.get(key) === 'general') out[key] = entry;
+  }
+  return out;
 }
 function readProfileStoreQuietly() {
   try {
@@ -4831,16 +5449,19 @@ function probeMedia(file, st) {
 // newest entry with one, out of the last ten), each with where its item stands
 // now. The history line keeps the error of the moment it failed; a later hand
 // classification only shows up here.
-app.get('/api/hub/media', (_req, res) => {
+app.get('/api/hub/media', (req, res) => {
   const store = readProfileStoreQuietly();
+  const adultView = wantsAdultView(req);
   const history = readHistory();
   const items = history
     .filter((e) => mediaViewer.isPlainName(e.filename))
-    .map((e) => mediaListItem(e, store));
+    .map((e) => mediaListItem(e, store))
+    .filter((it) => passesAudience(it.audience, adultView));
   const recent = history.slice(0, 10);
   const lastFile = recent.findIndex((e) => e.filename);
   const misses = (lastFile === -1 ? recent : recent.slice(0, lastFile))
     .filter((e) => !e.filename)
+    .filter((e) => passesAudience(entryClassification(e, store).audience, adultView))
     .map((e) => ({
       id: e.id,
       time: e.time || null,
@@ -4910,6 +5531,7 @@ app.get('/api/hub/media/:id', async (req, res) => {
   const store = readProfileStoreQuietly();
   const item = mediaListItem(e, store);
   const a = mediaAudience(e, store);
+  if (!passesAudience(a.audience, wantsAdultView(req))) return res.status(404).json({ ok: false, error: 'No such media entry' });
   const found = mediaViewer.findVariants(e.filename, mediaDirsOf(e), MEDIA_ROOTS);
   const variants = [];
   for (const v of ['original', 'web']) {
@@ -4956,6 +5578,8 @@ app.get('/api/hub/media/:id/file', (req, res) => {
   const e = mediaEntry(req.params.id);
   const v = String(req.query.v || 'original');
   if (!e || !mediaViewer.VARIANTS.includes(v)) return res.status(404).json({ ok: false, error: 'Not available' });
+  const fileAudience = entryClassification(e, readProfileStoreQuietly()).audience;
+  if (!passesAudience(fileAudience, wantsAdultView(req))) return res.status(404).json({ ok: false, error: 'Not available' });
   const found = mediaViewer.findVariants(e.filename, mediaDirsOf(e), MEDIA_ROOTS);
   const file = found && found[v];
   // Media only: a name the history log got from a site could end in .html or
@@ -4967,7 +5591,12 @@ app.get('/api/hub/media/:id/file', (req, res) => {
   res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
   if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+  // H98: a general file is revalidated on every use (ETag), so an entry
+  // reclassified 18+ stops at the gate above at once; an 18+ file is never
+  // stored. The hub's URLs carry `gen=2`, so nothing cached under the old
+  // `max-age=3600` rule is asked for again.
+  const cacheControl = fileAudience === 'general' ? 'private, no-cache' : 'private, no-store';
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': cacheControl } }, (err) => {
     if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
   });
 });
@@ -4978,10 +5607,21 @@ app.get('/api/hub/media/:id/file', (req, res) => {
 // Adshortis page and these routes answer 404. Grabbit only reads here; the app
 // owns the folder. See adshortis-library.js for what is listed and served.
 const ADS_LIBRARY = process.env.ADSHORTIS_LIBRARY ? adshortisLibrary.createLibrary(process.env.ADSHORTIS_LIBRARY) : null;
+// Grabbit 3.0 retires the folder page (D3, H1, H19): it serves files by folder
+// path and bypasses Adshortis' own visibility rules. It is mounted only when
+// ADSHORTIS_FOLDER_PAGE=1 is set AND the effective Adshortis mode is off or
+// embed; in native mode it is never mounted, whatever the flag says.
+const ADS_FOLDER_FLAG = process.env.ADSHORTIS_FOLDER_PAGE === '1';
+const ADS_FOLDER_PAGE = ADS_FOLDER_FLAG && ADSHORTIS_MODE !== 'native' && !!ADS_LIBRARY;
+if (ADS_FOLDER_FLAG && ADSHORTIS_MODE === 'native') {
+  console.warn('[grabbit] ADSHORTIS_FOLDER_PAGE=1 is ignored in native Adshortis mode; the folder page stays off.');
+}
+// (In native mode the retired folder routes answer before the auth gate; see
+// "Retired in native mode" above the gate.)
 
 // GET /api/hub/adshortis -> every clip, newest first. The page filters and
 // shuffles in the browser, so this is one compact list.
-app.get('/api/hub/adshortis', (req, res) => {
+if (ADS_FOLDER_PAGE) app.get('/api/hub/adshortis', (req, res) => {
   if (!ADS_LIBRARY) return res.status(404).json({ ok: false, error: 'The Adshortis library is not configured' });
   const items = ADS_LIBRARY.list({ fresh: req.query.fresh === '1' }).map((i) => ({
     id: i.id,
@@ -4996,15 +5636,16 @@ app.get('/api/hub/adshortis', (req, res) => {
 });
 
 // GET /api/hub/adshortis/file?id=<folder>/<file>&v=video|poster[&download=1]
-// -> the clip or its poster, with Range support for seeking.
-app.get('/api/hub/adshortis/file', (req, res) => {
+// -> the clip or its poster, with Range support for seeking. private, no-store
+// (H46): nothing from the folder page outlives a mode change in a browser cache.
+if (ADS_FOLDER_PAGE) app.get('/api/hub/adshortis/file', (req, res) => {
   const v = req.query.v === 'poster' ? 'poster' : req.query.v === 'video' || !req.query.v ? 'video' : null;
   const file = ADS_LIBRARY && v ? ADS_LIBRARY.resolve(String(req.query.id || ''), v) : null;
   if (!file) return res.status(404).json({ ok: false, error: 'Not available' });
   res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
   if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(path.basename(file)));
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => {
+  res.sendFile(file, { dotfiles: 'allow', cacheControl: false, headers: { 'Cache-Control': 'private, no-store' } }, (err) => {
     if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
   });
 });
@@ -5167,6 +5808,8 @@ app.get('/api/search', (req, res) => {
             : null) || (e.id ? `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg` : null),
       })).filter((r) => r.url);
       sent = true;
+      const previewAud = wantsAdultView(req) ? 'adult' : 'general';
+      for (const r of results) noteThumb(r.thumbnail, { kind: 'preview', aud: previewAud });
       res.json({ ok: true, results });
     } catch {
       fail(err.trim().split('\n').pop() || 'Search failed');
@@ -6339,8 +6982,13 @@ app.post('/api/playlists/delete', (req, res) => {
 });
 
 // GET /api/history -> recent downloads, newest first.
-app.get('/api/history', (_req, res) => {
-  res.json({ ok: true, items: readHistory().slice(0, 100) });
+app.get('/api/history', (req, res) => {
+  const adultView = wantsAdultView(req);
+  const store = adultView ? null : readProfileStoreQuietly();
+  const items = adultView
+    ? readHistory().slice(0, 100)
+    : readHistory().filter((e) => passesAudience(entryClassification(e, store).audience, false)).slice(0, 100);
+  res.json({ ok: true, items });
 });
 
 // GET /api/music?q=&lib=main|kids&limit=&offset= -> the music log (every track
@@ -6900,7 +7548,7 @@ app.get('/api/download', async (req, res) => {
       commitDrop(channel, job, destDir, buildPath, finalPath, sidecarName, sidecar);
       // Register the save so playlist views and "download new" recognise the
       // clip as fetched — the jobs/batch paths do this via finishJob.
-      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel);
+      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, channel, job);
       noteSourceMeta(job, outName, channel);
     }
 
@@ -6990,6 +7638,10 @@ app.get('/api/profile', async (req, res) => {
         },
       };
     });
+    for (const it of items) {
+      const token = it.thumbnail ? notePreviewThumb(req, it, it.sourceUrl) : null;
+      if (token) it.thumbToken = token;
+    }
     res.json({
       ok: true,
       isProfile: true,
@@ -7124,7 +7776,8 @@ app.get('/api/download-all', async (req, res) => {
       // The channel only means something for a shorts save (see finishJob) — a
       // server/photos save recorded under a channel makes a later shorts
       // download of the same clip look like a repeat and get skipped.
-      markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, dest === 'elite' ? channel : null);
+      markDownloaded(job.sourceUrl || job.url, null, job.site, job.mediaId, dest === 'elite' ? channel : null, job,
+        dest === 'elite' ? channel : dest === 'server' && /^adults(\/|$)/.test(String(folder || '')) ? 'server/adults' : null);
       noteSourceMeta(job, null, dest === 'elite' ? channel : null);
       send({ type: 'progress', index: i + 1, total: items.length, id, title, status: 'saved' });
     } catch (e) {
@@ -7161,7 +7814,7 @@ app.get('/api/download-all', async (req, res) => {
 // using the synchronous /api/download + /api/download-all over the docker
 // network, which has no such limit.
 const jobsMap = new Map();
-const jobSubs = new Set();
+const jobSubs = new Map(); // SSE response -> true for the 18+ view
 let jobSeq = 0;
 const JOB_KEEP_DONE = 60; // cap finished jobs retained in memory
 const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file this long
@@ -7171,19 +7824,108 @@ const DELIVER_TTL_MS = 30 * 60 * 1000; // keep a throwaway device-delivery file 
 function publicJob(j) {
   // `watch` is watcher bookkeeping (playlist id + registry key), like params:
   // internal, and nothing the UI renders.
-  const { finalPath, deliverTemp, params, watch, fromSchedule, savedPaths, ...pub } = j;
+  // `deliverKey` goes only to the request that started the job (B5).
+  const { finalPath, deliverTemp, params, watch, fromSchedule, savedPaths, deliverKey, ...pub } = j;
   return pub;
 }
-function snapshotJobs() {
-  return [...jobsMap.values()].map(publicJob).sort((a, b) => b.createdAt - a.createdAt);
+// H97: the job feeds follow the H4 audience gate. On a general view a job
+// whose item is 18+ or not classified general is sent without anything that
+// names it (creator, title, picture, file name, source); status and progress
+// stay, so the queue still counts it. The 18+ view (`audience=adult`) gets the
+// full job. The audience is worked out again on every send, and every job is
+// sent again when a classification changes (audienceChanged()).
+function jobClassChannel(j) {
+  if (j.dest === 'elite') return j.channel || null;
+  const folder = (j.params && j.params.folder) || j.folder;
+  if (j.dest === 'server' && typeof folder === 'string' && /^adults(\/|$)/.test(folder)) return 'server/adults';
+  return null;
+}
+function jobAudience(j) {
+  if (j.audience === 'adult') return 'adult';
+  let store;
+  try {
+    ({ store } = readProfilesReadOnly());
+  } catch {
+    return 'unknown';
+  }
+  const base = {
+    channel: jobClassChannel(j),
+    sourceUrl: j.sourceUrl || j.url || null,
+    site: j.site || null,
+    extractor: j.extractor || null,
+    filename: j.filename || null,
+    itemKey: itemKeyOf(j),
+  };
+  let aud = entryClassification({ ...base, creator: j.creator }, store).audience;
+  // A renamed creator never borrows another creator's general profile.
+  if (aud === 'general' && j.sourceCreator !== undefined && j.sourceCreator !== j.creator) {
+    aud = entryClassification({ ...base, creator: j.sourceCreator }, store).audience;
+  }
+  return aud;
+}
+const UNCLASSIFIED_REFUSAL_RE = / is a general app and the audience of .* is not classified/;
+function reducedJob(pub) {
+  const out = { ...pub };
+  for (const k of ['creator', 'sourceCreator', 'title', 'description', 'thumbnail', 'filename', 'sourceUrl', 'url', 'mediaId',
+    'dir', 'duplicate', 'message', 'route', 'savedTo']) {
+    if (k in out) out[k] = null;
+  }
+  // The hub offers "classify and retry" on an unclassified refusal; the
+  // sentence keeps that shape without the creator's name.
+  if (out.error) {
+    out.error = UNCLASSIFIED_REFUSAL_RE.test(out.error)
+      ? 'The app is a general app and the audience of this item is not classified.'
+      : 'The download failed.';
+  }
+  // `deliverable` stays, and names nothing: the file itself is handed only to
+  // the 18+ view or to the tab that started the job, with its delivery key
+  // (Codex phase-0 B5).
+  out.audienceHidden = true;
+  return out;
+}
+function viewOfJob(j, adultView) {
+  const pub = publicJob(j);
+  if (adultView || jobAudience(j) === 'general') return pub;
+  return reducedJob(pub);
+}
+function snapshotJobs(adultView = false) {
+  return [...jobsMap.values()].map((j) => viewOfJob(j, adultView)).sort((a, b) => b.createdAt - a.createdAt);
+}
+// A job's own picture is recorded once per change of what classifies it.
+const jobThumbNoted = new WeakMap();
+function noteJobThumb(j) {
+  if (!j.thumbnail) return;
+  const input = thumbIn(j, jobClassChannel(j));
+  const sig = `${j.thumbnail}\0${JSON.stringify(input)}`;
+  if (jobThumbNoted.get(j) === sig) return;
+  jobThumbNoted.set(j, sig);
+  noteThumb(j.thumbnail, { kind: 'job', ref: `j:${j.id}`, in: input });
 }
 function emitJob(j) {
-  const line = `data: ${JSON.stringify({ type: 'job', job: publicJob(j) })}\n\n`;
-  for (const r of jobSubs) {
+  noteJobThumb(j);
+  let full = null;
+  let general = null;
+  for (const [r, adultView] of jobSubs) {
+    let line;
+    if (adultView) line = full || (full = `data: ${JSON.stringify({ type: 'job', job: publicJob(j) })}\n\n`);
+    else line = general || (general = `data: ${JSON.stringify({ type: 'job', job: viewOfJob(j, false) })}\n\n`);
     try {
       r.write(line);
     } catch {
       /* subscriber gone; dropped on its close handler */
+    }
+  }
+}
+// A classification changed (a profile or an item): every job is sent again
+// in the form its audience now allows, and the hub hears that it should
+// reload what it shows (H99).
+function audienceChanged() {
+  for (const j of jobsMap.values()) emitJob(j);
+  for (const r of jobSubs.keys()) {
+    try {
+      r.write(`data: ${JSON.stringify({ type: 'audience' })}\n\n`);
+    } catch {
+      /* subscriber gone */
     }
   }
 }
@@ -7216,7 +7958,9 @@ function finishJob(job, patch) {
   // The channel only means something for a shorts save; recording it for a
   // server/Navidrome save would make a later shorts download look like a repeat.
   if (job.saved && job.sourceUrl) {
-    markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null);
+    // The registry row keeps the picture's provenance after the history row
+    // has rolled over (H47).
+    markDownloaded(job.sourceUrl, job.filename, job.site, job.mediaId, job.dest === 'elite' ? job.channel : null, job, jobClassChannel(job));
     noteSourceMeta(job, job.filename, job.dest === 'elite' ? job.channel : null, SOURCE_META.get(job) || null);
   }
   if (job.watch) clearWatchFailure(job.watch.playlistId, job.watch.key);
@@ -7251,6 +7995,7 @@ function pruneJobs() {
 function recordJobHistory(meta, params, channelLabel, filename, imported) {
   recordHistory({
     creator: meta.creator || null,
+    ...(meta.sourceCreator !== undefined && meta.sourceCreator !== meta.creator ? { sourceCreator: meta.sourceCreator } : {}),
     title: meta.title || null,
     channel: channelLabel,
     filename,
@@ -7307,8 +8052,16 @@ function failJob(job, message, err) {
   }
   recordHistory({
     creator: job.creator || null,
+    ...(job.sourceCreator !== undefined && job.sourceCreator !== job.creator ? { sourceCreator: job.sourceCreator } : {}),
     title: job.title || null,
-    channel: job.dest === 'navidrome' ? `navidrome/${job.lib === 'kids' ? 'kids' : 'music'}` : job.dest || null,
+    // The channel a success would have recorded where it decides the
+    // audience (Codex phase-0 B4): a failed 18+ save stays 18+ in History.
+    channel: job.dest === 'navidrome'
+      ? `navidrome/${job.lib === 'kids' ? 'kids' : 'music'}`
+      : job.dest === 'elite' ? job.channel || 'main'
+      : jobClassChannel(job) || job.dest || null,
+    ...(job.site ? { site: job.site } : {}),
+    ...(job.audience === 'adult' ? { audience: 'adult' } : {}),
     filename: null,
     sourceUrl: job.sourceUrl || job.url || null,
     thumbnail: job.thumbnail || null,
@@ -7427,6 +8180,10 @@ async function runJob(job, params) {
   const mediaType = meta.mediaType === 'image' ? 'image' : 'video';
   setJob(job, {
     title: meta.title || null, creator: meta.creator || null, thumbnail: meta.thumbnail || null,
+    // The creator as the site named it, before an override (Codex phase-0 B4):
+    // the first event that names the job is classified by both names, so a
+    // rename never makes an 18+ creator's job general.
+    ...(meta.sourceCreator !== undefined ? { sourceCreator: meta.sourceCreator } : {}),
     mediaType, duration: durationKnown(meta) ? Number(meta.duration) : null,
     sourceUrl: meta.sourceUrl || params.url,
     // Site-native id, so finishJob can register the clip under a key that
@@ -7610,7 +8367,7 @@ async function produceServerVideo(job, meta, params, onProgress) {
     // sidecar picture and the history thumbnail still apply. Setting it on meta
     // is what puts a generated frame on the queue row and in the history for a
     // site that handed over no thumbnail of its own.
-    const posterUrl = await attachPoster(meta, libPath, { embed: !(advanced && params.embedThumb) });
+    const posterUrl = await attachPoster(meta, libPath, { embed: !(advanced && params.embedThumb), channel: `server/${shelf}` });
     if (posterUrl && !meta.thumbnail) meta.thumbnail = posterUrl;
     recordJobHistory(meta, params, `server/${shelf}`, outName, false);
     finishJob(job, {
@@ -8134,11 +8891,17 @@ function startJobFromQuery(query, who, via) {
   const at = parseAt(req.query.at);
   const job = newJob({ dest: params.dest, channel: params.channel, lib: params.navLib, device: params.device, clientId: who.id, target });
   job.params = params;
+  // A device copy is handed out with this key, which only the starting
+  // request learns (B5): another general tab sees the job reduced and cannot
+  // fetch its file.
+  if (params.device) job.deliverKey = crypto.randomBytes(16).toString('hex');
   if (at) {
     setJob(job, { status: 'scheduled', at });
     addScheduled({ id: job.id, at, params, dest: params.dest, channel: params.channel, device: params.device, clientId: who.id, target });
   }
-  return { status: 200, body: { ok: true, jobId: job.id, scheduled: !!at }, job, run: at ? null : () => scheduleJob(job, params) };
+  const body = { ok: true, jobId: job.id, scheduled: !!at };
+  if (job.deliverKey) body.deliverKey = job.deliverKey;
+  return { status: 200, body, job, run: at ? null : () => scheduleJob(job, params) };
 }
 
 // ---------------------------------------------------------------------------
@@ -8351,7 +9114,8 @@ async function attemptRetry(entry) {
     imported: entry.dest === 'elite',
     device: false,
   });
-  markDownloaded(job.sourceUrl || entry.url, null, job.site, job.mediaId, entry.dest === 'elite' ? entry.channel : null);
+  markDownloaded(job.sourceUrl || entry.url, null, job.site, job.mediaId, entry.dest === 'elite' ? entry.channel : null, job,
+    entry.dest === 'elite' ? entry.channel : entry.dest === 'server' && /^adults(\/|$)/.test(String(entry.folder || '')) ? 'server/adults' : null);
   noteSourceMeta(job, null, entry.dest === 'elite' ? entry.channel : null);
   return { skipped: false };
 }
@@ -8449,6 +9213,7 @@ app.post('/api/jobs/:id/classify-retry', (req, res) => {
   if (item.audience === 'adult') return res.status(409).json({ ok: false, error: 'This item is 18+ and is never sent to a general app' });
   try {
     const r = ITEM_STORE.classifyItems([item.id], 'general');
+    if (r.changed.length) scheduleAudienceChanged();
     if (!r.changed.length && !(r.skipped[0] && /already general/.test(r.skipped[0].reason))) {
       return res.status(409).json({ ok: false, error: (r.skipped[0] && r.skipped[0].reason) || 'The item could not be classified' });
     }
@@ -8504,7 +9269,7 @@ function scheduleJob(job, params) {
 }
 
 // GET /api/jobs -> snapshot of current jobs (newest first).
-app.get('/api/jobs', (_req, res) => res.json({ ok: true, jobs: snapshotJobs() }));
+app.get('/api/jobs', (req, res) => res.json({ ok: true, jobs: snapshotJobs(wantsAdultView(req)) }));
 // ---------------------------------------------------------------------------
 // Health: the one page that answers "is anything quietly broken?". Three of the
 // destinations below are NFS mounts from ubu-desk (the libraries moved off the
@@ -8834,8 +9599,9 @@ app.get('/api/jobs/stream', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.write('retry: 3000\n\n');
-  for (const j of snapshotJobs()) res.write(`data: ${JSON.stringify({ type: 'job', job: j })}\n\n`);
-  jobSubs.add(res);
+  const adultView = wantsAdultView(req);
+  for (const j of snapshotJobs(adultView)) res.write(`data: ${JSON.stringify({ type: 'job', job: j })}\n\n`);
+  jobSubs.set(res, adultView);
   const ka = setInterval(() => {
     try {
       res.write(': ka\n\n');
@@ -8851,16 +9617,40 @@ app.get('/api/jobs/stream', (req, res) => {
 
 // GET /api/jobs/:id/file -> stream a finished job's file to the device. The file
 // is already on disk so bytes flow immediately (no gateway timeout).
-app.get('/api/jobs/:id/file', (req, res) => {
+// The file goes to the 18+ view, to the tab holding the job's delivery key,
+// or to anyone when the item is classified general (Codex phase-0 B5). The
+// file is opened before any header is sent, so a file that vanished answers
+// 422, never a 5xx.
+function deliverKeyOk(job, key) {
+  const k = String(key || '');
+  if (!job.deliverKey || !/^[0-9a-f]{32}$/.test(k)) return false;
+  return crypto.timingSafeEqual(Buffer.from(job.deliverKey), Buffer.from(k));
+}
+app.get('/api/jobs/:id/file', async (req, res) => {
   const job = jobsMap.get(req.params.id);
-  if (!job || job.status !== 'done' || !job.deliverable || !job.finalPath || !fs.existsSync(job.finalPath)) {
+  if (!job || job.status !== 'done' || !job.deliverable || !job.finalPath) {
     return res.status(404).send('Not available');
+  }
+  if (!wantsAdultView(req) && !deliverKeyOk(job, req.query.key) && jobAudience(job) !== 'general') {
+    return res.status(404).send('Not available');
+  }
+  let fh;
+  let size;
+  try {
+    fh = await fs.promises.open(job.finalPath, 'r');
+    const st = await fh.stat();
+    if (!st.isFile()) throw new Error('not a file');
+    size = st.size;
+  } catch (e) {
+    if (fh) await fh.close().catch(() => {});
+    return res.status(422).json({ ok: false, error: `The file is no longer available (${e.code || e.message}).` });
   }
   const name = job.filename || path.basename(job.finalPath);
   res.setHeader('Content-Disposition', contentDisposition(name));
   res.setHeader('Content-Type', job.mime || 'application/octet-stream');
-  res.setHeader('Content-Length', fs.statSync(job.finalPath).size);
-  pipeline(fs.createReadStream(job.finalPath), res)
+  res.setHeader('Content-Length', size);
+  res.setHeader('Cache-Control', 'private, no-store');
+  pipeline(fh.createReadStream(), res)
     .then(() => {
       if (job.deliverTemp) {
         fs.rm(job.finalPath, { force: true }, () => {});
@@ -8868,7 +9658,7 @@ app.get('/api/jobs/:id/file', (req, res) => {
       }
     })
     .catch(() => {
-      if (!res.headersSent) res.status(500).end();
+      if (!res.headersSent) res.status(422).end();
       else res.destroy();
     });
 });
@@ -9229,7 +10019,7 @@ async function downloadAudio(res, job, url, afmt, dest) {
         imported: false,
         device: false,
       });
-      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
+      markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null, job);
       noteSourceMeta(job, outName, null);
       return res.json({ ok: true, saved: true, dest: 'server', dir: 'mp3', filename: outName });
     }
@@ -9286,7 +10076,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     await embedMetadata(tmpPath, finalPath, job, false);
     // Only a real library save gets a poster: with `already`, finalPath is a
     // throwaway temp for the device copy and the library file has one already.
-    const histThumb = already ? job.thumbnail || null : await attachPoster(job, finalPath);
+    const histThumb = already ? job.thumbnail || null : await attachPoster(job, finalPath, { channel: `server/${shelf}` });
 
     const histEntry = {
       creator: job.creator || null,
@@ -9300,7 +10090,7 @@ async function downloadServerVideo(res, job, url, { folder, quality, device }) {
     };
     // Register a fresh library save (channel null: a server save must not make
     // a later shorts download look like a repeat) — matches finishJob.
-    if (!already) markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null);
+    if (!already) markDownloaded(job.sourceUrl || url, outName, job.site, job.mediaId, null, job, `server/${shelf}`);
     if (!already) noteSourceMeta(job, outName, null);
     if (!device) {
       recordHistory({ ...histEntry, device: false });
@@ -9632,12 +10422,12 @@ async function posterFor(job, videoPath) {
   if (job && job.thumbnail && /^https?:\/\//i.test(job.thumbnail)) {
     try {
       const key = thumbKey(job.thumbnail);
-      const hit = cachedThumb(key);
+      const hit = cachedUrlThumb(key);
       if (hit) return { buf: fs.readFileSync(hit.file), ext: hit.ext };
       const got = await fetchThumb(job.thumbnail);
       // Keep it for the UI too — a card is about to ask for the same picture.
       try {
-        fs.writeFileSync(path.join(THUMB_DIR, `${key}.${got.ext}`), got.buf);
+        writeThumbFile(urlCacheName(key), got.buf, got.ext);
       } catch {
         /* an unwritable cache costs nothing here */
       }
@@ -9698,7 +10488,11 @@ async function attachPoster(job, libPath, opts = {}) {
       console.warn('poster sidecar failed:', e.message);
     }
     if (fromSite) return fromSite;
-    const id = storeLocalThumb(poster.buf, poster.ext);
+    // The frame belongs to this download's registry entry (H47); the history
+    // row that names it records itself too.
+    const src = job.sourceUrl || job.url;
+    const ref = src ? `r:${mediaKey(src)}` : `j:${job.id || 'none'}`;
+    const id = storeFrame(ref, thumbIn(job, opts.channel === undefined ? jobClassChannel(job) : opts.channel), poster.buf, poster.ext);
     return id ? `/api/thumb?id=${id}` : null;
   } catch (e) {
     console.warn('poster failed:', e.message);

@@ -192,30 +192,30 @@ test('routes: admin only, by entry id, inside the roots', async (t) => {
   assert.ok(admin && app);
   const get = (p, cookie, headers = {}) => fetch(base + p, { headers: { ...(cookie ? { Cookie: cookie } : {}), ...headers } });
 
-  const list = await (await get('/api/hub/media', admin)).json();
+  const list = await (await get('/api/hub/media?audience=adult', admin)).json();
   assert.deepEqual(list.items.map((i) => i.id).sort(), [`${now}-1`, `${now}-2`, `${now}-3`, `${now}-5`]); // '../secret.txt' is never listed
   const one = list.items.find((i) => i.id === `${now}-1`);
   assert.equal(one.kind, 'video');
 
-  const detail = await (await get(`/api/hub/media/${now}-1`, admin)).json();
+  const detail = await (await get(`/api/hub/media/${now}-1?audience=adult`, admin)).json();
   assert.equal(detail.item.available, true);
   assert.equal(detail.item.variants[0].bytes, 4096);
 
-  const ranged = await get(`/api/hub/media/${now}-1/file?v=original`, admin, { Range: 'bytes=0-99' });
+  const ranged = await get(`/api/hub/media/${now}-1/file?v=original&audience=adult`, admin, { Range: 'bytes=0-99' });
   assert.equal(ranged.status, 206);
   assert.equal(ranged.headers.get('content-range'), 'bytes 0-99/4096');
   assert.equal((await ranged.arrayBuffer()).byteLength, 100);
   assert.match(ranged.headers.get('content-security-policy') || '', /sandbox/);
   // A file that is not media is never served, so it can never render as a page here.
-  assert.equal((await get(`/api/hub/media/${now}-5/file`, admin)).status, 404);
+  assert.equal((await get(`/api/hub/media/${now}-5/file?audience=adult`, admin)).status, 404);
 
   // A symlink out of the library, a channel that climbs out, a bad variant, a bad id.
-  for (const p of [`/api/hub/media/${now}-2/file`, `/api/hub/media/${now}-3/file`, `/api/hub/media/${now}-1/file?v=../x`, '/api/hub/media/..%2Fsecret.txt/file']) {
+  for (const p of [`/api/hub/media/${now}-2/file?audience=adult`, `/api/hub/media/${now}-3/file?audience=adult`, `/api/hub/media/${now}-1/file?v=../x&audience=adult`, '/api/hub/media/..%2Fsecret.txt/file?audience=adult']) {
     const r = await get(p, admin);
     assert.equal(r.status, 404, p);
     assert.doesNotMatch(await r.text(), /secret/);
   }
-  assert.equal((await (await get(`/api/hub/media/${now}-3`, admin)).json()).item.available, false);
+  assert.equal((await (await get(`/api/hub/media/${now}-3?audience=adult`, admin)).json()).item.available, false);
 
   // Who else is refused.
   assert.equal((await get('/api/hub/media', null)).status, 401);

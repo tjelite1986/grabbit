@@ -114,10 +114,17 @@ const norm = (v) => String(v || '').trim().toLowerCase();
 
 // The profiles a job's creator matches: by alias, by profile name, or by a
 // linked account on the job's own platform.
-function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
+// `index` (optional) is indexProfiles(store, keyOf): it only narrows which
+// profiles are looked at, in store order, so the answer is the same as without.
+function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm, index = null) {
   const out = [];
   if (!store || !Array.isArray(store.profiles)) return out;
-  for (const p of store.profiles) {
+  let list = store.profiles;
+  if (index && index.store === store && index.keyOf === keyOf) {
+    const hits = new Set([...((creatorKey && index.byKey.get(creatorKey)) || []), ...((handle && index.byHandle.get(handle)) || [])]);
+    list = [...hits].sort((a, b) => index.order.get(a) - index.order.get(b));
+  }
+  for (const p of list) {
     const byAlias = creatorKey && (p.aliases || []).some((a) => norm(keyOf(a.name)) === creatorKey);
     const byName = creatorKey && p.origin === 'manual' && norm(keyOf(p.name)) === creatorKey;
     // A general account must match on its own platform. An adult account
@@ -133,6 +140,28 @@ function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
   return out;
 }
 
+// Every profile by the keys matchProfiles() compares, for callers that classify
+// thousands of rows against one store.
+function indexProfiles(store, keyOf = norm) {
+  const byKey = new Map();
+  const byHandle = new Map();
+  const order = new Map();
+  const add = (map, k, p) => {
+    if (!k) return;
+    const list = map.get(k);
+    if (!list) map.set(k, [p]);
+    else if (!list.includes(p)) list.push(p);
+  };
+  const profiles = store && Array.isArray(store.profiles) ? store.profiles : [];
+  profiles.forEach((p, i) => {
+    order.set(p, i);
+    for (const a of p.aliases || []) add(byKey, norm(keyOf(a.name)), p);
+    if (p.origin === 'manual') add(byKey, norm(keyOf(p.name)), p);
+    for (const a of p.accounts || []) add(byHandle, norm(a.handle), p);
+  });
+  return { store, keyOf, byKey, byHandle, order };
+}
+
 // keyOf turns a name into its file-name spelling (the server passes
 // safeCreator), so "Jane Doe" and the alias "Jane_Doe" compare equal.
 // classify({ creatorKey, handle, site, extractor, sourceUrl, requested, prior }, store)
@@ -142,7 +171,7 @@ function matchProfiles(store, { creatorKey, handle, platform }, keyOf = norm) {
 //   prior:      the audience this item was recorded with before, or null
 //   priorByHand: true when the owner set that audience by hand
 // -> { audience, reasons: [string], profileId: number|null }
-function classify(input, store, { keyOf = norm } = {}) {
+function classify(input, store, { keyOf = norm, index = null } = {}) {
   const i = input || {};
   const ck = norm(i.creatorKey ? keyOf(i.creatorKey) : '');
   const creatorKey = ck === 'unknown' ? '' : ck;
@@ -153,7 +182,7 @@ function classify(input, store, { keyOf = norm } = {}) {
   if (i.requested === 'adult') reasons.push('the job saves it as 18+');
   if (i.prior === 'adult') reasons.push('this item was recorded as 18+ before');
   if (isAdultSite(i.site, i.extractor, i.sourceUrl)) reasons.push('the source site is an 18+ site');
-  const matches = matchProfiles(store, { creatorKey, handle, platform }, keyOf);
+  const matches = matchProfiles(store, { creatorKey, handle, platform }, keyOf, index);
   const adultProfile = matches.find((m) => effectiveAudience(m.profile) === 'adult');
   if (adultProfile) reasons.push(`the creator matches the 18+ profile #${adultProfile.profile.id}`);
   if (reasons.length) {
@@ -244,6 +273,7 @@ module.exports = {
   isAdultSite,
   platformOfSite,
   matchProfiles,
+  indexProfiles,
   classify,
   refusal,
   kidsRefusal,

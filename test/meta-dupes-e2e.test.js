@@ -73,7 +73,7 @@ async function boot(t, { mode = 'on', settings = null } = {}) {
       PATH: process.env.PATH, PORT: String(port), DATA_DIR: dirs.data, DOWNLOAD_DIR: path.join(root, 'downloads'),
       GRABBIT_PASSWORD: SHARED, STATE_BACKUP_DAYS: '0', YTDLP_BIN: '/bin/false', GALLERY_DL_BIN: '/bin/false',
       FFMPEG_BIN: '/bin/false', FFPROBE_BIN: '/bin/false', DUPES_SCAN_MBPS: '200',
-      ELITE_ROOT: dirs.ads, TIKSHORTIS_ROOT: dirs.tik, PLATFORM_IMPORT_ROOT: dirs.plat,
+      ELITE_ROOT: dirs.ads, TIKSHORTIS_ROOT: dirs.tik, PLATFORM_IMPORT_ROOT: dirs.plat, ADULTS_DOWNLOAD_DIR: path.join(root, 'adults'),
       INBOX_DROP_DIR: dirs.drop, EGRAM_IMPORT_DIR: dirs.egram, INBOX_MODE: mode,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -315,7 +315,8 @@ test('duplicate preview refuses a row whose path climbs out of its root or whose
 test('duplicate preview: an 18+ file is served only to a logged-in owner, and a deep intermediate symlink is refused', async (t) => {
   const s = await boot(t);
   const body = Buffer.alloc(400, 9);
-  const adultDir = path.join(s.dirs.ads, 'main', 'who');
+  // Grabbit's own 18+ shelf (the 18+ app's folders are not scanned, D12).
+  const adultDir = path.join(s.root, 'adults', 'who');
   const deepDir = path.join(s.dirs.tik, 'main', 'ann', 'deep');
   for (const d of [adultDir, deepDir, path.join(s.dirs.tik, 'main', 'ann', 'other')]) fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(adultDir, 'x.jpg'), body);

@@ -462,6 +462,7 @@ common variables:
 | `MAX_ACTIVE_JOBS` | `2` | Downloads that run at the same time. |
 | `TIKSHORTIS_MODE` | unset | `native` or `embed` to switch on TikShortis. Unset means `embed` when an embed URL is set, otherwise off. |
 | `EGRAM_MODE` | `off` | `native` to switch on Social & Photos. |
+| `ADSHORTIS_MODE` | `off` | `native` (with `ADSHORTIS_API_URL`, `ADSHORTIS_APP_ORIGIN`, `GRABBIT_PUBLIC_ORIGIN`) links Adshortis accounts through `/api/ads`; `embed` shows a link to `ADSHORTIS_EMBED_URL`. `ADSHORTIS_FOLDER_PAGE=1` keeps the old folder page outside `native`. |
 | `DUPES_SCAN_MBPS` | `20` | Read limit for the duplicate scanner, in MB/s. |
 | `STATE_BACKUP_DAYS` | `7` | Daily snapshot folders to keep (0 turns them off). |
 
@@ -554,9 +555,9 @@ npm test                            # node --test test/
 ## Roadmap
 
 From the module registry (`modules.js`). None of these is available in 3.0.4.
-(Separately, the hub already lists Adshortis and Adflix library viewers when
-`ADSHORTIS_LIBRARY` or `ADFLIX_LIBRARY` is mounted; they are not part of this
-roadmap.)
+(Separately, the hub lists the Adflix library viewer when `ADFLIX_LIBRARY` is
+mounted, and the old Adshortis folder page when `ADSHORTIS_LIBRARY` is mounted
+and `ADSHORTIS_FOLDER_PAGE=1` is set; they are not part of this roadmap.)
 
 - [ ] **Videos**: a native long-form video module
 - [ ] **Movies & music**: library browsing for films and music

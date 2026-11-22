@@ -61,7 +61,7 @@ test('a corrupt registry is quarantined and restored from the newest usable snap
   // The server loaded the restored registry, not just the file on disk: the
   // hub's creator list is built from it (creator "new" from REG_NEW, two
   // files; nothing from the older snapshot).
-  const creators = await s.call('/api/hub/creators');
+  const creators = await s.call('/api/hub/creators?audience=adult');
   assert.equal(creators.status, 200, creators.text);
   assert.deepEqual(creators.body.items.map((c) => [c.name, c.files]), [['new', 2]], creators.text);
 });
@@ -124,7 +124,7 @@ test('other state files: corrupt history and templates fall back empty, the dama
       write(path.join(d, 'scheduled.json'), '{');
     },
   });
-  const h = await s.call('/api/history');
+  const h = await s.call('/api/history?audience=adult');
   assert.equal(h.status, 200);
   assert.deepEqual(h.body, { ok: true, items: [] });
   const tpl = await s.call('/api/templates');
