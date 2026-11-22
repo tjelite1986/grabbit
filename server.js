@@ -1703,6 +1703,9 @@ const REVALIDATE = new Set([
   // The hub's own shell (public/hub/), same reason.
   'hub.js',
   'hub.css',
+  // Helpers shared by the native modules (public/hub/shared/).
+  'links.js',
+  'sheets.js',
   // Grabbit 3.0 native TikShortis pages (public/hub/tik/).
   'tik.js',
   'tik.css',

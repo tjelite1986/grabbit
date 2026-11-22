@@ -12,6 +12,8 @@ const PUB = path.join(__dirname, '..', 'public');
 const read = (rel) => fs.readFileSync(path.join(PUB, rel), 'utf8');
 const css = read('hub/tik/tik.css');
 const js = read('hub/tik/tik.js');
+// Adshortis phase 2: the sheet stack moved to public/hub/shared/.
+const sheetsJs = read('hub/shared/sheets.js');
 const hubJs = read('hub/hub.js');
 
 // Strip comments so a rule mentioned in prose does not count as a rule.
@@ -95,14 +97,15 @@ test('hub.js passes the menu hooks to the module and tik.js calls them', () => {
 
 test('version labels and the service worker cache name moved to 3.0.4', () => {
   assert.match(read('hub/index.html'), /<span id="version">v3\.0\.4<\/span>/);
-  // 3.0.4 added the duplicate manager's files to the shell, so the cache moved on.
-  assert.match(read('sw.js'), /const CACHE = 'grabbit-v16';/);
+  // 3.0.4 added the duplicate manager's files to the shell, and Adshortis
+  // phase 2 the shared helpers, so the cache moved on.
+  assert.match(read('sw.js'), /const CACHE = 'grabbit-v17';/);
 });
 
 test('3.0.2: sheets ride on top of the on-screen keyboard (visualViewport)', () => {
-  assert.match(js, /window\.innerHeight - vvp\.height - vvp\.offsetTop/);
-  assert.match(js, /vvp\.addEventListener\('resize', syncKeyboard\)/);
-  assert.match(js, /vvp\.addEventListener\('scroll', syncKeyboard\)/);
+  assert.match(sheetsJs, /window\.innerHeight - vvp\.height - vvp\.offsetTop/);
+  assert.match(sheetsJs, /vvp\.addEventListener\('resize', syncKeyboard\)/);
+  assert.match(sheetsJs, /vvp\.addEventListener\('scroll', syncKeyboard\)/);
   assert.match(cssCode, /\.tik-sheet \{[^}]*bottom: var\(--tik-kb, 0px\)/);
   assert.match(cssCode, /\.tik-sheet\.tf-sheet-comments[^{]*\{[^}]*max-height: min\(70dvh, calc\(var\(--tik-vvh, 100dvh\) - 16px\)\)/);
 });
@@ -121,9 +124,9 @@ test('3.0.2: For You and Random continue the saved shuffle instead of reshufflin
 });
 
 test('confirmSheet() puts the focus on Cancel, not on the destructive button', () => {
-  const at = js.indexOf('function confirmSheet(');
+  const at = sheetsJs.indexOf('function confirmSheet(');
   assert.ok(at >= 0);
-  const body = js.slice(at, js.indexOf('\n    }\n', at));
+  const body = sheetsJs.slice(at, sheetsJs.indexOf('\n    }\n', at));
   assert.match(body, /querySelector\('\.tf-sheet-btns \.tf-sbtn:not\(\.danger\)'\)/);
   assert.match(body, /cancel\.focus\(/);
 });

@@ -13,12 +13,15 @@
 // v14: phase 2 final: comments, share, upload, notifications, settings, the full-screen viewer.
 // v15: Grabbit 3.0.3 (wide feed, clickable @mentions, Mentioned in on profiles).
 // v16: Grabbit 3.0.4, the Smart Duplicate Manager (public/hub/dupes/).
-const CACHE = 'grabbit-v16';
+// v17: helpers shared by the native modules (public/hub/shared/).
+const CACHE = 'grabbit-v17';
 const SHELL = [
   '/',
   '/classic/',
   '/hub/hub.js',
   '/hub/hub.css',
+  '/hub/shared/links.js',
+  '/hub/shared/sheets.js',
   '/hub/tik/tik.js',
   '/hub/tik/tik.css',
   '/hub/social/social.js',

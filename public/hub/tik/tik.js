@@ -151,9 +151,7 @@
     const intOf = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
     const tagHref = (t) => link(`tag/${enc(tagOf(t))}`);
     // Only http(s) links from captions and profile rows become hrefs.
-    function safeHref(u) {
-      try { const x = new URL(String(u)); return x.protocol === 'https:' || x.protocol === 'http:' ? x.href : null; } catch { return null; }
-    }
+    const { safeHref } = window.GrabbitShared;
     function when(s) {
       const t = Date.parse(String(s || '').replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(s)) ? '' : 'Z'));
       return Number.isFinite(t) ? hub.ago(t) : '';
@@ -343,124 +341,12 @@
     const LENGTHS = [['all', 'Any length'], ['short', 'Short'], ['long', 'Long']];
 
     // --- Sheets (dialogs) --------------------------------------------------
-    // One stack. The device Back button closes the open sheets: while any is
-    // open, ONE history entry with the same address sits on top (no
-    // hashchange, no redraw). One entry, not one per sheet, because a sheet
-    // often closes and the next opens in the same click (More -> Edit), and a
-    // history.back() per sheet would land late and close the new one.
-    const sheets = [];
-    // The on-screen keyboard. Android Chrome only shrinks the visual
-    // viewport, so a sheet pinned to bottom: 0 ends up behind the keyboard
-    // (the comment field could not be seen while typing). --tik-kb is the
-    // height the keyboard takes off the bottom of the layout viewport and
-    // --tik-vvh the height still visible; the sheets ride on top of it.
-    const vvp = window.visualViewport;
-    function syncKeyboard() {
-      const root = document.documentElement.style;
-      if (!vvp) return;
-      const kb = Math.max(0, Math.round(window.innerHeight - vvp.height - vvp.offsetTop));
-      root.setProperty('--tik-kb', `${kb}px`);
-      root.setProperty('--tik-vvh', `${Math.round(vvp.height)}px`);
-    }
-    if (vvp) {
-      vvp.addEventListener('resize', syncKeyboard);
-      vvp.addEventListener('scroll', syncKeyboard);
-      syncKeyboard();
-    }
-    let guard = false; // our history entry is on top
-    let ignorePop = 0; // pops we caused ourselves
-    //
-    // The look is TikShortis' bottom sheet: full width with a title row and
-    // an X (comments, playlists, share, the menu). opts.size 'narrow' is the
-    // player menu and its confirmations (at most 448 px wide), 'form' a sheet
-    // with inputs. opts.bare drops the title row, as TikShortis' player menu
-    // has none; opts.clear leaves the page behind undimmed.
-    function openSheet(title, body, opts = {}) {
-      const close = () => closeSheet(entry, true);
-      const cls = ['tik-sheet', opts.size || (opts.wide ? 'wide' : 'form'), opts.bare ? 'bare' : null, opts.cls || null].filter(Boolean).join(' ');
-      const panel = h('div', { class: cls, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
-        opts.bare ? null : h('div', { class: 'tik-sheet-head' }, h('h3', null, title), h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Close', onclick: close }, lu('x', 20))),
-        h('div', { class: 'tik-sheet-body' }, body));
-      const scrim = h('div', { class: `tik-scrim${opts.clear ? ' clear' : ''}`, onclick: close });
-      const entry = { panel, scrim, onClose: opts.onClose, back: document.activeElement };
-      document.body.append(scrim, panel);
-      sheets.push(entry);
-      if (!guard) {
-        try { history.pushState({ ...(history.state || {}), tikSheet: 1 }, '', location.href); guard = true; } catch { /* ignore */ }
-      }
-      const first = panel.querySelector('input, textarea, select, button:not(.tik-x), a[href]');
-      const target = first || panel.querySelector('.tik-x');
-      if (target) target.focus({ preventScroll: true });
-      return { close, panel, body: panel.querySelector('.tik-sheet-body') };
-    }
-    // Called once the last sheet is gone (the feed resumes auto-scroll).
-    const whenSheetsClosed = new Set();
-    function closeSheet(entry, viaUi) {
-      const i = sheets.indexOf(entry);
-      if (i < 0) return;
-      sheets.splice(i, 1);
-      entry.panel.remove();
-      entry.scrim.remove();
-      if (entry.onClose) entry.onClose();
-      if (!sheets.length) for (const fn of whenSheetsClosed) { try { fn(); } catch (e) { console.warn('tik: sheet-close hook failed', e); } }
-      if (!viaUi) return;
-      if (entry.back && entry.back.isConnected && !sheets.length) entry.back.focus({ preventScroll: true });
-      // Closed on screen: take the history entry back off, unless another
-      // sheet opens right away (it reuses the entry).
-      setTimeout(() => {
-        if (sheets.length || !guard) return;
-        guard = false;
-        if (history.state && history.state.tikSheet) { ignorePop++; history.back(); }
-      }, 0);
-    }
-    function closeAllSheets() {
-      while (sheets.length) closeSheet(sheets[sheets.length - 1], false);
-      // Leaving the page: the entry stays below the new address and is a
-      // harmless duplicate of the old one.
-      guard = false;
-    }
-    window.addEventListener('popstate', () => {
-      if (ignorePop) { ignorePop--; return; }
-      if (!guard) return;
-      guard = false;
-      while (sheets.length) closeSheet(sheets[sheets.length - 1], false);
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && sheets.length) { e.preventDefault(); closeSheet(sheets[sheets.length - 1], true); }
-      // aria-modal: Tab and Shift+Tab cycle inside the top sheet and never
-      // reach the page behind the scrim.
-      if (e.key === 'Tab' && sheets.length) {
-        const panel = sheets[sheets.length - 1].panel;
-        const items = [...panel.querySelectorAll('a[href], button, input, textarea, select, video[controls], [tabindex]:not([tabindex="-1"])')]
-          .filter((el) => !el.disabled && !el.hidden && el.getClientRects().length);
-        if (!items.length) return;
-        const firstEl = items[0];
-        const lastEl = items[items.length - 1];
-        const inside = panel.contains(document.activeElement);
-        if (e.shiftKey && (!inside || document.activeElement === firstEl)) { e.preventDefault(); lastEl.focus(); }
-        else if (!e.shiftKey && (!inside || document.activeElement === lastEl)) { e.preventDefault(); firstEl.focus(); }
-      }
-    });
-    // TikShortis' confirmation sheet (the clip's "Delete this clip?"): a title,
-    // one line, then the action in red and Cancel side by side.
-    function confirmSheet(title, text, label, run) {
-      const s = openSheet(title, [
-        h('p', { class: 'tf-sheet-title' }, title),
-        h('p', { class: 'tf-sheet-sub' }, text),
-        h('div', { class: 'tf-sheet-btns' },
-          h('button', { type: 'button', class: 'tf-sbtn danger', onclick: async (e) => {
-            // currentTarget is gone after the await: keep the button.
-            const btn = e.currentTarget;
-            btn.disabled = true;
-            try { await run(); s.close(); } catch (err) { fail(err); btn.disabled = false; }
-          } }, label),
-          h('button', { type: 'button', class: 'tf-sbtn', onclick: () => s.close() }, 'Cancel')),
-      ], { size: 'narrow', bare: true });
-      // The destructive button comes first, as in TikShortis, but the focus
-      // starts on Cancel: Enter (or a held key) must never confirm by itself.
-      const cancel = s.panel.querySelector('.tf-sheet-btns .tf-sbtn:not(.danger)');
-      if (cancel) cancel.focus({ preventScroll: true });
-    }
+    // The hub's one sheet stack (public/hub/shared/sheets.js).
+    const SH = window.GrabbitShared.sheets({ h, closeIcon: () => lu('x', 20), onError: (e) => fail(e) });
+    const openSheet = SH.open;
+    const closeAllSheets = SH.closeAll;
+    const confirmSheet = SH.confirm;
+    const whenSheetsClosed = SH.whenClosed;
 
     // --- Watch history (the view beacon) ----------------------------------
     // Same contract as TikShortis lib/view-beacon.ts: latest report per clip,
@@ -1051,7 +937,7 @@
           c.completed = true;
           // Not under an open sheet: the sheet's Back entry would then point
           // at the clip before.
-          if (S.autoScroll && F.cards[F.active] === c) { if (sheets.length) c.advanceOnClose = true; else step(1); }
+          if (S.autoScroll && F.cards[F.active] === c) { if (SH.count()) c.advanceOnClose = true; else step(1); }
         });
         video.addEventListener('play', () => { c.playIcon.hidden = true; });
         video.addEventListener('pause', () => { c.playIcon.hidden = F.cards[F.active] !== c; });
@@ -1615,14 +1501,14 @@
           // No browser fullscreen to leave (refused or unsupported): Escape
           // ends the page's own immersive view. Not when the same key just
           // closed a sheet (its handler runs first and prevents the default).
-          if (F.fullscreen && !e.defaultPrevented && !sheets.length && !(document.fullscreenElement || document.webkitFullscreenElement)) { e.preventDefault(); toggleFullscreen(); return; }
+          if (F.fullscreen && !e.defaultPrevented && !SH.count() && !(document.fullscreenElement || document.webkitFullscreenElement)) { e.preventDefault(); toggleFullscreen(); return; }
         }
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
         // Space and the arrows belong to a focused control (a button, the
         // feed selector), not to the player.
         if ((e.key === ' ' || e.key.startsWith('Arrow')) && e.target.closest && e.target.closest('button, a[href], [role=menu], [role=listbox]')) return;
-        if (sheets.length || document.querySelector('[role=dialog][aria-modal=true]')) return;
+        if (SH.count() || document.querySelector('[role=dialog][aria-modal=true]')) return;
         const c = F.cards[F.active];
         const k = e.key;
         if (k === 'ArrowDown' || k === 'j' || k === 'PageDown') { e.preventDefault(); step(1); }
@@ -1646,7 +1532,7 @@
         clearTimeout(advanceTimer);
         advanceTimer = setTimeout(() => {
           if (!live(gen) || !S.autoScroll || F.cards[F.active] !== c || !c.video.ended) return;
-          if (sheets.length) c.advanceOnClose = true; else step(1);
+          if (SH.count()) c.advanceOnClose = true; else step(1);
         }, 150);
       };
       let advanceTimer = 0;
