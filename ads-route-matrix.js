@@ -35,6 +35,7 @@ const CONDITIONS = {
   'adshortis:A13': 'Adshortis A13 deployed',
   'adshortis:A15': 'Adshortis A15 deployed',
   'adshortis:A17': 'Adshortis A17 deployed (stored task area)',
+  'adshortis:A18': 'Adshortis A18 deployed and checked: ordinary video and poster handlers refuse deleted and unready clips on GET, HEAD and Range (H93, H100)',
   'grabbit:H10': 'every H10 row implemented',
   'owner:D13': 'owner decision D13 answered',
   'projection:no-error': 'the admin projection drops `error` (and import file names for non-import holders), H81/A16',
@@ -114,6 +115,44 @@ const NL_RESPONSE = Object.freeze({
   body: Object.freeze({ ok: false, error: 'Sign in to Grabbit again', reason: 'login_id_missing' }),
 });
 
+// The S1-S3 contracts as code (Codex phase-0 MAJOR on H101). The phase-1
+// gateway calls these and nothing else for the session rows; the matrix
+// tests run them. What only the gateway can prove (seal, AAD, origin, the
+// internal/GDA principal refusal, S5 isolation) is listed in
+// PHASE1_GATEWAY_TESTS and must be real tests before phase 1 exits.
+
+// S1 for a caller with no per-login id: the answer, before anything is sent
+// upstream. Returns NL_RESPONSE or null (the request may go on).
+function sessionPreflight(method, path, loginId) {
+  if (String(method).toUpperCase() !== 'POST' || path !== '/api/ads/session') return null;
+  const id = typeof loginId === 'string' ? loginId.trim() : '';
+  return id ? null : NL_RESPONSE;
+}
+
+// S2: the upstream /api/me body reduced to exactly the keys this phase
+// passes; anything else, `ai` and `nav_tabs` included, is dropped. A body
+// that is not an object gives null (the gateway answers 424).
+function projectSession(upstream, phase) {
+  if (!upstream || typeof upstream !== 'object' || Array.isArray(upstream)) return null;
+  const out = {};
+  for (const k of sessionFields(phase)) {
+    if (NEVER_SESSION_FIELDS.includes(k)) continue;
+    out[k] = Object.hasOwn(upstream, k) ? upstream[k] : null;
+  }
+  return out;
+}
+
+// Gateway-level tests phase 1 must add (they need the gateway itself).
+const PHASE1_GATEWAY_TESTS = Object.freeze([
+  'S1 NL: POST /api/ads/session without __Host-grabbit_login answers NL_RESPONSE with zero upstream calls (sessionPreflight)',
+  'S1/S2 principals: an internal-token or GDA app principal is refused on every /api/ads route; only the owner\'s browser session reaches the gateway',
+  'S1-S3 origin: Sec-Fetch-Site cross-site and same-site are refused; a header-less caller may only GET/HEAD',
+  'S1 seal: tampered seal, seal of another login id, duplicate cookie name: 401 and no upstream call',
+  'S2: the response has exactly the keys of projectSession(upstream, phase), never ai or nav_tabs',
+  'S3: the local seal record is deleted before the upstream logout; an upstream 500 still leaves the next call 401',
+  'S5: a native Adshortis route never answers a general hub view, and Grabbit general routes never list Adshortis objects',
+]);
+
 // Path parameters. `:id` and `:clip` are the N control (numeric only, 404
 // before upstream otherwise). `:name` is a job name, checked against jobsFor().
 // `:task` has no pattern until GAP 17 decides one, so T2 never matches live.
@@ -160,8 +199,10 @@ const ROWS = [
   R('M24', ['GET'], '/api/ads/clips/:id/playlists', 'member', '3'),
   R('M25', ['PATCH'], '/api/ads/me/prefs', 'member', '3', [6]),
   // Media (part 1 section 4)
-  R('D1', ['GET', 'HEAD'], '/api/ads/m/video/:id', 'member', '3', [10]),
-  R('D2', ['GET', 'HEAD'], '/api/ads/m/poster/:id', 'member', '3', [10]),
+  // H100: deny-by-default until the deployed Adshortis build with A18 passes
+  // the H93 GET, HEAD and Range checks (Codex phase-0 MAJOR).
+  R('D1', ['GET', 'HEAD'], '/api/ads/m/video/:id', 'member', '3', [10], ['adshortis:A18']),
+  R('D2', ['GET', 'HEAD'], '/api/ads/m/poster/:id', 'member', '3', [10], ['adshortis:A18']),
   R('D3', ['GET'], '/api/ads/m/avatar/creator/:id', 'member', '3', [8]),
   R('D4', ['GET'], '/api/ads/m/avatar/user/:id', 'member', '3', [8]),
   R('D5', ['GET'], '/api/ads/m/download/:id', null, '3', [9]),
@@ -304,6 +345,9 @@ module.exports = {
   SESSION_FIELDS,
   NEVER_SESSION_FIELDS,
   NL_RESPONSE,
+  PHASE1_GATEWAY_TESTS,
+  sessionPreflight,
+  projectSession,
   jobsFor,
   sessionFields,
   holdReason,

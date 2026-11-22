@@ -54,8 +54,15 @@ test('the allowlist per phase', () => {
     'S1', 'S2', 'S3',
     'M3', 'M4', 'M6', 'M7', 'M8', 'M10', 'M11', 'M13', 'M14',
     'M16', 'M17', 'M18', 'M19', 'M20', 'M21', 'M22', 'M23', 'M24',
-    'D1', 'D2',
   ]);
+  // H100 (Codex phase-0 MAJOR): ordinary media stays off until A18 is
+  // deployed and checked, also in phase 3.
+  for (const r of ['D1', 'D2']) assert.ok(!p3.includes(r), r);
+  assert.equal(m.matchRoute('GET', '/api/ads/m/video/12', '3'), null);
+  assert.equal(m.matchRoute('HEAD', '/api/ads/m/poster/12', '3'), null);
+  assert.match(m.holdReason(m.ROWS.find((r) => r.row === 'D1'), '3'), /waits on adshortis:A18/);
+  const p3a18 = ids(m.liveRoutes('3', new Set(['adshortis:A18'])));
+  assert.ok(p3a18.includes('D1') && p3a18.includes('D2'));
   // Held by open GAPs: lists (3), prefs (6), creator URLs (7), avatars (8),
   // download (9), comments on deleted clips (23); upload waits on A2 (GAP 5).
   for (const r of ['M1', 'M2', 'M5', 'M9', 'M12', 'M15', 'M25', 'D3', 'D4', 'D5']) assert.ok(!p3.includes(r), r);
@@ -132,5 +139,43 @@ test('S1 and S2 contracts (H101)', () => {
     for (const k of m.NEVER_SESSION_FIELDS) assert.ok(!f.includes(k), `${k} in phase ${phase}`);
     // prefs waits on GAP 6 even in phase 3.
     if (m.GAPS[6].status !== 'closed') assert.deepEqual(f, m.SESSION_FIELDS);
+  }
+});
+
+// Codex phase-0 MAJOR on H101: the S1 and S2 contracts run as code. The
+// fake upstream counts calls; the NL answer never reaches it.
+test('S1 NL answer and S2 projection run as code, with no upstream call for NL', () => {
+  let calls = 0;
+  const upstream = () => {
+    calls++;
+    return { id: 7, username: 'ada', display_name: 'Ada', role: 'member', permissions: ['x'], avatar: null, prefs: { a: 1 }, ai: { k: 1 }, nav_tabs: ['x'], extra: 'no' };
+  };
+  // What the phase-1 gateway does for a session request.
+  const gateway = (method, path, loginId, phase = '1') => {
+    const nl = m.sessionPreflight(method, path, loginId);
+    if (nl) return nl;
+    if (!m.matchRoute(method, path, phase)) return { status: 404 };
+    return { status: 200, body: method === 'GET' ? m.projectSession(upstream(), phase) : { ok: true } };
+  };
+  for (const id of [undefined, null, '', '   ', 42]) {
+    assert.deepEqual(gateway('POST', '/api/ads/session', id), m.NL_RESPONSE);
+  }
+  assert.equal(calls, 0, 'no upstream call for an NL caller');
+  assert.equal(m.sessionPreflight('GET', '/api/ads/session', ''), null, 'only S1 answers NL');
+  assert.equal(m.sessionPreflight('POST', '/api/ads/session', 'login-1'), null);
+  const s2 = gateway('GET', '/api/ads/session', 'login-1');
+  assert.deepEqual(Object.keys(s2.body), m.SESSION_FIELDS, 'exactly the six keys, in order');
+  assert.equal(calls, 1);
+  for (const phase of m.PHASES) {
+    const out = m.projectSession(upstream(), phase);
+    for (const k of m.NEVER_SESSION_FIELDS) assert.ok(!(k in out), `${k} in phase ${phase}`);
+    assert.ok(!('extra' in out));
+  }
+  assert.deepEqual(m.projectSession({ id: 1 }, '1'), { id: 1, username: null, display_name: null, role: null, permissions: null, avatar: null });
+  for (const bad of [null, 'x', [], 3]) assert.equal(m.projectSession(bad, '1'), null);
+  // What only the gateway can prove is named for phase 1.
+  assert.ok(m.PHASE1_GATEWAY_TESTS.length >= 7);
+  for (const topic of ['S1 NL', 'principal', 'origin', 'seal', 'S2', 'S3', 'S5']) {
+    assert.ok(m.PHASE1_GATEWAY_TESTS.some((t) => t.includes(topic)), topic);
   }
 });
