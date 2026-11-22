@@ -124,3 +124,89 @@ test('the v2 preview routes check the retired roots on every request', async (t)
   for (const id of [1, 2]) assert.equal((await fetch(`${base}/thumb/${id}?adult=1`)).status, 404);
   assert.equal((await fetch(`${base}/trash/g1/file`)).status, 404);
 });
+
+// Codex phase-0 B7: the 18+ library inside another scan root (here Grabbit's
+// own download folder). Earlier rows under it are set aside at boot, a scan
+// never enters it, and no preview route serves a file inside it.
+test('a retired folder nested inside another root is set aside, never scanned and never previewed (B7)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'grabbit-d12n-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const data = path.join(root, 'data');
+  const dl = path.join(root, 'downloads');
+  const adsLib = path.join(dl, 'adshortis-library');
+  for (const d of [data, path.join(adsLib, 'Ada'), dl]) fs.mkdirSync(d, { recursive: true });
+  // A symlink inside the general root that points into the retired folder.
+  fs.symlinkSync(path.join(adsLib, 'Ada'), path.join(dl, 'alias'));
+  const files = {
+    nested: [dl, 'adshortis-library/Ada/clip 1.mp4', SHA_ADULT],
+    viaLink: [dl, 'alias/clip 1.mp4', SHA_ADULT],
+    gen: [dl, 'Jane Doe_-_clip 3.mp4', SHA_GENERAL],
+  };
+  fs.writeFileSync(path.join(adsLib, 'Ada', 'clip 1.mp4'), 'bytes nested');
+  fs.writeFileSync(path.join(dl, 'Jane Doe_-_clip 3.mp4'), 'bytes general');
+  const st = itemStore.open(path.join(data, 'items.db'));
+  const ids = {};
+  for (const [k, [r, rel, sha]] of Object.entries(files)) {
+    const { row } = st.fileSeen(r, rel, fs.statSync(path.join(r, rel)));
+    st.fileHashed(row.id, { sha256: sha });
+    ids[k] = row.id;
+  }
+  st.close();
+  const thumbDir = path.join(data, 'dupe-thumbs');
+  for (const sha of [SHA_ADULT, SHA_GENERAL]) {
+    fs.mkdirSync(path.join(thumbDir, sha.slice(0, 2)), { recursive: true });
+    fs.writeFileSync(path.join(thumbDir, sha.slice(0, 2), `${sha}.jpg`), 'jpeg');
+  }
+  const port = await freePort();
+  const proc = spawn(process.execPath, ['-r', path.join(__dirname, 'fixtures', 'loopback-listen.js'), 'server.js'], {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      PATH: process.env.PATH, TMPDIR: os.tmpdir(), PORT: String(port), DATA_DIR: data, DOWNLOAD_DIR: dl,
+      GRABBIT_PASSWORD: SHARED, STATE_BACKUP_DAYS: '0', YTDLP_BIN: '/bin/false', GALLERY_DL_BIN: '/bin/false',
+      FFMPEG_BIN: '/bin/false', FFPROBE_BIN: '/bin/false', ADSHORTIS_LIBRARY_DIR: adsLib,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let logs = '';
+  proc.stdout.on('data', (d) => (logs += d));
+  proc.stderr.on('data', (d) => (logs += d));
+  t.after(() => proc.kill());
+  for (let i = 0; i < 100 && !logs.includes('grabbit listening'); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.ok(logs.includes('grabbit listening'), logs);
+  assert.match(logs, /2 recorded files set aside, 1 cached previews deleted/);
+  const base = `http://127.0.0.1:${port}`;
+  const login = await fetch(`${base}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: `password=${encodeURIComponent(SHARED)}`,
+    redirect: 'manual',
+  });
+  const cookie = login.headers.getSetCookie().map((v) => v.split(';')[0]).find((v) => v.startsWith('grabbit_auth='));
+  const get = (p) => fetch(base + p, { headers: { Cookie: cookie } });
+  for (const k of ['nested', 'viaLink']) {
+    assert.equal((await get(`/api/hub/dupes/file/${ids[k]}`)).status, 404, `${k} legacy file`);
+    assert.equal((await get(`/api/hub/dupes/v2/thumb/${ids[k]}?adult=1`)).status, 404, `${k} thumb`);
+  }
+  assert.equal((await get(`/api/hub/dupes/file/${ids.gen}`)).status, 200);
+
+  // A full scan of the download folder never records a file inside it.
+  fs.writeFileSync(path.join(adsLib, 'Ada', 'clip new.mp4'), 'bytes new nested');
+  fs.writeFileSync(path.join(dl, 'Jane Doe_-_clip 4.mp4'), 'bytes general 4');
+  const sr = await fetch(`${base}/api/hub/dupes/v2/scan`, {
+    method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'start' }),
+  });
+  assert.equal(sr.status, 200, await sr.text());
+  let rels = [];
+  for (let i = 0; i < 100; i++) {
+    const s2 = itemStore.open(path.join(data, 'items.db'));
+    try {
+      rels = s2.raw.prepare('SELECT rel FROM file_hashes WHERE gone_at IS NULL').pluck().all();
+    } finally {
+      s2.close();
+    }
+    if (rels.includes('Jane Doe_-_clip 4.mp4')) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(rels.includes('Jane Doe_-_clip 4.mp4'), JSON.stringify(rels));
+  assert.equal(rels.some((r) => r.includes('clip new') || r.startsWith('adshortis-library') || r.startsWith('alias')), false, JSON.stringify(rels));
+});

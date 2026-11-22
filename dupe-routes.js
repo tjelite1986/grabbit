@@ -113,7 +113,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     try {
       if (!/^g[1-9][0-9]{0,15}$/.test(req.params.id) || !trash) return notFound();
       const t = trash.store.trashGet(Number(req.params.id.slice(1)));
-      if (!t || t.restored_at || t.purged_at || retiredRoot(t.root)) return notFound();
+      if (!t || t.restored_at || t.purged_at || retiredRoot(t.root, t.rel)) return notFound();
       const f = trash.trashedFile(t);
       if (!f || !['video', 'image', 'audio'].includes(kindOfName(t.rel))) return notFound();
       res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
@@ -149,7 +149,7 @@ function createRouter({ service, scanner, analyzer, models, trash, actorOf, kind
     try {
       if (!/^[1-9][0-9]{0,15}$/.test(req.params.id) || !thumbDir) return notFound();
       const row = service.store.dupeFile(Number(req.params.id));
-      if (!row || !row.sha256 || retiredRoot(row.root)) return notFound();
+      if (!row || !row.sha256 || retiredRoot(row.root, row.rel)) return notFound();
       const kind = kindOfName(row.rel);
       if (!['video', 'image'].includes(kind)) return notFound();
       // An 18+ (or not yet verified) copy is previewed only on request of a

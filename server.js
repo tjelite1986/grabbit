@@ -3528,14 +3528,30 @@ const DUPE_ROOT_CANDIDATES = [
 // earlier scan recorded under them are marked gone at boot, their cached
 // previews are deleted, and every preview route refuses them per request.
 const DUPE_RETIRED_ROOTS = [ELITE_ROOT, ADSHORTIS_LIBRARY_DIR].filter(Boolean).map((p) => path.resolve(p));
-function isRetiredDupeRoot(p) {
+const realPathOrNull = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+};
+// Codex phase-0 B7: a retired folder may also sit inside another scan root, so
+// every check takes the file's whole path (root + rel), lexically and as
+// resolved on disk (a symlink is followed).
+function isRetiredDupeRoot(p, rel = '') {
   if (!p) return false;
-  const abs = path.resolve(String(p));
-  return DUPE_RETIRED_ROOTS.some((r) => abs === r || abs.startsWith(r + path.sep));
+  const abs = path.resolve(String(p), String(rel || ''));
+  const under = (x, r) => x === r || x.startsWith(r + path.sep);
+  if (DUPE_RETIRED_ROOTS.some((r) => under(abs, r))) return true;
+  const real = realPathOrNull(abs);
+  if (!real) return false;
+  return DUPE_RETIRED_ROOTS.some((r) => under(real, r) || under(real, realPathOrNull(r) || r));
 }
 // An import folder's copy may go only when its app's library has the bytes.
 // importFor is null when that library is not mounted here.
-const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR]);
+// The retired 18+ folders are never entered, also when they sit inside
+// another root (Codex phase-0 B7).
+const dupeRoots = () => dupeScan.planRoots(DUPE_ROOT_CANDIDATES, [DATA_DIR, INBOX_DROP_DIR, ...DUPE_RETIRED_ROOTS]);
 const dupeRootOf = (p) => DUPE_ROOT_CANDIDATES.find((r) => r.path && r.path === p) || null;
 // Smart Duplicate Manager 2.0 state: dupes.db, attached to items.db's
 // connection (dupe-store.js). items.db itself keeps schema 6, so 3.0.3 can
@@ -3606,21 +3622,34 @@ if (DUPE_TRASH) {
 if (ITEM_STORE && ITEM_STORE.raw && ITEM_STORE.filesGoneBefore && DUPE_RETIRED_ROOTS.length) {
   try {
     const db = ITEM_STORE.raw;
-    const roots = db.prepare('SELECT DISTINCT root FROM file_hashes WHERE gone_at IS NULL').pluck().all().filter(isRetiredDupeRoot);
+    const all = db.prepare('SELECT DISTINCT root FROM file_hashes WHERE gone_at IS NULL').pluck().all();
+    const roots = all.filter((r) => isRetiredDupeRoot(r));
     let rows = 0;
     let thumbs = 0;
     const thumbDir = path.join(DATA_DIR, 'dupe-thumbs');
-    for (const root of roots) {
-      for (const sha of db.prepare('SELECT DISTINCT sha256 FROM file_hashes WHERE root = ? AND sha256 IS NOT NULL').pluck().all(root)) {
-        if (!/^[0-9a-f]{64}$/.test(sha)) continue;
-        try {
-          fs.unlinkSync(path.join(thumbDir, sha.slice(0, 2), `${sha}.jpg`));
-          thumbs++;
-        } catch {
-          /* never made */
-        }
+    const dropThumb = (sha) => {
+      if (!/^[0-9a-f]{64}$/.test(String(sha))) return;
+      try {
+        fs.unlinkSync(path.join(thumbDir, sha.slice(0, 2), `${sha}.jpg`));
+        thumbs++;
+      } catch {
+        /* never made */
       }
+    };
+    for (const root of roots) {
+      for (const sha of db.prepare('SELECT DISTINCT sha256 FROM file_hashes WHERE root = ? AND sha256 IS NOT NULL').pluck().all(root)) dropThumb(sha);
       rows += ITEM_STORE.filesGoneBefore(root, Number.MAX_SAFE_INTEGER);
+    }
+    // A retired folder inside another root (B7): its files under that root.
+    const goneOne = db.prepare('UPDATE file_hashes SET gone_at = ? WHERE id = ? AND gone_at IS NULL');
+    for (const root of all.filter((r) => !roots.includes(r))) {
+      const nested = DUPE_RETIRED_ROOTS.filter((r) => r.startsWith(path.resolve(root) + path.sep));
+      if (!nested.length) continue;
+      for (const f of db.prepare('SELECT id, rel, sha256 FROM file_hashes WHERE root = ? AND gone_at IS NULL').all(root)) {
+        if (!isRetiredDupeRoot(root, f.rel)) continue;
+        dropThumb(f.sha256);
+        rows += goneOne.run(Date.now(), f.id).changes;
+      }
     }
     if (rows || thumbs) console.log(`dupes: the 18+ app's folders are no longer scanned; ${rows} recorded files set aside, ${thumbs} cached previews deleted`);
   } catch (e) {
@@ -4724,6 +4753,7 @@ app.get('/api/hub/dupes/file/:id', (req, res) => {
   try {
     const row = store.hashedFile(req.params.id);
     if (!row || !DUPE_ROOT_CANDIDATES.some((r) => r.path && r.path === row.root)) return notFound();
+    if (isRetiredDupeRoot(row.root, row.rel)) return notFound();
     const abs = path.resolve(row.root, row.rel);
     if (!abs.startsWith(path.resolve(row.root) + path.sep)) return notFound();
     const kind = mediaViewer.kindOfName(abs);
