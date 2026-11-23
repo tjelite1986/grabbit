@@ -126,8 +126,28 @@ test('leave() tears the player down: every listener the core adds is removed', (
 test('history (m6): only a player that pushed its own entry goes back; no a.tile hook', () => {
   const src = player();
   assert.doesNotMatch(src, /a\.tile/);
-  assert.match(src, /if \(opts\.ownHistory\) \{\s*history\.pushState\(/);
-  assert.match(src, /if \(pushed\) history\.back\(\);/);
+  // M6-HIST: the entry carries this instance's token; it is pushed only
+  // inside a user activation; close is idempotent; a pop onto our own entry
+  // (a sheet's entry above it went) is not a close. Behaviour is covered by
+  // the phase-3 browser check; these pin the contract's pieces.
+  assert.match(src, /history\.pushState\(\{ \.\.\.\(history\.state \|\| \{\}\), feedPlayer: token \}, ''\)/);
+  assert.match(src, /if \(!ua \|\| ua\.isActive\) \{/);
+  assert.match(src, /if \(closed \|\| closing\) return;/);
+  assert.match(src, /if \(!pushed \|\| closed \|\| ours\(\)\) return;/);
+  assert.match(src, /function finish\(\) \{\s*if \(closed\) return;/);
+});
+
+test('leave cancels every pending timer of the player (E7 MINOR)', () => {
+  const src = code(player());
+  // Exactly one raw setTimeout: the one inside later().
+  assert.equal((src.match(/setTimeout\(/g) || []).length, 1);
+  assert.match(src, /onLeave\(\(\) => \{ for \(const t of timers\) clearTimeout\(t\); timers\.clear\(\); \}\);/);
+});
+
+test('a sheet closed by Back gives the focus back to its opener (E7 MINOR)', () => {
+  const src = read('hub/shared/sheets.js');
+  assert.match(src, /while \(stack\.length\) closeSheet\(stack\[stack\.length - 1\], false, true\);/);
+  assert.match(src, /if \(\(viaUi \|\| refocus\) && entry\.back && entry\.back\.isConnected && !stack\.length\)/);
 });
 
 // Adshortis phase 2, slice C: the feed and sheet CSS moved to shared/feed-player.css.

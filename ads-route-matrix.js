@@ -2,7 +2,7 @@
 // Grabbit 3.0 native Adshortis: the permission matrix as data (plan part 11,
 // H101). Pure module, no I/O.
 //
-// The phase-1 gateway (adshortis-gateway.js, mounted at /api/ads/*) takes its
+// The gateway (adshortis-gateway.js, mounted at /api/ads/*) takes its
 // method + path allowlist from liveRoutes()/matchRoute() here and from nowhere
 // else, so the rule below is enforced in one place and tested per phase:
 //
@@ -41,6 +41,26 @@ const CONDITIONS = {
   'projection:no-error': 'the admin projection drops `error` (and import file names for non-import holders), H81/A16',
 };
 
+// The conditions the owner may declare met through ADSHORTIS_CONDITIONS
+// (owner Q2, 2026-11-23), after the install checklist's checks passed on the
+// deployed Adshortis: A2 (upload limit answers 413) and A18 (H93 GET/HEAD/Range
+// checks). Nothing is ever assumed met; every other condition stays unmet.
+const ENV_CONDITIONS = ['A2', 'A18'];
+
+// ADSHORTIS_CONDITIONS="A2,A18" -> { met: Set('adshortis:A2', ...), unknown }.
+function parseConditions(raw) {
+  const met = new Set();
+  const unknown = [];
+  for (const part of String(raw == null ? '' : raw).split(',')) {
+    const s = part.trim();
+    if (!s) continue;
+    const k = s.replace(/^adshortis:/i, '').toUpperCase();
+    if (ENV_CONDITIONS.includes(k)) met.add(`adshortis:${k}`);
+    else unknown.push(s.slice(0, 40));
+  }
+  return { met, unknown };
+}
+
 // Rule groups (H7): the phase a group is enabled from and what it waits on.
 const GROUPS = {
   session: { phase: '1', requires: [] },
@@ -59,12 +79,12 @@ const GROUPS = {
 const GAPS = {
   1: { status: 'closed', topic: 'NL status (S1): 409 login_id_missing, H101' },
   2: { status: 'closed', topic: 'Session fields (S1, S2): six-key allowlist, H101' },
-  3: { status: 'open', topic: 'List field allowlist (M1, M2, M9, A19)' },
+  3: { status: 'closed', topic: 'List field allowlist (M1, M2, M9, A19): the M3 clip fields minus the detail keys, `error` never (ads-member-rows.js projectClip), phase 3' },
   4: { status: 'closed', topic: '`q` on GET is refused with 400 (M1, M13), H101' },
   5: { status: 'held', until: 'adshortis:A2', topic: 'Upload timing (M12)' },
-  6: { status: 'open', topic: 'Prefs keys (M25, S2 prefs)' },
-  7: { status: 'open', topic: 'Absolute URLs in creator detail (M15)' },
-  8: { status: 'open', topic: 'Avatars without clip scope (D3, D4)' },
+  6: { status: 'closed', topic: 'Prefs keys (M25, S2 prefs): PREFS_FIELDS, `nav` dropped (owner Q6, 2026-11-23)' },
+  7: { status: 'closed', topic: 'Absolute URLs in creator detail (M15): links[].url only as https:, `source` dropped (owner Q5, 2026-11-23)' },
+  8: { status: 'open', topic: 'User avatars without clip scope (D4). Creator avatars (D3) were allowed by the owner (Q4, 2026-11-23)' },
   9: { status: 'open', topic: 'Download (D5)' },
   10: { status: 'closed', topic: 'Eligibility mechanism for media (D1, D2), H93/H100' },
   11: { status: 'open', topic: 'Deleted preview: who may preview/restore (A13); partly closed by H93' },
@@ -79,7 +99,7 @@ const GAPS = {
   20: { status: 'open', topic: 'Source listing fields (X2)' },
   21: { status: 'open', topic: 'Avatar upload group (A18)' },
   22: { status: 'open', topic: 'Analysis group (A19)' },
-  23: { status: 'open', topic: 'Comments on deleted clips (M5)' },
+  23: { status: 'closed', topic: 'Comments on deleted clips (M5): the gateway checks the clip (M3, eligibility) first and answers 404, every role' },
 };
 
 // Job names the gateway may run or stop (J2, J3), cumulative by phase.
@@ -101,6 +121,42 @@ function jobsFor(phase) {
 // GAP 6 names the keys; `ai` and `nav_tabs` never pass.
 const SESSION_FIELDS = ['id', 'username', 'display_name', 'role', 'permissions', 'avatar'];
 const NEVER_SESSION_FIELDS = ['ai', 'nav_tabs'];
+
+// GAP 6 (owner Q6): the upstream prefs keys that pass S2 and M25. `nav` is
+// Adshortis' own tab bar, which the native module does not have.
+const PREFS_FIELDS = ['sound', 'autoplay', 'grid_columns', 'feed', 'feed_pos'];
+const FEEDS = ['foryou', 'new', 'following', 'liked', 'random'];
+const FEED_POS_MAX = 40;
+const FEED_POS_KEY_MAX = 200;
+
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// feed_pos: { <feed slice>: <clip id> }, at most FEED_POS_MAX entries.
+function projectFeedPos(v) {
+  if (!isPlainObject(v)) return {};
+  const out = {};
+  let n = 0;
+  for (const [k, id] of Object.entries(v)) {
+    if (n >= FEED_POS_MAX) break;
+    if (k.length > FEED_POS_KEY_MAX || k === '__proto__' || !Number.isSafeInteger(id)) continue;
+    out[k] = id;
+    n++;
+  }
+  return out;
+}
+
+// The upstream prefs object reduced to PREFS_FIELDS with their types; a value
+// of the wrong type is null. Not an object: null.
+function projectPrefs(p) {
+  if (!isPlainObject(p)) return null;
+  return {
+    sound: typeof p.sound === 'boolean' ? p.sound : null,
+    autoplay: typeof p.autoplay === 'boolean' ? p.autoplay : null,
+    grid_columns: Number.isSafeInteger(p.grid_columns) ? p.grid_columns : null,
+    feed: FEEDS.includes(p.feed) ? p.feed : null,
+    feed_pos: projectFeedPos(p.feed_pos),
+  };
+}
 
 function sessionFields(phase) {
   const out = SESSION_FIELDS.slice();
@@ -137,7 +193,8 @@ function projectSession(upstream, phase) {
   const out = {};
   for (const k of sessionFields(phase)) {
     if (NEVER_SESSION_FIELDS.includes(k)) continue;
-    out[k] = Object.hasOwn(upstream, k) ? upstream[k] : null;
+    if (k === 'prefs') out.prefs = projectPrefs(upstream.prefs);
+    else out[k] = Object.hasOwn(upstream, k) ? upstream[k] : null;
   }
   return out;
 }
@@ -203,7 +260,8 @@ const ROWS = [
   // the H93 GET, HEAD and Range checks (Codex phase-0 MAJOR).
   R('D1', ['GET', 'HEAD'], '/api/ads/m/video/:id', 'member', '3', [10], ['adshortis:A18']),
   R('D2', ['GET', 'HEAD'], '/api/ads/m/poster/:id', 'member', '3', [10], ['adshortis:A18']),
-  R('D3', ['GET'], '/api/ads/m/avatar/creator/:id', 'member', '3', [8]),
+  // D3: no GAP since the owner allowed creator avatars (Q4); D4 stays on GAP 8.
+  R('D3', ['GET'], '/api/ads/m/avatar/creator/:id', 'member', '3'),
   R('D4', ['GET'], '/api/ads/m/avatar/user/:id', 'member', '3', [8]),
   R('D5', ['GET'], '/api/ads/m/download/:id', null, '3', [9]),
   // Curate and admin (part 2 section 5)
@@ -344,6 +402,13 @@ module.exports = {
   NEVER_JOBS,
   SESSION_FIELDS,
   NEVER_SESSION_FIELDS,
+  PREFS_FIELDS,
+  FEEDS,
+  FEED_POS_MAX,
+  FEED_POS_KEY_MAX,
+  ENV_CONDITIONS,
+  parseConditions,
+  projectPrefs,
   NL_RESPONSE,
   PHASE1_GATEWAY_TESTS,
   sessionPreflight,

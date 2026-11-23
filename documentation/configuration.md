@@ -80,10 +80,12 @@ Elitogram is a separate application:
 ## Adshortis (18+)
 
 Adshortis is a separate application. Grabbit 3.0 is moving it into the hub as
-a native 18+ module, behind its own gateway at `/api/ads/*`. In this release
-the gateway only links and unlinks an Adshortis account (`/api/ads/session`);
-the module's pages come later. Each person links their own Adshortis account
-in their own browser, after a fresh sign-in to Grabbit with the main password.
+a native 18+ module, behind its own gateway at `/api/ads/*`. The gateway links
+and unlinks an Adshortis account (`/api/ads/session`) and carries the member
+calls (clips, search, comments, playlists, profiles, preferences, media and
+upload); the module's pages in the hub come later. Each person links their own
+Adshortis account in their own browser, after a fresh sign-in to Grabbit with
+the main password.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -92,7 +94,8 @@ in their own browser, after a fresh sign-in to Grabbit with the main password.
 | `ADSHORTIS_APP_ORIGIN` | empty | The public origin Adshortis checks writes against (its own `APP_ORIGIN`), such as `https://ads.example.com`. Needed for `native`. |
 | `GRABBIT_PUBLIC_ORIGIN` | empty | This hub's own public `https://` origin, such as `https://grabbit.example.com`. Every write to `/api/ads` must carry exactly this `Origin`. Needed for `native`. |
 | `ADSHORTIS_EMBED_URL` | empty | The standalone app's `https://` origin, used for the plain link in `embed` mode (and as the fallback link in `native`). |
-| `ADSHORTIS_UPLOAD_MAX_MB` | - | Reserved for the module's upload page (a later release). Not read yet. |
+| `ADSHORTIS_CONDITIONS` | empty | Adshortis deployments you have checked, comma-separated: `A2` (an over-limit upload answers 413) and `A18` (video and poster URLs refuse deleted and unready clips on GET, HEAD and Range). Until `A18` is listed, video and poster calls answer 404; until `A2` is listed, upload answers 404. Add each only after its check passed on the Adshortis you run. Anything else is ignored with a warning. |
+| `ADSHORTIS_UPLOAD_MAX_MB` | `4096` | The largest file the gateway accepts for an upload, in MB. Keep it at or below Adshortis' own `MAX_UPLOAD_MB`, and check what your proxy and CDN let through. |
 | `ADSHORTIS_FOLDER_PAGE` | off | `1` keeps the old folder page (`#/adshortis`, read from `ADSHORTIS_LIBRARY`) in `off` and `embed` mode. It is never mounted in `native` mode, whatever this says. |
 
 `native` also needs Grabbit's own sign-in (`GRABBIT_PASSWORD` set, not
@@ -100,6 +103,9 @@ in their own browser, after a fresh sign-in to Grabbit with the main password.
 `GRABBIT_TRUST_PROXY`, because both link cookies are `__Host-` cookies. List the
 Grabbit container in Adshortis' `TRUSTED_PROXIES`: the gateway sends the
 viewer's address in `X-Forwarded-For`, and Adshortis throttles sign-ins on it.
+In `native` mode Grabbit lifts Node's five-minute limit on receiving a request,
+so a long upload is not cut off; a proxy in front may still have its own read
+timeout.
 
 What Grabbit keeps in `DATA_DIR`: `ads-seal-key.json` (the key that seals the
 linked session, in the daily snapshots), `ads-logins.json` (one record per

@@ -65,6 +65,8 @@ function answerUp(req, res, send) {
       if (up.login === '429') return send(429, { error: 'Too many attempts' }, { 'retry-after': '600' });
       if (up.login === '401') return send(401, { error: 'Wrong user name or password' });
       if (up.login === '500') return send(500, { error: 'boom' });
+      if (up.login === '429text') return send(429, { error: 'UPSTREAM-TEXT login throttle' }, { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' });
+      if (up.login === '418') return send(418, { error: 'UPSTREAM-TEXT teapot' });
       up.tokens++;
       return send(200, { ok: true }, { 'set-cookie': `as_session=tok${up.tokens}; Path=/; HttpOnly` });
     }
@@ -75,6 +77,8 @@ function answerUp(req, res, send) {
       if (up.me === 'html') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<html>'); }
       if (up.me === 'emptyobj') return send(200, {});
       if (up.me === '403') return send(403, { error: 'Forbidden' });
+      if (up.me === '429') return send(429, { error: 'UPSTREAM-TEXT me throttle' }, { 'retry-after': '1e9' });
+      if (up.me === '404text') return send(404, { error: 'UPSTREAM-TEXT gone' });
       return send(200, ME);
     }
     if (req.url === '/api/logout') {
@@ -542,6 +546,32 @@ test('S1 strict: only a 200 JSON { ok: true } with a well-formed token and a rea
   }
   reset();
   assert.equal((await call('/api/ads/session', { login })).body.linked, false);
+});
+
+test('S1/S2 (3a review C-M5): a JSON 4xx keeps its status with a fixed message; upstream text and a non-numeric Retry-After never pass', async () => {
+  const login = links.issueLogin();
+  const post = () => call('/api/ads/session', { method: 'POST', login, body: { username: USERNAME, password: PASSWORD } });
+  const seen = [];
+  for (const [mode, want, retry] of [['401', 401, null], ['403', 403, null], ['429', 429, '600'], ['429text', 429, null], ['418', 418, null]]) {
+    reset();
+    up.login = mode;
+    const r = await post();
+    assert.equal(r.status, want, mode);
+    assert.equal(r.headers.get('retry-after'), retry, `${mode}: Retry-After`);
+    assert.equal(typeof r.body.error, 'string', mode);
+    seen.push(r.body.error);
+  }
+  assert.deepEqual(seen.filter((e) => /UPSTREAM-TEXT|Wrong user name|Account disabled|Too many attempts/.test(e)), [], 'S1 messages are fixed');
+  reset();
+  const { login: l2, seal } = await linked();
+  for (const [mode, want] of [['429', 429], ['404text', 404], ['403', 403]]) {
+    up.me = mode;
+    const r = await call('/api/ads/session', { login: l2, seal });
+    assert.equal(r.status, want, `S2 ${mode}`);
+    assert.equal(r.headers.get('retry-after'), null, `S2 ${mode}: Retry-After`);
+    assert.doesNotMatch(r.body.error, /UPSTREAM-TEXT|Forbidden/, `S2 ${mode}: fixed message`);
+  }
+  reset();
 });
 
 test('S2: a JSON 4xx other than 401 keeps its status and the link', async () => {

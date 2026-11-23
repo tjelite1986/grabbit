@@ -1,0 +1,122 @@
+/* Grabbit 3.0 native Adshortis (public/hub/ads/ads.js). Grabbit tokens only
+   (UX 1): Adshortis' own red accent never reaches the page. Every class has
+   the ads- prefix; the legacy folder page uses adsf- (hub.css). */
+.ads-root { display: flex; flex-direction: column; gap: 16px; }
+.ads-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ads-head h1 { margin: 0; }
+.ads-empty { color: var(--muted); padding: 10px 0; }
+.ads-empty p { margin: 0 0 12px; }
+.ads-banner {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+}
+.ads-panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; background: var(--panel); max-width: 520px; }
+.ads-panel h2 { margin: 0 0 8px; font-size: 17px; }
+.ads-link {
+  display: flex; flex-direction: column; gap: 10px; max-width: 420px;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; background: var(--panel);
+}
+.ads-link h2 { margin: 0; font-size: 18px; }
+.ads-link p { margin: 0; }
+/* The hub's .field grows along a row (flex 1 1 320px); in this column that
+   basis became a 320 px tall input. */
+.ads-link .field { flex: none; }
+.ads-form-msg { color: var(--bad); }
+@media (pointer: coarse) {
+  .ads-link .field, .ads-link .btn, .ads-banner .btn, .ads-panel .btn { min-height: 44px; }
+}
+
+/* ---- Feed (phase 3 slice C): the shared player (tf-*) fills the space
+   between the Grabbit menu and the right edge, as TikShortis' feed does. */
+.ads-feed { position: fixed; z-index: 6; top: 0; left: var(--tik-left); right: 0; bottom: 0; background: #000; }
+body.tik-immersive .ads-feed { inset: 0; z-index: 40; }
+/* The chip row sits in the player's top centre; it scrolls sideways on a
+   phone and never shrinks its chips (flex: none). */
+.ads-feedbar {
+  display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain;
+  max-width: calc(100vw - var(--tik-left) - 120px); padding: 2px;
+}
+.ads-feedbar::-webkit-scrollbar { display: none; }
+.ads-chip {
+  flex: none; padding: 6px 12px; border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 999px;
+  background: rgba(0, 0, 0, 0.5); color: rgba(255, 255, 255, 0.75); font: inherit; font-size: 13px; cursor: pointer;
+}
+.ads-chip[aria-pressed='true'] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.ads-chip:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.ads-filter.on { border-color: var(--accent-2); color: #fff; }
+.ads-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ads-filter-box { display: flex; flex-direction: column; gap: 8px; }
+.ads-filter-box h4 { margin: 6px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); }
+/* The creator on the rail: picture, follow badge under it. */
+.ads-who { position: relative; display: flex; flex-direction: column; align-items: center; margin-bottom: 10px; }
+.ads-who-av { display: block; border-radius: 50%; }
+.ads-follow {
+  position: absolute; bottom: -9px; display: grid; place-items: center; width: 22px; height: 22px; padding: 0;
+  border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer;
+}
+.ads-follow.on { background: #fff; color: var(--accent); }
+.ads-pills { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+.ads-pill {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15); font-size: 12px; color: #fff;
+}
+.ads-note {
+  position: absolute; z-index: 12; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 80%;
+  padding: 10px 16px; border-radius: 12px; background: rgba(0, 0, 0, 0.7); color: #fff; text-align: center;
+}
+.ads-cm { display: flex; align-items: flex-start; gap: 10px; }
+.ads-cm-av {
+  flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+  background: var(--panel-2); color: #fff; font-size: 12px; font-weight: 600;
+}
+.ads-cm-t { flex: 1; min-width: 0; }
+.ads-share { display: flex; flex-direction: column; padding-bottom: 12px; }
+.ads-share .tf-sheet-note { margin: 0 20px; }
+.ads-copy { position: fixed; left: -9999px; top: 0; opacity: 0; }
+/* ---- Explore (phase 3 slice D): search, genre chips, the grid ---- */
+.ads-search {
+  display: flex; align-items: center; gap: 8px; max-width: 560px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--muted);
+}
+.ads-search:focus-within { border-color: var(--accent-2); }
+.ads-search-in { flex: 1; min-width: 0; border: 0; background: transparent; padding: 10px 0; outline: 0; }
+.ads-genres { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain; padding: 2px; }
+.ads-genres::-webkit-scrollbar { display: none; }
+.ads-genres .ads-chip { flex: none; }
+.ads-tools { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.ads-density { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.ads-density input { width: 120px; accent-color: var(--accent); }
+.ads-grid { display: grid; grid-template-columns: repeat(var(--ads-cols, 3), minmax(0, 1fr)); gap: 4px; }
+.ads-tile {
+  position: relative; display: block; aspect-ratio: 9 / 16; overflow: hidden; border-radius: 6px;
+  background: var(--panel-2); color: #fff; text-decoration: none;
+}
+.ads-tile:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.ads-thumb { position: absolute; inset: 0; display: block; }
+.ads-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ads-tile-meta { position: absolute; top: 6px; left: 6px; right: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.ads-dur, .ads-badge {
+  display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6); font-size: 11px; line-height: 16px;
+}
+.ads-dur { margin-left: auto; order: 2; }
+.ads-tile-title {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 6px 6px; font-size: 12px; line-height: 1.3;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.ads-tile-title:empty { display: none; }
+.ads-grid-foot { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 40px; color: var(--muted); }
+.ads-grid-foot p { margin: 0; }
+.ads-sentinel { height: 1px; }
+/* The player over the grid takes the feed's place, under the hub's drawer,
+   toasts and sheets; the immersive view covers everything, as the feed's. */
+.ads-viewer { z-index: 7; left: var(--tik-left); background: #000; }
+body.tik-immersive .ads-viewer { inset: 0; z-index: 40; }
+.ads-viewer > .tf { flex: 1; min-height: 0; height: auto; }
+
+@media (pointer: coarse) {
+  .ads-chip { min-height: 44px; }
+  .ads-search-in { min-height: 44px; }
+  .ads-follow { width: 28px; height: 28px; bottom: -12px; }
+}

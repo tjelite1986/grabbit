@@ -50,6 +50,8 @@ button, input, select { font: inherit; color: inherit; }
 .nav .nav-sub { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 26px; padding-left: 8px; border-left: 1px solid var(--line); }
 .nav .nav-sub a { min-height: 40px; padding: 8px 12px; font-size: 14px; }
 .nav .nav-sub a[aria-current='page'] { background: var(--panel-2); color: #fff; box-shadow: inset 3px 0 0 var(--accent); }
+/* A sidebar group's heading (the 18+ group: Adshortis and Adflix). */
+.nav .nav-group { margin: 10px 14px 2px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; color: var(--bad); }
 .badge {
   min-width: 24px; padding: 1px 8px; border-radius: 999px; text-align: center;
   background: #3a2e7a; color: #fff; font-size: 12px; font-weight: 600;
@@ -393,10 +395,10 @@ pre.raw { max-height: 320px; overflow: auto; font-size: 12px; background: var(--
 .avatar.big { width: 56px; height: 56px; font-size: 24px; }
 
 /* Adshortis library page: portrait tiles, two across on a phone. */
-.ads-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
-.ads-tile { aspect-ratio: 9 / 16; }
-.ads-search { display: flex; flex: 1 1 200px; }
-.ads-search .field { width: 100%; }
+.adsf-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.adsf-tile { aspect-ratio: 9 / 16; }
+.adsf-search { display: flex; flex: 1 1 200px; }
+.adsf-search .field { width: 100%; }
 a.chip { text-decoration: none; }
 .film-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .film-tile { aspect-ratio: 16 / 9; }
@@ -481,4 +483,18 @@ body.embed-page .view { padding: 0; }
   .tik-menu { order: -1; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: env(safe-area-inset-top) 16px 0 calc(16px + env(safe-area-inset-left)); border: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.12); background: #121212; color: #fff; font: inherit; font-size: 14px; text-align: left; }
   .tik-menu::after { content: 'Grabbit'; opacity: 0.8; }
   .tik-menu svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; }
+}
+
+/* Build check banner (hub.js checkBuild, H63/H88). Below the safe area and
+   below the player's top row (.f-top here, .tf-side/.tf-ctl/.tf-resume in
+   feed-player.css end by about 96px), so the "clip N of M" line stays
+   visible; above the viewer (40) and the sheets (50/51). */
+.build-banner {
+  position: fixed; z-index: 55; left: 50%; transform: translateX(-50%);
+  top: calc(100px + env(safe-area-inset-top));
+  display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 16px;
+  max-width: calc(100vw - 32px); border-radius: 12px; border: 1px solid var(--accent); background: #231d42; color: var(--text);
+}
+@media (pointer: coarse) {
+  .build-banner .btn { min-height: 44px; }
 }

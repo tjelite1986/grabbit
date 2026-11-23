@@ -25,7 +25,9 @@
 //                                       settings object; the core changes it
 //   side { toggle(), isOpen() }, closeMenu()  the hub's menu hooks
 //   onLeave(fn)                         the product's leave hook (P2-ONCE)
-//   start { cursor, prev, restoreFocus }
+//   start { cursor, prev, restoreFocus, focus }  focus: the id to start on
+//                                       with the items above it kept (a
+//                                       player opened on a grid tile)
 //   load({ cursor } | { after })        -> Promise<{ items, nextCursor }>; items carry an integer id
 //   selector({ btn, menu, item })       paints the top-centre feed selector, or
 //   back                                an element shown there instead
@@ -37,6 +39,21 @@
 //   onFirstPage(), onRestoreMiss(), onWatched(c, ms, completed), onTabHidden()
 //   keys { [key]: fn(c) }               product keys (plain letters)
 //   ownHistory, onClose()               see "History" below
+// Optional (Adshortis phase 3):
+//   ahead                               load the next page this many cards
+//                                       from the end (default 3)
+//   errorText(err, more) -> string      the words for a failed page (first
+//                                       page: more false); default the core's
+//   retryDelay(err) -> ms | null        wait before the next try (Retry-After)
+//   end() -> nodes                      shown on the last card once the list
+//                                       has no more pages
+//   onVideoError(c)                     the active clip's video failed
+//   liveCount                           true: a polite live region says
+//                                       "Clip N of M" when the active clip
+//                                       changes. Only for a product that never
+//                                       loads earlier pages (N counts from the
+//                                       first card); off for TikShortis
+//   videoSrc(item) may return null: the card shows its poster only.
 (() => {
   const shared = (window.GrabbitShared = window.GrabbitShared || {});
 
@@ -79,7 +96,19 @@
   shared.feedPlayer = function feedPlayer(opts) {
     const { h, icon: lu, sheets: SH, store, storeKeys: KEYS, prefs: S, onLeave } = opts;
     const start = opts.start || {};
+    const AHEAD = Number.isInteger(opts.ahead) && opts.ahead > 0 ? opts.ahead : 3;
     let alive = true; // false once the product's page is left
+    // Every pending timer of this player (tap, long press, hints, bursts,
+    // offers, auto-advance): leave cancels them all, so nothing fires into a
+    // page that is gone (phase-2 E7 MINOR).
+    const timers = new Set();
+    const later = (fn, ms) => {
+      const t = setTimeout(() => { timers.delete(t); if (alive) fn(); }, ms);
+      timers.add(t);
+      return t;
+    };
+    const cancel = (t) => { if (t) { clearTimeout(t); timers.delete(t); } };
+    onLeave(() => { for (const t of timers) clearTimeout(t); timers.clear(); });
 
     const F = {
       token: 0, // bumps when the feed is reset in place: late pages are dropped
@@ -100,6 +129,7 @@
       firstPage: true,
       // The clip to start on when a saved place is continued.
       restoreFocus: start.restoreFocus ?? null,
+      focus: start.focus ?? null,
     };
     document.body.classList.add('tik-feed');
 
@@ -201,7 +231,10 @@
 
     const resumeBox = h('div', { class: 'tf-resume', hidden: true });
     const hintEl = h('div', { class: 'tf-hint', hidden: true, role: 'status' }, 'Long-press a clip for the menu');
-    const root = h('div', { class: `tf${S.chromeHidden ? ' clean' : ''}`, [ROOT_ATTR]: '' }, scroller, status, sideBtn, modeBox, ctlBox, resumeBox, hintEl);
+    // Opt-in "Clip N of M" (opts.liveCount); inside the root so it is still
+    // read in fullscreen.
+    const countEl = opts.liveCount ? h('div', { class: 'tf-sr', 'aria-live': 'polite', 'aria-atomic': 'true' }) : null;
+    const root = h('div', { class: `tf${S.chromeHidden ? ' clean' : ''}`, [ROOT_ATTR]: '' }, scroller, status, sideBtn, modeBox, ctlBox, resumeBox, hintEl, countEl);
 
     const onDocDown = (e) => {
       if (modeBox.contains(e.target)) return;
@@ -211,13 +244,15 @@
     onLeave(() => document.removeEventListener('pointerdown', onDocDown, true));
 
     // ---- View toggles ----
+    let hintTimer = 0;
     function toggleChrome() {
       S.chromeHidden = !S.chromeHidden;
       store.set(KEYS.chrome, S.chromeHidden ? '1' : null);
       root.classList.toggle('clean', S.chromeHidden);
       if (S.chromeHidden) {
         hintEl.hidden = false;
-        setTimeout(() => { hintEl.hidden = true; }, 2500);
+        cancel(hintTimer);
+        hintTimer = later(() => { hintEl.hidden = true; }, 2500);
       }
       paintCtl();
     }
@@ -291,7 +326,14 @@
         for (const s of items) addCard(s, false, pageAt);
         F.cursor = d.nextCursor;
         F.hasMore = d.nextCursor !== null && d.nextCursor !== undefined;
+        // A page that arrives under the same clip changes M (B4 review B4-2).
+        if (F.active >= 0) paintCount();
         if (F.active < 0 && F.cards.length) {
+          if (F.focus !== null) {
+            const fc = F.cards.find((c) => String(c.s.id) === String(F.focus));
+            F.focus = null;
+            if (fc) jumpTo(fc);
+          }
           pickActive();
           if (F.firstPage && opts.onFirstPage) opts.onFirstPage();
           F.firstPage = false;
@@ -302,8 +344,9 @@
       } catch (e) {
         if (!current(tok)) return;
         F.errors++;
-        F.retryAt = Date.now() + Math.min(30000, 2 ** F.errors * 1000);
-        F.lastError = e.message;
+        const wait = opts.retryDelay ? opts.retryDelay(e) : null;
+        F.retryAt = Date.now() + (Number.isFinite(wait) && wait > 0 ? wait : Math.min(30000, 2 ** F.errors * 1000));
+        F.lastError = e;
       } finally {
         if (current(tok)) { F.loading = false; paintStatus(); }
       }
@@ -331,17 +374,24 @@
         if (current(tok)) F.loadingPrev = false;
       }
     }
+    const errorText = (more) => (opts.errorText && F.lastError ? opts.errorText(F.lastError, more) : null) || (more ? 'Could not load more.' : 'Could not load the feed.');
+    // A retry the viewer asks for still waits out a Retry-After.
+    const retryNow = () => { if (Date.now() >= F.retryAt || !opts.retryDelay) F.retryAt = 0; loadMore(); };
     function paintStatus() {
       if (F.cards.length) {
-        status.hidden = !(F.loading || (F.errors && F.hasMore));
+        // The current clip keeps playing; the row sits over the last card.
+        const atEnd = !F.hasMore && !F.loading && opts.end && F.active === F.cards.length - 1;
+        status.hidden = !(F.loading || (F.errors && F.hasMore) || atEnd);
         status.classList.add('more');
-        fill(status, F.loading ? h('span', { class: 'tf-spin', 'aria-label': 'Loading' }) : h('span', null, 'Could not load more. ', h('button', { type: 'button', class: 'linkish', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again')));
+        if (F.loading) fill(status, h('span', { class: 'tf-spin', 'aria-label': 'Loading' }));
+        else if (F.errors && F.hasMore) fill(status, h('span', { role: 'status' }, `${errorText(true)} `, h('button', { type: 'button', class: 'linkish', onclick: retryNow }, 'Try again')));
+        else if (atEnd) fill(status, h('div', { class: 'tf-end', role: 'status' }, opts.end()));
         return;
       }
       status.hidden = false;
       status.classList.remove('more');
       if (F.loading) fill(status, h('span', { class: 'tf-spin', 'aria-label': 'Loading' }));
-      else if (F.errors) fill(status, h('p', null, 'Could not load the feed.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => { F.retryAt = 0; F.errors = 0; loadMore(); } }, 'Try again'));
+      else if (F.errors) fill(status, h('p', { role: 'status' }, errorText(false)), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => { F.errors = 0; retryNow(); } }, 'Try again'));
       else fill(status, opts.empty());
     }
     // A new order in place: no navigation, so fullscreen and the sheets'
@@ -352,7 +402,7 @@
       const c = F.cards[F.active];
       if (c) deactivate(c);
       for (const x of F.cards) { unload(x); activeObserver.unobserve(x.el); x.el.remove(); }
-      Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1, restoreFocus: null });
+      Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1, restoreFocus: null, focus: null });
       if (prepare) prepare();
       resumeBox.hidden = true;
       scroller.scrollTop = 0;
@@ -463,6 +513,11 @@
         if (S.autoScroll && F.cards[F.active] === c) { if (SH.count()) c.advanceOnClose = true; else step(1); }
       });
       video.addEventListener('play', () => { c.playIcon.hidden = true; });
+      // An unloaded card (removed src) fires no error; only a real failure of
+      // the clip on screen reaches the product (a lost sign-in, H17).
+      video.addEventListener('error', () => {
+        if (alive && video.getAttribute('src') && F.cards[F.active] === c && opts.onVideoError) opts.onVideoError(c);
+      });
       video.addEventListener('pause', () => { c.playIcon.hidden = F.cards[F.active] !== c; });
       attachGestures(c);
       return c;
@@ -530,18 +585,18 @@
         if (onControl(e) || e.button > 0) return;
         startAt = { x: e.clientX, y: e.clientY };
         long = false;
-        press = setTimeout(() => { press = null; long = true; }, 550);
+        press = later(() => { press = null; long = true; }, 550);
       });
       c.el.addEventListener('pointermove', (e) => {
         if (!startAt) return;
-        if (Math.abs(e.clientX - startAt.x) > 10 || Math.abs(e.clientY - startAt.y) > 10) { clearTimeout(press); press = null; startAt = null; }
+        if (Math.abs(e.clientX - startAt.x) > 10 || Math.abs(e.clientY - startAt.y) > 10) { cancel(press); press = null; startAt = null; }
       });
-      c.el.addEventListener('pointercancel', () => { clearTimeout(press); press = null; startAt = null; });
+      c.el.addEventListener('pointercancel', () => { cancel(press); press = null; startAt = null; });
       c.el.addEventListener('contextmenu', (e) => { if (!onControl(e)) e.preventDefault(); });
       c.el.addEventListener('pointerup', (e) => {
         if (!startAt) return;
         startAt = null;
-        clearTimeout(press);
+        cancel(press);
         press = null;
         // The player menu opens on release, as in TikShortis.
         if (long) { long = false; opts.onLongPress(c); return; }
@@ -549,7 +604,7 @@
         const x = rect.width ? (e.clientX - rect.left) / rect.width : 0.5;
         const now = Date.now();
         if (tapTimer && now - lastTap < 260) {
-          clearTimeout(tapTimer);
+          cancel(tapTimer);
           tapTimer = null;
           // Outer thirds seek, the middle is the product's (a like).
           if (x > 0.65) skip(c, SEEK_SECONDS);
@@ -558,7 +613,7 @@
           return;
         }
         lastTap = now;
-        tapTimer = setTimeout(() => { tapTimer = null; togglePlay(c); }, 220);
+        tapTimer = later(() => { tapTimer = null; togglePlay(c); }, 220);
       });
     }
     function skip(c, by) {
@@ -569,8 +624,8 @@
       c.seekHint.classList.toggle('fwd', by > 0);
       c.seekHint.classList.toggle('back', by < 0);
       c.seekHint.hidden = false;
-      clearTimeout(c.seekTimer);
-      c.seekTimer = setTimeout(() => { c.seekHint.hidden = true; }, 600);
+      cancel(c.seekTimer);
+      c.seekTimer = later(() => { c.seekHint.hidden = true; }, 600);
     }
     function togglePlay(c) {
       if (F.cards[F.active] !== c) return;
@@ -581,8 +636,8 @@
       c.burst.classList.remove('go');
       void c.burst.offsetWidth;
       c.burst.classList.add('go');
-      clearTimeout(c.burstTimer);
-      c.burstTimer = setTimeout(() => { c.burst.hidden = true; c.burst.classList.remove('go'); }, 700);
+      cancel(c.burstTimer);
+      c.burstTimer = later(() => { c.burst.hidden = true; c.burst.classList.remove('go'); }, 700);
     }
 
     // ---- Active card, preloading, playback ----
@@ -623,15 +678,22 @@
       });
       if (best >= 0) setActive(best, true);
     }
+    // The opt-in "Clip N of M". Only a change is written: a forced repeat
+    // (resize) says nothing.
+    function paintCount() {
+      if (!countEl || F.active < 0) return;
+      const words = `Clip ${F.active + 1} of ${F.cards.length}${F.hasMore ? ' or more' : ''}`;
+      if (countEl.textContent !== words) countEl.textContent = words;
+    }
     function setActive(i, force) {
-      if (i === F.active && !force) return;
+      if (F.suspended || (i === F.active && !force)) return;
       const old = F.cards[F.active];
       if (old && old !== F.cards[i]) deactivate(old);
       F.active = i;
       F.cards.forEach((c, j) => {
         if (Math.abs(j - i) <= NEAR) {
           c.video.preload = j === i || j === i + 1 ? 'auto' : 'metadata';
-          if (!c.video.getAttribute('src')) c.video.src = opts.videoSrc(c.s);
+          if (!c.video.getAttribute('src')) setSrc(c);
         } else unload(c);
       });
       const c = F.cards[i];
@@ -641,13 +703,21 @@
       // The product keeps the current item in the address (a reload or Back
       // lands here) and says what to save as the place to resume.
       if (opts.onActive) opts.onActive(c);
+      paintCount();
       const saved = opts.resumeEntry ? opts.resumeEntry(c) : null;
       if (saved) store.set(KEYS.resume, JSON.stringify(saved));
-      if (i >= F.cards.length - 3) loadMore();
+      if (i >= F.cards.length - AHEAD) loadMore();
+      paintStatus();
+    }
+    // The product may have no source for an item (not ready): poster only.
+    function setSrc(c) {
+      const src = F.suspended ? null : opts.videoSrc(c.s);
+      if (src) c.video.src = src;
+      return !!src;
     }
     function play(c) {
       const v = c.video;
-      if (!v.getAttribute('src')) v.src = opts.videoSrc(c.s);
+      if (!v.getAttribute('src') && !setSrc(c)) return;
       v.muted = S.muted;
       v.defaultPlaybackRate = S.speed;
       v.playbackRate = S.speed;
@@ -702,10 +772,46 @@
       F.cards[i] = freshC;
       activeObserver.observe(freshC.el);
       if (wasActive) {
-        freshC.video.src = opts.videoSrc(freshC.s);
+        setSrc(freshC);
         freshC.video.addEventListener('loadedmetadata', () => { try { freshC.video.currentTime = t; } catch { /* ignore */ } }, { once: true });
         play(freshC);
       }
+    }
+
+    // Put a card at the top without a scroll animation. Snapping is off for
+    // the jump: with scroll-snap-stop a script scroll can halt at the first
+    // card.
+    function jumpTo(c) {
+      scroller.style.scrollSnapType = 'none';
+      scroller.scrollTop = c.el.offsetTop - scroller.offsetTop;
+      requestAnimationFrame(() => { scroller.style.scrollSnapType = ''; });
+    }
+    // Move to an item already in the list (a clip-only address change).
+    // False when it is not loaded; the product decides what to do then.
+    function goTo(id) {
+      const i = F.cards.findIndex((c) => String(c.s.id) === String(id));
+      if (i < 0) return false;
+      if (i !== F.active) F.cards[i].el.scrollIntoView({ block: 'start' });
+      return true;
+    }
+    // A lost sign-in (H17): every media element lets go of its source; the
+    // list, the cursor and the current item stay. resume() plays on.
+    function suspend() {
+      if (F.suspended) return;
+      const c = F.cards[F.active];
+      if (c) { c.wantPlay = false; c.video.pause(); c.resumeAt = c.video.currentTime || 0; }
+      F.suspended = true;
+      for (const x of F.cards) unload(x);
+    }
+    function resume() {
+      if (!F.suspended || !alive) return;
+      F.suspended = false;
+      const c = F.cards[F.active];
+      const at = c ? c.resumeAt : 0;
+      if (c && at > 0) c.video.addEventListener('loadedmetadata', () => { try { c.video.currentTime = at; } catch { /* ignore */ } }, { once: true });
+      if (F.active >= 0) setActive(F.active, true);
+      if (F.errors) { F.retryAt = 0; loadMore(); }
+      else if (!F.cards.length) loadMore();
     }
 
     // ---- Keyboard ----
@@ -744,13 +850,12 @@
       // setTimeout 0 plus the async history.back()); stepping sooner would
       // write the next clip's address into that entry. A sheet opened in the
       // meantime (menu -> Report) waits for its own close.
-      clearTimeout(advanceTimer);
-      advanceTimer = setTimeout(() => {
+      cancel(advanceTimer);
+      advanceTimer = later(() => {
         if (!alive || !S.autoScroll || F.cards[F.active] !== c || !c.video.ended) return;
         if (SH.count()) c.advanceOnClose = true; else step(1);
       }, 150);
     };
-    onLeave(() => clearTimeout(advanceTimer));
     SH.whenClosed.add(onSheetsClosed);
     onLeave(() => SH.whenClosed.delete(onSheetsClosed));
 
@@ -764,35 +869,65 @@
     document.addEventListener('visibilitychange', onVis);
 
     // ---- The resume / reshuffle offer under the top bar ----
+    let offerTimer = 0;
     function offer(node) {
       fill(resumeBox, node);
       resumeBox.hidden = false;
-      const t = setTimeout(() => { resumeBox.hidden = true; }, 15000);
-      onLeave(() => clearTimeout(t));
+      cancel(offerTimer);
+      offerTimer = later(() => { resumeBox.hidden = true; }, 15000);
     }
 
     // ---- History ----
     // The core never relies on the hub's a.tile click hook for a history
-    // entry. A route-owned player (opts.ownHistory false: TikShortis' feed is
-    // a hash route) leaves history to the route. A player the product opens
-    // with a tap over another page (opts.ownHistory true; only from a user
-    // gesture, or Chrome skips the entry) pushes its own entry, closes with
-    // history.back(), and calls opts.onClose() when its entry is popped.
+    // entry. A route-owned player (opts.ownHistory false: a feed page is a
+    // hash route) leaves history to the route. A player the product opens
+    // with a tap over another page (opts.ownHistory true) pushes its own
+    // entry, closes with history.back(), and calls opts.onClose() once.
+    //
+    // M6-HIST (phase-2 E7 MAJOR): the entry carries this instance's token, so
+    //   - a sheet's entry above it (it copies the state) popping back onto
+    //     ours is not a close: Back closes the sheet first, then the player;
+    //   - any other entry (an older player's stale token included) means our
+    //     entry is gone: close, once;
+    //   - close() is idempotent: a second call (a double tap, Escape while
+    //     the Back is still on its way) does nothing;
+    //   - the entry is pushed only inside a user activation (Chrome skips
+    //     entries pushed without one, and Back would leave the app).
+    const token = `fp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     let pushed = false;
+    let closing = false;
+    let closed = false;
+    const ours = () => !!(history.state && history.state.feedPlayer === token);
+    function finish() {
+      if (closed) return;
+      closed = true;
+      if (opts.onClose) opts.onClose();
+    }
     if (opts.ownHistory) {
-      history.pushState({ ...(history.state || {}), feedPlayer: true }, '');
-      pushed = true;
+      const ua = navigator.userActivation;
+      if (!ua || ua.isActive) {
+        history.pushState({ ...(history.state || {}), feedPlayer: token }, '');
+        pushed = true;
+      }
       const onPop = () => {
-        if (!pushed || (history.state && history.state.feedPlayer)) return;
+        if (!pushed || closed || ours()) return;
         pushed = false;
-        if (opts.onClose) opts.onClose();
+        finish();
       };
       window.addEventListener('popstate', onPop);
       onLeave(() => window.removeEventListener('popstate', onPop));
     }
     function close() {
-      if (pushed) history.back();
-      else if (opts.onClose) opts.onClose();
+      if (closed || closing) return;
+      if (pushed && ours()) {
+        closing = true;
+        // A sheet's entry still on top: step over it too (the sheet stack
+        // closes its sheets on the same popstate).
+        history.go(history.state.tikSheet ? -2 : -1);
+      } else {
+        pushed = false;
+        finish();
+      }
     }
 
     // ---- Leaving the page stops everything ----
@@ -834,6 +969,10 @@
       offer,
       hideOffer: () => { resumeBox.hidden = true; },
       close,
+      goTo,
+      suspend,
+      resume,
+      get activeItem() { return F.cards[F.active] ? F.cards[F.active].s : null; },
     };
 
     paintStatus();

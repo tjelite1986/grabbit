@@ -100,8 +100,9 @@ test('hub.js passes the menu hooks to the module and tik.js calls them', () => {
 test('version labels and the service worker cache name moved to 3.0.4', () => {
   assert.match(read('hub/index.html'), /<span id="version">v3\.0\.4<\/span>/);
   // 3.0.4 added the duplicate manager's files to the shell, and Adshortis
-  // phase 2 the shared helpers, so the cache moved on.
-  assert.match(read('sw.js'), /const CACHE = 'grabbit-v17';/);
+  // phase 2 the shared helpers and phase 3 the Adshortis module, so the
+  // cache moved on.
+  assert.match(read('sw.js'), /const CACHE = 'grabbit-v20';/);
 });
 
 test('3.0.2: sheets ride on top of the on-screen keyboard (visualViewport)', () => {

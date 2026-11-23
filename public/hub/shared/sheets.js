@@ -68,7 +68,10 @@
     }
     // Called once the last sheet is gone (the feed resumes auto-scroll).
     const whenClosed = new Set();
-    function closeSheet(entry, viaUi) {
+    // viaUi: closed on screen (X, scrim, Escape, a button). refocus: closed by
+    // the device Back; the opener gets its focus back as on screen (phase-2
+    // E7 MINOR). Leaving the page (closeAll) does neither.
+    function closeSheet(entry, viaUi, refocus) {
       const i = stack.indexOf(entry);
       if (i < 0) return;
       stack.splice(i, 1);
@@ -76,8 +79,8 @@
       entry.scrim.remove();
       if (entry.onClose) entry.onClose();
       if (!stack.length) for (const fn of whenClosed) { try { fn(); } catch (e) { console.warn('sheets: sheet-close hook failed', e); } }
+      if ((viaUi || refocus) && entry.back && entry.back.isConnected && !stack.length) entry.back.focus({ preventScroll: true });
       if (!viaUi) return;
-      if (entry.back && entry.back.isConnected && !stack.length) entry.back.focus({ preventScroll: true });
       // Closed on screen: take the history entry back off, unless another
       // sheet opens right away (it reuses the entry).
       setTimeout(() => {
@@ -96,7 +99,7 @@
       if (ignorePop) { ignorePop--; return; }
       if (!guard) return;
       guard = false;
-      while (stack.length) closeSheet(stack[stack.length - 1], false);
+      while (stack.length) closeSheet(stack[stack.length - 1], false, true);
     });
     document.addEventListener('keydown', (e) => {
       // Escape closes the top sheet and nothing else: no other handler on the

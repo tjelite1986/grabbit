@@ -32,6 +32,7 @@ const tikshortisEmbed = require('./tikshortis-embed');
 const tikGateway = require('./tikshortis-gateway');
 const egramGateway = require('./egram-gateway');
 const adsGateway = require('./adshortis-gateway');
+const adsMatrix = require('./ads-route-matrix');
 const { createLinkStore: createAdsLinkStore, LOGIN_DAYS: ADS_LOGIN_DAYS } = require('./ads-links');
 const modules = require('./modules');
 const inbox = require('./inbox');
@@ -1430,6 +1431,21 @@ const ADS_BOOT = ADS_LINKS.bootCheck({ mode: ADSHORTIS_MODE, password: GRABBIT_P
 if (ADS_BOOT.dropped) console.log(`[grabbit] Adshortis: dropped ${ADS_BOOT.dropped} link record(s) (${ADS_BOOT.reason}).`);
 const CACHE_GEN = ADS_BOOT.gen;
 const CACHE_GEN_COOKIE = 'grabbit_cache_gen';
+// This build carries the phase-3 member rows. A row that waits on an Adshortis
+// deployment (A2 upload, A18 media) stays off until the owner has checked that
+// deployment and lists it in ADSHORTIS_CONDITIONS (e.g. "A2,A18"); nothing is
+// assumed met.
+const ADS_PHASE = '3';
+const ADS_CONDITIONS = adsMatrix.parseConditions(process.env.ADSHORTIS_CONDITIONS);
+for (const u of ADS_CONDITIONS.unknown) console.warn(`[grabbit] ADSHORTIS_CONDITIONS: "${u}" is not a known condition; it is ignored.`);
+const ADS_UPLOAD_MAX_MB = (() => {
+  const raw = String(process.env.ADSHORTIS_UPLOAD_MAX_MB || '').trim();
+  if (!raw) return 4096;
+  const n = Number(raw);
+  if (Number.isSafeInteger(n) && n > 0) return n;
+  console.warn('[grabbit] ADSHORTIS_UPLOAD_MAX_MB is not a positive whole number; using 4096.');
+  return 4096;
+})();
 const ADS_GATEWAY =
   ADSHORTIS_MODE === 'native'
     ? adsGateway.createGateway({
@@ -1441,6 +1457,9 @@ const ADS_GATEWAY =
         // app client (the gate already keeps those off /api/ads).
         isOwner: (req) => req.principal === gda.LEGACY_SHARED,
         clientIp: (req) => req.ip || '',
+        phase: ADS_PHASE,
+        met: ADS_CONDITIONS.met,
+        uploadMaxMb: ADS_UPLOAD_MAX_MB,
       })
     : null;
 
@@ -1705,6 +1724,7 @@ const REVALIDATE = new Set([
   'hub.css',
   // Helpers shared by the native modules (public/hub/shared/).
   'links.js',
+  'icons.js',
   'sheets.js',
   'feed-player.js',
   'feed-player.css',
@@ -1714,6 +1734,9 @@ const REVALIDATE = new Set([
   // Grabbit 3.0.4 Smart Duplicate Manager (public/hub/dupes/).
   'dupes.js',
   'dupes.css',
+  // Grabbit 3.0 native Adshortis (public/hub/ads/).
+  'ads.js',
+  'ads.css',
 ]);
 
 // The hub is the start page. Grabbit 1's interface lives on at /classic/; it
@@ -3443,7 +3466,8 @@ if (ADS_GATEWAY) {
       else res.destroy();
     });
   });
-  console.log('[grabbit] Adshortis: native');
+  const conds = [...ADS_CONDITIONS.met].join(', ') || 'none';
+  console.log(`[grabbit] Adshortis: native (phase ${ADS_PHASE}, conditions met: ${conds})`);
 } else {
   console.log(`[grabbit] Adshortis: ${ADSHORTIS_MODE}`);
 }
@@ -10587,7 +10611,7 @@ for (const dir of [VIDEOS_DIR, AUDIO_DIR, ADULTS_DIR, PHOTOS_DIR]) {
   }
 }
 
-app.listen(PORT, '0.0.0.0', () => {
+const httpServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(
     `grabbit listening on :${PORT}, shorts roots main=${CHANNEL_ROOTS.main || '(unset)'} ` +
       `18plus=${CHANNEL_ROOTS['18plus'] || '(unset)'} platform=${CHANNEL_ROOTS.platform || '(unset)'} posts=${POSTS_IMPORT_DIR || '(unset)'}`
@@ -10601,3 +10625,12 @@ app.listen(PORT, '0.0.0.0', () => {
   );
   countYtdlpExtractors();
 });
+// Node ends a request that takes longer than five minutes to arrive; an
+// Adshortis upload through the gateway (M12) can take longer on a slow line.
+// The limit is server-wide, so it is raised only while the upload route can be
+// live (A2 met) and stays bounded: a request body that trickles in can hold a
+// socket for at most two hours. The header timeout still guards slow clients.
+const ADS_UPLOAD_REQUEST_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+if (ADS_GATEWAY) {
+  if (ADS_CONDITIONS.met.has('adshortis:A2')) httpServer.requestTimeout = ADS_UPLOAD_REQUEST_TIMEOUT_MS;
+}
