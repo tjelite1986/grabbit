@@ -210,6 +210,8 @@ body.tik-immersive .tf-side, body.tik-immersive .tf-resume { display: none !impo
   display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; white-space: nowrap;
   background: #fff; color: #000; font-size: 14px; font-weight: 600; text-decoration: none; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
 }
+/* Read by screen readers only (the opt-in "Clip N of M"). */
+.tf-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .tf-hint { position: fixed; z-index: 50; left: calc(50% + var(--tik-left) / 2); top: 50%; transform: translate(-50%, -50%); padding: 8px 16px; border-radius: 999px; background: rgba(0, 0, 0, 0.75); color: #fff; font-size: 14px; font-weight: 500; pointer-events: none; }
 
 .tf-status { position: absolute; z-index: 30; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; color: rgba(255, 255, 255, 0.6); pointer-events: none; }

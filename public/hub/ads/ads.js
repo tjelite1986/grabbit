@@ -462,6 +462,8 @@
         keys: { l: (c) => toggleLike(c, false), s: (c) => openSave(c) },
         ownHistory: !!cfg.ownHistory,
         onClose: cfg.onClose,
+        // H-M3: "Clip N of M" for screen readers; no earlier pages here.
+        liveCount: true,
       });
 
       // ---- The card: rail, caption ----
@@ -1172,6 +1174,7 @@
         // Escape with no sheet over it closes the player (UX 10.1); the
         // sheet stack stops the key while a sheet is open.
         const onKey = (e) => {
+          if (e.key === 'Tab') { trapTab(e); return; }
           if (e.key !== 'Escape' || e.defaultPrevented || SH.count() || P.fullscreen) return;
           if (document.querySelector('[role=dialog][aria-modal=true]:not([data-feed-player])')) return;
           e.preventDefault();
@@ -1205,6 +1208,39 @@
           if (back) back.focus({ preventScroll: true });
         }
         onLeave(() => closeModal(true));
+        // H-M2: the page behind is inert while the player is open: the hub's
+        // top bar and view always, the menu only while it is closed (the
+        // player's own menu button opens it, and it stays usable then).
+        // Only what this player made inert is given back.
+        const main = document.querySelector('.app > .main');
+        const side = document.getElementById('side');
+        const madeInert = new Set();
+        function setInert(el, on) {
+          if (!el) return;
+          if (on && !el.inert) { el.inert = true; madeInert.add(el); }
+          else if (!on && madeInert.has(el)) { el.inert = false; madeInert.delete(el); }
+        }
+        const paintInert = () => { if (!shut) { setInert(main, true); setInert(side, !hub.sideOpen()); } };
+        paintInert();
+        window.addEventListener('grabbit:side', paintInert);
+        // Tab and Shift+Tab wrap inside the player (and the open menu); a
+        // sheet over it keeps its own trap. Called from onKey above.
+        function trapTab(e) {
+          if (e.defaultPrevented || SH.count()) return;
+          if (document.querySelector('[role=dialog][aria-modal=true]:not([data-feed-player])')) return;
+          const scopes = side && !side.inert ? [side, box] : [box];
+          const items = scopes.flatMap((sc) => [...sc.querySelectorAll('a[href], button, input, textarea, select, [tabindex]:not([tabindex="-1"])')])
+            .filter((el) => !el.disabled && !el.closest('[hidden], [inert]') && el.getClientRects().length);
+          if (!items.length) return;
+          const at = document.activeElement;
+          const inside = scopes.some((sc) => sc.contains(at));
+          if (e.shiftKey && (!inside || at === items[0])) { e.preventDefault(); items[items.length - 1].focus(); }
+          else if (!e.shiftKey && (!inside || at === items[items.length - 1])) { e.preventDefault(); items[0].focus(); }
+        }
+        local.push(() => {
+          window.removeEventListener('grabbit:side', paintInert);
+          for (const el of [...madeInert]) setInert(el, false);
+        });
         const handle = {
           modal: true,
           setClip(cid) { P.goTo(cid); },

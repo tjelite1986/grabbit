@@ -48,6 +48,11 @@
 //   end() -> nodes                      shown on the last card once the list
 //                                       has no more pages
 //   onVideoError(c)                     the active clip's video failed
+//   liveCount                           true: a polite live region says
+//                                       "Clip N of M" when the active clip
+//                                       changes. Only for a product that never
+//                                       loads earlier pages (N counts from the
+//                                       first card); off for TikShortis
 //   videoSrc(item) may return null: the card shows its poster only.
 (() => {
   const shared = (window.GrabbitShared = window.GrabbitShared || {});
@@ -226,7 +231,10 @@
 
     const resumeBox = h('div', { class: 'tf-resume', hidden: true });
     const hintEl = h('div', { class: 'tf-hint', hidden: true, role: 'status' }, 'Long-press a clip for the menu');
-    const root = h('div', { class: `tf${S.chromeHidden ? ' clean' : ''}`, [ROOT_ATTR]: '' }, scroller, status, sideBtn, modeBox, ctlBox, resumeBox, hintEl);
+    // Opt-in "Clip N of M" (opts.liveCount); inside the root so it is still
+    // read in fullscreen.
+    const countEl = opts.liveCount ? h('div', { class: 'tf-sr', 'aria-live': 'polite', 'aria-atomic': 'true' }) : null;
+    const root = h('div', { class: `tf${S.chromeHidden ? ' clean' : ''}`, [ROOT_ATTR]: '' }, scroller, status, sideBtn, modeBox, ctlBox, resumeBox, hintEl, countEl);
 
     const onDocDown = (e) => {
       if (modeBox.contains(e.target)) return;
@@ -686,6 +694,11 @@
       // The product keeps the current item in the address (a reload or Back
       // lands here) and says what to save as the place to resume.
       if (opts.onActive) opts.onActive(c);
+      if (countEl) {
+        // Only a change is written: a forced repeat (resize) says nothing.
+        const words = `Clip ${i + 1} of ${F.cards.length}${F.hasMore ? ' or more' : ''}`;
+        if (countEl.textContent !== words) countEl.textContent = words;
+      }
       const saved = opts.resumeEntry ? opts.resumeEntry(c) : null;
       if (saved) store.set(KEYS.resume, JSON.stringify(saved));
       if (i >= F.cards.length - AHEAD) loadMore();
