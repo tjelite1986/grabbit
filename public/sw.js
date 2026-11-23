@@ -15,13 +15,15 @@
 // v16: Grabbit 3.0.4, the Smart Duplicate Manager (public/hub/dupes/).
 // v17: helpers and the clip player shared by the native modules (public/hub/shared/).
 // v18: native Adshortis (public/hub/ads/) and the 18+ sidebar group.
-const CACHE = 'grabbit-v18';
+// v19: the shared Lucide icons (public/hub/shared/icons.js) and the Adshortis feed.
+const CACHE = 'grabbit-v19';
 const SHELL = [
   '/',
   '/classic/',
   '/hub/hub.js',
   '/hub/hub.css',
   '/hub/shared/links.js',
+  '/hub/shared/icons.js',
   '/hub/shared/sheets.js',
   '/hub/shared/feed-player.js',
   '/hub/shared/feed-player.css',

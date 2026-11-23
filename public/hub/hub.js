@@ -1264,6 +1264,8 @@
     try {
       return adsDef.create({
         h, toast, route, updateNav,
+        // The Grabbit menu, for the feed player's own menu button.
+        toggleSide, sideOpen, closeMenu,
         // Change the address without a hashchange (swipes, filters, legacy links).
         replaceHash: (hash) => { history.replaceState(history.state, '', hash); renderedKey = pageKey(); updateNav(); },
         // After the module redrew itself for another view (H59, H78): the

@@ -13,14 +13,17 @@ const hubJs = read('public/hub/hub.js');
 const hubCss = read('public/hub/hub.css');
 const adsJs = read('public/hub/ads/ads.js');
 const adsCss = read('public/hub/ads/ads.css');
-// Class names a stylesheet defines: the first class of every selector.
+// Class names a stylesheet defines: the first class of every selector. A
+// selector may start with a body state class the shared player sets
+// (tik-feed, tik-immersive); the class after it is the one defined.
+const STATE = new Set(['tik-feed', 'tik-immersive']);
 const classesOf = (css) => {
   const out = new Set();
   const noComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
   for (const m of noComments.matchAll(/(^|[},])\s*([^{}@]+)\{/g)) {
     for (const sel of m[2].split(',')) {
-      const c = /\.([a-zA-Z][\w-]*)/.exec(sel.trim());
-      if (c) out.add(c[1]);
+      const c = [...sel.trim().matchAll(/\.([a-zA-Z][\w-]*)/g)].map((x) => x[1]).find((x) => !STATE.has(x));
+      if (c) out.add(c);
     }
   }
   return out;
@@ -36,7 +39,7 @@ test('SHELL: ads.js and ads.css load after the shared files and before hub.js', 
 
 test('SHELL: the service worker caches the module and the server revalidates it', () => {
   const sw = read('public/sw.js');
-  assert.match(sw, /const CACHE = 'grabbit-v18';/);
+  assert.match(sw, /const CACHE = 'grabbit-v19';/);
   assert.match(sw, /'\/hub\/ads\/ads\.js'/);
   assert.match(sw, /'\/hub\/ads\/ads\.css'/);
   // The worker still leaves the API and the login alone.
@@ -109,9 +112,19 @@ test('LEAVE/REDRAW: render() tears the module down; the module never calls the h
   assert.match(lv, /open\.player\.stop\(\)/);
 });
 
-test('STORE/SEARCH: the module keeps nothing in browser storage and pushes no history entry by itself', () => {
+test('STORE/SEARCH: only the six grabbit.ads.* keys, through one store; no history entry by itself', () => {
   const code = adsJs.replace(/^\s*\/\/.*$/gm, '');
-  assert.doesNotMatch(code, /localStorage|sessionStorage|indexedDB|document\.cookie/);
+  assert.doesNotMatch(code, /sessionStorage|indexedDB|document\.cookie/);
+  // UX 6: localStorage only inside adsStore, whose key list is exactly these.
+  assert.match(code, /const STORE_KEYS = \['grabbit\.ads\.sound', 'grabbit\.ads\.autoplay', 'grabbit\.ads\.autoscroll', 'grabbit\.ads\.clean', 'grabbit\.ads\.cols', 'grabbit\.ads\.lastFeed'\];/);
+  const store = code.slice(code.indexOf('const adsStore = {'), code.indexOf('const prefs = {'));
+  assert.equal((code.match(/localStorage/g) || []).length, (store.match(/localStorage/g) || []).length, 'localStorage outside adsStore');
+  assert.equal((store.match(/if \(!STORE_KEYS\.includes\(k\)\) return/g) || []).length, 2, 'get and set check the key');
+  const keys = new Set(code.match(/grabbit\.ads\.[A-Za-z]+/g));
+  for (const k of keys) assert.match(k, /^grabbit\.ads\.(sound|autoplay|autoscroll|clean|cols|lastFeed)$/, k);
+  // No resume position is stored (it stays with Adshortis' prefs).
+  assert.match(code, /resume: null \}/);
+  assert.doesNotMatch(code, /resumeEntry/);
   assert.doesNotMatch(code, /adshortis:/);
   assert.doesNotMatch(code, /history\.pushState/);
   // Legacy ?creator= leaves the address before the lookup, and the name goes in the POST body (H35).
@@ -128,6 +141,6 @@ test('BANNER: role=status, checked on boot and visibilitychange, null build disa
   assert.match(hubJs, /if \(state\.config\) checkBuild\(state\.config\.build\);/);
   // Idle needs the module's empty store (H75).
   assert.match(hubJs, /if \(adsNative && !adsNative\.idle\(\)\) return false;/);
-  assert.match(adsJs, /const idle = \(\) => !open\.player && open\.sheets === 0 && storeEmpty\(\);/);
+  assert.match(adsJs, /const idle = \(\) => !open\.player && open\.sheets === 0 && SH\.count\(\) === 0 && storeEmpty\(\);/);
   assert.match(hubCss, /\.build-banner \{[\s\S]*?top: calc\(100px \+ env\(safe-area-inset-top\)\);/);
 });

@@ -1724,6 +1724,7 @@ const REVALIDATE = new Set([
   'hub.css',
   // Helpers shared by the native modules (public/hub/shared/).
   'links.js',
+  'icons.js',
   'sheets.js',
   'feed-player.js',
   'feed-player.css',

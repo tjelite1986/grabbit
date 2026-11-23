@@ -22,3 +22,55 @@
 @media (pointer: coarse) {
   .ads-link .field, .ads-link .btn, .ads-banner .btn, .ads-panel .btn { min-height: 44px; }
 }
+
+/* ---- Feed (phase 3 slice C): the shared player (tf-*) fills the space
+   between the Grabbit menu and the right edge, as TikShortis' feed does. */
+.ads-feed { position: fixed; z-index: 6; top: 0; left: var(--tik-left); right: 0; bottom: 0; background: #000; }
+body.tik-immersive .ads-feed { inset: 0; z-index: 40; }
+/* The chip row sits in the player's top centre; it scrolls sideways on a
+   phone and never shrinks its chips (flex: none). */
+.ads-feedbar {
+  display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain;
+  max-width: calc(100vw - var(--tik-left) - 120px); padding: 2px;
+}
+.ads-feedbar::-webkit-scrollbar { display: none; }
+.ads-chip {
+  flex: none; padding: 6px 12px; border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 999px;
+  background: rgba(0, 0, 0, 0.5); color: rgba(255, 255, 255, 0.75); font: inherit; font-size: 13px; cursor: pointer;
+}
+.ads-chip[aria-pressed='true'] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.ads-chip:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.ads-filter.on { border-color: var(--accent-2); color: #fff; }
+.ads-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ads-filter-box { display: flex; flex-direction: column; gap: 8px; }
+.ads-filter-box h4 { margin: 6px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); }
+/* The creator on the rail: picture, follow badge under it. */
+.ads-who { position: relative; display: flex; flex-direction: column; align-items: center; margin-bottom: 10px; }
+.ads-who-av { display: block; border-radius: 50%; }
+.ads-follow {
+  position: absolute; bottom: -9px; display: grid; place-items: center; width: 22px; height: 22px; padding: 0;
+  border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer;
+}
+.ads-follow.on { background: #fff; color: var(--accent); }
+.ads-pills { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+.ads-pill {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15); font-size: 12px; color: #fff;
+}
+.ads-note {
+  position: absolute; z-index: 12; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 80%;
+  padding: 10px 16px; border-radius: 12px; background: rgba(0, 0, 0, 0.7); color: #fff; text-align: center;
+}
+.ads-cm { display: flex; align-items: flex-start; gap: 10px; }
+.ads-cm-av {
+  flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+  background: var(--panel-2); color: #fff; font-size: 12px; font-weight: 600;
+}
+.ads-cm-t { flex: 1; min-width: 0; }
+.ads-share { display: flex; flex-direction: column; padding-bottom: 12px; }
+.ads-share .tf-sheet-note { margin: 0 20px; }
+.ads-copy { position: fixed; left: -9999px; top: 0; opacity: 0; }
+@media (pointer: coarse) {
+  .ads-chip { min-height: 44px; }
+  .ads-follow { width: 28px; height: 28px; bottom: -12px; }
+}
