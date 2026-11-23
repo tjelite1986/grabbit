@@ -1733,6 +1733,9 @@ const REVALIDATE = new Set([
   // Grabbit 3.0.4 Smart Duplicate Manager (public/hub/dupes/).
   'dupes.js',
   'dupes.css',
+  // Grabbit 3.0 native Adshortis (public/hub/ads/).
+  'ads.js',
+  'ads.css',
 ]);
 
 // The hub is the start page. Grabbit 1's interface lives on at /classic/; it

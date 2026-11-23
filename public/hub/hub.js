@@ -266,13 +266,15 @@
     { id: 'tikshortis', label: 'TikShortis', icon: 'play', ownData: true, show: () => !!tikEmbed() || tikIsNative(), view: viewTikshortisPage, subnav: () => (tikIsNative() ? tikNative.subnav(route()) : null) },
     // Grabbit 3.0 phase 2 (public/hub/social/), from EGRAM_MODE. General only.
     { id: 'social', label: 'Social & Photos', icon: 'social', ownData: true, show: () => socialOn(), view: viewSocialPage, subnav: () => (socialOn() ? socialNative.subnav(route()) : null) },
+    // The 18+ group (UX 2, owner Q9): Adshortis and Adflix, below the general
+    // modules under their own heading (buildNav).
     // Grabbit 3.0 (H28, H39, H53): from the effective ADSHORTIS_MODE. The entry
     // shows in native, or when the server mounts the old folder page. In embed
     // the standalone app gets its own plain link next to it (buildNav). A
     // #/adshortis bookmark without a page draws "not available here".
-    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', ownData: true, show: () => adsFolderPage() || adsMode() === 'native', view: viewAdshortisPage },
+    { id: 'adshortis', label: 'Adshortis 18+', icon: 'video', group: '18', ownData: true, show: () => adsFolderPage() || adsMode() === 'native', view: viewAdshortisPage, subnav: () => (adsIsNative() ? adsNative.subnav(route()) : null) },
     // Listed only when the server has the 18+ film library mounted.
-    { id: 'adflix', label: 'Adflix 18+', icon: 'media', ownData: true, show: () => !!(state.config && state.config.adflixLibrary), view: viewAdflix },
+    { id: 'adflix', label: 'Adflix 18+', icon: 'media', group: '18', ownData: true, show: () => !!(state.config && state.config.adflixLibrary), view: viewAdflix },
     { id: 'profiles', label: 'Profiles', icon: 'profiles', view: viewProfiles },
     { id: 'review', label: 'Review', icon: 'review', badge: () => (state.review ? state.review.creators.unclassified : 0), view: viewReview },
     { id: 'inbox', label: 'Inbox', icon: 'inbox', badge: () => (state.inbox && state.inbox.counts ? state.inbox.counts.held || 0 : 0), view: viewInbox },
@@ -296,14 +298,17 @@
   function buildNav() {
     const nav = $('#nav');
     nav.replaceChildren(
-      ...PAGES.map((p) => [
-        h('a', { href: `#/${p.id}`, 'data-page': p.id, hidden: p.show ? !p.show() : null }, icon(p.icon), h('span', null, p.label),
+      ...PAGES.map((p, i) => [
+        // A group's heading, before its first entry (hidden in updateNav when
+        // nothing in the group is listed).
+        p.group && (!i || PAGES[i - 1].group !== p.group) ? h('div', { class: 'nav-group', 'data-group': p.group, role: 'presentation' }, `${p.group}+`) : null,
+        h('a', { href: `#/${p.id}`, 'data-page': p.id, 'data-group': p.group || null, hidden: p.show ? !p.show() : null }, icon(p.icon), h('span', null, p.label),
           p.badge ? h('span', { class: 'badge', hidden: true }) : null,
           p.planned ? h('span', { class: 'tag' }, 'planned') : null),
         // A module's own sections, listed under it while it is open.
         p.subnav ? h('div', { class: 'nav-sub', 'data-sub': p.id, hidden: true }) : null,
         // H53: in embed, a plain link to the standalone Adshortis (updateNav).
-        p.id === 'adshortis' ? h('a', { 'data-ads-link': '1', href: '#', target: '_blank', rel: 'noopener noreferrer', hidden: true }, icon('video'), h('span', null, 'Adshortis 18+ ↗')) : null,
+        p.id === 'adshortis' ? h('a', { 'data-ads-link': '1', 'data-group': p.group, href: '#', target: '_blank', rel: 'noopener noreferrer', hidden: true }, icon('video'), h('span', null, 'Adshortis 18+ ↗')) : null,
       ]).flat().filter(Boolean)
     );
   }
@@ -327,6 +332,9 @@
       const url = adsMode() === 'embed' ? adsStandalone() : null;
       adsLink.hidden = !url;
       if (url) adsLink.href = url;
+    }
+    for (const g of document.querySelectorAll('#nav > .nav-group')) {
+      g.hidden = ![...document.querySelectorAll(`#nav > a[data-group="${g.dataset.group}"]`)].some((a) => !a.hidden);
     }
     for (const box of document.querySelectorAll('#nav .nav-sub')) {
       const p = PAGES.find((x) => x.id === box.dataset.sub);
@@ -357,6 +365,12 @@
     if (tikNative) tikNative.leave();
     if (socialNative) socialNative.leave();
     if (dupesNative) dupesNative.leave();
+    // Adshortis keeps its browse store across its own views; leaving the page
+    // id clears it (UX 10.2).
+    if (adsNative) {
+      if (route().id === 'adshortis') adsNative.leave();
+      else adsNative.reset();
+    }
     renderedKey = pageKey();
     const r = route();
     const view = $('#view');
@@ -1239,11 +1253,43 @@
     const v = state.config && state.config.adshortisEmbed;
     return typeof v === 'string' && /^https:\/\/[a-z0-9.\-[\]:]+\/$/i.test(v) ? v : null;
   };
-  // #/adshortis* decides on the effective mode (H28): the folder page only when
-  // the server mounts it, so viewAdshortis never calls unmounted routes.
-  function viewAdshortisPage(params) {
+  // --- Adshortis, native (Grabbit 3.0 phase 3) -------------------------------
+  // public/hub/ads/ads.js registers itself before this file runs and draws
+  // #/adshortis/* through its own gateway. It runs only when the
+  // effective mode is native (H36); a module that fails to start leaves the
+  // page on "not available here".
+  const adsDef = (window.GrabbitModules || []).find((m) => m && m.id === 'adshortis');
+  const adsNative = (() => {
+    if (!adsDef) return null;
+    try {
+      return adsDef.create({
+        h, toast, route, updateNav,
+        // Change the address without a hashchange (swipes, filters, legacy links).
+        replaceHash: (hash) => { history.replaceState(history.state, '', hash); renderedKey = pageKey(); updateNav(); },
+        // After the module redrew itself for another view (H59, H78): the
+        // hub's own steps from render(), in the same order.
+        viewChanged: () => {
+          renderedKey = pageKey();
+          updateNav();
+          $('#view').focus({ preventScroll: true });
+          closeMenu();
+        },
+      });
+    } catch (e) {
+      console.error('Adshortis module failed to start', e);
+      return null;
+    }
+  })();
+  const adsIsNative = () => !!(adsNative && adsMode() === 'native');
+  // #/adshortis* decides on the effective mode (H28, H36): the native module
+  // only in native mode, the folder page only when the server mounts it, so
+  // viewAdshortis never calls unmounted routes. The legacy links of Media's
+  // Adshortis feed source (#/adshortis?creator=) need no change: native maps
+  // them in ads.js (UX 9.1), the folder page reads them as before.
+  function viewAdshortisPage(params, r) {
     // Redrawn by settle() once the config is in.
     if (!state.config) return [h('p', { class: 'empty', 'data-ads-wait': '1' }, 'Loading ...')];
+    if (adsIsNative()) return adsNative.view(r);
     if (adsFolderPage()) return viewAdshortis(params);
     const link = adsStandalone();
     return [
@@ -1287,7 +1333,7 @@
   function adsTile(it, query) {
     const q = new URLSearchParams(query || '');
     q.set('open', it.id);
-    return h('a', { class: `tile ads-tile${it.poster ? '' : ' no-thumb'}`, 'data-kind': 'video', href: `#/adshortis?${q}`, title: [it.creator, it.title].filter(Boolean).join(' - ') },
+    return h('a', { class: `tile adsf-tile${it.poster ? '' : ' no-thumb'}`, 'data-kind': 'video', href: `#/adshortis?${q}`, title: [it.creator, it.title].filter(Boolean).join(' - ') },
       it.poster ? h('img', { src: adsFileUrl(it.id, 'poster'), alt: '', loading: 'lazy', 'data-media-bg': '1', onerror: dropBrokenImg }) : null,
       it.creator ? h('span', { class: 'chip site' }, it.creator) : null,
       h('span', { class: 'chip adult aud' }, '18+'),
@@ -1311,7 +1357,7 @@
     const shuffled = !!params.get('seed');
     const items = adsList(params);
     const search = h('input', { class: 'field small', type: 'search', placeholder: 'Search creator or caption', value: q, 'aria-label': 'Search' });
-    const grid = h('div', { class: 'media-grid ads-grid' });
+    const grid = h('div', { class: 'media-grid adsf-grid' });
     let shown = 0;
     const more = h('button', { class: 'btn ghost', type: 'button', onclick: () => showMore() }, 'Show more');
     function showMore() {
@@ -1328,7 +1374,7 @@
           ? `${state.ads.length} clips from ${creators} creators, read from the app's library folder. Click one to play the feed.`
           : 'The 18+ app\'s library, read from its folder on this server.'),
       h('div', { class: 'toolbar' },
-        h('form', { class: 'ads-search', onsubmit: (e) => { e.preventDefault(); location.hash = withParams({ q: search.value.trim() }); } }, search),
+        h('form', { class: 'adsf-search', onsubmit: (e) => { e.preventDefault(); location.hash = withParams({ q: search.value.trim() }); } }, search),
         h('a', { class: `btn small ${shuffled ? 'ghost' : ''}`, href: withParams({ seed: '' }) }, 'Newest'),
         h('a', { class: `btn small ${shuffled ? '' : 'ghost'}`, href: withParams({ seed: Math.random().toString(36).slice(2, 8) }) }, shuffled ? 'Shuffle again' : 'Shuffle'),
         h('button', { class: 'btn small ghost', type: 'button', onclick: () => { state.ads = null; loadAds(true); render(false); } }, 'Refresh'),
@@ -1429,7 +1475,7 @@
           ? `${state.films.length} films from ${studios.length} studios, read from the film library on this server. Click one to play it.`
           : 'The 18+ film library, read from its folder on this server.'),
       h('div', { class: 'toolbar' },
-        h('form', { class: 'ads-search', onsubmit: (e) => { e.preventDefault(); location.hash = withParams({ q: search.value.trim() }); } }, search),
+        h('form', { class: 'adsf-search', onsubmit: (e) => { e.preventDefault(); location.hash = withParams({ q: search.value.trim() }); } }, search),
         studioPick,
         sortBtn('Newest', '', { sort: '', seed: '' }),
         sortBtn('Release', 'year', { sort: 'year', seed: '' }),
@@ -3472,7 +3518,18 @@
       $('#searchInput').focus();
     }
   });
-  window.addEventListener('hashchange', () => {
+  // The page id of an address from a hashchange event (oldURL, newURL).
+  const pageIdOf = (url) => {
+    const i = String(url || '').indexOf('#');
+    return i < 0 ? '' : String(url).slice(i).replace(/^#\/?/, '').split(/[/?]/)[0];
+  };
+  window.addEventListener('hashchange', (e) => {
+    // H51, H59: one native Adshortis address to another is the module's
+    // (clip change, close, view change); entering or leaving the page id goes
+    // through render() below.
+    if (adsIsNative() && pageIdOf(e.oldURL) === 'adshortis' && route().id === 'adshortis' && document.querySelector('#view > .ads-root')) {
+      return adsNative.onHash(e.oldURL, e.newURL);
+    }
     // Opening, closing or stepping in the viewer changes only `open`: the page
     // under it keeps its scroll position and is not rebuilt.
     if (pageKey() === renderedKey) return syncViewer();
@@ -3496,6 +3553,71 @@
     else render(false);
   }
 
+  // --- Build check (H63, H74, H75, H85, H88) ---------------------------------
+  // The server writes its build id into this page (<meta name="grabbit-build">)
+  // and returns it in /api/config. They differ once a new image is running.
+  // Checked on boot and when the tab becomes visible again, never on
+  // hashchange. A missing id on either side turns the check off.
+  const BUILD_RE = /^[0-9a-f]{40}$/;
+  const PAGE_BUILD = (() => {
+    const m = document.querySelector('meta[name="grabbit-build"]');
+    const v = m ? m.getAttribute('content') : null;
+    return BUILD_RE.test(v || '') ? v : null;
+  })();
+  // One automatic reload per new build: if the page still carries the old id
+  // afterwards, the banner shows instead of a reload loop.
+  const BUILD_RELOAD_KEY = 'grabbit.hub.buildReload';
+  // Idle: nothing open or kept that a reload would throw away (H75): no
+  // player or sheet, no playing video, no typed text, and an empty Adshortis
+  // browse store. Almost every open Adshortis page is not idle (H88).
+  function buildIdle() {
+    if (adsNative && !adsNative.idle()) return false;
+    if (document.querySelector('[role=dialog], .tik-sheet, .sg-sheet-panel, .dm-overlay')) return false;
+    for (const v of document.querySelectorAll('video')) if (!v.paused) return false;
+    for (const f of document.querySelectorAll('#view input, #view textarea')) {
+      if (f.type !== 'checkbox' && f.type !== 'radio' && f.type !== 'hidden' && f.value) return false;
+    }
+    return true;
+  }
+  let buildBanner = null;
+  // "Grabbit was updated. Reload" (H63): role=status, never a dialog, so the
+  // Ctrl+K and player key guards ignore it. It sits below the safe area and
+  // below the player's top row (.f-top, .tf-side/.tf-ctl/.tf-resume), so
+  // "clip N of M" stays visible; inside the fullscreen element when one is
+  // open (hub.css .build-banner).
+  function placeBuildBanner() {
+    if (!buildBanner) return;
+    const host = document.fullscreenElement || document.body;
+    if (buildBanner.parentNode !== host) host.append(buildBanner);
+  }
+  function showBuildBanner() {
+    if (!buildBanner) {
+      buildBanner = h('div', { class: 'build-banner', role: 'status', 'aria-live': 'polite' },
+        h('span', null, 'Grabbit was updated.'),
+        h('button', { type: 'button', class: 'btn', onclick: () => location.reload() }, 'Reload'));
+      document.addEventListener('fullscreenchange', placeBuildBanner);
+    }
+    placeBuildBanner();
+  }
+  function checkBuild(serverBuild) {
+    const srv = BUILD_RE.test(serverBuild || '') ? serverBuild : null;
+    if (!PAGE_BUILD || !srv || srv === PAGE_BUILD) return;
+    if (buildIdle()) {
+      let done = null;
+      try { done = sessionStorage.getItem(BUILD_RELOAD_KEY); } catch { /* storage blocked */ }
+      if (done !== srv) {
+        let marked = false;
+        try { sessionStorage.setItem(BUILD_RELOAD_KEY, srv); marked = true; } catch { /* no loop guard: banner */ }
+        if (marked) { location.reload(); return; }
+      }
+    }
+    showBuildBanner();
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !PAGE_BUILD) return;
+    api('/api/config').then((d) => checkBuild(d && d.build)).catch(() => {});
+  });
+
   async function boot() {
     buildNav();
     render();
@@ -3508,6 +3630,7 @@
     }
     settle();
     syncViewer();
+    if (state.config) checkBuild(state.config.build);
     connectStream();
     // The health probe touches every mount; it can take a moment.
     await load(['health']);

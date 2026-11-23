@@ -1,0 +1,24 @@
+/* Grabbit 3.0 native Adshortis (public/hub/ads/ads.js). Grabbit tokens only
+   (UX 1): Adshortis' own red accent never reaches the page. Every class has
+   the ads- prefix; the legacy folder page uses adsf- (hub.css). */
+.ads-root { display: flex; flex-direction: column; gap: 16px; }
+.ads-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ads-head h1 { margin: 0; }
+.ads-empty { color: var(--muted); padding: 10px 0; }
+.ads-empty p { margin: 0 0 12px; }
+.ads-banner {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+}
+.ads-panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; background: var(--panel); max-width: 520px; }
+.ads-panel h2 { margin: 0 0 8px; font-size: 17px; }
+.ads-link {
+  display: flex; flex-direction: column; gap: 10px; max-width: 420px;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; background: var(--panel);
+}
+.ads-link h2 { margin: 0; font-size: 18px; }
+.ads-link p { margin: 0; }
+.ads-form-msg { color: var(--bad); }
+@media (pointer: coarse) {
+  .ads-link .field, .ads-link .btn, .ads-banner .btn, .ads-panel .btn { min-height: 44px; }
+}

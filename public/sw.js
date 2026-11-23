@@ -14,7 +14,8 @@
 // v15: Grabbit 3.0.3 (wide feed, clickable @mentions, Mentioned in on profiles).
 // v16: Grabbit 3.0.4, the Smart Duplicate Manager (public/hub/dupes/).
 // v17: helpers and the clip player shared by the native modules (public/hub/shared/).
-const CACHE = 'grabbit-v17';
+// v18: native Adshortis (public/hub/ads/) and the 18+ sidebar group.
+const CACHE = 'grabbit-v18';
 const SHELL = [
   '/',
   '/classic/',
@@ -30,6 +31,8 @@ const SHELL = [
   '/hub/social/social.css',
   '/hub/dupes/dupes.js',
   '/hub/dupes/dupes.css',
+  '/hub/ads/ads.js',
+  '/hub/ads/ads.css',
   '/manifest.webmanifest',
   '/favicon-32.png?v=2',
   '/icon-192.png?v=2',
