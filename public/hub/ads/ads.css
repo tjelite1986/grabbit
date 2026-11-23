@@ -18,6 +18,9 @@
 }
 .ads-link h2 { margin: 0; font-size: 18px; }
 .ads-link p { margin: 0; }
+/* The hub's .field grows along a row (flex 1 1 320px); in this column that
+   basis became a 320 px tall input. */
+.ads-link .field { flex: none; }
 .ads-form-msg { color: var(--bad); }
 @media (pointer: coarse) {
   .ads-link .field, .ads-link .btn, .ads-banner .btn, .ads-panel .btn { min-height: 44px; }
