@@ -70,9 +70,12 @@ test('NAV-18: Adshortis and Adflix form the 18+ group with its heading', () => {
   assert.match(hubJs, /g\.hidden = !\[\.\.\.document\.querySelectorAll\(`#nav > a\[data-group="\$\{g\.dataset\.group\}"\]`\)\]\.some\(\(a\) => !a\.hidden\);/);
   // The module's sections show under the entry only in native mode.
   assert.match(hubJs, /subnav: \(\) => \(adsIsNative\(\) \? adsNative\.subnav\(route\(\)\) : null\)/);
-  for (const s of ['Feed', 'Explore', 'Profiles', 'Tags', 'Playlists', 'Liked', 'Mine', 'Upload', 'Settings']) {
-    assert.match(adsJs, new RegExp(`\\['[a-z]+', '${s}'\\]`), s);
-  }
+  // B3: the first install lists only the working sections; Liked is the
+  // feed's Liked order. The unbuilt views keep their routes, off the menu.
+  const sections = adsJs.slice(adsJs.indexOf('const SECTIONS = ['), adsJs.indexOf('];', adsJs.indexOf('const SECTIONS = [')));
+  assert.deepEqual([...sections.matchAll(/\['[a-z]+', '([A-Za-z]+)'/g)].map((m) => m[1]), ['Feed', 'Explore', 'Liked', 'Settings']);
+  assert.match(sections, /\['liked', 'Liked', LIKED\]/);
+  for (const v of ['profiles', 'tags', 'playlists', 'mine', 'upload']) assert.match(adsJs, new RegExp(`\\n      ${v}: \\{ title: '`), v);
   assert.doesNotMatch(adsJs, /'Admin'/, 'admin is phase 4');
 });
 

@@ -342,7 +342,8 @@
           if (last && typeof last === 'object') src = new URLSearchParams(Object.entries(last).filter(([, v]) => typeof v === 'string'));
         } catch { /* ignore */ }
       }
-      if (isFeed(src.get('feed'))) out.feed = src.get('feed');
+      // Liked has its own menu entry (B3): a bare Feed link never reopens it.
+      if (isFeed(src.get('feed')) && (src === params || src.get('feed') !== 'liked')) out.feed = src.get('feed');
       out.genre = String(src.get('genre') || '').split(',').filter((g) => GENRES.some(([k]) => k === g));
       if (['short', 'long'].includes(src.get('length'))) out.length = src.get('length');
       out.sound = src.get('sound') === '1';
@@ -799,7 +800,7 @@
 
       function emptyNodes() {
         if (filtered(f)) return [h('p', null, 'No clips match these filters.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({ genre: [], length: null, sound: false }) }, 'Clear filters')];
-        if (f.feed === 'following') return [h('p', null, "You don't follow anyone yet."), h('a', { class: 'tf-sbtn', href: link('profiles') }, 'Browse profiles')];
+        if (f.feed === 'following') return [h('p', null, "You don't follow anyone yet."), h('a', { class: 'tf-sbtn', href: link('explore') }, 'Explore clips')];
         if (f.feed === 'liked') return [h('p', null, 'Clips you like show up here.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({ feed: 'foryou' }) }, 'Open For You')];
         return [h('p', null, 'No clips here.')];
       }
@@ -1250,6 +1251,8 @@
         hub.updateNav();
       })];
     }
+    // O1: what linking means, said the same way on the form and in Settings.
+    const LINK_ONCE = 'You sign in once: this browser stays linked to that Adshortis account while you are signed in to Grabbit, for up to 30 days.';
     // The sign-in form (S1). onLinked(d) runs with the S1 answer; the caller
     // decides what comes next (the page, or the re-link sheet of H17).
     function linkForm(onLinked, intro) {
@@ -1281,21 +1284,21 @@
         },
       },
       h('h2', null, 'Sign in to Adshortis'),
-      h('p', { class: 'muted' }, intro || 'Adshortis has its own accounts. Your sign-in stays in this browser.'),
+      h('p', { class: 'muted' }, intro || 'No Adshortis account is linked yet. Adshortis has its own accounts, separate from Grabbit and TikShortis.'),
+      h('p', { class: 'muted' }, LINK_ONCE),
       user, pass, msg, btn);
     }
 
     // --- Views ---------------------------------------------------------------
-    // Sections in the sidebar (UX 2). Admin is phase 4.
+    // Sections in the sidebar (UX 2). Admin is phase 4. The first install
+    // lists only what works (B3): Liked is the feed's Liked order. Profiles,
+    // Tags, Playlists, Mine and Upload stay out of the menu until they are
+    // built; their routes keep the placeholder below.
+    const LIKED = { feed: 'liked' };
     const SECTIONS = [
       ['feed', 'Feed'],
       ['explore', 'Explore'],
-      ['profiles', 'Profiles'],
-      ['tags', 'Tags'],
-      ['playlists', 'Playlists'],
-      ['liked', 'Liked'],
-      ['mine', 'Mine'],
-      ['upload', 'Upload'],
+      ['liked', 'Liked', LIKED],
       ['settings', 'Settings'],
     ];
     // A detail view lights up the section it belongs to.
@@ -1314,7 +1317,8 @@
       tag: { title: 'Tag', id: (v) => (v && v.length <= 100 ? v : null) },
       playlists: { title: 'Playlists' },
       playlist: { title: 'Playlist', id: numId },
-      liked: { title: 'Liked' },
+      // The old Liked route opens the Liked feed (B3).
+      liked: { title: 'Liked', draw: () => { hub.replaceHash(link('feed', LIKED)); return drawView(parse(link('feed', LIKED))); } },
       mine: { title: 'Mine' },
       hidden: { title: 'Hidden' },
       upload: { title: 'Upload' },
@@ -1328,7 +1332,9 @@
         pageHead('Settings'),
         h('section', { class: 'ads-panel' },
           h('h2', null, 'Adshortis account'),
-          h('p', null, 'Signed in as ', h('strong', null, (u && (u.username || u.name)) || 'unknown')),
+          h('p', null, 'Linked Adshortis account: ', h('strong', null, (u && (u.username || u.name)) || 'unknown')),
+          h('p', { class: 'muted' }, 'This is your Adshortis account, not your Grabbit or TikShortis one. ', LINK_ONCE),
+          h('p', { class: 'muted' }, 'The link ends when you sign out of Adshortis here or sign out of Grabbit.'),
           h('button', { type: 'button', class: 'btn ghost', onclick: unlink }, 'Sign out of Adshortis')),
       ];
     }
@@ -1466,8 +1472,9 @@
     function subnav(r) {
       if (!me()) return null;
       const first = r.sub[0] || 'feed';
-      const cur = SECTION_OF[first] || first;
-      return SECTIONS.map(([id, label]) => ({ href: link(id), label, current: cur === id }));
+      let cur = SECTION_OF[first] || first;
+      if (first === 'feed' && new URLSearchParams(location.hash.split('?')[1] || '').get('feed') === 'liked') cur = 'liked';
+      return SECTIONS.map(([id, label, q]) => (q ? { href: link('feed', q), label, current: cur === id } : { href: link(id), label, current: cur === id }));
     }
 
     // The build check may reload only an idle page (plan H63, H75, H88).
