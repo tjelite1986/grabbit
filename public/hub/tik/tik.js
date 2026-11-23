@@ -151,9 +151,7 @@
     const intOf = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
     const tagHref = (t) => link(`tag/${enc(tagOf(t))}`);
     // Only http(s) links from captions and profile rows become hrefs.
-    function safeHref(u) {
-      try { const x = new URL(String(u)); return x.protocol === 'https:' || x.protocol === 'http:' ? x.href : null; } catch { return null; }
-    }
+    const { safeHref } = window.GrabbitShared;
     function when(s) {
       const t = Date.parse(String(s || '').replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(s)) ? '' : 'Z'));
       return Number.isFinite(t) ? hub.ago(t) : '';
@@ -343,124 +341,11 @@
     const LENGTHS = [['all', 'Any length'], ['short', 'Short'], ['long', 'Long']];
 
     // --- Sheets (dialogs) --------------------------------------------------
-    // One stack. The device Back button closes the open sheets: while any is
-    // open, ONE history entry with the same address sits on top (no
-    // hashchange, no redraw). One entry, not one per sheet, because a sheet
-    // often closes and the next opens in the same click (More -> Edit), and a
-    // history.back() per sheet would land late and close the new one.
-    const sheets = [];
-    // The on-screen keyboard. Android Chrome only shrinks the visual
-    // viewport, so a sheet pinned to bottom: 0 ends up behind the keyboard
-    // (the comment field could not be seen while typing). --tik-kb is the
-    // height the keyboard takes off the bottom of the layout viewport and
-    // --tik-vvh the height still visible; the sheets ride on top of it.
-    const vvp = window.visualViewport;
-    function syncKeyboard() {
-      const root = document.documentElement.style;
-      if (!vvp) return;
-      const kb = Math.max(0, Math.round(window.innerHeight - vvp.height - vvp.offsetTop));
-      root.setProperty('--tik-kb', `${kb}px`);
-      root.setProperty('--tik-vvh', `${Math.round(vvp.height)}px`);
-    }
-    if (vvp) {
-      vvp.addEventListener('resize', syncKeyboard);
-      vvp.addEventListener('scroll', syncKeyboard);
-      syncKeyboard();
-    }
-    let guard = false; // our history entry is on top
-    let ignorePop = 0; // pops we caused ourselves
-    //
-    // The look is TikShortis' bottom sheet: full width with a title row and
-    // an X (comments, playlists, share, the menu). opts.size 'narrow' is the
-    // player menu and its confirmations (at most 448 px wide), 'form' a sheet
-    // with inputs. opts.bare drops the title row, as TikShortis' player menu
-    // has none; opts.clear leaves the page behind undimmed.
-    function openSheet(title, body, opts = {}) {
-      const close = () => closeSheet(entry, true);
-      const cls = ['tik-sheet', opts.size || (opts.wide ? 'wide' : 'form'), opts.bare ? 'bare' : null, opts.cls || null].filter(Boolean).join(' ');
-      const panel = h('div', { class: cls, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
-        opts.bare ? null : h('div', { class: 'tik-sheet-head' }, h('h3', null, title), h('button', { type: 'button', class: 'tik-x', 'aria-label': 'Close', onclick: close }, lu('x', 20))),
-        h('div', { class: 'tik-sheet-body' }, body));
-      const scrim = h('div', { class: `tik-scrim${opts.clear ? ' clear' : ''}`, onclick: close });
-      const entry = { panel, scrim, onClose: opts.onClose, back: document.activeElement };
-      document.body.append(scrim, panel);
-      sheets.push(entry);
-      if (!guard) {
-        try { history.pushState({ ...(history.state || {}), tikSheet: 1 }, '', location.href); guard = true; } catch { /* ignore */ }
-      }
-      const first = panel.querySelector('input, textarea, select, button:not(.tik-x), a[href]');
-      const target = first || panel.querySelector('.tik-x');
-      if (target) target.focus({ preventScroll: true });
-      return { close, panel, body: panel.querySelector('.tik-sheet-body') };
-    }
-    // Called once the last sheet is gone (the feed resumes auto-scroll).
-    const whenSheetsClosed = new Set();
-    function closeSheet(entry, viaUi) {
-      const i = sheets.indexOf(entry);
-      if (i < 0) return;
-      sheets.splice(i, 1);
-      entry.panel.remove();
-      entry.scrim.remove();
-      if (entry.onClose) entry.onClose();
-      if (!sheets.length) for (const fn of whenSheetsClosed) { try { fn(); } catch (e) { console.warn('tik: sheet-close hook failed', e); } }
-      if (!viaUi) return;
-      if (entry.back && entry.back.isConnected && !sheets.length) entry.back.focus({ preventScroll: true });
-      // Closed on screen: take the history entry back off, unless another
-      // sheet opens right away (it reuses the entry).
-      setTimeout(() => {
-        if (sheets.length || !guard) return;
-        guard = false;
-        if (history.state && history.state.tikSheet) { ignorePop++; history.back(); }
-      }, 0);
-    }
-    function closeAllSheets() {
-      while (sheets.length) closeSheet(sheets[sheets.length - 1], false);
-      // Leaving the page: the entry stays below the new address and is a
-      // harmless duplicate of the old one.
-      guard = false;
-    }
-    window.addEventListener('popstate', () => {
-      if (ignorePop) { ignorePop--; return; }
-      if (!guard) return;
-      guard = false;
-      while (sheets.length) closeSheet(sheets[sheets.length - 1], false);
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && sheets.length) { e.preventDefault(); closeSheet(sheets[sheets.length - 1], true); }
-      // aria-modal: Tab and Shift+Tab cycle inside the top sheet and never
-      // reach the page behind the scrim.
-      if (e.key === 'Tab' && sheets.length) {
-        const panel = sheets[sheets.length - 1].panel;
-        const items = [...panel.querySelectorAll('a[href], button, input, textarea, select, video[controls], [tabindex]:not([tabindex="-1"])')]
-          .filter((el) => !el.disabled && !el.hidden && el.getClientRects().length);
-        if (!items.length) return;
-        const firstEl = items[0];
-        const lastEl = items[items.length - 1];
-        const inside = panel.contains(document.activeElement);
-        if (e.shiftKey && (!inside || document.activeElement === firstEl)) { e.preventDefault(); lastEl.focus(); }
-        else if (!e.shiftKey && (!inside || document.activeElement === lastEl)) { e.preventDefault(); firstEl.focus(); }
-      }
-    });
-    // TikShortis' confirmation sheet (the clip's "Delete this clip?"): a title,
-    // one line, then the action in red and Cancel side by side.
-    function confirmSheet(title, text, label, run) {
-      const s = openSheet(title, [
-        h('p', { class: 'tf-sheet-title' }, title),
-        h('p', { class: 'tf-sheet-sub' }, text),
-        h('div', { class: 'tf-sheet-btns' },
-          h('button', { type: 'button', class: 'tf-sbtn danger', onclick: async (e) => {
-            // currentTarget is gone after the await: keep the button.
-            const btn = e.currentTarget;
-            btn.disabled = true;
-            try { await run(); s.close(); } catch (err) { fail(err); btn.disabled = false; }
-          } }, label),
-          h('button', { type: 'button', class: 'tf-sbtn', onclick: () => s.close() }, 'Cancel')),
-      ], { size: 'narrow', bare: true });
-      // The destructive button comes first, as in TikShortis, but the focus
-      // starts on Cancel: Enter (or a held key) must never confirm by itself.
-      const cancel = s.panel.querySelector('.tf-sheet-btns .tf-sbtn:not(.danger)');
-      if (cancel) cancel.focus({ preventScroll: true });
-    }
+    // The hub's one sheet stack (public/hub/shared/sheets.js).
+    const SH = window.GrabbitShared.sheets({ h, closeIcon: () => lu('x', 20), onError: (e) => fail(e) });
+    const openSheet = SH.open;
+    const closeAllSheets = SH.closeAll;
+    const confirmSheet = SH.confirm;
 
     // --- Watch history (the view beacon) ----------------------------------
     // Same contract as TikShortis lib/view-beacon.ts: latest report per clip,
@@ -496,8 +381,6 @@
     // Mode order and labels as in TikShortis' selector (SORT_ORDER).
     const MODES = [['foryou', 'For You'], ['new', 'New'], ['following', 'Following'], ['liked', 'Liked'], ['random', 'Random']];
     const SEEDED = new Set(['foryou', 'random']);
-    const NEAR = 2; // cards around the active one that keep their video source
-    const SEEK_SECONDS = 10;
     const SPEEDS = [0.5, 1, 1.5, 2];
     const newSeed = () => 1 + Math.floor(Math.random() * 2147483645);
     const RESUME_MAX_AGE = 7 * 86400000;
@@ -569,6 +452,9 @@
       return h('span', { class: `tf-switch${on ? ' on' : ''}`, role: 'switch', 'aria-checked': String(!!on) }, h('span'));
     }
 
+    // The feed is the shared player (public/hub/shared/feed-player.js); this
+    // is TikShortis' part of it: the query, the address, the saved place, the
+    // card's rail and caption, and every sheet and call behind them.
     function viewFeed(r, scoped) {
       const gen = generation;
       const p = r.params;
@@ -595,7 +481,7 @@
       let seed = restore ? restore.seed : SEEDED.has(sort) ? newSeed() : null;
       // New, Following and Liked page by clip id, so a deep link can also
       // load the clips above it (`after`); the others page by offset.
-      let byId = !SEEDED.has(sort);
+      const byId = !SEEDED.has(sort);
       const inPlaylist = !!scope.playlist;
       // The address the feed keeps up to date (the current clip goes in
       // `focus`); a mode switch replaces it.
@@ -603,197 +489,6 @@
       baseParams.delete('path');
       const subPath = r.sub.length ? `/${r.sub.map(enc).join('/')}` : '';
 
-      const F = {
-        token: 0, // bumps when the feed is reset in place: late pages are dropped
-        items: [],
-        cards: [],
-        ids: new Set(),
-        cursor: restore ? restore.cursor : focus ? focus + 1 : null,
-        hasMore: true,
-        loading: false,
-        errors: 0,
-        retryAt: 0,
-        prev: focus && byId ? focus : null,
-        hasPrev: !!(focus && byId),
-        loadingPrev: false,
-        active: -1,
-        soundBlocked: false,
-        fullscreen: false,
-        firstPage: true,
-        // The clip to start on when a saved shuffle is continued.
-        restoreFocus: restore ? restore.focus : null,
-      };
-      document.body.classList.add('tik-feed');
-
-      const scroller = h('div', { class: 'tf-scroll', tabindex: '-1' });
-      const status = h('div', { class: 'tf-status' });
-      const topSentinel = h('div', { class: 'tf-sentinel tf-sentinel-top', 'aria-hidden': 'true' });
-      const bottomSentinel = h('div', { class: 'tf-sentinel', 'aria-hidden': 'true' });
-      scroller.append(topSentinel, bottomSentinel);
-
-      // ---- Sound ----
-      function setMuted(m) {
-        S.muted = m;
-        F.soundBlocked = false;
-        store.set(KEYS.soundLast, m ? 'muted' : 'on');
-        for (const c of F.cards) paintSound(c);
-        const c = F.cards[F.active];
-        if (c) c.video.muted = m;
-      }
-      // The browser refused sound before the first touch: the next touch
-      // that is not the speaker button brings the wanted sound back.
-      const unblock = (e) => {
-        if (!F.soundBlocked || (e.target.closest && e.target.closest('[data-sound-toggle]'))) return;
-        F.soundBlocked = false;
-        const c = F.cards[F.active];
-        if (c && !S.muted) { c.video.muted = false; }
-      };
-      document.addEventListener('pointerdown', unblock, true);
-      onLeave(() => document.removeEventListener('pointerdown', unblock, true));
-
-      // ---- Top left: the Grabbit menu (Grabbit's own control) ----
-      const sideBtn = h('button', { type: 'button', class: 'tf-cbtn tf-side', onclick: () => hub.toggleSide() });
-      function paintSide() {
-        const open = hub.sideOpen();
-        fill(sideBtn, lu(open ? 'panelLeftClose' : 'panelLeft', 18));
-        sideBtn.setAttribute('aria-label', open ? 'Hide the Grabbit menu' : 'Show the Grabbit menu');
-        sideBtn.setAttribute('aria-expanded', String(open));
-      }
-      paintSide();
-      window.addEventListener('grabbit:side', paintSide);
-      onLeave(() => window.removeEventListener('grabbit:side', paintSide));
-
-      // ---- Top centre: the feed selector ("For You v") ----
-      const menus = []; // open-state closers for Escape and outside clicks
-      let modeBox;
-      let paintMode = () => {};
-      if (mainFeed) {
-        const btn = h('button', { type: 'button', class: 'tf-pill tf-mode-btn', 'aria-haspopup': 'menu', 'aria-expanded': 'false' });
-        const menu = h('div', { class: 'tf-mode-menu', role: 'menu', hidden: true });
-        modeBox = h('div', { class: 'tf-modebox' }, btn, menu);
-        const setOpen = (v) => {
-          // Closing with the focus inside: hand it back to the button, never
-          // leave it on a hidden item.
-          const inside = !v && menu.contains(document.activeElement);
-          menu.hidden = !v;
-          btn.setAttribute('aria-expanded', String(v));
-          modeBox.classList.toggle('open', v);
-          if (inside) btn.focus({ preventScroll: true });
-        };
-        // Up and Down move between the items, as in any menu.
-        menu.addEventListener('keydown', (e) => {
-          if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-          e.preventDefault();
-          const items = [...menu.querySelectorAll('[role=menuitemradio]')];
-          const i = items.indexOf(document.activeElement);
-          const next = items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length];
-          if (next) next.focus();
-        });
-        menus.push(() => { if (!menu.hidden) { setOpen(false); return true; } return false; });
-        btn.addEventListener('click', () => setOpen(menu.hidden));
-        const item = (label, cur, pick) => h('button', { type: 'button', class: 'tf-mode-item', role: 'menuitemradio', 'aria-checked': String(cur), onclick: () => { setOpen(false); pick(); } }, label);
-        paintMode = () => {
-          fill(btn, h('span', null, labelOf(MODES, sort)), length !== 'all' ? h('span', { class: 'tf-mode-len' }, `· ${labelOf(LENGTHS, length)}`) : null, lu('chevronDown', 15, 2, 'tf-chev'));
-          btn.setAttribute('aria-label', `Feed: ${labelOf(MODES, sort)}${length !== 'all' ? `, ${labelOf(LENGTHS, length)}` : ''}`);
-          // Length is a second axis that narrows whichever order is picked,
-          // so it sits below its own divider (as in TikShortis).
-          fill(menu,
-            MODES.map(([m, label]) => item(label, m === sort, () => switchFeed(m, length))),
-            h('div', { class: 'tf-mode-sep', role: 'separator' }),
-            LENGTHS.map(([l, label]) => item(label, l === length, () => switchFeed(sort, l))));
-        };
-        paintMode();
-      } else {
-        // A tag, profile or playlist feed: no selector, a way back instead.
-        modeBox = h('div', { class: 'tf-modebox' },
-          h('a', { class: 'tf-pill tf-back', href: scopeBackHref(scope) }, lu('chevronLeft', 15), h('span', null, scopeLabel(scope))));
-      }
-
-      // ---- Top right: the view controls, collapsed to one chevron ----
-      let ctlOpen = false;
-      const ctlToggle = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => { ctlOpen = !ctlOpen; paintCtl(); } });
-      const fsBtn = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => toggleFullscreen() });
-      const chromeBtn = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => toggleChrome() });
-      const autoBtn = h('button', { type: 'button', class: 'tf-cbtn', onclick: () => toggleAutoScroll() });
-      const ctlBox = h('div', { class: 'tf-ctl' }, ctlToggle, fsBtn, chromeBtn, autoBtn);
-      function paintCtl() {
-        fill(ctlToggle, lu(ctlOpen ? 'chevronsUp' : 'chevronsDown', 18));
-        ctlToggle.setAttribute('aria-label', ctlOpen ? 'Collapse controls' : 'Expand controls');
-        ctlToggle.setAttribute('aria-expanded', String(ctlOpen));
-        fsBtn.hidden = chromeBtn.hidden = autoBtn.hidden = !ctlOpen;
-        fill(fsBtn, lu(F.fullscreen ? 'minimize' : 'maximize', 18));
-        fsBtn.setAttribute('aria-label', F.fullscreen ? 'Exit fullscreen' : 'Fullscreen');
-        fill(chromeBtn, lu(S.chromeHidden ? 'eyeOff' : 'eye', 18));
-        chromeBtn.setAttribute('aria-label', S.chromeHidden ? 'Show overlay' : 'Clear display');
-        fill(autoBtn, lu('chevronsDown', 18));
-        autoBtn.classList.toggle('on', S.autoScroll);
-        autoBtn.setAttribute('aria-label', 'Auto-scroll');
-        autoBtn.setAttribute('aria-pressed', String(S.autoScroll));
-      }
-      paintCtl();
-
-      const resumeBox = h('div', { class: 'tf-resume', hidden: true });
-      const hintEl = h('div', { class: 'tf-hint', hidden: true, role: 'status' }, 'Long-press a clip for the menu');
-      const root = h('div', { class: `tf${S.chromeHidden ? ' clean' : ''}` }, scroller, status, sideBtn, modeBox, ctlBox, resumeBox, hintEl);
-
-      const onDocDown = (e) => {
-        if (modeBox.contains(e.target)) return;
-        for (const close of menus) close();
-      };
-      document.addEventListener('pointerdown', onDocDown, true);
-      onLeave(() => document.removeEventListener('pointerdown', onDocDown, true));
-
-      // ---- View toggles ----
-      function toggleChrome() {
-        S.chromeHidden = !S.chromeHidden;
-        store.set(KEYS.chrome, S.chromeHidden ? '1' : null);
-        root.classList.toggle('clean', S.chromeHidden);
-        if (S.chromeHidden) {
-          hintEl.hidden = false;
-          setTimeout(() => { hintEl.hidden = true; }, 2500);
-        }
-        paintCtl();
-      }
-      function toggleAutoScroll() {
-        S.autoScroll = !S.autoScroll;
-        store.set(KEYS.autoScroll, S.autoScroll ? '1' : null);
-        for (const x of F.cards) x.video.loop = !S.autoScroll;
-        paintCtl();
-      }
-      // Fullscreen is the whole document, as in TikShortis: the sheets,
-      // menus and toasts are children of <body>, and a fullscreen element
-      // only shows what sits inside it. The page itself hides the Grabbit
-      // menu, the top bar and the bottom bar (body.tik-immersive) and puts
-      // them back as they were on the way out.
-      function setImmersive(on) {
-        F.fullscreen = on;
-        document.body.classList.toggle('tik-immersive', on);
-        if (on) hub.closeMenu();
-        paintCtl();
-        window.dispatchEvent(new Event('grabbit:side'));
-      }
-      function toggleFullscreen() {
-        const de = document.documentElement;
-        if (!F.fullscreen) {
-          setImmersive(true);
-          // Best effort: iPhone Safari has no element fullscreen; the page
-          // still fills the screen without the browser's own bars hidden.
-          const req = de.requestFullscreen || de.webkitRequestFullscreen;
-          if (req) { try { const pr = req.call(de); if (pr && pr.catch) pr.catch(() => {}); } catch { /* not allowed */ } }
-        } else {
-          setImmersive(false);
-          const el = document.fullscreenElement || document.webkitFullscreenElement;
-          const exit = document.exitFullscreen || document.webkitExitFullscreen;
-          if (el && exit) { try { const pr = exit.call(document); if (pr && pr.catch) pr.catch(() => {}); } catch { /* ignore */ } }
-        }
-      }
-      // Leaving fullscreen through the browser (Esc, the Back gesture) ends
-      // the immersive view too.
-      const onFs = () => { if (!(document.fullscreenElement || document.webkitFullscreenElement) && F.fullscreen) setImmersive(false); };
-      document.addEventListener('fullscreenchange', onFs);
-      document.addEventListener('webkitfullscreenchange', onFs);
-
-      // ---- Loading pages ----
       function feedQuery(extra) {
         const q = new URLSearchParams({ channel: 'main' });
         for (const [k, v] of Object.entries(scope)) q.set(k, String(v));
@@ -803,183 +498,85 @@
         for (const [k, v] of Object.entries(extra || {})) if (v != null) q.set(k, String(v));
         return `shorts/feed?${q}`;
       }
-      const current = (tok) => live(gen) && tok === F.token;
-      async function loadMore() {
-        if (F.loading || !F.hasMore || Date.now() < F.retryAt) return;
-        const tok = F.token;
-        const pageAt = F.cursor;
-        F.loading = true;
-        paintStatus();
-        try {
-          const d = await call(feedQuery({ cursor: pageAt }));
-          if (!current(tok)) return;
-          F.errors = 0;
-          let fresh = (d.items || []).filter((s) => s && Number.isInteger(s.id) && !F.ids.has(s.id));
-          if (F.restoreFocus !== null) {
-            // Continuing a saved shuffle: start on the clip the viewer was
-            // on (the ones before it on that page were already watched). A
-            // shuffle that no longer reaches that far starts over.
-            const at = fresh.findIndex((s) => s.id === F.restoreFocus);
-            F.restoreFocus = null;
-            if (!fresh.length && !F.cards.length) { switchFeed(sort, length, true); return; }
-            if (at > 0) fresh = fresh.slice(at);
-          }
-          for (const s of fresh) addCard(s, false, pageAt);
-          F.cursor = d.nextCursor;
-          F.hasMore = d.nextCursor !== null && d.nextCursor !== undefined;
-          if (F.active < 0 && F.cards.length) {
-            pickActive();
-            if (F.firstPage) { if (restore) offerReshuffle(); else offerResume(); }
-            F.firstPage = false;
-            // The top sentinel was already in view before the first page
-            // came, so its observer will not fire again: ask once here.
-            loadPrev();
-          }
-        } catch (e) {
-          if (!current(tok)) return;
-          F.errors++;
-          F.retryAt = Date.now() + Math.min(30000, 2 ** F.errors * 1000);
-          F.lastError = e.message;
-        } finally {
-          if (current(tok)) { F.loading = false; paintStatus(); }
-        }
-      }
-      // Clips above the top one, after a focus deep link (id-paged orders).
-      async function loadPrev() {
-        if (!byId || F.loadingPrev || !F.hasPrev || F.prev === null || !F.cards.length) return;
-        const tok = F.token;
-        F.loadingPrev = true;
-        try {
-          const d = await call(feedQuery({ after: F.prev }));
-          if (!current(tok)) return;
-          const firstCard = F.cards[0];
-          const delta = firstCard.el.offsetTop - scroller.scrollTop;
-          const fresh = (d.items || []).filter((s) => s && Number.isInteger(s.id) && !F.ids.has(s.id));
-          for (const s of fresh.reverse()) addCard(s, true);
-          F.prev = d.nextCursor;
-          F.hasPrev = d.nextCursor !== null && d.nextCursor !== undefined;
-          // Keep the clip on screen exactly where it was.
-          scroller.scrollTop = firstCard.el.offsetTop - delta;
-          pickActive();
-        } catch {
-          if (current(tok)) F.hasPrev = false;
-        } finally {
-          if (current(tok)) F.loadingPrev = false;
-        }
-      }
-      function paintStatus() {
-        if (F.cards.length) {
-          status.hidden = !(F.loading || (F.errors && F.hasMore));
-          status.classList.add('more');
-          fill(status, F.loading ? h('span', { class: 'tf-spin', 'aria-label': 'Loading' }) : h('span', null, 'Could not load more. ', h('button', { type: 'button', class: 'linkish', onclick: () => { F.retryAt = 0; loadMore(); } }, 'Try again')));
-          return;
-        }
-        status.hidden = false;
-        status.classList.remove('more');
-        if (F.loading) fill(status, h('span', { class: 'tf-spin', 'aria-label': 'Loading' }));
-        else if (F.errors) fill(status, h('p', null, 'Could not load the feed.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => { F.retryAt = 0; F.errors = 0; loadMore(); } }, 'Try again'));
-        else if (sort === 'following') fill(status, h('p', null, 'Nothing from creators you follow.'), h('p', { class: 'small' }, 'TikShortis has no follow button yet; this list only holds follows carried over from the old app.'));
-        else fill(status, h('p', null, 'No clips yet.'), h('a', { class: 'tf-sbtn rose', href: link('upload') }, 'Upload the first one'));
-      }
       // A new order or length, in place: no navigation, so fullscreen and the
       // sheets' history entry survive, and the address is replaced (Back
       // leaves the feed, as in TikShortis).
       function switchFeed(nextSort, nextLength, reshuffle) {
         if (!reshuffle && nextSort === sort && nextLength === length) return;
-        F.token++;
-        const c = F.cards[F.active];
-        if (c) deactivate(c);
-        for (const x of F.cards) { unload(x); activeObserver.unobserve(x.el); x.el.remove(); }
-        Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1, restoreFocus: null });
-        sort = nextSort;
-        length = nextLength;
-        seed = SEEDED.has(sort) ? newSeed() : null;
-        byId = !SEEDED.has(sort);
-        resumeBox.hidden = true;
-        baseParams = new URLSearchParams();
-        if (sort !== 'foryou') baseParams.set('sort', sort);
-        if (length !== 'all') baseParams.set('length', length);
-        hub.replaceHash(`${BASE}${subPath}${baseParams.toString() ? `?${baseParams}` : ''}`);
-        scroller.scrollTop = 0;
-        paintMode();
-        paintStatus();
-        loadMore();
-      }
-
-      // ---- Cards ----
-      function addCard(s, atTop, pageAt) {
-        F.ids.add(s.id);
-        const c = buildCard(s);
-        // The offset cursor of the page the clip came in (seeded orders), so
-        // the saved place can load that page again.
-        c.pageAt = Number.isInteger(pageAt) ? pageAt : null;
-        if (atTop) {
-          F.items.unshift(s);
-          F.cards.unshift(c);
-          if (F.active >= 0) F.active++;
-          topSentinel.after(c.el);
-        } else {
-          F.items.push(s);
-          F.cards.push(c);
-          bottomSentinel.before(c.el);
-        }
-        activeObserver.observe(c.el);
-      }
-      function removeCard(c) {
-        const i = F.cards.indexOf(c);
-        if (i < 0) return -1;
-        deactivate(c);
-        unload(c);
-        activeObserver.unobserve(c.el);
-        c.el.remove();
-        F.cards.splice(i, 1);
-        F.items.splice(i, 1);
-        F.ids.delete(c.s.id);
-        if (F.active === i) F.active = -1;
-        else if (F.active > i) F.active--;
-        requestAnimationFrame(pickActive);
-        if (!F.cards.length) paintStatus();
-        return i;
-      }
-      function reinsert(c, i) {
-        F.ids.add(c.s.id);
-        const before = F.cards[i];
-        (before ? before.el : bottomSentinel).before(c.el);
-        F.cards.splice(i, 0, c);
-        F.items.splice(i, 0, c.s);
-        if (F.active >= i) F.active++;
-        activeObserver.observe(c.el);
-        status.hidden = true;
-        c.el.scrollIntoView({ block: 'start' });
-      }
-
-      function buildCard(s) {
-        const parts = splitCaption(s.caption);
-        const video = h('video', {
-          class: 'tf-video',
-          playsinline: true,
-          'webkit-playsinline': true,
-          preload: 'none',
-          loop: !S.autoScroll,
-          poster: posterOf(s),
-          'data-media-bg': '1',
-          'aria-label': parts.title || 'Clip',
+        P.reload(() => {
+          sort = nextSort;
+          length = nextLength;
+          seed = SEEDED.has(sort) ? newSeed() : null;
+          baseParams = new URLSearchParams();
+          if (sort !== 'foryou') baseParams.set('sort', sort);
+          if (length !== 'all') baseParams.set('length', length);
+          hub.replaceHash(`${BASE}${subPath}${baseParams.toString() ? `?${baseParams}` : ''}`);
         });
-        video.muted = true;
-        const c = { s, video, maxTime: 0, lastTime: 0, completed: false, scrubbing: false, wantPlay: false };
+      }
 
-        // Overlays in the middle of the clip.
-        c.burst = h('span', { class: 'tf-burst', hidden: true, 'aria-hidden': 'true' }, lu('heart', 96));
-        c.seekHint = h('div', { class: 'tf-seekhint', hidden: true, 'aria-hidden': 'true' });
-        c.playIcon = h('span', { class: 'tf-paused', hidden: true, 'aria-hidden': 'true' }, h('span', null, lu('play', 40)));
+      const P = window.GrabbitShared.feedPlayer({
+        h,
+        icon: lu,
+        sheets: SH,
+        store,
+        storeKeys: { soundLast: KEYS.soundLast, autoScroll: KEYS.autoScroll, chrome: KEYS.chrome, resume: KEYS.resume },
+        prefs: S,
+        side: { toggle: () => hub.toggleSide(), isOpen: () => hub.sideOpen() },
+        closeMenu: () => hub.closeMenu(),
+        onLeave,
+        start: {
+          cursor: restore ? restore.cursor : focus ? focus + 1 : null,
+          prev: focus && byId ? focus : null,
+          // The clip to start on when a saved shuffle is continued.
+          restoreFocus: restore ? restore.focus : null,
+        },
+        load: (extra) => call(feedQuery(extra)),
+        // Top centre: the feed selector ("For You v") on the main feed.
+        selector: mainFeed ? ({ btn, menu, item }) => {
+          fill(btn, h('span', null, labelOf(MODES, sort)), length !== 'all' ? h('span', { class: 'tf-mode-len' }, `· ${labelOf(LENGTHS, length)}`) : null, lu('chevronDown', 15, 2, 'tf-chev'));
+          btn.setAttribute('aria-label', `Feed: ${labelOf(MODES, sort)}${length !== 'all' ? `, ${labelOf(LENGTHS, length)}` : ''}`);
+          // Length is a second axis that narrows whichever order is picked,
+          // so it sits below its own divider (as in TikShortis).
+          fill(menu,
+            MODES.map(([m, label]) => item(label, m === sort, () => switchFeed(m, length))),
+            h('div', { class: 'tf-mode-sep', role: 'separator' }),
+            LENGTHS.map(([l, label]) => item(label, l === length, () => switchFeed(sort, l))));
+        } : null,
+        // A tag, profile or playlist feed: no selector, a way back instead.
+        back: mainFeed ? null : h('a', { class: 'tf-pill tf-back', href: scopeBackHref(scope) }, lu('chevronLeft', 15), h('span', null, scopeLabel(scope))),
+        empty: () => (sort === 'following'
+          ? [h('p', null, 'Nothing from creators you follow.'), h('p', { class: 'small' }, 'TikShortis has no follow button yet; this list only holds follows carried over from the old app.')]
+          : [h('p', null, 'No clips yet.'), h('a', { class: 'tf-sbtn rose', href: link('upload') }, 'Upload the first one')]),
+        card: cardBody,
+        paintSound,
+        videoSrc: (s) => videoOf(s.id),
+        poster: posterOf,
+        onDoubleTap: (c) => toggleLike(c, true),
+        onLongPress: (c) => openMore(c),
+        // Keep the current clip in the address (a reload or Back lands here).
+        onActive: (c) => {
+          const q = new URLSearchParams(baseParams);
+          q.set('focus', String(c.s.id));
+          hub.replaceHash(`${BASE}${subPath}?${q}`);
+        },
+        resumeEntry: (c) => {
+          if (!mainFeed) return null;
+          const saved = { focus: c.s.id, at: Date.now() };
+          if (SEEDED.has(sort)) Object.assign(saved, { sort, length, seed, cursor: c.pageAt });
+          return saved;
+        },
+        onFirstPage: () => { if (restore) offerReshuffle(); else offerResume(); },
+        // A shuffle that no longer reaches the saved clip starts over.
+        onRestoreMiss: () => switchFeed(sort, length, true),
+        onWatched: (c, watchMs, completed) => queueView(c.s.id, watchMs, completed),
+        onTabHidden: flushViews,
+        keys: { l: (c) => toggleLike(c, false), s: (c) => openSave(c) },
+      });
 
-        // Timeline: drag anywhere on the strip; the time shows while dragging.
-        c.tlFill = h('div', { class: 'tf-tl-fill' });
-        c.tlKnob = h('div', { class: 'tf-tl-knob' });
-        c.tlBar = h('div', { class: 'tf-tl-bar' }, c.tlFill, c.tlKnob);
-        c.tlTime = h('div', { class: 'tf-tl-time', hidden: true });
-        c.timeline = h('div', { class: 'tf-tl', role: 'slider', tabindex: '0', 'aria-label': 'Seek', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' }, c.tlTime, c.tlBar);
-        attachTimeline(c);
+      // ---- The card: rail, caption, admin tools ----
+      function cardBody(c) {
+        const s = c.s;
+        const parts = splitCaption(s.caption);
 
         // Right rail, in TikShortis' order.
         c.likeBtn = railBtn('heart', '0', () => toggleLike(c, false), { aria: 'Like' });
@@ -987,7 +584,7 @@
         c.saveBtn = railBtn('listVideo', 'Playlists', () => openSave(c), { aria: 'Playlists' });
         const shareBtn = railBtn('share2', 'Share', () => openShare(c));
         const dlBtn = railBtn('download', 'Download', null, { href: `${videoOf(s.id)}?download=1` });
-        c.soundBtn = railBtn(S.muted ? 'volumeX' : 'volume2', S.muted ? 'Muted' : 'Sound', () => setMuted(!S.muted), { sound: true });
+        c.soundBtn = railBtn(S.muted ? 'volumeX' : 'volume2', S.muted ? 'Muted' : 'Sound', () => P.setMuted(!S.muted), { sound: true });
         const moreBtn = railBtn('moreVertical', 'More', () => openMore(c));
         const rail = h('div', { class: 'tf-rail' }, c.likeBtn.el, c.commentBtn.el, c.saveBtn.el, shareBtn.el, dlBtn.el, c.soundBtn.el, moreBtn.el);
 
@@ -1029,34 +626,8 @@
           : [];
         c.privateEl = h('div', { class: 'tf-private', hidden: !(s.is_private && (isOwner(s) || isAdmin())) }, lu('lock', 12), 'Private');
         c.aiEl = h('div', { class: 'tf-ai', hidden: true, onclick: () => { c.aiEl.hidden = true; } });
-
-        c.el = h('section', { class: 'tf-card', 'data-id': String(s.id) },
-          video, ...admin, c.privateEl, c.aiEl, c.burst, c.seekHint, c.playIcon,
-          h('div', { class: 'tf-scrim', 'aria-hidden': 'true' }), c.timeline, rail, info);
         paintCounts(c);
-
-        video.addEventListener('timeupdate', () => {
-          const t = video.currentTime;
-          const d = video.duration;
-          if (t > c.maxTime) c.maxTime = t;
-          if (Number.isFinite(d) && d > 0) {
-            if (t >= d * 0.95) c.completed = true;
-            // A loop wrap from near the end counts as watched through.
-            if (c.lastTime >= d * 0.9 && t < c.lastTime - 1) c.completed = true;
-            if (!c.scrubbing) paintProgress(c, t / d);
-          }
-          c.lastTime = t;
-        });
-        video.addEventListener('ended', () => {
-          c.completed = true;
-          // Not under an open sheet: the sheet's Back entry would then point
-          // at the clip before.
-          if (S.autoScroll && F.cards[F.active] === c) { if (sheets.length) c.advanceOnClose = true; else step(1); }
-        });
-        video.addEventListener('play', () => { c.playIcon.hidden = true; });
-        video.addEventListener('pause', () => { c.playIcon.hidden = F.cards[F.active] !== c; });
-        attachGestures(c);
-        return c;
+        return { label: parts.title, top: [...admin, c.privateEl, c.aiEl], bottom: [rail, info] };
       }
       function paintCounts(c) {
         const s = c.s;
@@ -1073,229 +644,14 @@
         c.soundBtn.text.textContent = S.muted ? 'Muted' : 'Sound';
         c.soundBtn.el.setAttribute('aria-label', S.muted ? 'Turn sound on' : 'Mute');
       }
-      function paintProgress(c, frac) {
-        const pct = Math.max(0, Math.min(1, frac || 0)) * 100;
-        c.tlFill.style.width = `${pct}%`;
-        c.tlKnob.style.left = `${pct}%`;
-        c.timeline.setAttribute('aria-valuenow', String(Math.round(pct)));
-        const d = c.video.duration;
-        if (Number.isFinite(d) && d > 0) c.timeline.setAttribute('aria-valuetext', `${clock((pct / 100) * d)} of ${clock(d)}`);
-        if (c.scrubbing && Number.isFinite(d) && d > 0) c.tlTime.textContent = `${clock((pct / 100) * d)} / ${clock(d)}`;
-      }
-      function attachTimeline(c) {
-        const tl = c.timeline;
-        const seekTo = (clientX) => {
-          const v = c.video;
-          const d = v.duration;
-          const rect = c.tlBar.getBoundingClientRect();
-          const frac = rect.width ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) : 0;
-          if (Number.isFinite(d) && d > 0) v.currentTime = frac * d;
-          paintProgress(c, frac);
-        };
-        const end = (e) => {
-          if (!c.scrubbing) return;
-          c.scrubbing = false;
-          tl.classList.remove('scrub');
-          c.tlTime.hidden = true;
-          if (e) e.stopPropagation();
-        };
-        tl.addEventListener('pointerdown', (e) => {
-          e.stopPropagation();
-          c.scrubbing = true;
-          tl.classList.add('scrub');
-          c.tlTime.hidden = !(Number.isFinite(c.video.duration) && c.video.duration > 0);
-          try { tl.setPointerCapture(e.pointerId); } catch { /* old browser */ }
-          seekTo(e.clientX);
-        });
-        tl.addEventListener('pointermove', (e) => { if (c.scrubbing) { e.stopPropagation(); seekTo(e.clientX); } });
-        tl.addEventListener('pointerup', end);
-        tl.addEventListener('pointercancel', end);
-        // Keyboard: Left and Right step five seconds.
-        tl.addEventListener('keydown', (e) => {
-          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-          e.preventDefault();
-          e.stopPropagation();
-          const v = c.video;
-          if (!(Number.isFinite(v.duration) && v.duration > 0)) return;
-          v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + (e.key === 'ArrowRight' ? 5 : -5)));
-          paintProgress(c, v.currentTime / v.duration);
-        });
-      }
-
-      // ---- Gestures: tap, double tap, long press ----
-      function attachGestures(c) {
-        let tapTimer = null;
-        let lastTap = 0;
-        let press = null;
-        let long = false;
-        let start = null;
-        const onControl = (e) => !!(e.target.closest && e.target.closest('a, button, input, .tf-info, .tf-tl, .tf-rail, .tf-ai'));
-        c.el.addEventListener('pointerdown', (e) => {
-          if (onControl(e) || e.button > 0) return;
-          start = { x: e.clientX, y: e.clientY };
-          long = false;
-          press = setTimeout(() => { press = null; long = true; }, 550);
-        });
-        c.el.addEventListener('pointermove', (e) => {
-          if (!start) return;
-          if (Math.abs(e.clientX - start.x) > 10 || Math.abs(e.clientY - start.y) > 10) { clearTimeout(press); press = null; start = null; }
-        });
-        c.el.addEventListener('pointercancel', () => { clearTimeout(press); press = null; start = null; });
-        c.el.addEventListener('contextmenu', (e) => { if (!onControl(e)) e.preventDefault(); });
-        c.el.addEventListener('pointerup', (e) => {
-          if (!start) return;
-          start = null;
-          clearTimeout(press);
-          press = null;
-          // The player menu opens on release, as in TikShortis.
-          if (long) { long = false; openMore(c); return; }
-          const rect = c.el.getBoundingClientRect();
-          const x = rect.width ? (e.clientX - rect.left) / rect.width : 0.5;
-          const now = Date.now();
-          if (tapTimer && now - lastTap < 260) {
-            clearTimeout(tapTimer);
-            tapTimer = null;
-            // Outer thirds seek, the middle likes.
-            if (x > 0.65) skip(c, SEEK_SECONDS);
-            else if (x < 0.35) skip(c, -SEEK_SECONDS);
-            else toggleLike(c, true);
-            return;
-          }
-          lastTap = now;
-          tapTimer = setTimeout(() => { tapTimer = null; togglePlay(c); }, 220);
-        });
-      }
-      function skip(c, by) {
-        const v = c.video;
-        const d = Number.isFinite(v.duration) ? v.duration : Infinity;
-        v.currentTime = Math.max(0, Math.min(d - 0.1, v.currentTime + by));
-        fill(c.seekHint, lu(by > 0 ? 'fastForward' : 'rewind', 28), h('span', null, `${by > 0 ? '+' : '-'}${Math.abs(by)}s`));
-        c.seekHint.classList.toggle('fwd', by > 0);
-        c.seekHint.classList.toggle('back', by < 0);
-        c.seekHint.hidden = false;
-        clearTimeout(c.seekTimer);
-        c.seekTimer = setTimeout(() => { c.seekHint.hidden = true; }, 600);
-      }
-      function togglePlay(c) {
-        if (F.cards[F.active] !== c) return;
-        if (c.video.paused) play(c); else { c.wantPlay = false; c.video.pause(); }
-      }
-
-      // ---- Active card, preloading, playback ----
-      const activeObserver = new IntersectionObserver((entries) => {
-        for (const en of entries) {
-          if (!en.isIntersecting || en.intersectionRatio < 0.6) continue;
-          const i = F.cards.findIndex((c) => c.el === en.target);
-          if (i >= 0) setActive(i);
-        }
-      }, { root: scroller, threshold: [0.6] });
-      const edgeObserver = new IntersectionObserver((entries) => {
-        for (const en of entries) {
-          if (!en.isIntersecting) continue;
-          if (en.target === bottomSentinel) loadMore();
-          else if (en.target === topSentinel) loadPrev();
-        }
-      }, { root: scroller, rootMargin: '600px 0px 400px 0px' });
-      edgeObserver.observe(bottomSentinel);
-      edgeObserver.observe(topSentinel);
-      // The sidebar opening or closing, fullscreen and a rotation change the
-      // feed's size: keep the current clip snapped in place.
-      let lastHeight = 0;
-      const resizeObserver = new ResizeObserver(() => {
-        const hgt = scroller.clientHeight;
-        if (hgt === lastHeight) return;
-        lastHeight = hgt;
-        const c = F.cards[F.active];
-        if (c) scroller.scrollTop = c.el.offsetTop;
-      });
-      resizeObserver.observe(scroller);
-      function pickActive() {
-        const top = scroller.getBoundingClientRect().top;
-        let best = -1;
-        let bestDist = Infinity;
-        F.cards.forEach((c, i) => {
-          const dist = Math.abs(c.el.getBoundingClientRect().top - top);
-          if (dist < bestDist) { bestDist = dist; best = i; }
-        });
-        if (best >= 0) setActive(best, true);
-      }
-      function setActive(i, force) {
-        if (i === F.active && !force) return;
-        const old = F.cards[F.active];
-        if (old && old !== F.cards[i]) deactivate(old);
-        F.active = i;
-        F.cards.forEach((c, j) => {
-          if (Math.abs(j - i) <= NEAR) {
-            c.video.preload = j === i || j === i + 1 ? 'auto' : 'metadata';
-            if (!c.video.getAttribute('src')) c.video.src = videoOf(c.s.id);
-          } else unload(c);
-        });
-        const c = F.cards[i];
-        if (!c) return;
-        play(c);
-        for (const x of F.cards) x.playIcon.hidden = true;
-        // Keep the current clip in the address (a reload or Back lands here).
-        const q = new URLSearchParams(baseParams);
-        q.set('focus', String(c.s.id));
-        hub.replaceHash(`${BASE}${subPath}?${q}`);
-        if (mainFeed) {
-          const saved = { focus: c.s.id, at: Date.now() };
-          if (SEEDED.has(sort)) Object.assign(saved, { sort, length, seed, cursor: c.pageAt });
-          store.set(KEYS.resume, JSON.stringify(saved));
-        }
-        if (i >= F.cards.length - 3) loadMore();
-      }
-      function play(c) {
-        const v = c.video;
-        if (!v.getAttribute('src')) v.src = videoOf(c.s.id);
-        v.muted = S.muted;
-        v.defaultPlaybackRate = S.speed;
-        v.playbackRate = S.speed;
-        v.loop = !S.autoScroll;
-        c.wantPlay = true;
-        const pr = v.play();
-        if (pr && pr.catch) {
-          pr.catch((e) => {
-            if (!c.wantPlay || F.cards[F.active] !== c) return;
-            if (e && e.name === 'NotAllowedError' && !v.muted) {
-              v.muted = true;
-              F.soundBlocked = true;
-              v.play().catch(() => { c.playIcon.hidden = false; });
-            } else c.playIcon.hidden = false;
-          });
-        }
-      }
-      function deactivate(c) {
-        c.wantPlay = false;
-        c.video.pause();
-        if (c.video.getAttribute('src')) { try { c.video.currentTime = 0; } catch { /* not loaded */ } }
-        queueView(c.s.id, c.maxTime * 1000, c.completed);
-        c.maxTime = 0;
-        c.lastTime = 0;
-        c.completed = false;
-        c.playIcon.hidden = true;
-        paintProgress(c, 0);
-      }
-      // Drops the video source to free the decoder and the memory it holds.
-      function unload(c) {
-        if (!c.video.getAttribute('src')) return;
-        c.video.pause();
-        c.video.removeAttribute('src');
-        c.video.load();
-      }
-      function step(by) {
-        const next = F.cards[F.active + by];
-        if (next) next.el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
-      }
-
       // ---- Like, comments, playlists, share ----
       async function toggleLike(c, onlyLike) {
         const s = c.s;
-        if (onlyLike && s.viewer_liked) { heartBurst(c); return; }
+        if (onlyLike && s.viewer_liked) { P.burst(c); return; }
         const was = { liked: s.viewer_liked, count: s.like_count };
         s.viewer_liked = !was.liked;
         s.like_count = Math.max(0, (was.count || 0) + (s.viewer_liked ? 1 : -1));
-        if (s.viewer_liked) heartBurst(c);
+        if (s.viewer_liked) P.burst(c);
         paintCounts(c);
         try {
           const d = await call(`shorts/${s.id}/like`, { method: 'POST' });
@@ -1307,14 +663,6 @@
           fail(e);
         }
         paintCounts(c);
-      }
-      function heartBurst(c) {
-        c.burst.hidden = false;
-        c.burst.classList.remove('go');
-        void c.burst.offsetWidth;
-        c.burst.classList.add('go');
-        clearTimeout(c.burstTimer);
-        c.burstTimer = setTimeout(() => { c.burst.hidden = true; c.burst.classList.remove('go'); }, 700);
       }
       // TikShortis' comments sheet: "N comments", "@name text" rows, and a
       // round field with a send button.
@@ -1434,12 +782,12 @@
       function hideFromFeed(c, msg, undoable) {
         // In a playlist and in Liked the clip stays; elsewhere it leaves.
         if (inPlaylist || sort === 'liked') { c.s.viewer_hidden = true; say(msg); return; }
-        const i = removeCard(c);
+        const i = P.removeCard(c);
         say(msg, undoable ? { label: 'Undo', run: async () => {
           try {
             await call(`shorts/${c.s.id}/hide`, { method: 'DELETE' });
             c.s.viewer_hidden = false;
-            if (live(gen) && i >= 0) reinsert(c, Math.min(i, F.cards.length));
+            if (live(gen) && i >= 0) P.reinsert(c, Math.min(i, P.cards.length));
           } catch (e) { fail(e); }
         } } : null);
       }
@@ -1465,13 +813,11 @@
         const close = (fn) => () => { sheet.close(); fn(); };
         const speedBox = h('div', { class: 'tf-speeds', role: 'group', 'aria-label': 'Speed' });
         const paintSpeed = () => fill(speedBox, SPEEDS.map((r) => h('button', { type: 'button', class: `tf-speed${r === S.speed ? ' on' : ''}`, 'aria-pressed': String(r === S.speed), onclick: () => {
-          S.speed = r;
-          const cur = F.cards[F.active];
-          if (cur) { cur.video.defaultPlaybackRate = r; cur.video.playbackRate = r; }
+          P.setSpeed(r);
           paintSpeed();
         } }, `${r.toFixed(1)}×`)));
         paintSpeed();
-        const autoRow = moreRow('chevronsDown', 'Auto scroll', () => { toggleAutoScroll(); fill(autoRow.querySelector('.tf-row-t'), switchEl(S.autoScroll)); }, { trailing: switchEl(S.autoScroll) });
+        const autoRow = moreRow('chevronsDown', 'Auto scroll', () => { P.toggleAutoScroll(); fill(autoRow.querySelector('.tf-row-t'), switchEl(S.autoScroll)); }, { trailing: switchEl(S.autoScroll) });
         const pip = document.pictureInPictureEnabled && typeof HTMLVideoElement.prototype.requestPictureInPicture === 'function';
         const rows = [
           moreRow('download', 'Download', () => sheet.close(), { href: `${videoOf(s.id)}?download=1` }),
@@ -1480,10 +826,10 @@
           moreRow('flag', s.viewer_reported ? 'Reported' : 'Report', close(() => openReport(c))),
           h('div', { class: 'tf-sep' }),
           h('div', { class: 'tf-row tf-row-static' }, h('span', { class: 'tf-row-ic' }, lu('gauge', 18)), h('span', { class: 'tf-row-l' }, 'Speed'), speedBox),
-          moreRow('minimize2', S.chromeHidden ? 'Show overlay' : 'Clear display', close(toggleChrome)),
+          moreRow('minimize2', S.chromeHidden ? 'Show overlay' : 'Clear display', close(P.toggleChrome)),
           autoRow,
           pip ? moreRow('pip', 'Picture-in-Picture', close(() => { c.video.requestPictureInPicture().catch(() => say('Picture-in-Picture is not available')); })) : null,
-          moreRow(F.fullscreen ? 'minimize' : 'maximize', F.fullscreen ? 'Exit fullscreen' : 'Fullscreen', close(toggleFullscreen)),
+          moreRow(P.fullscreen ? 'minimize' : 'maximize', P.fullscreen ? 'Exit fullscreen' : 'Fullscreen', close(P.toggleFullscreen)),
         ];
         if (owner) {
           rows.push(
@@ -1496,12 +842,12 @@
             h('div', { class: 'tf-sep' }),
             moreRow('arrowRightLeft', 'Hand over to 18+', close(() => confirmSheet('Hand over to 18+?', 'The clip moves to the 18+ library and leaves TikShortis and every general feed. There is no way back from here.', 'Hand over', async () => {
               const d = await call(`shorts/${s.id}/channel`, { method: 'PATCH', body: { channel: '18plus' } });
-              removeCard(c);
+              P.removeCard(c);
               say(d.message || 'Handed over to 18+');
             }))),
             moreRow('trash2', 'Delete', close(() => confirmSheet('Delete this clip?', 'The video and its file are removed. This can’t be undone.', 'Delete', async () => {
               await call(`shorts/${s.id}`, { method: 'DELETE' });
-              removeCard(c);
+              P.removeCard(c);
               say('Deleted');
             })), { danger: true, icon: lu('trash2', 18, 2, 'red') }));
         }
@@ -1519,14 +865,14 @@
         c.privateEl.hidden = !(s.is_private && (isOwner(s) || isAdmin()));
       }
       function editHere(c) {
-        openEdit(c.s, (caption) => { c.s.caption = caption; swapCard(c, buildCard(c.s)); });
+        openEdit(c.s, (caption) => { c.s.caption = caption; P.rebuild(c); });
       }
       async function fetchTitle(c) {
         say('Fetching title…');
         try {
           const d = await call(`shorts/${c.s.id}/fetch-title`, { method: 'POST' });
           c.s.caption = d.caption;
-          swapCard(c, buildCard(c.s));
+          P.rebuild(c);
           say('Title updated');
         } catch (e) { fail(e); }
       }
@@ -1559,23 +905,6 @@
             h('button', { type: 'button', class: 'tf-sbtn light', onclick: () => sheet.close() }, 'Got it')),
         ], { size: 'narrow', bare: true });
       }
-      function swapCard(oldC, fresh) {
-        const i = F.cards.indexOf(oldC);
-        if (i < 0) return;
-        const wasActive = i === F.active;
-        const t = oldC.video.currentTime;
-        activeObserver.unobserve(oldC.el);
-        deactivate(oldC);
-        unload(oldC);
-        oldC.el.replaceWith(fresh.el);
-        F.cards[i] = fresh;
-        activeObserver.observe(fresh.el);
-        if (wasActive) {
-          fresh.video.src = videoOf(fresh.s.id);
-          fresh.video.addEventListener('loadedmetadata', () => { try { fresh.video.currentTime = t; } catch { /* ignore */ } }, { once: true });
-          play(fresh);
-        }
-      }
       // TikShortis' report sheet: a reason list, an optional note, Send.
       function openReport(c) {
         const s = c.s;
@@ -1607,68 +936,9 @@
         ], { size: 'narrow', bare: true });
       }
 
-      // ---- Keyboard ----
-      const onKey = (e) => {
-        if (e.key === 'Escape') {
-          // An open feed selector closes first.
-          for (const close of menus) if (close()) { e.preventDefault(); return; }
-          // No browser fullscreen to leave (refused or unsupported): Escape
-          // ends the page's own immersive view. Not when the same key just
-          // closed a sheet (its handler runs first and prevents the default).
-          if (F.fullscreen && !e.defaultPrevented && !sheets.length && !(document.fullscreenElement || document.webkitFullscreenElement)) { e.preventDefault(); toggleFullscreen(); return; }
-        }
-        if (e.metaKey || e.ctrlKey || e.altKey) return;
-        if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
-        // Space and the arrows belong to a focused control (a button, the
-        // feed selector), not to the player.
-        if ((e.key === ' ' || e.key.startsWith('Arrow')) && e.target.closest && e.target.closest('button, a[href], [role=menu], [role=listbox]')) return;
-        if (sheets.length || document.querySelector('[role=dialog][aria-modal=true]')) return;
-        const c = F.cards[F.active];
-        const k = e.key;
-        if (k === 'ArrowDown' || k === 'j' || k === 'PageDown') { e.preventDefault(); step(1); }
-        else if (k === 'ArrowUp' || k === 'k' || k === 'PageUp') { e.preventDefault(); step(-1); }
-        else if (k === ' ' && c) { e.preventDefault(); togglePlay(c); }
-        else if (k === 'm') setMuted(!S.muted);
-        else if (k === 'l' && c) toggleLike(c, false);
-        else if (k === 's' && c) openSave(c);
-        else if (k === 'f') toggleFullscreen();
-      };
-      document.addEventListener('keydown', onKey);
-      // A clip that ended under a sheet moves on once the sheet is closed.
-      const onSheetsClosed = () => {
-        const c = F.cards[F.active];
-        if (!c || !c.advanceOnClose) return;
-        c.advanceOnClose = false;
-        // After closeSheet() has taken the sheet's history entry back off
-        // (a setTimeout 0 plus the async history.back()); stepping sooner
-        // would write the next clip's address into that entry.
-        // A sheet opened in the meantime (menu -> Report) waits for its own close.
-        clearTimeout(advanceTimer);
-        advanceTimer = setTimeout(() => {
-          if (!live(gen) || !S.autoScroll || F.cards[F.active] !== c || !c.video.ended) return;
-          if (sheets.length) c.advanceOnClose = true; else step(1);
-        }, 150);
-      };
-      let advanceTimer = 0;
-      onLeave(() => clearTimeout(advanceTimer));
-      whenSheetsClosed.add(onSheetsClosed);
-      onLeave(() => whenSheetsClosed.delete(onSheetsClosed));
-
-      // ---- Pause when the tab is hidden; resume what was playing ----
-      const onVis = () => {
-        const c = F.cards[F.active];
-        if (!c) return;
-        if (document.hidden) { flushViews(); if (!c.video.paused) { c.resumeOnShow = true; c.video.pause(); } }
-        else if (c.resumeOnShow) { c.resumeOnShow = false; play(c); }
-      };
-      document.addEventListener('visibilitychange', onVis);
-
       // ---- Continued shuffle: a way to start a fresh one ----
       function offerReshuffle() {
-        fill(resumeBox, h('button', { type: 'button', class: 'tf-resume-btn', onclick: () => { resumeBox.hidden = true; switchFeed(sort, length, true); } }, lu('shuffle', 16), 'Shuffle again'));
-        resumeBox.hidden = false;
-        const t = setTimeout(() => { resumeBox.hidden = true; }, 15000);
-        onLeave(() => clearTimeout(t));
+        P.offer(h('button', { type: 'button', class: 'tf-resume-btn', onclick: () => { P.hideOffer(); switchFeed(sort, length, true); } }, lu('shuffle', 16), 'Shuffle again'));
       }
 
       // ---- Resume offer (main feed, no deep link) ----
@@ -1677,35 +947,11 @@
         let saved = null;
         try { saved = JSON.parse(store.get(KEYS.resume) || 'null'); } catch { saved = null; }
         if (!saved || !intOf(saved.focus) || !(Date.now() - saved.at < RESUME_MAX_AGE)) return;
-        if (F.items[0] && F.items[0].id === saved.focus) return;
-        fill(resumeBox, h('a', { class: 'tf-resume-btn', href: link('', { focus: saved.focus, sort: 'new' }), onclick: () => { resumeBox.hidden = true; } }, lu('history', 16), 'Continue where you left off'));
-        resumeBox.hidden = false;
-        const t = setTimeout(() => { resumeBox.hidden = true; }, 15000);
-        onLeave(() => clearTimeout(t));
+        if (P.items[0] && P.items[0].id === saved.focus) return;
+        P.offer(h('a', { class: 'tf-resume-btn', href: link('', { focus: saved.focus, sort: 'new' }), onclick: () => { P.hideOffer(); } }, lu('history', 16), 'Continue where you left off'));
       }
 
-      // ---- Leaving the page stops everything ----
-      onLeave(() => {
-        F.token++;
-        activeObserver.disconnect();
-        edgeObserver.disconnect();
-        resizeObserver.disconnect();
-        document.removeEventListener('keydown', onKey);
-        document.removeEventListener('visibilitychange', onVis);
-        document.removeEventListener('fullscreenchange', onFs);
-        document.removeEventListener('webkitfullscreenchange', onFs);
-        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-        else if (document.webkitFullscreenElement && document.webkitExitFullscreen) document.webkitExitFullscreen();
-        if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
-        const c = F.cards[F.active];
-        if (c) deactivate(c);
-        for (const x of F.cards) unload(x);
-        F.cards = [];
-      });
-
-      paintStatus();
-      loadMore();
-      return root;
+      return P.root;
     }
     function scopeLabel(scope) {
       if (scope.tag) return `#${scope.tag}`;
