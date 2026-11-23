@@ -44,9 +44,13 @@ test('S5: hub.js reaches /api/ads only to end the link at sign-out', () => {
   const lines = read('public/hub/hub.js').split('\n').filter((l) => ADS_REF.test(l));
   assert.equal(lines.length, 1, lines.join('\n'));
   assert.match(lines[0], /fetch\('\/api\/ads\/session', \{ method: 'DELETE'/);
-  // The global search goes to TikShortis, Social or Media, never to the module.
+  // The global search never builds an Adshortis address (the words would sit
+  // in the URL and history). On an Adshortis view it hands the words to the
+  // module in memory, which searches with a POST body (3a review H-M1).
   const search = read('public/hub/hub.js').split("$('#searchForm').addEventListener")[1].split('});')[0];
-  assert.ok(!/ads/i.test(search), 'global search never routes to Adshortis');
+  assert.ok(!/#\/adshortis/.test(search), 'global search never writes an Adshortis address');
+  assert.ok(!/\/api\/ads/.test(search), 'global search never calls the gateway itself');
+  assert.match(search, /adsNative\.search\(q\)/);
 });
 
 test('S5: the TikShortis and Elitogram gateways know nothing of Adshortis and refuse its shapes', () => {

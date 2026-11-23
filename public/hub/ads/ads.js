@@ -194,9 +194,12 @@
           if (r.status === 401) { location.href = '/login'; return; }
           let d = null;
           try { d = await r.json(); } catch { /* not JSON */ }
-          // Still linked: the failure was something else (a dead clip).
-          if (r.ok && d && d.linked) return;
+          // Still linked as the same account: the failure was something else
+          // (a dead clip). Linked as another account (another tab re-linked,
+          // 3a review C-B2): nothing of the old account stays on screen.
+          if (r.ok && d && d.linked && d.user && d.user.id === S.userId) return;
           if (!live(gen)) return;
+          if (r.ok && d && d.linked) { adoptSession(d); return; }
           const p = open.player;
           if (p && p.suspend && r.ok) { relinkSheet(p); return; }
           leave();
@@ -205,6 +208,36 @@
         })
         .catch(() => {})
         .finally(() => { relinking = false; });
+    }
+    // This tab now talks as another account, or as none: drop the view, the
+    // player and the store, then draw for the session given (H17).
+    function adoptSession(d) {
+      reset();
+      S.session = { linked: !!d.linked, user: d.user || null, reason: d.reason || null, expired: !!d.expired };
+      S.userId = d.linked && d.user ? d.user.id : null;
+      redraw();
+      hub.updateNav();
+    }
+    // The link cookie is shared by every tab of this browser. A tab that links,
+    // re-links or signs out tells the others (3a review C-B2); they re-read the
+    // session and keep nothing from another account. Same account: no change.
+    const linkChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('grabbit-ads-link') : null;
+    function announceLink() {
+      try { if (linkChannel) linkChannel.postMessage('changed'); } catch { /* best effort */ }
+    }
+    if (linkChannel) {
+      linkChannel.onmessage = () => {
+        const was = me() ? S.userId : null;
+        call('session', { signal: new AbortController().signal })
+          .then((d) => {
+            const id = d && d.linked && d.user ? d.user.id : null;
+            if (id !== null && id === was) return;
+            adoptSession(d || {});
+          })
+          .catch((e) => {
+            if (e.status === 401) location.href = '/login';
+          });
+      };
     }
     function relinkSheet(p) {
       const was = S.userId;
@@ -541,7 +574,10 @@
           const t = sheet.panel.querySelector('.tik-sheet-head h3');
           if (t) t.textContent = `${list.length} comment${list.length === 1 ? '' : 's'}`;
         };
-        const reload = () => call(`clips/${s.id}/comments`, { signal: new AbortController().signal }).then((d) => {
+        // Reads end with the view (leave() aborts its signal, 3a review C-M1);
+        // a comment already sent still completes.
+        const viewSig = ctl.signal;
+        const reload = () => call(`clips/${s.id}/comments`, { signal: viewSig }).then((d) => {
           list = d.items || [];
           s.comment_count = list.length;
           paintCounts(c);
@@ -580,6 +616,8 @@
         let pls = [];
         let inIds = new Set();
         const sig = () => ({ signal: new AbortController().signal });
+        // The lists end with the view (leave() aborts it, 3a review C-M1).
+        const viewSig = ctl.signal;
         const listEl = h('div', { class: 'tf-pl-list' }, h('p', { class: 'tf-dim' }, 'Loading ...'));
         const name = h('input', { type: 'text', maxlength: '100', placeholder: 'New playlist ...', 'aria-label': 'New playlist name' });
         const paint = () => fill(listEl, pls.length ? pls.map(row) : h('p', { class: 'tf-dim' }, 'No playlists yet. Create one above.'));
@@ -604,11 +642,11 @@
           lu('bookmark', 20, 2, on ? 'on' : null));
         }
         function reload() {
-          Promise.all([call('playlists?all=1', sig()), call(`clips/${s.id}/playlists`, sig())]).then(([a, b]) => {
+          Promise.all([call('playlists?all=1', { signal: viewSig }), call(`clips/${s.id}/playlists`, { signal: viewSig })]).then(([a, b]) => {
             pls = a.items || [];
             inIds = new Set(b.items || []);
             paint();
-          }).catch((e) => fill(listEl, h('p', { class: 'tf-cm-err' }, errorWords(e, false))));
+          }).catch((e) => { if (!aborted(e)) fill(listEl, h('p', { class: 'tf-cm-err' }, errorWords(e, false))); });
         }
         const form = h('form', { class: 'tf-pl-form', onsubmit: async (e) => {
           e.preventDefault();
@@ -1078,16 +1116,18 @@
         const local = [];
         let shut = false;
         const box = h('div', { class: 'viewer ads-viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Clip player', 'data-feed-player': '' });
+        // The first load keeps its state until it succeeds: the player's Retry
+        // runs it again, with the requested clip, and restarts a failed grid
+        // page instead of paging past it (3a review C-B1).
+        let head = null;
         async function load() {
           if (first) {
-            first = false;
-            let head = null;
-            if (cold) { const want = cold; cold = null; head = await coldClip(want); }
-            if (!L || (L.pending && !L.items.length)) {
-              if (!L) startList();
-              await L.pending;
-            }
+            if (cold && !head) head = await coldClip(cold);
+            if (!L || (L.error && !L.items.length)) startList();
+            if (L.pending && !L.items.length) await L.pending;
             if (L.error && !L.items.length) throw L.error;
+            first = false;
+            cold = null;
             const items = L.items.filter((c) => !head || c.id !== head.id);
             return { items: head ? [head, ...items] : items, nextCursor: L.hasMore ? 'more' : null };
           }
@@ -1125,10 +1165,13 @@
         };
         document.addEventListener('keydown', onKey);
         local.push(() => document.removeEventListener('keydown', onKey));
+        // A Back already asked for counts as closing: a second Escape or tap
+        // before the popstate must not step back past the grid (C-M2).
+        let backAsked = false;
         function closeAsked() {
-          if (shut) return;
+          if (shut || backAsked) return;
           if (how === 'tap') P.close();
-          else if (how === 'hash') history.back();
+          else if (how === 'hash') { backAsked = true; history.back(); }
           else closeModal(false);
         }
         // Once, whichever way it ends: Back, the button, Escape, a view change.
@@ -1211,7 +1254,7 @@
           say('');
           // Its own signal: the re-link sheet sits over a live view.
           call('session', { method: 'POST', body: { username: user.value, password: pass.value }, signal: new AbortController().signal })
-            .then((d) => { if (live(gen)) onLinked(d); })
+            .then((d) => { announceLink(); if (live(gen)) onLinked(d); })
             .catch((err) => {
               if (aborted(err)) return;
               btn.disabled = false;
@@ -1277,14 +1320,21 @@
       ];
     }
     function unlink() {
-      call('session', { method: 'DELETE' })
+      const gen = generation;
+      call('session', { method: 'DELETE', signal: new AbortController().signal })
         .catch(() => {})
         .finally(() => {
+          announceLink();
+          // The session ends either way; the address and the view change only
+          // while the view that asked is still on show (3a review C-M1).
+          const here = live(gen);
           reset();
           S.session = { linked: false, user: null };
           S.userId = null;
-          hub.replaceHash(BASE);
-          redraw();
+          if (here) {
+            hub.replaceHash(BASE);
+            redraw();
+          }
           hub.updateNav();
         });
     }
@@ -1410,6 +1460,18 @@
     // The build check may reload only an idle page (plan H63, H75, H88).
     const idle = () => !open.player && open.sheets === 0 && SH.count() === 0 && storeEmpty();
 
-    return { view, leave, reset, subnav, onHash, idle, hasView, link };
+    // The hub's top search on an Adshortis view (3a review H-M1): the words go
+    // to Explore's own search (POST body only), never into an address.
+    function search(q) {
+      store.words = String(q || '').slice(0, 200);
+      if (parse(location.hash).sub[0] === 'explore' && root && root.isConnected) {
+        leave();
+        redraw();
+      } else {
+        location.hash = link('explore');
+      }
+    }
+
+    return { view, leave, reset, subnav, onHash, idle, hasView, link, search };
   }
 })();

@@ -349,7 +349,8 @@
     }
     const native = cur === 'tikshortis' && tikIsNative();
     const social = cur === 'social' && socialOn();
-    $('#searchInput').placeholder = native ? 'Search TikShortis tags and creators' : social ? 'Search Social & Photos' : 'Search media and creators';
+    const ads = cur === 'adshortis' && adsIsNative();
+    $('#searchInput').placeholder = native ? 'Search TikShortis tags and creators' : social ? 'Search Social & Photos' : ads ? 'Search Adshortis' : 'Search media and creators';
   }
   // The route without the viewer's `open` parameter.
   function pageKey() {
@@ -3510,6 +3511,8 @@
     const q = $('#searchInput').value.trim();
     if (route().id === 'tikshortis' && tikIsNative()) location.hash = `#/tikshortis/search${q ? `?q=${encodeURIComponent(q)}` : ''}`;
     else if (route().id === 'social' && socialOn()) location.hash = socialNative.searchHash(q);
+    // Adshortis: Explore's own search; the words never reach an address (3a review H-M1).
+    else if (route().id === 'adshortis' && adsIsNative()) { $('#searchInput').value = ''; adsNative.search(q); }
     else location.hash = q ? `#/media?q=${encodeURIComponent(q)}` : '#/media';
   });
   document.addEventListener('keydown', (e) => {
