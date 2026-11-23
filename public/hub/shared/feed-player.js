@@ -25,7 +25,9 @@
 //                                       settings object; the core changes it
 //   side { toggle(), isOpen() }, closeMenu()  the hub's menu hooks
 //   onLeave(fn)                         the product's leave hook (P2-ONCE)
-//   start { cursor, prev, restoreFocus }
+//   start { cursor, prev, restoreFocus, focus }  focus: the id to start on
+//                                       with the items above it kept (a
+//                                       player opened on a grid tile)
 //   load({ cursor } | { after })        -> Promise<{ items, nextCursor }>; items carry an integer id
 //   selector({ btn, menu, item })       paints the top-centre feed selector, or
 //   back                                an element shown there instead
@@ -122,6 +124,7 @@
       firstPage: true,
       // The clip to start on when a saved place is continued.
       restoreFocus: start.restoreFocus ?? null,
+      focus: start.focus ?? null,
     };
     document.body.classList.add('tik-feed');
 
@@ -316,6 +319,11 @@
         F.cursor = d.nextCursor;
         F.hasMore = d.nextCursor !== null && d.nextCursor !== undefined;
         if (F.active < 0 && F.cards.length) {
+          if (F.focus !== null) {
+            const fc = F.cards.find((c) => String(c.s.id) === String(F.focus));
+            F.focus = null;
+            if (fc) jumpTo(fc);
+          }
           pickActive();
           if (F.firstPage && opts.onFirstPage) opts.onFirstPage();
           F.firstPage = false;
@@ -384,7 +392,7 @@
       const c = F.cards[F.active];
       if (c) deactivate(c);
       for (const x of F.cards) { unload(x); activeObserver.unobserve(x.el); x.el.remove(); }
-      Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1, restoreFocus: null });
+      Object.assign(F, { items: [], cards: [], ids: new Set(), cursor: null, hasMore: true, loading: false, errors: 0, retryAt: 0, prev: null, hasPrev: false, loadingPrev: false, active: -1, restoreFocus: null, focus: null });
       if (prepare) prepare();
       resumeBox.hidden = true;
       scroller.scrollTop = 0;
@@ -752,6 +760,14 @@
       }
     }
 
+    // Put a card at the top without a scroll animation. Snapping is off for
+    // the jump: with scroll-snap-stop a script scroll can halt at the first
+    // card.
+    function jumpTo(c) {
+      scroller.style.scrollSnapType = 'none';
+      scroller.scrollTop = c.el.offsetTop - scroller.offsetTop;
+      requestAnimationFrame(() => { scroller.style.scrollSnapType = ''; });
+    }
     // Move to an item already in the list (a clip-only address change).
     // False when it is not loaded; the product decides what to do then.
     function goTo(id) {

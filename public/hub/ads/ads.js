@@ -119,7 +119,8 @@
     const storeEmpty = () => !store.words && !store.profileWords && store.lists.size === 0;
 
     // Open player and sheets, counted for idle() (the build check, H75).
-    const open = { player: null, sheets: 0 };
+    // `grid` is the explore view's opener for a clip link onto its own grid.
+    const open = { player: null, sheets: 0, grid: null };
 
     let cleanups = [];
     const onLeave = (fn) => { cleanups.push(fn); };
@@ -140,6 +141,7 @@
         try { open.player.stop(); } catch (e) { console.warn('ads: player stop failed', e); }
         open.player = null;
       }
+      open.grid = null;
       // A sheet of the old view (comments, share, re-link) never outlives it.
       SH.closeAll();
       open.sheets = 0;
@@ -362,78 +364,28 @@
       return box;
     }
 
-    function viewFeed() {
+    // A cold clip link (H64, H73, H80): the clip when it may play, else
+    // null after the "not available" toast. A lost link still throws (H17).
+    async function coldClip(id) {
+      try {
+        const d = await call(`clips/${id}`);
+        if (d && d.id && d.status === 'ready' && d.deleted === false) return d;
+      } catch (e) {
+        if (aborted(e) || e.status === 401) throw e;
+      }
+      hub.toast('This clip is not available.');
+      return null;
+    }
+
+    // The vertical player with Adshortis' card, rail and sheets, for the
+    // feed page and for a player opened over a grid (plan H52). cfg:
+    //   route        the list's route, for the share link (H70, H82)
+    //   load, back, empty, end, onActive, start   passed to the core
+    //   ownHistory, onClose, onLeave              a modal player's own
+    //                history entry and teardown (the feed has none, H65)
+    //   onHidden(id) a clip was hidden: the product drops it from its list
+    function clipPlayer(cfg) {
       const gen = generation;
-      const params = new URLSearchParams(location.hash.split('?')[1] || '');
-      const f = feedFilters(params);
-      // Cold link (H64, H73, H80): this clip first, then the list without it.
-      let cold = numId(params.get('clip'));
-      let seed = f.feed === 'random' ? randomSeed : null;
-
-      const address = (clip) => link('feed', { ...filterQuery(f), clip });
-      function remember() {
-        const q = filterQuery(f);
-        adsStore.set('grabbit.ads.lastFeed', JSON.stringify(Object.fromEntries(Object.entries(q).filter(([, v]) => v))));
-      }
-      function pageQuery(cursor) {
-        const q = new URLSearchParams();
-        for (const [k, v] of Object.entries(filterQuery(f))) if (v) q.set(k, v);
-        if (seed) q.set('seed', String(seed));
-        q.set('limit', String(PAGE));
-        if (cursor !== null && cursor !== undefined) q.set('next', String(cursor));
-        return `clips?${q}`;
-      }
-      async function load({ cursor }) {
-        const first = cursor === null || cursor === undefined;
-        let head = null;
-        if (first && cold) {
-          const want = cold;
-          cold = null;
-          try {
-            const d = await call(`clips/${want}`);
-            if (d && d.id && d.status === 'ready' && d.deleted === false) head = d;
-            else hub.toast('This clip is not available.');
-          } catch (e) {
-            if (aborted(e) || e.status === 401) throw e;
-            hub.toast('This clip is not available.');
-          }
-        }
-        const d = await call(pageQuery(cursor));
-        const items = (d.items || []).filter((c) => !head || c.id !== head.id);
-        return { items: head ? [head, ...items] : items, nextCursor: d.next ?? null };
-      }
-      // A new order or filter, in place: no navigation, the address replaced.
-      function switchFeed(next) {
-        P.reload(() => {
-          Object.assign(f, next);
-          if (next.feed === 'random' || (next.reshuffle && f.feed === 'random')) randomSeed = newSeed();
-          seed = f.feed === 'random' ? randomSeed : null;
-          cold = null;
-          remember();
-          hub.replaceHash(address(null));
-          paintBar();
-        });
-      }
-
-      // Top centre: the feed chips and the filter button (UX 2: a chip row).
-      const bar = h('div', { class: 'ads-feedbar', role: 'group', 'aria-label': 'Feed' });
-      function paintBar() {
-        fill(bar,
-          FEEDS.map(([k, label]) => h('button', {
-            type: 'button', class: 'ads-chip', 'aria-pressed': String(k === f.feed),
-            onclick: () => (k === f.feed && k !== 'random' ? null : switchFeed({ feed: k, reshuffle: k === 'random' })),
-          }, label)),
-          h('button', { type: 'button', class: `ads-chip ads-filter${filtered(f) ? ' on' : ''}`, 'aria-haspopup': 'dialog', 'aria-label': filtered(f) ? 'Filter clips (on)' : 'Filter clips', onclick: openFilter }, 'Filter'));
-      }
-      paintBar();
-
-      function emptyNodes() {
-        if (filtered(f)) return [h('p', null, 'No clips match these filters.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({ genre: [], length: null, sound: false }) }, 'Clear filters')];
-        if (f.feed === 'following') return [h('p', null, "You don't follow anyone yet."), h('a', { class: 'tf-sbtn', href: link('profiles') }, 'Browse profiles')];
-        if (f.feed === 'liked') return [h('p', null, 'Clips you like show up here.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({ feed: 'foryou' }) }, 'Open For You')];
-        return [h('p', null, 'No clips here.')];
-      }
-
       const P = window.GrabbitShared.feedPlayer({
         h,
         icon: lu,
@@ -443,38 +395,27 @@
         prefs,
         side: { toggle: () => hub.toggleSide(), isOpen: () => hub.sideOpen() },
         closeMenu: () => hub.closeMenu(),
-        onLeave,
-        start: {},
+        onLeave: cfg.onLeave || onLeave,
+        start: cfg.start || {},
         ahead: 5,
-        load,
+        load: cfg.load,
         errorText: errorWords,
         retryDelay: (e) => (e && e.status === 429 && e.retryAfter ? e.retryAfter * 1000 : null),
-        end: () => [h('p', null, "You've reached the end."), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({}) }, 'Back to the top')],
-        back: bar,
-        empty: emptyNodes,
+        end: cfg.end,
+        back: cfg.back,
+        empty: cfg.empty,
         card: cardBody,
         paintSound,
         videoSrc: (c) => (c.status === 'ready' && c.deleted !== true && c.video ? c.video : null),
         poster: (c) => c.poster || '',
         onDoubleTap: (c) => toggleLike(c, true),
         onLongPress: (c) => openMore(c),
-        onActive: (c) => hub.replaceHash(address(c.s.id)),
+        onActive: cfg.onActive,
         onVideoError: () => lostLink(),
         keys: { l: (c) => toggleLike(c, false), s: (c) => openSave(c) },
+        ownHistory: !!cfg.ownHistory,
+        onClose: cfg.onClose,
       });
-
-      // The player handle the hash branch and leave() use (H51): the feed is
-      // a page, so it has no close transition (H65).
-      open.player = {
-        modal: false,
-        setClip(id) {
-          if (P.goTo(id)) return;
-          P.reload(() => { cold = numId(id); });
-        },
-        stop() {},
-        suspend: () => P.suspend(),
-        resume: () => P.resume(),
-      };
 
       // ---- The card: rail, caption ----
       function cardBody(c) {
@@ -689,7 +630,7 @@
         if (!numId(s.id)) { hub.toast('This clip cannot be shared.'); return; }
         const ready = s.status === 'ready' && s.deleted !== true;
         const copy = h('button', { type: 'button', class: 'tf-row tf-share-row', disabled: !ready, onclick: async () => {
-          const ok = await copyText(shareLink('feed', s.id));
+          const ok = await copyText(shareLink(cfg.route, s.id));
           sheet.close();
           hub.toast(ok ? 'Link copied.' : 'Could not copy the link.');
         } }, h('span', { class: 'tf-row-ic' }, lu('link2', 18)), h('span', { class: 'tf-row-l' }, 'Copy link'));
@@ -720,6 +661,7 @@
           await call(`clips/${c.s.id}/hide`, { method: 'POST' });
           if (!live(gen)) return;
           P.removeCard(c);
+          if (cfg.onHidden) cfg.onHidden(c.s.id);
           hub.toast('Hidden. You can bring it back under Settings, Hidden.');
         } catch (e) { if (!aborted(e)) say(e); }
       }
@@ -743,6 +685,95 @@
         const sheet = SH.open('Report', [h('p', { class: 'tf-sheet-title' }, 'Report this clip'), reasons, note,
           h('div', { class: 'tf-sheet-btns' }, send, h('button', { type: 'button', class: 'tf-sbtn', onclick: () => sheet.close() }, 'Cancel'))], { size: 'narrow', bare: true });
       }
+
+      return P;
+    }
+
+    function viewFeed() {
+      const params = new URLSearchParams(location.hash.split('?')[1] || '');
+      const f = feedFilters(params);
+      // Cold link (H64, H73, H80): this clip first, then the list without it.
+      let cold = numId(params.get('clip'));
+      let seed = f.feed === 'random' ? randomSeed : null;
+
+      const address = (clip) => link('feed', { ...filterQuery(f), clip });
+      function remember() {
+        const q = filterQuery(f);
+        adsStore.set('grabbit.ads.lastFeed', JSON.stringify(Object.fromEntries(Object.entries(q).filter(([, v]) => v))));
+      }
+      function pageQuery(cursor) {
+        const q = new URLSearchParams();
+        for (const [k, v] of Object.entries(filterQuery(f))) if (v) q.set(k, v);
+        if (seed) q.set('seed', String(seed));
+        q.set('limit', String(PAGE));
+        if (cursor !== null && cursor !== undefined) q.set('next', String(cursor));
+        return `clips?${q}`;
+      }
+      async function load({ cursor }) {
+        const first = cursor === null || cursor === undefined;
+        let head = null;
+        if (first && cold) {
+          const want = cold;
+          cold = null;
+          head = await coldClip(want);
+        }
+        const d = await call(pageQuery(cursor));
+        const items = (d.items || []).filter((c) => !head || c.id !== head.id);
+        return { items: head ? [head, ...items] : items, nextCursor: d.next ?? null };
+      }
+      // A new order or filter, in place: no navigation, the address replaced.
+      function switchFeed(next) {
+        P.reload(() => {
+          Object.assign(f, next);
+          if (next.feed === 'random' || (next.reshuffle && f.feed === 'random')) randomSeed = newSeed();
+          seed = f.feed === 'random' ? randomSeed : null;
+          cold = null;
+          remember();
+          hub.replaceHash(address(null));
+          paintBar();
+        });
+      }
+
+      // Top centre: the feed chips and the filter button (UX 2: a chip row).
+      const bar = h('div', { class: 'ads-feedbar', role: 'group', 'aria-label': 'Feed' });
+      function paintBar() {
+        fill(bar,
+          FEEDS.map(([k, label]) => h('button', {
+            type: 'button', class: 'ads-chip', 'aria-pressed': String(k === f.feed),
+            onclick: () => (k === f.feed && k !== 'random' ? null : switchFeed({ feed: k, reshuffle: k === 'random' })),
+          }, label)),
+          h('button', { type: 'button', class: `ads-chip ads-filter${filtered(f) ? ' on' : ''}`, 'aria-haspopup': 'dialog', 'aria-label': filtered(f) ? 'Filter clips (on)' : 'Filter clips', onclick: openFilter }, 'Filter'));
+      }
+      paintBar();
+
+      function emptyNodes() {
+        if (filtered(f)) return [h('p', null, 'No clips match these filters.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({ genre: [], length: null, sound: false }) }, 'Clear filters')];
+        if (f.feed === 'following') return [h('p', null, "You don't follow anyone yet."), h('a', { class: 'tf-sbtn', href: link('profiles') }, 'Browse profiles')];
+        if (f.feed === 'liked') return [h('p', null, 'Clips you like show up here.'), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({ feed: 'foryou' }) }, 'Open For You')];
+        return [h('p', null, 'No clips here.')];
+      }
+
+      const P = clipPlayer({
+        route: 'feed',
+        load,
+        back: bar,
+        empty: emptyNodes,
+        end: () => [h('p', null, "You've reached the end."), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => switchFeed({}) }, 'Back to the top')],
+        onActive: (c) => hub.replaceHash(address(c.s.id)),
+      });
+
+      // The player handle the hash branch and leave() use (H51): the feed is
+      // a page, so it has no close transition (H65).
+      open.player = {
+        modal: false,
+        setClip(id) {
+          if (P.goTo(id)) return;
+          P.reload(() => { cold = numId(id); });
+        },
+        stop() {},
+        suspend: () => P.suspend(),
+        resume: () => P.resume(),
+      };
 
       // ---- Filters: genre, length, sound; applied once ----
       function openFilter() {
@@ -775,6 +806,373 @@
       }
 
       return [h('div', { class: 'ads-feed' }, P.root)];
+    }
+
+    // --- Explore: the grid and clip search (plan H52, H64; UX 3, 9.3, 9.5, 10.2) ---
+    // The grid's list lives in the store (H38), so Back from the player or
+    // from another view in the module finds the same tiles, words and scroll.
+    // A tap on a tile opens the player over the grid with one history entry
+    // of its own (UX 9.3, 10.3); swiping plays on through the grid's list and
+    // loads its next pages into the grid too (H52).
+    const GRID_PAGE = 60; // H64: at most 60
+    const SEARCH_MIN = 2; // UX 9.5
+    const SEARCH_DELAY = 300;
+    const colsOf = (v) => { const n = Number(v); return Number.isInteger(n) && n >= 2 && n <= 6 ? n : null; };
+    const genresOf = (v) => String(v || '').split(',').filter((g) => GENRES.some(([k]) => k === g));
+    function clockOf(sec) {
+      if (!Number.isFinite(sec) || sec <= 0) return '';
+      const t = Math.round(sec);
+      return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+    }
+
+    function viewExplore() {
+      const gen = generation;
+      const params = new URLSearchParams(location.hash.split('?')[1] || '');
+      const genre = genresOf(params.get('genre'));
+      // `cols` stays in the address only once it was there or was picked.
+      let colsSet = colsOf(params.get('cols')) !== null;
+      let cols = colsOf(params.get('cols')) || colsOf(adsStore.get('grabbit.ads.cols')) || 3;
+      const startClip = numId(params.get('clip'));
+      const address = (clip) => link('explore', { genre: genre.join(','), cols: colsSet ? cols : null, clip });
+      // The words a search runs with: at least two characters, else none.
+      const wordsNow = () => { const w = store.words.trim().slice(0, 100); return w.length >= SEARCH_MIN ? w : ''; };
+      const keyOf = (words) => `${genre.join(',')}|${words}`;
+
+      // ---- The list (one per explore view, kept in the store) ----
+      let L = store.lists.get('explore');
+      if (L && L.key !== keyOf(wordsNow())) L = null;
+      // One list request in flight (UX 9.5): a newer one aborts it.
+      let reqCtl = null;
+      onLeave(() => { if (reqCtl) reqCtl.abort(); });
+      const timers = new Set();
+      const later = (fn, ms) => { const t = setTimeout(() => { timers.delete(t); if (live(gen)) fn(); }, ms); timers.add(t); return t; };
+      onLeave(() => { for (const t of timers) clearTimeout(t); timers.clear(); });
+
+      function fetchPage(words, cursor, signal) {
+        const more = cursor !== null && cursor !== undefined;
+        if (words) {
+          // M2: the words only in the POST body, never in an address (H6).
+          const body = { q: words, limit: GRID_PAGE };
+          if (genre.length) body.genre = genre.join(',');
+          if (more) body.next = cursor;
+          return call('search', { method: 'POST', body, signal });
+        }
+        const q = new URLSearchParams();
+        if (genre.length) q.set('genre', genre.join(','));
+        q.set('limit', String(GRID_PAGE));
+        if (more) q.set('next', String(cursor));
+        return call(`clips?${q}`, { signal });
+      }
+      // The first page of the list for the current words and genre.
+      function startList() {
+        if (reqCtl) reqCtl.abort();
+        reqCtl = new AbortController();
+        const sig = reqCtl.signal;
+        const words = wordsNow();
+        const fresh = { key: keyOf(words), words, items: [], cursor: null, hasMore: true, scroll: 0, error: null, pending: null };
+        L = fresh;
+        store.lists.set('explore', fresh);
+        fresh.pending = fetchPage(words, null, sig)
+          .then((d) => {
+            if (sig.aborted || L !== fresh) return;
+            fresh.items = (d.items || []).filter((c) => c && numId(c.id));
+            fresh.cursor = d.next ?? null;
+            fresh.hasMore = fresh.cursor !== null;
+          })
+          .catch((e) => {
+            if (aborted(e) || L !== fresh) return;
+            fresh.error = e;
+            // UX 5.2: a search over the limit tries again after Retry-After.
+            if (e.status === 429 && words) later(() => { if (L === fresh) startList(); }, Math.max(1, e.retryAfter || 5) * 1000);
+          })
+          .finally(() => {
+            if (L !== fresh) return;
+            fresh.pending = null;
+            paintAll();
+          });
+        paintAll();
+        return fresh.pending;
+      }
+      // The next page, shared by the grid and the player: one at a time.
+      // Resolves to the new items; rejects for the player's retry row.
+      function more() {
+        const cur = L;
+        if (!cur) return Promise.resolve([]);
+        // A page already on its way: both callers get its items.
+        if (cur.pending) return cur.pending.then((a) => (Array.isArray(a) ? a : []));
+        if (!cur.hasMore) return Promise.resolve([]);
+        const sig = (reqCtl = reqCtl || new AbortController()).signal;
+        const p = fetchPage(cur.words, cur.cursor, sig)
+          .then((d) => {
+            if (L !== cur) return [];
+            const have = new Set(cur.items.map((c) => c.id));
+            const added = (d.items || []).filter((c) => c && numId(c.id) && !have.has(c.id));
+            cur.items.push(...added);
+            cur.cursor = d.next ?? null;
+            cur.hasMore = cur.cursor !== null;
+            cur.error = null;
+            addTiles(added);
+            return added;
+          }, (e) => {
+            if (L === cur && !aborted(e)) cur.error = e;
+            throw e;
+          })
+          .finally(() => {
+            if (L !== cur) return;
+            cur.pending = null;
+            paintFoot();
+          });
+        cur.pending = p;
+        paintFoot();
+        return p;
+      }
+
+      // ---- Search box (UX 9.5): as you type, 300 ms, two characters ----
+      const input = h('input', {
+        type: 'search', class: 'field ads-search-in', placeholder: 'Search title, creator or #hashtag',
+        'aria-label': 'Search clips', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'search', maxlength: '100',
+      });
+      input.value = store.words;
+      let typing = 0;
+      const runSearch = () => {
+        clearTimeout(typing);
+        timers.delete(typing);
+        if (!L || L.key !== keyOf(wordsNow())) startList();
+      };
+      input.addEventListener('input', () => {
+        store.words = input.value;
+        clearTimeout(typing);
+        timers.delete(typing);
+        typing = later(runSearch, SEARCH_DELAY);
+      });
+      const searchForm = h('form', { class: 'ads-search', role: 'search', onsubmit: (e) => { e.preventDefault(); runSearch(); } }, lu('search', 18), input);
+      function clearSearch() {
+        store.words = '';
+        input.value = '';
+        runSearch();
+        input.focus();
+      }
+
+      // ---- Genre chips and grid density ----
+      const chips = h('div', { class: 'ads-chips ads-genres', role: 'group', 'aria-label': 'Genre' });
+      function paintChips() {
+        const pick = (next) => {
+          genre.splice(0, genre.length, ...next);
+          hub.replaceHash(address(null));
+          startList();
+          paintChips();
+        };
+        fill(chips,
+          h('button', { type: 'button', class: 'ads-chip', 'aria-pressed': String(!genre.length), onclick: () => { if (genre.length) pick([]); } }, 'All'),
+          GENRES.map(([k, label]) => h('button', {
+            type: 'button', class: 'ads-chip', 'aria-pressed': String(genre.includes(k)),
+            onclick: () => pick(genre.includes(k) ? genre.filter((g) => g !== k) : [...genre, k]),
+          }, label)));
+      }
+      paintChips();
+      const density = h('input', { type: 'range', min: '2', max: '6', step: '1', value: String(cols), 'aria-label': 'Grid columns' });
+      density.addEventListener('input', () => {
+        cols = colsOf(density.value) || cols;
+        colsSet = true;
+        grid.style.setProperty('--ads-cols', String(cols));
+        adsStore.set('grabbit.ads.cols', String(cols));
+        hub.replaceHash(address(null));
+      });
+      const tools = h('div', { class: 'ads-tools' }, h('label', { class: 'ads-density' }, lu('listVideo', 16), density));
+
+      // ---- The grid ----
+      const grid = h('div', { class: 'ads-grid', style: `--ads-cols:${cols}` });
+      const note = h('div', { class: 'ads-grid-note' });
+      const foot = h('div', { class: 'ads-grid-foot' });
+      const sentinel = h('div', { class: 'ads-sentinel', 'aria-hidden': 'true' });
+      function tile(c) {
+        const thumb = h('span', { class: 'ads-thumb', 'data-media-bg': '1' });
+        if (c.poster) {
+          thumb.append(h('img', {
+            alt: '', src: c.poster, loading: 'lazy', decoding: 'async',
+            // No picture upstream (the 1x1 placeholder) or none at all: the
+            // tile keeps its plain background (UX 5.2).
+            onload: (e) => { if (e.currentTarget.naturalWidth <= 1) e.currentTarget.remove(); },
+            onerror: (e) => e.currentTarget.remove(),
+          }));
+        }
+        const ready = c.status === 'ready' && c.deleted !== true;
+        const label = c.title || (c.creator && c.creator.name) || 'Clip';
+        return h('a', {
+          class: 'ads-tile', href: address(c.id), 'data-clip': String(c.id), 'aria-label': label,
+          onclick: (e) => {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            openPlayer(c.id, 'tap', e.currentTarget);
+          },
+        },
+        thumb,
+        h('span', { class: 'ads-tile-meta' },
+          c.duration ? h('span', { class: 'ads-dur' }, clockOf(c.duration)) : null,
+          !ready ? h('span', { class: 'ads-badge' }, c.status === 'failed' ? 'failed' : 'processing') : null,
+          c.visibility === 'private' ? h('span', { class: 'ads-badge' }, lu('lock', 11), 'private') : null),
+        h('span', { class: 'ads-tile-title' }, c.title || (c.creator ? `@${c.creator.name}` : '')));
+      }
+      function addTiles(items) { if (items.length) grid.append(...items.map(tile)); }
+      function paintFoot() {
+        if (!L || !L.items.length) { fill(foot); return; }
+        if (L.pending) fill(foot, h('span', { class: 'tf-spin', 'aria-label': 'Loading' }));
+        else if (L.error && L.hasMore) {
+          // H87: the grid's last row says why and offers a retry.
+          const e = L.error;
+          const wait = e.status === 429 && e.retryAfter ? e.retryAfter * 1000 : 0;
+          const again = h('button', { type: 'button', class: 'btn ghost', disabled: !!wait, onclick: () => { L.error = null; more().catch(() => {}); } }, 'Retry');
+          if (wait) later(() => { again.disabled = false; }, wait);
+          fill(foot, h('p', { role: 'status' }, errorWords(e, true)), again);
+        } else if (!L.hasMore) fill(foot, h('span', { class: 'muted' }, `${L.items.length} clip${L.items.length === 1 ? '' : 's'}`));
+        else fill(foot);
+      }
+      function paintAll() {
+        if (!live(gen)) return;
+        fill(grid);
+        fill(note);
+        if (!L) { fill(foot); return; }
+        if (L.pending && !L.items.length) {
+          fill(note, h('p', { class: 'muted' }, L.words ? 'Searching ...' : 'Loading ...'));
+        } else if (L.error && !L.items.length) {
+          const e = L.error;
+          if (e.status === 429 && L.words) fill(note, h('p', { class: 'ads-empty', role: 'status' }, 'Too many searches. Wait a moment.'));
+          else if (e.status === 424) fill(note, retryBanner('Adshortis is not reachable right now.', startList));
+          else fill(note, h('div', { class: 'ads-empty', role: 'status' }, h('p', null, errorWords(e, false)), h('button', { type: 'button', class: 'btn ghost', onclick: startList }, 'Retry')));
+        } else if (!L.items.length) {
+          if (L.words) fill(note, empty('Nothing found for this search.', h('button', { type: 'button', class: 'btn ghost', onclick: clearSearch }, 'Clear search')));
+          else if (genre.length) fill(note, empty('No clips match these filters.', h('button', { type: 'button', class: 'btn ghost', onclick: () => { genre.length = 0; hub.replaceHash(address(null)); startList(); paintChips(); } }, 'Clear filters')));
+          else fill(note, empty('No clips here yet.'));
+        } else {
+          addTiles(L.items);
+        }
+        paintFoot();
+      }
+      // Next page when the end of the grid comes near (not under the player:
+      // the player asks for its own pages).
+      const io = new IntersectionObserver((entries) => {
+        if (!entries.some((x) => x.isIntersecting) || open.player || !L || L.pending || L.error || !L.hasMore) return;
+        more().catch(() => {});
+      }, { rootMargin: '800px' });
+      io.observe(sentinel);
+      onLeave(() => io.disconnect());
+
+      // ---- Scroll: kept in the store, put back on redraw ----
+      const saveScroll = () => { if (L) L.scroll = window.scrollY; };
+      onLeave(() => { if (!open.player) saveScroll(); });
+      function restoreScroll(y) {
+        requestAnimationFrame(() => { if (live(gen)) window.scrollTo(0, y); });
+      }
+
+      // ---- The player over the grid (H52, UX 9.3, 10.3) ----
+      // how: 'tap' (pushes its own entry, Back closes it), 'hash' (an
+      // in-module link pushed the entry: Back closes it too), 'cold' (the
+      // address was opened as is: closing only replaces the address).
+      function openPlayer(id, how, opener) {
+        if (open.player || !live(gen)) return;
+        saveScroll();
+        const scrollAt = window.scrollY;
+        const known = L && L.items.some((c) => String(c.id) === String(id));
+        let cold = known ? null : numId(id);
+        let first = true;
+        const local = [];
+        let shut = false;
+        const box = h('div', { class: 'viewer ads-viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Clip player', 'data-feed-player': '' });
+        async function load() {
+          if (first) {
+            first = false;
+            let head = null;
+            if (cold) { const want = cold; cold = null; head = await coldClip(want); }
+            if (!L || (L.pending && !L.items.length)) {
+              if (!L) startList();
+              await L.pending;
+            }
+            if (L.error && !L.items.length) throw L.error;
+            const items = L.items.filter((c) => !head || c.id !== head.id);
+            return { items: head ? [head, ...items] : items, nextCursor: L.hasMore ? 'more' : null };
+          }
+          const added = await more();
+          return { items: added, nextCursor: L && L.hasMore ? 'more' : null };
+        }
+        const backBtn = h('button', { type: 'button', class: 'tf-pill tf-back', 'aria-label': 'Close the player', onclick: () => closeAsked() },
+          lu('chevronLeft', 15), h('span', null, wordsNow() ? 'Search results' : 'Explore'));
+        const P = clipPlayer({
+          route: 'explore',
+          load,
+          back: backBtn,
+          start: known ? { focus: Number(id) } : {},
+          empty: () => [h('p', null, wordsNow() ? 'Nothing found for this search.' : 'No clips here yet.')],
+          end: () => [h('p', null, "You've reached the end."), h('button', { type: 'button', class: 'tf-sbtn', onclick: () => closeAsked() }, 'Back to the list')],
+          onActive: (c) => { if (!shut) hub.replaceHash(address(c.s.id)); },
+          ownHistory: how === 'tap',
+          onClose: () => closeModal(false),
+          onLeave: (fn) => local.push(fn),
+          onHidden: (cid) => {
+            if (!L) return;
+            L.items = L.items.filter((c) => c.id !== cid);
+            const t = grid.querySelector(`[data-clip="${cid}"]`);
+            if (t) t.remove();
+          },
+        });
+        box.append(P.root);
+        // Escape with no sheet over it closes the player (UX 10.1); the
+        // sheet stack stops the key while a sheet is open.
+        const onKey = (e) => {
+          if (e.key !== 'Escape' || e.defaultPrevented || SH.count() || P.fullscreen) return;
+          if (document.querySelector('[role=dialog][aria-modal=true]:not([data-feed-player])')) return;
+          e.preventDefault();
+          closeAsked();
+        };
+        document.addEventListener('keydown', onKey);
+        local.push(() => document.removeEventListener('keydown', onKey));
+        function closeAsked() {
+          if (shut) return;
+          if (how === 'tap') P.close();
+          else if (how === 'hash') history.back();
+          else closeModal(false);
+        }
+        // Once, whichever way it ends: Back, the button, Escape, a view change.
+        function closeModal(leaving) {
+          if (shut) return;
+          shut = true;
+          if (open.player === handle) open.player = null;
+          for (const fn of local.reverse()) {
+            try { fn(); } catch (e) { console.warn('ads: player cleanup failed', e); }
+          }
+          box.remove();
+          if (leaving) return;
+          if (parse(location.hash).clip) hub.replaceHash(address(null));
+          hub.updateNav();
+          window.scrollTo(0, scrollAt);
+          const back = opener && opener.isConnected ? opener : grid.querySelector(`[data-clip="${CSS.escape(String(id))}"]`);
+          if (back) back.focus({ preventScroll: true });
+        }
+        onLeave(() => closeModal(true));
+        const handle = {
+          modal: true,
+          setClip(cid) { P.goTo(cid); },
+          stop: () => closeModal(false),
+          suspend: () => P.suspend(),
+          resume: () => P.resume(),
+        };
+        open.player = handle;
+        document.body.append(box);
+        // The player's own controls take the keys from here.
+        const sc = P.root.querySelector('.tf-scroll');
+        if (sc) sc.focus({ preventScroll: true });
+      }
+      open.grid = { openClip: (id) => openPlayer(id, 'hash', null) };
+
+      // ---- First paint: from the store, or a fresh list ----
+      const view = [pageHead('Explore'), searchForm, chips, tools, note, grid, foot, sentinel];
+      if (L) {
+        paintAll();
+        restoreScroll(L.scroll || 0);
+      } else startList();
+      // A clip in the address (a shared link, a reload, Back onto it): it
+      // plays over the grid; with the store empty X comes first (H64).
+      if (startClip) setTimeout(() => { if (live(gen)) openPlayer(startClip, 'cold', null); }, 0);
+      return view;
     }
 
     // --- Link form (UX 5.1) ----------------------------------------------------
@@ -852,7 +1250,7 @@
     // placeholder and never calls the gateway.
     const VIEWS = {
       feed: { title: 'Feed', draw: viewFeed },
-      explore: { title: 'Explore' },
+      explore: { title: 'Explore', draw: viewExplore },
       profiles: { title: 'Profiles' },
       creator: { title: 'Creator', id: numId },
       person: { title: 'Person', id: numId },
@@ -978,11 +1376,20 @@
           hub.updateNav();
           return;
         }
-        // Close: the player stops and the grid shows from the store.
-        if (a.clip && !b.clip && open.player && open.player.modal) {
+        // Close: the player stops and the grid shows from the store. A
+        // player over a grid that already closed on the same Back (its
+        // popstate came first) leaves nothing to do.
+        if (a.clip && !b.clip && (open.player ? open.player.modal : open.grid)) {
           const p = open.player;
           open.player = null;
-          p.stop();
+          if (p) p.stop();
+          hub.updateNav();
+          return;
+        }
+        // Open: a link onto a clip of the grid on show plays it over the
+        // grid; the link's own entry is the player's (H52).
+        if (!a.clip && b.clip && open.grid && !open.player && numId(b.clip)) {
+          open.grid.openClip(b.clip);
           hub.updateNav();
           return;
         }

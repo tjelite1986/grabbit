@@ -16,7 +16,8 @@
 // v17: helpers and the clip player shared by the native modules (public/hub/shared/).
 // v18: native Adshortis (public/hub/ads/) and the 18+ sidebar group.
 // v19: the shared Lucide icons (public/hub/shared/icons.js) and the Adshortis feed.
-const CACHE = 'grabbit-v19';
+// v20: Adshortis Explore, search and the player over a grid.
+const CACHE = 'grabbit-v20';
 const SHELL = [
   '/',
   '/classic/',

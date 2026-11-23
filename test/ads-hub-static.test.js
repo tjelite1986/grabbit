@@ -39,7 +39,7 @@ test('SHELL: ads.js and ads.css load after the shared files and before hub.js', 
 
 test('SHELL: the service worker caches the module and the server revalidates it', () => {
   const sw = read('public/sw.js');
-  assert.match(sw, /const CACHE = 'grabbit-v19';/);
+  assert.match(sw, /const CACHE = 'grabbit-v20';/);
   assert.match(sw, /'\/hub\/ads\/ads\.js'/);
   assert.match(sw, /'\/hub\/ads\/ads\.css'/);
   // The worker still leaves the API and the login alone.
@@ -143,4 +143,30 @@ test('BANNER: role=status, checked on boot and visibilitychange, null build disa
   assert.match(hubJs, /if \(adsNative && !adsNative\.idle\(\)\) return false;/);
   assert.match(adsJs, /const idle = \(\) => !open\.player && open\.sheets === 0 && SH\.count\(\) === 0 && storeEmpty\(\);/);
   assert.match(hubCss, /\.build-banner \{[\s\S]*?top: calc\(100px \+ env\(safe-area-inset-top\)\);/);
+});
+
+test('EXPLORE/SEARCH: words only in the M2 POST body; search-as-you-type limits; modal player markers', () => {
+  const code = adsJs.replace(/^\s*\/\/.*$/gm, '');
+  const ex = code.slice(code.indexOf('function viewExplore() {'), code.indexOf('function viewLink() {'));
+  assert.ok(ex.length > 1000, 'viewExplore exists');
+  assert.match(code, /explore: \{ title: 'Explore', draw: viewExplore \}/);
+  // UX 9.5: 300 ms, two characters, at most 60 per page (H64).
+  assert.match(code, /const SEARCH_MIN = 2;/);
+  assert.match(code, /const SEARCH_DELAY = 300;/);
+  assert.match(code, /const GRID_PAGE = 60;/);
+  // H6: the words go to POST search in the body; never into a query or an address.
+  assert.match(ex, /const body = \{ q: words, limit: GRID_PAGE \};/);
+  assert.match(ex, /return call\('search', \{ method: 'POST', body, signal \}\);/);
+  assert.doesNotMatch(code, /\.set\('q'|[?&]q=/);
+  assert.doesNotMatch(code, /link\([^)]*words/i);
+  assert.doesNotMatch(ex, /replaceHash\([^)]*words/i);
+  // The box keeps nothing in the browser's form history.
+  assert.match(ex, /type: 'search', class: 'field ads-search-in'/);
+  assert.match(ex, /autocomplete: 'off'/);
+  assert.doesNotMatch(ex.slice(ex.indexOf("const input = h('input'"), ex.indexOf('input.value = store.words')), /\bname:/);
+  // UX 10.1/10.3: the player over the grid is a modal the key guard knows, with its own entry.
+  assert.match(ex, /class: 'viewer ads-viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Clip player', 'data-feed-player': ''/);
+  assert.match(ex, /ownHistory: how === 'tap'/);
+  // Share from a grid uses the explore route (H70).
+  assert.match(ex, /route: 'explore'/);
 });
