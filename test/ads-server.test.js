@@ -141,10 +141,10 @@ test('who reaches /api/ads: anonymous 401, internal token 403, app password 403,
     assert.equal(internal.status, 403, `internal ${method} ${p}`);
     const cross = await s.call(p, { method, headers: { ...browser(s, [login], method !== 'GET'), 'Sec-Fetch-Site': 'cross-site' } });
     assert.equal(cross.status, 403, `cross-site ${method} ${p}`);
-    // Same-site passes the global gate; the gateway refuses it. An unlisted
-    // path is already a 404 there (allowlist first, as in the tik gateway).
+    // Same-site passes the global gate; the gateway refuses it (every path
+    // here is a live row in phase 3).
     const sameSite = await s.call(p, { method, headers: { ...browser(s, [login], method !== 'GET'), 'Sec-Fetch-Site': 'same-site' } });
-    assert.equal(sameSite.status, p === '/api/ads/clips' ? 404 : 403, `same-site ${method} ${p}`);
+    assert.equal(sameSite.status, 403, `same-site ${method} ${p}`);
   }
   const app = await s.login(fs.readFileSync(path.join(s.dataDir, 'ads-app.pw'), 'utf8'));
   assert.equal(app.status, 302);
@@ -178,7 +178,7 @@ test('S1 NL over HTTP: grabbit_auth without a login id -> 409, zero upstream cal
   assert.ok(seal);
   const me = await s.call('/api/ads/session', { headers: browser(s, [login, seal]) });
   assert.equal(me.body.linked, true);
-  assert.deepEqual(Object.keys(me.body.user), ['id', 'username', 'display_name', 'role', 'permissions', 'avatar']);
+  assert.deepEqual(Object.keys(me.body.user), ['id', 'username', 'display_name', 'role', 'permissions', 'avatar', 'prefs']);
   const lg = seen.find((x) => x.url === '/api/login');
   assert.equal(lg.headers.origin, APP);
   assert.equal(lg.headers['x-forwarded-for'], '127.0.0.1');

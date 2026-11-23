@@ -52,8 +52,14 @@ test('the allowlist per phase', () => {
   const p3 = ids(m.liveRoutes('3'));
   assert.deepEqual(p3, [
     'S1', 'S2', 'S3',
-    'M3', 'M4', 'M6', 'M7', 'M8', 'M10', 'M11', 'M13', 'M14',
-    'M16', 'M17', 'M18', 'M19', 'M20', 'M21', 'M22', 'M23', 'M24',
+    'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10', 'M11', 'M13', 'M14',
+    'M15', 'M16', 'M17', 'M18', 'M19', 'M20', 'M21', 'M22', 'M23', 'M24', 'M25', 'D3',
+  ]);
+  // E1: with both phase-3 conditions met, exactly the phase-3 live set.
+  assert.deepEqual(ids(m.liveRoutes('3', new Set(['adshortis:A2', 'adshortis:A18']))), [
+    'S1', 'S2', 'S3',
+    'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10', 'M11', 'M12', 'M13', 'M14',
+    'M15', 'M16', 'M17', 'M18', 'M19', 'M20', 'M21', 'M22', 'M23', 'M24', 'M25', 'D1', 'D2', 'D3',
   ]);
   // H100 (Codex phase-0 MAJOR): ordinary media stays off until A18 is
   // deployed and checked, also in phase 3.
@@ -63,9 +69,9 @@ test('the allowlist per phase', () => {
   assert.match(m.holdReason(m.ROWS.find((r) => r.row === 'D1'), '3'), /waits on adshortis:A18/);
   const p3a18 = ids(m.liveRoutes('3', new Set(['adshortis:A18'])));
   assert.ok(p3a18.includes('D1') && p3a18.includes('D2'));
-  // Held by open GAPs: lists (3), prefs (6), creator URLs (7), avatars (8),
-  // download (9), comments on deleted clips (23); upload waits on A2 (GAP 5).
-  for (const r of ['M1', 'M2', 'M5', 'M9', 'M12', 'M15', 'M25', 'D3', 'D4', 'D5']) assert.ok(!p3.includes(r), r);
+  // Held: user avatars (GAP 8, owner Q4), download (GAP 9); upload waits on
+  // A2 (GAP 5). GAPs 3, 6, 7 and 23 closed in phase 3.
+  for (const r of ['M12', 'D4', 'D5']) assert.ok(!p3.includes(r), r);
   assert.ok(ids(m.liveRoutes('3', new Set(['adshortis:A2']))).includes('M12'));
 
   const p4 = ids(m.liveRoutes('4'));
@@ -90,7 +96,9 @@ test('holdReason names why a row is not live', () => {
   assert.equal(m.holdReason(row('S1'), '0'), 'group session starts in phase 1');
   assert.equal(m.holdReason(row('S1'), '1'), null);
   assert.equal(m.holdReason(row('M3'), '1'), 'row starts in phase 3');
-  assert.equal(m.holdReason(row('M1'), '3'), 'GAP 3 open');
+  assert.equal(m.holdReason(row('M1'), '3'), null);
+  assert.equal(m.holdReason(row('D4'), '3'), 'GAP 8 open');
+  assert.equal(m.holdReason(row('D5'), '3'), 'rule group undecided');
   assert.equal(m.holdReason(row('M12'), '3'), 'GAP 5 held');
   assert.equal(m.holdReason(row('A3'), '4'), 'rule group undecided');
   assert.equal(m.holdReason(row('A13'), '4'), 'path not named');
@@ -137,8 +145,8 @@ test('S1 and S2 contracts (H101)', () => {
   for (const phase of m.PHASES) {
     const f = m.sessionFields(phase);
     for (const k of m.NEVER_SESSION_FIELDS) assert.ok(!f.includes(k), `${k} in phase ${phase}`);
-    // prefs waits on GAP 6 even in phase 3.
-    if (m.GAPS[6].status !== 'closed') assert.deepEqual(f, m.SESSION_FIELDS);
+    // prefs joins in phase 3 (GAP 6 closed), never before.
+    assert.deepEqual(f, m.PHASES.indexOf(phase) >= m.PHASES.indexOf('3') ? [...m.SESSION_FIELDS, 'prefs'] : m.SESSION_FIELDS, phase);
   }
 });
 
@@ -178,4 +186,30 @@ test('S1 NL answer and S2 projection run as code, with no upstream call for NL',
   for (const topic of ['S1 NL', 'principal', 'origin', 'seal', 'S2', 'S3', 'S5']) {
     assert.ok(m.PHASE1_GATEWAY_TESTS.some((t) => t.includes(topic)), topic);
   }
+});
+
+test('ADSHORTIS_CONDITIONS: only A2 and A18, never assumed met', () => {
+  assert.deepEqual([...m.parseConditions(undefined).met], []);
+  assert.deepEqual([...m.parseConditions('').met], []);
+  const r = m.parseConditions(' A2, adshortis:a18 ,A4,owner:D13,, x ');
+  assert.deepEqual([...r.met].sort(), ['adshortis:A18', 'adshortis:A2']);
+  assert.deepEqual(r.unknown, ['A4', 'owner:D13', 'x']);
+  // A4 and the other phase-4 conditions can never be set this way.
+  for (const c of Object.keys(m.CONDITIONS)) {
+    if (!['adshortis:A2', 'adshortis:A18'].includes(c)) assert.ok(!m.parseConditions(c).met.has(c), c);
+  }
+});
+
+test('S2 prefs (GAP 6): exactly PREFS_FIELDS with their types; nav and unknown keys dropped', () => {
+  const me = {
+    id: 7, username: 'a', display_name: 'A', role: 'user', permissions: [], avatar: null, ai: true, nav_tabs: ['x'],
+    prefs: { sound: true, autoplay: 'yes', nav: ['feed'], grid_columns: 3, feed: 'evil', feed_pos: { 'foryou|': 12, bad: 'x', ['k'.repeat(201)]: 3 }, extra: 1 },
+  };
+  const out = m.projectSession(me, '3');
+  assert.deepEqual(Object.keys(out), [...m.SESSION_FIELDS, 'prefs']);
+  assert.deepEqual(out.prefs, { sound: true, autoplay: null, grid_columns: 3, feed: null, feed_pos: { 'foryou|': 12 } });
+  assert.equal(m.projectSession({ ...me, prefs: 'x' }, '3').prefs, null);
+  const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`k${i}`, i]));
+  assert.equal(Object.keys(m.projectPrefs({ feed_pos: many }).feed_pos).length, m.FEED_POS_MAX);
+  assert.equal('prefs' in m.projectSession(me, '1'), false);
 });
