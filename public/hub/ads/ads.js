@@ -797,6 +797,15 @@
             onclick: () => (k === f.feed && k !== 'random' ? null : switchFeed({ feed: k, reshuffle: k === 'random' })),
           }, label)),
           h('button', { type: 'button', class: `ads-chip ads-filter${filtered(f) ? ' on' : ''}`, 'aria-haspopup': 'dialog', 'aria-label': filtered(f) ? 'Filter clips (on)' : 'Filter clips', onclick: openFilter }, 'Filter'));
+        // The chosen order in sight: on a phone the row is wider than the
+        // screen, and Liked (its own menu entry) sat past the edge.
+        requestAnimationFrame(() => {
+          const on = bar.querySelector('.ads-chip[aria-pressed="true"]');
+          if (!on || !bar.isConnected) return;
+          const b = bar.getBoundingClientRect();
+          const c = on.getBoundingClientRect();
+          if (c.left < b.left || c.right > b.right) bar.scrollLeft += c.left - b.left - (b.width - c.width) / 2;
+        });
       }
       paintBar();
 
@@ -1220,7 +1229,15 @@
           if (on && !el.inert) { el.inert = true; madeInert.add(el); }
           else if (!on && madeInert.has(el)) { el.inert = false; madeInert.delete(el); }
         }
-        const paintInert = () => { if (!shut) { setInert(main, true); setInert(side, !hub.sideOpen()); } };
+        // While the menu is usable the player is not modal: aria-modal
+        // would tell a screen reader the menu is hidden (B4 review B4-1).
+        const paintInert = () => {
+          if (shut) return;
+          const menu = hub.sideOpen();
+          setInert(main, true);
+          setInert(side, !menu);
+          box.setAttribute('aria-modal', String(!menu));
+        };
         paintInert();
         window.addEventListener('grabbit:side', paintInert);
         // Tab and Shift+Tab wrap inside the player (and the open menu); a
@@ -1288,7 +1305,7 @@
       })];
     }
     // O1: what linking means, said the same way on the form and in Settings.
-    const LINK_ONCE = 'You sign in once: this browser stays linked to that Adshortis account while you are signed in to Grabbit, for up to 30 days.';
+    const LINK_ONCE = 'Sign in once per Grabbit login: this browser stays linked to the Adshortis account you sign in with for up to 30 days, or until you sign out of Adshortis or of Grabbit.';
     // The sign-in form (S1). onLinked(d) runs with the S1 answer; the caller
     // decides what comes next (the page, or the re-link sheet of H17).
     function linkForm(onLinked, intro) {
@@ -1370,7 +1387,6 @@
           h('h2', null, 'Adshortis account'),
           h('p', null, 'Linked Adshortis account: ', h('strong', null, (u && (u.username || u.name)) || 'unknown')),
           h('p', { class: 'muted' }, 'This is your Adshortis account, not your Grabbit or TikShortis one. ', LINK_ONCE),
-          h('p', { class: 'muted' }, 'The link ends when you sign out of Adshortis here or sign out of Grabbit.'),
           h('button', { type: 'button', class: 'btn ghost', onclick: unlink }, 'Sign out of Adshortis')),
       ];
     }

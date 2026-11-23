@@ -326,6 +326,8 @@
         for (const s of items) addCard(s, false, pageAt);
         F.cursor = d.nextCursor;
         F.hasMore = d.nextCursor !== null && d.nextCursor !== undefined;
+        // A page that arrives under the same clip changes M (B4 review B4-2).
+        if (F.active >= 0) paintCount();
         if (F.active < 0 && F.cards.length) {
           if (F.focus !== null) {
             const fc = F.cards.find((c) => String(c.s.id) === String(F.focus));
@@ -676,6 +678,13 @@
       });
       if (best >= 0) setActive(best, true);
     }
+    // The opt-in "Clip N of M". Only a change is written: a forced repeat
+    // (resize) says nothing.
+    function paintCount() {
+      if (!countEl || F.active < 0) return;
+      const words = `Clip ${F.active + 1} of ${F.cards.length}${F.hasMore ? ' or more' : ''}`;
+      if (countEl.textContent !== words) countEl.textContent = words;
+    }
     function setActive(i, force) {
       if (F.suspended || (i === F.active && !force)) return;
       const old = F.cards[F.active];
@@ -694,11 +703,7 @@
       // The product keeps the current item in the address (a reload or Back
       // lands here) and says what to save as the place to resume.
       if (opts.onActive) opts.onActive(c);
-      if (countEl) {
-        // Only a change is written: a forced repeat (resize) says nothing.
-        const words = `Clip ${i + 1} of ${F.cards.length}${F.hasMore ? ' or more' : ''}`;
-        if (countEl.textContent !== words) countEl.textContent = words;
-      }
+      paintCount();
       const saved = opts.resumeEntry ? opts.resumeEntry(c) : null;
       if (saved) store.set(KEYS.resume, JSON.stringify(saved));
       if (i >= F.cards.length - AHEAD) loadMore();
