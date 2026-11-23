@@ -86,6 +86,20 @@ test('the key guard (m4): sheets of every module and foreign dialogs, never the 
   assert.match(src, /if \(F\.fullscreen && !e\.defaultPrevented && !SH\.count\(\)/);
 });
 
+test('the key guard also covers Escape and the timeline keys (E7 BLOCKER 2)', () => {
+  const src = player();
+  // Escape: an overlay above the player takes it before the selector or the immersive view.
+  const esc = src.indexOf("if (e.key === 'Escape') {");
+  assert.ok(esc > 0);
+  const escBody = src.slice(esc, src.indexOf('for (const close of menus)', esc));
+  assert.match(escBody, /if \(SH\.count\(\) \|\| foreignModalOpen\(\)\) return;/);
+  // Timeline Left/Right: focus can stay there while an overlay opens.
+  const tl = src.indexOf("tl.addEventListener('keydown'");
+  assert.ok(tl > 0);
+  const tlBody = src.slice(tl, src.indexOf('e.preventDefault()', tl));
+  assert.match(tlBody, /e\.metaKey \|\| e\.ctrlKey \|\| e\.altKey \|\| SH\.count\(\) \|\| foreignModalOpen\(\)\) return;/);
+});
+
 test('the core owns the immersive view under the class the hub reads', () => {
   const src = player();
   assert.match(src, /function setImmersive\(on\)/);

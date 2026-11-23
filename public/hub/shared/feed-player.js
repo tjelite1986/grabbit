@@ -507,6 +507,8 @@
       // Keyboard: Left and Right step five seconds.
       tl.addEventListener('keydown', (e) => {
         if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        // Focus can stay here while an overlay opens above the player.
+        if (e.metaKey || e.ctrlKey || e.altKey || SH.count() || foreignModalOpen()) return;
         e.preventDefault();
         e.stopPropagation();
         const v = c.video;
@@ -710,6 +712,9 @@
     const extraKeys = opts.keys || {};
     const onKey = (e) => {
       if (e.key === 'Escape') {
+        // Escape belongs to an overlay that is still open above the player
+        // (a sheet whose stack did not consume it, or a foreign modal).
+        if (SH.count() || foreignModalOpen()) return;
         // An open feed selector closes first.
         for (const close of menus) if (close()) { e.preventDefault(); return; }
         // No browser fullscreen to leave (refused or unsupported): Escape
