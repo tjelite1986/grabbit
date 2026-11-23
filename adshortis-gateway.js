@@ -666,11 +666,12 @@ function createGateway({
     const m = [].concat(r.headers['set-cookie'] || []).map((c) => new RegExp(`^${UPSTREAM_COOKIE}=([^;]*)`).exec(c)).find(Boolean);
     const t = m && TOKEN_RE.test(m[1]) ? m[1] : null;
     if (r.statusCode !== 200) {
-      // A JSON refusal keeps its status (401 wrong password, 429 throttled);
+      // A JSON refusal keeps its status (401 wrong password, 429 throttled)
+      // with a fixed message and only a numeric Retry-After (3a review C-M5);
       // a redirect, a 5xx or a body that is not a JSON object is 424.
       if (r.statusCode >= 400 && r.statusCode < 500 && json) {
-        if (r.statusCode === 429 && r.headers['retry-after']) res.setHeader('Retry-After', String(r.headers['retry-after']).slice(0, 16));
-        return fail(res, r.statusCode, typeof d.error === 'string' ? d.error.slice(0, 200) : 'Adshortis refused the sign-in');
+        if (r.statusCode === 401) return fail(res, 401, 'Wrong username or password');
+        return refuse(res, r.statusCode, r.headers);
       }
       if (t) upstreamLogout(req, t);
       return fail(res, 424, 'Adshortis is not reachable right now');
@@ -742,10 +743,11 @@ function createGateway({
       return answer(res, 200, { ok: true, linked: false, expired: true });
     }
     if (r.statusCode !== 200) {
-      // Other JSON 4xx keep their status (GW-ANSWER); the rest is 424.
+      // Other JSON 4xx keep their status (GW-ANSWER) with a fixed message
+      // (3a review C-M5); the rest is 424.
       const d = await readJson(r).catch(() => undefined);
       if (r.statusCode >= 400 && r.statusCode < 500 && d !== null && typeof d === 'object' && !Array.isArray(d)) {
-        return fail(res, r.statusCode, typeof d.error === 'string' ? d.error.slice(0, 200) : 'Adshortis refused the request');
+        return refuse(res, r.statusCode, r.headers);
       }
       return fail(res, 424, 'Adshortis is not reachable right now');
     }
