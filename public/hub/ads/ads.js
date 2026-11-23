@@ -225,17 +225,30 @@
     function announceLink() {
       try { if (linkChannel) linkChannel.postMessage('changed'); } catch { /* best effort */ }
     }
+    // Probes overlap when links change fast; only the newest answer counts,
+    // and it is compared with the account on screen when it lands (Codex
+    // re-check NEW-B1). A failed probe fails closed: nothing of the old
+    // account stays, the page says Adshortis is not reachable (C-B2).
+    let probeSeq = 0;
     if (linkChannel) {
       linkChannel.onmessage = () => {
-        const was = me() ? S.userId : null;
+        const seq = ++probeSeq;
         call('session', { signal: new AbortController().signal })
           .then((d) => {
+            if (seq !== probeSeq) return;
+            const was = me() ? S.userId : null;
             const id = d && d.linked && d.user ? d.user.id : null;
             if (id !== null && id === was) return;
             adoptSession(d || {});
           })
           .catch((e) => {
-            if (e.status === 401) location.href = '/login';
+            if (seq !== probeSeq) return;
+            if (e.status === 401) { location.href = '/login'; return; }
+            reset();
+            S.session = undefined;
+            S.sessionError = 'Adshortis is not reachable right now.';
+            redraw();
+            hub.updateNav();
           });
       };
     }
@@ -1325,16 +1338,16 @@
         .catch(() => {})
         .finally(() => {
           announceLink();
-          // The session ends either way; the address and the view change only
-          // while the view that asked is still on show (3a review C-M1).
+          // The session ends either way; the address moves only while the
+          // view that asked is still on show (3a review C-M1). Another
+          // Adshortis view on show by now is redrawn signed out at its own
+          // address; off the module redraw() does nothing.
           const here = live(gen);
           reset();
           S.session = { linked: false, user: null };
           S.userId = null;
-          if (here) {
-            hub.replaceHash(BASE);
-            redraw();
-          }
+          if (here) hub.replaceHash(BASE);
+          redraw();
           hub.updateNav();
         });
     }
