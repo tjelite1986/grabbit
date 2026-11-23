@@ -10623,5 +10623,10 @@ const httpServer = app.listen(PORT, '0.0.0.0', () => {
 });
 // Node ends a request that takes longer than five minutes to arrive; an
 // Adshortis upload through the gateway (M12) can take longer on a slow line.
-// The header timeout still guards against slow clients.
-if (ADS_GATEWAY) httpServer.requestTimeout = 0;
+// The limit is server-wide, so it is raised only while the upload route can be
+// live (A2 met) and stays bounded: a request body that trickles in can hold a
+// socket for at most two hours. The header timeout still guards slow clients.
+const ADS_UPLOAD_REQUEST_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+if (ADS_GATEWAY) {
+  if (ADS_CONDITIONS.met.has('adshortis:A2')) httpServer.requestTimeout = ADS_UPLOAD_REQUEST_TIMEOUT_MS;
+}
