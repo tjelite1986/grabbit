@@ -309,11 +309,12 @@ test('job start: parameter validation and response shape', async (t) => {
     // The generic resolve tolerates a failed probe, so the two destinations
     // fail at different later stages; each is pinned with its own body.
     const at = (dest) => s.call(`/api/download?url=https://192.0.2.1/v/1&device=0&dest=${dest}`);
-    // Shorts: refused by the audience gate (unknown creator, general app), JSON.
+    // Shorts: refused by the audience gate (unknown creator, general app), JSON,
+    // naming the failed probe rather than a missing classification.
     const elite = await at('elite');
     assert.equal(elite.status, 422, elite.text);
     assert.equal(elite.body.ok, false, elite.text);
-    assert.match(elite.body.error, /is not classified/, elite.text);
+    assert.match(elite.body.error, /^Could not read this link \(yt-dlp exited 1\)/, elite.text);
     // Server library: the download itself fails, plain text.
     const server = await at('server');
     assert.equal(server.status, 422, server.text);

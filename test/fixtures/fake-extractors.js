@@ -38,6 +38,17 @@ extractors.resolve = async (url) => {
   if (u.searchParams.get('w')) job.width = Number(u.searchParams.get('w'));
   if (u.searchParams.get('h')) job.height = Number(u.searchParams.get('h'));
   if (u.searchParams.get('dur')) job.duration = Number(u.searchParams.get('dur'));
+  // ?probe=fatal|transient stands in for a failed yt-dlp metadata probe: the
+  // real generic extractor then leaves the creator 'unknown' and no title.
+  const probe = u.searchParams.get('probe');
+  if (probe) {
+    Object.assign(job, { creator: 'unknown', sourceCreator: 'unknown', title: undefined });
+    job.probeError =
+      probe === 'fatal'
+        ? `ERROR: [TikTok] ${id}: No video formats found!; please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template.`
+        : 'Timed out reading metadata';
+    job.probeFatal = probe === 'fatal';
+  }
   // ?thumb=1 gives the item a site picture on the loopback server.
   if (u.searchParams.get('thumb') === '1') job.thumbnail = `${BASE}/thumbs/${encodeURIComponent(id)}.jpg`;
   return job;
