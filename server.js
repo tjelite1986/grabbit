@@ -2012,8 +2012,31 @@ function channelRefusal(channel, job) {
     const own = platformDrop.platformRefusal(job);
     if (own) return own;
   }
-  return audienceRefusal(destinationOf(ch, job), job);
+  const destination = destinationOf(ch, job);
+  const why = audienceRefusal(destination, job);
+  return why && unreadLink(job) && UNCLASSIFIED_REFUSAL_RE.test(why) ? unreadLinkRefusal(destination, job) : why;
 }
+
+// A link whose metadata probe failed has no creator at all, so the audience
+// gate refuses it as "not classified" and the person is sent to the Review
+// page for an item no classification can fix. The item is still refused; the
+// message names the real cause instead.
+function unreadLink(job) {
+  return !!(job && job.probeError && (!job.creator || job.creator === 'unknown'));
+}
+function unreadLinkRefusal(destination, job) {
+  const app = (audience.DESTINATIONS[destination] || {}).app || 'this app';
+  const cause = String(job.probeError)
+    .replace(/^ERROR:\s*/, '')
+    .replace(/;?\s*please report this issue\b[\s\S]*$/i, '')
+    .trim()
+    .slice(0, 200);
+  return job.probeFatal
+    ? `${UNREAD_FATAL_PREFIX} (${cause}). Nothing is saved to ${app}.`
+    : `${UNREAD_PREFIX} (${cause}), so its creator is unknown and nothing is saved to ${app}. Try again later.`;
+}
+const UNREAD_FATAL_PREFIX = 'The site did not hand over this video';
+const UNREAD_PREFIX = 'Could not read this link';
 
 // The app that will show a clip saved to this channel.
 function channelLibrary(channel) {
@@ -7901,10 +7924,16 @@ function reducedJob(pub) {
   }
   // The hub offers "classify and retry" on an unclassified refusal; the
   // sentence keeps that shape without the creator's name.
+  // An unreadable link keeps its cause but not the site's own words, which can
+  // carry the media id.
   if (out.error) {
     out.error = UNCLASSIFIED_REFUSAL_RE.test(out.error)
       ? 'The app is a general app and the audience of this item is not classified.'
-      : 'The download failed.';
+      : out.error.startsWith(UNREAD_FATAL_PREFIX)
+        ? `${UNREAD_FATAL_PREFIX}. Nothing is saved.`
+        : out.error.startsWith(UNREAD_PREFIX)
+          ? `${UNREAD_PREFIX}. Nothing is saved; try again later.`
+          : 'The download failed.';
   }
   // `deliverable` stays, and names nothing: the file itself is handed only to
   // the 18+ view or to the tab that started the job, with its delivery key

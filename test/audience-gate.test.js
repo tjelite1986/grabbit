@@ -786,6 +786,37 @@ test('the job snapshot names a job only when its item is general, unless the 18+
   assert.equal(by(full.jobs, adult.job.id).creator, 'Ada');
 });
 
+test('a link the site would not hand over is refused with the real cause, not as unclassified', async (t) => {
+  const s = await boot(t);
+  const fatal = (id) => s.fakeUrl('video', 'tiktok', 'ignored', id) + '?probe=fatal';
+
+  // The synchronous route Grabbit Connect and co-hosted apps call.
+  const r = await s.save(fatal('7711008524347673876'), 'main');
+  assert.equal(r.status, 422, JSON.stringify(r.body));
+  assert.match(r.body.error, /^The site did not hand over this video \(\[TikTok\] 7711008524347673876: No video formats found!\)\. Nothing is saved to Tikshortis\.$/);
+
+  // A transient probe failure says so, and suggests trying again.
+  const tr = await s.save(s.fakeUrl('video', 'tiktok', 'ignored', 'tr1') + '?probe=transient', 'main');
+  assert.equal(tr.status, 422, JSON.stringify(tr.body));
+  assert.match(tr.body.error, /^Could not read this link \(Timed out reading metadata\), so its creator is unknown and nothing is saved to Tikshortis\. Try again later\.$/);
+
+  // The background job route; the plain queue keeps the cause but not the id.
+  const job = await s.saveJob(fatal('7692717866168339733'), 'main');
+  assert.equal(job.job.status, 'error');
+  assert.match(job.job.error, /^The site did not hand over this video \(.*No video formats found/);
+  const plain = await (await fetch(`${s.base}/api/jobs`, { headers: s.headers })).json();
+  const j = plain.jobs.find((x) => x.id === job.job.id);
+  assert.equal(j.audienceHidden, true);
+  assert.equal(j.error, 'The site did not hand over this video. Nothing is saved.');
+  assert.equal(JSON.stringify(plain).includes('7692717866168339733'), false);
+
+  // Still refused: nothing reached a general app, and each refusal is recorded.
+  assert.deepEqual(s.generalFiles(), []);
+  const { deliveries } = s.items();
+  assert.equal(deliveries.length, 3);
+  assert.ok(deliveries.every((d) => d.status === 'refused'));
+});
+
 test('the job stream reduces live updates, and re-sends a job reclassified 18+', async (t) => {
   const s = await boot(t, { profileList: [{ name: 'Jane Doe', audience: 'general' }] });
   const gen = await s.saveJob(s.fakeUrl('video', 'tiktok', 'Jane Doe', 'h97-s-g'), 'main');
